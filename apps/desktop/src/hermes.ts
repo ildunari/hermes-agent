@@ -854,6 +854,7 @@ export function getActionStatus(name: string, lines = 200): Promise<ActionStatus
 
 export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<AudioTranscriptionResponse> {
   return window.hermesDesktop.api<AudioTranscriptionResponse>({
+    ...profileScoped(),
     path: '/api/audio/transcribe',
     method: 'POST',
     body: {
@@ -865,6 +866,7 @@ export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<Aud
 
 export function speakText(text: string): Promise<AudioSpeakResponse> {
   return window.hermesDesktop.api<AudioSpeakResponse>({
+    ...profileScoped(),
     path: '/api/audio/speak',
     method: 'POST',
     body: { text }
@@ -873,6 +875,7 @@ export function speakText(text: string): Promise<AudioSpeakResponse> {
 
 export function getElevenLabsVoices(): Promise<ElevenLabsVoicesResponse> {
   return window.hermesDesktop.api<ElevenLabsVoicesResponse>({
+    ...profileScoped(),
     path: '/api/audio/elevenlabs/voices'
   })
 }

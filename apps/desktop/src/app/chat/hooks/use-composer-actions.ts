@@ -332,7 +332,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
   )
 
   const attachImagePath = useCallback(
-    async (filePath: string) => {
+    async (filePath: string, options: { localPreview?: boolean } = {}) => {
       if (!filePath) {
         return false
       }
@@ -348,7 +348,9 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
       attachToMain(baseAttachment)
 
       try {
-        const previewUrl = await readDesktopFileDataUrl(filePath)
+        const previewUrl = options.localPreview
+          ? await window.hermesDesktop?.readFileDataUrl(filePath)
+          : await readDesktopFileDataUrl(filePath)
 
         if (previewUrl) {
           addComposerAttachment({ ...baseAttachment, previewUrl })
@@ -385,7 +387,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
           return false
         }
 
-        return attachImagePath(savedPath)
+        return attachImagePath(savedPath, { localPreview: true })
       } catch (err) {
         notifyError(err, copy.imageAttachFailed)
 
@@ -433,7 +435,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
           return false
         }
 
-        await attachImagePath(path)
+        await attachImagePath(path, { localPreview: true })
 
         return true
       } catch (err) {
@@ -525,7 +527,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
         const isImage = file.type.startsWith('image/') || isImagePath(file.name) || (filePath && isImagePath(filePath))
 
         if (isImage) {
-          if ((filePath && (await attachImagePath(filePath))) || (await attachImageBlob(file))) {
+          if ((filePath && (await attachImagePath(filePath, { localPreview: !knownPath }))) || (await attachImageBlob(file))) {
             attached = true
 
             continue
