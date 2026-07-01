@@ -1,6 +1,20 @@
-import { describe, expect, it } from 'vitest'
+import { act, renderHook } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { type DroppedFile, imageDropPreviewOptions, partitionDroppedFiles } from './use-composer-actions'
+import { readDesktopFileDataUrl, selectLocalDesktopPaths } from '@/lib/desktop-fs'
+import { $composerAttachments } from '@/store/composer'
+
+import { type DroppedFile, imageDropPreviewOptions, partitionDroppedFiles, useComposerActions } from './use-composer-actions'
+
+vi.mock('@/lib/desktop-fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/lib/desktop-fs')>()
+
+  return {
+    ...actual,
+    readDesktopFileDataUrl: vi.fn(),
+    selectLocalDesktopPaths: vi.fn()
+  }
+})
 
 // A Finder/Explorer drop carries a native File handle; an in-app drag (project
 // tree, gutter line ref) is path-only. The split decides whether a drop becomes
@@ -9,6 +23,12 @@ import { type DroppedFile, imageDropPreviewOptions, partitionDroppedFiles } from
 // can't read, plus image bytes for vision).
 const osDrop = (path: string): DroppedFile => ({ file: new File(['x'], path.split('/').pop() || 'f'), path })
 const inAppRef = (path: string, extra: Partial<DroppedFile> = {}): DroppedFile => ({ path, ...extra })
+
+afterEach(() => {
+  $composerAttachments.set([])
+  vi.clearAllMocks()
+  delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+})
 
 describe('partitionDroppedFiles', () => {
   it('routes File-bearing OS drops to osDrops and path-only in-app drags to inAppRefs', () => {
@@ -65,5 +85,26 @@ describe('partitionDroppedFiles', () => {
     const remoteTreeImage = inAppRef('/remote/work/image.png')
 
     expect(imageDropPreviewOptions(remoteTreeImage)).toEqual({})
+  })
+
+  it('previews native image picker paths through the local desktop bridge', async () => {
+    const readFileDataUrl = vi.fn().mockResolvedValue('data:image/png;base64,cGljaw==')
+
+    window.hermesDesktop = { readFileDataUrl } as never
+    vi.mocked(selectLocalDesktopPaths).mockResolvedValue(['/Users/kosta/Desktop/pick.png'])
+
+    const { result } = renderHook(() =>
+      useComposerActions({ activeSessionId: null, currentCwd: '/Users/kosta', requestGateway: vi.fn() })
+    )
+
+    await act(async () => {
+      await result.current.pickImages()
+    })
+
+    expect(readFileDataUrl).toHaveBeenCalledWith('/Users/kosta/Desktop/pick.png')
+    expect(readDesktopFileDataUrl).not.toHaveBeenCalled()
+    expect($composerAttachments.get()).toContainEqual(
+      expect.objectContaining({ path: '/Users/kosta/Desktop/pick.png', previewUrl: 'data:image/png;base64,cGljaw==' })
+    )
   })
 })

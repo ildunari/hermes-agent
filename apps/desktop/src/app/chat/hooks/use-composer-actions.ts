@@ -418,7 +418,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
     }
 
     for (const path of paths) {
-      await attachImagePath(path)
+      await attachImagePath(path, { localPreview: true })
     }
   }, [attachImagePath, copy.attachImages, currentCwd, t.composer.images])
 
