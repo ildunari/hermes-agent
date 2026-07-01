@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { $connection } from '@/store/session'
 
 import {
+  clearDesktopDirCache,
   desktopDefaultCwd,
   desktopFileDiff,
   desktopGitRoot,
@@ -71,6 +72,7 @@ describe('desktop filesystem facade', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     $connection.set(null)
+    clearDesktopDirCache()
     setDesktopFsRemotePicker(null)
   })
 
@@ -121,6 +123,27 @@ describe('desktop filesystem facade', () => {
 
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/list?path=%2Fsrv%2Fproject', profile: 'remote-docker' })
     expect(api).toHaveBeenCalledWith({ path: '/api/fs/default-cwd', profile: 'remote-docker' })
+  })
+
+  it('coalesces duplicate remote directory reads briefly', async () => {
+    $connection.set({ mode: 'remote' } as never)
+
+    await Promise.all([readDesktopDir('/srv/project'), readDesktopDir('/srv/project')])
+
+    expect(api).toHaveBeenCalledTimes(1)
+    expect(api).toHaveBeenCalledWith({ path: '/api/fs/list?path=%2Fsrv%2Fproject' })
+  })
+
+  it('clears cached remote directory descendants when a parent is invalidated', async () => {
+    $connection.set({ mode: 'remote' } as never)
+
+    await readDesktopDir('/srv/project')
+    await readDesktopDir('/srv/project/src')
+    clearDesktopDirCache('/srv/project')
+    await readDesktopDir('/srv/project/src')
+
+    expect(api).toHaveBeenCalledTimes(3)
+    expect(api).toHaveBeenLastCalledWith({ path: '/api/fs/list?path=%2Fsrv%2Fproject%2Fsrc' })
   })
 
   it('routes file diffs through backend git in remote mode', async () => {

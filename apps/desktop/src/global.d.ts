@@ -662,6 +662,7 @@ export interface HermesReadDirEntry {
 export interface HermesReadDirResult {
   entries: HermesReadDirEntry[]
   error?: string
+  truncated?: boolean
 }
 
 export interface HermesPreviewFileChanged {
