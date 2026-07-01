@@ -4575,10 +4575,11 @@ async function mintGatewayWsTicket(baseUrl) {
 
 // Build a fresh WS URL for the *current* connection. Critical for reconnects:
 // OAuth WS tickets are single-use with a ~30s TTL, so the ticket baked into
-// the cached connection's wsUrl is stale on the second connect. The renderer
-// calls this immediately before every gateway.connect() so each WS upgrade
-// carries a freshly-minted ticket. For local/token connections this just
-// reuses the static token (no minting needed).
+// the cached connection's wsUrl is stale on the second connect. Token-mode
+// remote dashboards can also rotate their served token after a backend restart;
+// /api/status is public, so a cached stale token can look healthy until the WS
+// upgrade is rejected. The renderer calls this immediately before every
+// gateway.connect() so each WS upgrade carries the live credential.
 async function freshGatewayWsUrl(profile) {
   // Mint for the requested profile's backend, NOT always the primary. The
   // renderer re-mints right before every gateway.connect(); when swapping to a
@@ -4591,7 +4592,12 @@ async function freshGatewayWsUrl(profile) {
     const ticket = await mintGatewayWsTicket(connection.baseUrl)
     return buildGatewayWsUrlWithTicket(connection.baseUrl, ticket)
   }
-  // Local/token: the cached wsUrl already carries the (long-lived) token.
+  if (connection.mode === 'remote') {
+    const refreshed = await refreshRemoteTokenConnection(connection)
+    if (refreshed !== connection) {
+      Object.assign(connection, refreshed)
+    }
+  }
   return connection.wsUrl
 }
 
@@ -4893,6 +4899,24 @@ async function buildRemoteConnection(rawUrl, authMode, token, source) {
     authMode: 'token',
     token,
     wsUrl: buildGatewayWsUrl(baseUrl, token)
+  }
+}
+
+async function refreshRemoteTokenConnection(remote) {
+  if (!remote || remote.authMode === 'oauth' || !remote.token) {
+    return remote
+  }
+  const authToken = await resolveServedDashboardToken(remote.baseUrl, remote.token, { rememberLog }).catch(error => {
+    rememberLog(`[boot] could not read served dashboard token for remote backend: ${error.message}`)
+    return remote.token
+  })
+  if (authToken === remote.token) {
+    return remote
+  }
+  return {
+    ...remote,
+    token: authToken,
+    wsUrl: buildGatewayWsUrl(remote.baseUrl, authToken)
   }
 }
 
@@ -5267,8 +5291,9 @@ async function spawnPoolBackend(profile, entry) {
   const remote = await resolveRemoteBackend(profile)
   if (remote) {
     await waitForHermes(remote.baseUrl, remote.token)
+    const refreshedRemote = await refreshRemoteTokenConnection(remote)
     return {
-      ...remote,
+      ...refreshedRemote,
       profile,
       logs: hermesLog.slice(-80),
       ...getWindowState()
@@ -6044,6 +6069,13 @@ ipcMain.handle('hermes:connection:revalidate', async () => {
   const base = conn.baseUrl.replace(/\/+$/, '')
   try {
     await fetchPublicJson(`${base}/api/status`, { timeoutMs: 2_500 })
+    if (conn.authMode !== 'oauth') {
+      const refreshed = await refreshRemoteTokenConnection(conn)
+      if (refreshed !== conn) {
+        Object.assign(conn, refreshed)
+        return { ok: true, rebuilt: true }
+      }
+    }
     return { ok: true, rebuilt: false }
   } catch {
     // Unreachable remote: drop the stale cache so the renderer's next reconnect
