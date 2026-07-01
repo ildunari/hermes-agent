@@ -58,11 +58,11 @@ function detectRemoteDisplay(options = {}) {
   if (GPU_OVERRIDE_ON.has(override)) return 'override (HERMES_DESKTOP_DISABLE_GPU)'
   if (GPU_OVERRIDE_OFF.has(override)) return null
 
-  // Launched from an SSH session → the display is X11-forwarded or otherwise
-  // remote. Covers the common `ssh user@box` + GUI-forwarding case.
-  if (env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY) return 'ssh-session'
-
   if (platform === 'linux') {
+    // A plain SSH control shell is not enough evidence that the GUI is remote:
+    // agents often launch or inspect a local desktop app over SSH while the app
+    // still renders on the machine's physical display. Only disable GPU when
+    // the display server itself is forwarded/remoted.
     // X11 forwarding sets DISPLAY to "<host>:N" (e.g. "localhost:10.0"); a
     // local X server is ":0"/":1" with no host part before the colon.
     // NB: WSLg deliberately isn't treated as remote — it reports

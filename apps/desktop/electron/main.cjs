@@ -37,7 +37,7 @@ const {
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
 const { createLinkTitleWindow } = require('./link-title-window.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
-const { adoptServedDashboardToken } = require('./dashboard-token.cjs')
+const { adoptServedDashboardToken, resolveServedDashboardToken } = require('./dashboard-token.cjs')
 const { waitForDashboardPortAnnouncement } = require('./backend-ready.cjs')
 const { dashboardFallbackArgs, sourceDeclaresServe } = require('./backend-command.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
@@ -169,7 +169,7 @@ function hiddenWindowsChildOptions(options = {}) {
   return { ...options, windowsHide: true }
 }
 
-// Remote displays (SSH X11 forwarding, VNC, RDP) make Chromium's GPU
+// Remote displays (X11 forwarding, VNC, RDP) make Chromium's GPU
 // compositor flicker — accelerated layers can't be presented cleanly over the
 // wire, so the window flashes during scroll/streaming/animation. Local
 // Windows/macOS (and WSLg, which renders locally via vGPU) composite on the
@@ -177,7 +177,9 @@ function hiddenWindowsChildOptions(options = {}) {
 // is detected; it's rock-steady over the wire and the CPU cost is negligible
 // next to the connection's latency. Must run before app `ready` — these
 // switches only apply pre-launch. Override with HERMES_DESKTOP_DISABLE_GPU
-// (1/true → always disable, 0/false → keep GPU on).
+// (1/true → always disable, 0/false → keep GPU on). A plain SSH control shell
+// is not treated as remote display; agents often launch the local Mac app over
+// SSH while it still renders on the physical screen.
 const REMOTE_DISPLAY_REASON = detectRemoteDisplay()
 if (REMOTE_DISPLAY_REASON) {
   app.disableHardwareAcceleration()
@@ -3856,9 +3858,20 @@ async function waitForHermes(baseUrl, token) {
   throw new Error(`Hermes backend did not become ready: ${lastError?.message || 'timeout'}`)
 }
 
+function liveMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return null
+  return mainWindow
+}
+
 function getWindowButtonPosition() {
   if (!IS_MAC) return null
-  return mainWindow?.getWindowButtonPosition?.() || WINDOW_BUTTON_POSITION
+  const window = liveMainWindow()
+  if (!window) return WINDOW_BUTTON_POSITION
+  try {
+    return window.getWindowButtonPosition?.() || WINDOW_BUTTON_POSITION
+  } catch {
+    return WINDOW_BUTTON_POSITION
+  }
 }
 
 function getNativeOverlayWidth() {
@@ -3866,8 +3879,17 @@ function getNativeOverlayWidth() {
 }
 
 function getWindowState() {
+  const window = liveMainWindow()
+  let isFullscreen = false
+  if (window) {
+    try {
+      isFullscreen = Boolean(window.isFullScreen?.())
+    } catch {
+      isFullscreen = false
+    }
+  }
   return {
-    isFullscreen: Boolean(mainWindow?.isFullScreen?.()),
+    isFullscreen,
     nativeOverlayWidth: getNativeOverlayWidth(),
     windowButtonPosition: getWindowButtonPosition()
   }
@@ -5482,6 +5504,7 @@ async function startHermes() {
     if (remote) {
       await advanceBootProgress('backend.remote', `Connecting to remote Hermes backend at ${remote.baseUrl}`, 24)
       await waitForHermes(remote.baseUrl, remote.token)
+      const refreshedRemote = await refreshRemoteTokenConnection(remote)
       updateBootProgress({
         phase: 'backend.ready',
         message: 'Remote Hermes backend is ready',
@@ -5490,12 +5513,12 @@ async function startHermes() {
         error: null
       })
       return {
-        baseUrl: remote.baseUrl,
+        baseUrl: refreshedRemote.baseUrl,
         mode: 'remote',
-        source: remote.source,
-        authMode: remote.authMode || 'token',
-        token: remote.token,
-        wsUrl: remote.wsUrl,
+        source: refreshedRemote.source,
+        authMode: refreshedRemote.authMode || 'token',
+        token: refreshedRemote.token,
+        wsUrl: refreshedRemote.wsUrl,
         logs: hermesLog.slice(-80),
         ...getWindowState()
       }
