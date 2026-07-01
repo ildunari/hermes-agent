@@ -172,10 +172,8 @@ export async function desktopFileDiff(repoRoot: string, filePath: string): Promi
 }
 
 export async function selectDesktopPaths(options?: HermesSelectPathsOptions): Promise<string[]> {
-  const desktop = bridge()
-
   if (!isDesktopFsRemoteMode()) {
-    return desktop.selectPaths(options)
+    return selectLocalDesktopPaths(options)
   }
 
   if (!options?.directories) {
@@ -183,4 +181,13 @@ export async function selectDesktopPaths(options?: HermesSelectPathsOptions): Pr
   }
 
   return remotePicker ? remotePicker.selectPaths({ ...options, multiple: false }) : []
+}
+
+// Always use the native Electron picker on this desktop, even while the chat is
+// connected to a remote backend. This is intentionally separate from
+// selectDesktopPaths(): context/project picks should be remote-aware, but image
+// attachments selected from Finder live on the local desktop until their bytes
+// are uploaded to the backend.
+export async function selectLocalDesktopPaths(options?: HermesSelectPathsOptions): Promise<string[]> {
+  return bridge().selectPaths(options)
 }

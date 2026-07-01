@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { type DroppedFile, partitionDroppedFiles } from './use-composer-actions'
+import { type DroppedFile, imageDropPreviewOptions, partitionDroppedFiles } from './use-composer-actions'
 
 // A Finder/Explorer drop carries a native File handle; an in-app drag (project
 // tree, gutter line ref) is path-only. The split decides whether a drop becomes
@@ -53,5 +53,17 @@ describe('partitionDroppedFiles', () => {
 
   it('returns empty groups for an empty drop', () => {
     expect(partitionDroppedFiles([])).toEqual({ inAppRefs: [], osDrops: [] })
+  })
+
+  it('previews File-bearing image drops locally even when Chromium exposes an absolute path', () => {
+    const screenshot = osDrop('/Users/kosta/Desktop/Screenshot 2026-06-30.png')
+
+    expect(imageDropPreviewOptions(screenshot)).toEqual({ localPreview: true })
+  })
+
+  it('does not force local preview for path-only in-app image drags', () => {
+    const remoteTreeImage = inAppRef('/remote/work/image.png')
+
+    expect(imageDropPreviewOptions(remoteTreeImage)).toEqual({})
   })
 })

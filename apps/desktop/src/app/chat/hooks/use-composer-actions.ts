@@ -5,7 +5,7 @@ import { droppedFileInlineRef } from '@/app/chat/composer/inline-refs'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { useI18n } from '@/i18n'
 import { attachmentId, contextPath, pathLabel } from '@/lib/chat-runtime'
-import { readDesktopFileDataUrl, selectDesktopPaths } from '@/lib/desktop-fs'
+import { readDesktopFileDataUrl, selectDesktopPaths, selectLocalDesktopPaths } from '@/lib/desktop-fs'
 import {
   addComposerAttachment,
   type ComposerAttachment,
@@ -212,6 +212,10 @@ export function partitionDroppedFiles(candidates: DroppedFile[]): {
   return { osDrops, inAppRefs }
 }
 
+export function imageDropPreviewOptions(candidate: Pick<DroppedFile, 'file'>): { localPreview?: boolean } {
+  return candidate.file ? { localPreview: true } : {}
+}
+
 interface ComposerActionsOptions {
   activeSessionId: string | null
   currentCwd: string
@@ -398,7 +402,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
   )
 
   const pickImages = useCallback(async () => {
-    const paths = await selectDesktopPaths({
+    const paths = await selectLocalDesktopPaths({
       title: copy.attachImages,
       defaultPath: currentCwd || undefined,
       filters: [
@@ -527,7 +531,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
         const isImage = file.type.startsWith('image/') || isImagePath(file.name) || (filePath && isImagePath(filePath))
 
         if (isImage) {
-          if ((filePath && (await attachImagePath(filePath, { localPreview: !knownPath }))) || (await attachImageBlob(file))) {
+          if ((filePath && (await attachImagePath(filePath, imageDropPreviewOptions(candidate)))) || (await attachImageBlob(file))) {
             attached = true
 
             continue

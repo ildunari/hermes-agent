@@ -10,6 +10,7 @@ import {
   readDesktopFileDataUrl,
   readDesktopFileText,
   selectDesktopPaths,
+  selectLocalDesktopPaths,
   setDesktopFsRemotePicker
 } from './desktop-fs'
 
@@ -152,5 +153,14 @@ describe('desktop filesystem facade', () => {
 
     expect(remoteSelect).toHaveBeenCalledWith({ directories: true, multiple: false })
     expect(selectPaths).not.toHaveBeenCalled()
+  })
+
+  it('can force the native local picker while connected to a remote backend', async () => {
+    $connection.set({ mode: 'remote' } as never)
+
+    await expect(selectLocalDesktopPaths({ directories: false, multiple: true })).resolves.toEqual(['/local'])
+
+    expect(selectPaths).toHaveBeenCalledWith({ directories: false, multiple: true })
+    expect(api).not.toHaveBeenCalled()
   })
 })
