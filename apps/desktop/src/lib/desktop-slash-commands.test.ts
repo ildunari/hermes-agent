@@ -73,6 +73,17 @@ describe('desktop slash command curation', () => {
     expect(resolveDesktopCommand('/browser')?.args).toBe(true)
   })
 
+  it('surfaces smart update once and hides its underscore alias from suggestions', () => {
+    expect(isDesktopSlashCommand('/update-smart')).toBe(true)
+    expect(isDesktopSlashSuggestion('/update-smart')).toBe(true)
+    expect(resolveDesktopCommand('/update-smart')?.surface).toEqual({ kind: 'exec' })
+    expect(resolveDesktopCommand('/update-smart')?.args).toBe(true)
+
+    expect(isDesktopSlashCommand('/update_smart')).toBe(true)
+    expect(isDesktopSlashSuggestion('/update_smart')).toBe(false)
+    expect(resolveDesktopCommand('/update_smart')?.surface).toEqual({ kind: 'exec' })
+  })
+
   it('allows aliases to execute without cluttering the popover', () => {
     expect(isDesktopSlashSuggestion('/reset')).toBe(false)
     expect(isDesktopSlashCommand('/reset')).toBe(true)

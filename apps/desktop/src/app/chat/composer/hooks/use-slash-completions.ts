@@ -46,6 +46,28 @@ function commandText(value: string): string {
   return value.startsWith('/') ? value : `/${value}`
 }
 
+function commandDedupeKey(value: string): string {
+  return commandText(value).trim().toLowerCase().replaceAll('_', '-')
+}
+
+function uniqueCommands<T extends { text: string }>(items: T[]): T[] {
+  const seen = new Set<string>()
+  const unique: T[] = []
+
+  for (const item of items) {
+    const key = commandDedupeKey(item.text)
+
+    if (seen.has(key)) {
+      continue
+    }
+
+    seen.add(key)
+    unique.push(item)
+  }
+
+  return unique
+}
+
 /** How many recent sessions to surface inline before the "Browse all…" entry. */
 const SESSION_INLINE_LIMIT = 7
 
@@ -192,7 +214,7 @@ export function useSlashCompletions(options: {
 
         const items = isArgCompletion
           ? decorated
-          : [...decorated].sort((a, b) => groupOrder.indexOf(a.group) - groupOrder.indexOf(b.group))
+          : uniqueCommands(decorated).sort((a, b) => groupOrder.indexOf(a.group) - groupOrder.indexOf(b.group))
 
         return { items, query }
       } catch {
