@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { $activeGatewayProfile } from '@/store/profile'
 import { $connection } from '@/store/session'
 
 import { filePathFromMediaPath, gatewayMediaDataUrl, isRemoteGateway, mediaExternalUrl } from './media'
@@ -76,6 +77,8 @@ describe('gatewayMediaDataUrl', () => {
   })
 
   afterEach(() => {
+    $connection.set(null)
+    $activeGatewayProfile.set('default')
     vi.unstubAllGlobals()
   })
 
@@ -84,7 +87,32 @@ describe('gatewayMediaDataUrl', () => {
 
     expect(url).toBe('data:image/png;base64,ZHVtbXk=')
     expect(api).toHaveBeenCalledWith({
-      path: '/api/media?path=%2Fhome%2Fu%2F.hermes%2Fimages%2Fa%20b.png'
+      path: '/api/media?path=%2Fhome%2Fu%2F.hermes%2Fimages%2Fa%20b.png',
+      profile: 'default'
+    })
+  })
+
+  it('forwards the active profile so remote media reads hit the owning backend/profile home', async () => {
+    $connection.set({ mode: 'remote' } as never)
+    $activeGatewayProfile.set('stylelab')
+
+    await gatewayMediaDataUrl('/Users/Kosta/.hermes/profiles/stylelab/images/upload.png')
+
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/media?path=%2FUsers%2FKosta%2F.hermes%2Fprofiles%2Fstylelab%2Fimages%2Fupload.png',
+      profile: 'stylelab'
+    })
+  })
+
+  it('prefers an explicit per-profile connection when present', async () => {
+    $connection.set({ mode: 'remote', profile: 'research' } as never)
+    $activeGatewayProfile.set('stylelab')
+
+    await gatewayMediaDataUrl('/Users/Kosta/.hermes/profiles/research/images/upload.png')
+
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/media?path=%2FUsers%2FKosta%2F.hermes%2Fprofiles%2Fresearch%2Fimages%2Fupload.png',
+      profile: 'research'
     })
   })
 })

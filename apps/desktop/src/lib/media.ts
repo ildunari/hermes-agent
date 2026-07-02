@@ -1,3 +1,4 @@
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { $connection } from '@/store/session'
 
 export type MediaKind = 'audio' | 'image' | 'video' | 'file'
@@ -120,9 +121,11 @@ export function isRemoteGateway(): boolean {
 // expose GET /api/media (hermes_cli/web_server.py).
 export async function gatewayMediaDataUrl(path: string): Promise<string> {
   const file = filePathFromMediaPath(path)
+  const profile = $connection.get()?.profile || normalizeProfileKey($activeGatewayProfile.get())
 
   const result = await window.hermesDesktop!.api<{ data_url: string }>({
-    path: `/api/media?path=${encodeURIComponent(file)}`
+    path: `/api/media?path=${encodeURIComponent(file)}`,
+    ...(profile ? { profile } : {})
   })
 
   return result.data_url
