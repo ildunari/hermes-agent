@@ -352,9 +352,12 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
       attachToMain(baseAttachment)
 
       try {
-        const previewUrl = options.localPreview
-          ? await window.hermesDesktop?.readFileDataUrl(filePath)
-          : await readDesktopFileDataUrl(filePath)
+        // Composer image paths come from this desktop shell (picker, drop, or
+        // clipboard), even when the active Hermes backend is remote.  Preview
+        // them from the local Mac and let submit-time sync upload the bytes to
+        // the gateway; using the remote file reader here asks the Studio to read
+        // a MacBook-only path and surfaces "File not found".
+        const previewUrl = await window.hermesDesktop?.readFileDataUrl(filePath)
 
         if (previewUrl) {
           addComposerAttachment({ ...baseAttachment, previewUrl })

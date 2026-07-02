@@ -216,6 +216,14 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding')
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 app.commandLine.appendSwitch('disable-background-timer-throttling')
 
+// Read-aloud asks the backend to synthesize audio after the user clicks the
+// menu item, then plays the returned data URL once that async request finishes.
+// Chromium's transient user activation can expire during synthesis, so the
+// later HTMLAudioElement.play() call is treated like autoplay and may be
+// rejected. Hermes Desktop is a trusted local shell; allow its own audio UI to
+// play without a second gesture.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+
 const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 
 // Build-time install stamp -- the git ref this .exe was built against.
