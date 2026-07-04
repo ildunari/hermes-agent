@@ -34,6 +34,7 @@ export type DesktopActionId =
   | 'handoff'
   | 'hatch'
   | 'help'
+  | 'journey'
   | 'new'
   | 'pet'
   | 'profile'
@@ -122,6 +123,12 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
     surface: action('browser'),
     args: true
   },
+  {
+    name: '/journey',
+    description: 'Open the memory graph — skills + memories over time',
+    aliases: ['/learning', '/memory-graph'],
+    surface: action('journey')
+  },
 
   // Overlay pickers
   { name: '/model', description: 'Switch the model for this session', surface: picker('model'), hidden: true },
@@ -144,6 +151,12 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   { name: '/compress', description: 'Compress this conversation context', surface: exec() },
   { name: '/debug', description: 'Create a debug report', surface: exec() },
   { name: '/goal', description: 'Manage the standing goal for this session', surface: exec() },
+  {
+    name: '/moa',
+    description: 'Switch to a Mixture-of-Agents preset, or run one prompt through it',
+    surface: exec(),
+    args: true
+  },
   { name: '/personality', description: 'Switch personality for this session', surface: exec(), args: true },
   {
     name: '/pet',
@@ -170,6 +183,13 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
     name: '/update-smart',
     description: 'Run the branch-first smart update workflow',
     aliases: ['/update_smart'],
+    surface: exec(),
+    args: true
+  },
+  {
+    name: '/update-desktop',
+    description: 'Update only the Desktop clients on Studio and MacBook',
+    aliases: ['/update_desktop'],
     surface: exec(),
     args: true
   },

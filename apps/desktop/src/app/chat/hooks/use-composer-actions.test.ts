@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { readDesktopFileDataUrl, selectLocalDesktopPaths } from '@/lib/desktop-fs'
 import { $composerAttachments } from '@/store/composer'
+import { $connection } from '@/store/session'
 
 import {
+  attachmentPreviewDataUrl,
   type DroppedFile,
   extractDroppedFiles,
   HERMES_PATHS_MIME,
@@ -174,9 +176,9 @@ describe('extractDroppedFiles', () => {
   }
 
   it('emits a dropped directory as a path-only entry with isDirectory (no File to upload)', () => {
-    const transfer = stubTransfer([
-      { path: '/Users/jeff/projects/hermes', isDirectory: true }
-    ]) as DataTransfer & { _pathByFile: Map<File, string> }
+    const transfer = stubTransfer([{ path: '/Users/jeff/projects/hermes', isDirectory: true }]) as DataTransfer & {
+      _pathByFile: Map<File, string>
+    }
 
     stubBridge(transfer)
 
@@ -226,9 +228,9 @@ describe('extractDroppedFiles', () => {
   it('does not duplicate a folder that appears in both items and files', () => {
     // Chromium lists a dropped folder in transfer.files too (as a size-0 File);
     // the items pass claims its path first so the files fallback skips it.
-    const transfer = stubTransfer([
-      { path: '/abs/project', isDirectory: true }
-    ]) as DataTransfer & { _pathByFile: Map<File, string> }
+    const transfer = stubTransfer([{ path: '/abs/project', isDirectory: true }]) as DataTransfer & {
+      _pathByFile: Map<File, string>
+    }
 
     stubBridge(transfer)
 
@@ -236,5 +238,64 @@ describe('extractDroppedFiles', () => {
 
     expect(result).toHaveLength(1)
     expect(result[0]?.isDirectory).toBe(true)
+  })
+})
+
+describe('attachmentPreviewDataUrl', () => {
+  const LOCAL_PREVIEW = 'data:image/png;base64,bG9jYWw='
+  const REMOTE_PREVIEW = 'data:image/png;base64,cmVtb3Rl'
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+    $connection.set(null)
+  })
+
+  it('reads a local path via the local bridge even in remote mode (paperclip/paste/OS drop)', async () => {
+    const readFileDataUrl = vi.fn(async () => LOCAL_PREVIEW)
+    const api = vi.fn()
+
+    vi.stubGlobal('window', { hermesDesktop: { api, readFileDataUrl } })
+    $connection.set({ mode: 'remote' } as never)
+
+    await expect(attachmentPreviewDataUrl('/Users/me/Pictures/pic.png')).resolves.toBe(LOCAL_PREVIEW)
+
+    expect(readFileDataUrl).toHaveBeenCalledWith('/Users/me/Pictures/pic.png')
+    expect(api).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the remote fs bridge when the path is not on this machine (project-tree drag)', async () => {
+    const readFileDataUrl = vi.fn(async () => {
+      throw new Error('ENOENT')
+    })
+
+    const api = vi.fn(async ({ path }: { path: string }) => {
+      if (path.startsWith('/api/fs/read-data-url?')) {
+        return { dataUrl: REMOTE_PREVIEW }
+      }
+
+      throw new Error(`unexpected path ${path}`)
+    })
+
+    vi.stubGlobal('window', { hermesDesktop: { api, readFileDataUrl } })
+    $connection.set({ mode: 'remote' } as never)
+    vi.mocked(readDesktopFileDataUrl).mockResolvedValue(REMOTE_PREVIEW)
+
+    await expect(attachmentPreviewDataUrl('/home/gateway/shot.png')).resolves.toBe(REMOTE_PREVIEW)
+
+    expect(readDesktopFileDataUrl).toHaveBeenCalledWith('/home/gateway/shot.png')
+  })
+
+  it('falls back when the local bridge returns an empty read', async () => {
+    const readFileDataUrl = vi.fn(async () => '')
+
+    const api = vi.fn(async () => ({ dataUrl: REMOTE_PREVIEW }))
+
+    vi.stubGlobal('window', { hermesDesktop: { api, readFileDataUrl } })
+    $connection.set({ mode: 'remote' } as never)
+    vi.mocked(readDesktopFileDataUrl).mockResolvedValue(REMOTE_PREVIEW)
+
+    await expect(attachmentPreviewDataUrl('/home/gateway/shot.png')).resolves.toBe(REMOTE_PREVIEW)
+    expect(readDesktopFileDataUrl).toHaveBeenCalledWith('/home/gateway/shot.png')
   })
 })

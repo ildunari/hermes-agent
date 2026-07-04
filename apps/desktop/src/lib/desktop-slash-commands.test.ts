@@ -62,6 +62,19 @@ describe('desktop slash command curation', () => {
     expect(isDesktopSlashCommand('/pets')).toBe(false)
   })
 
+  it('treats /moa as an executable command with args (MoA preset / one-shot)', () => {
+    // Without a registry row the desktop composer sent `/moa <prompt>` as
+    // plain chat text, so it ran on the base model instead of routing through
+    // slash.exec -> command.dispatch (which applies the MoA override). The
+    // exec spec restores that path; `args: true` keeps the popover open for
+    // the preset name / prompt.
+    expect(isDesktopSlashCommand('/moa')).toBe(true)
+    expect(isDesktopSlashSuggestion('/moa')).toBe(true)
+    expect(desktopSlashUnavailableMessage('/moa')).toBeNull()
+    expect(resolveDesktopCommand('/moa')?.surface).toEqual({ kind: 'exec' })
+    expect(resolveDesktopCommand('/moa')?.args).toBe(true)
+  })
+
   it('treats /browser as an executable action command (local-gateway connect)', () => {
     // /browser used to be terminal-only; it now resolves to a desktop action
     // handler that routes browser.manage RPC when the gateway is local.
@@ -82,6 +95,29 @@ describe('desktop slash command curation', () => {
     expect(isDesktopSlashCommand('/update_smart')).toBe(true)
     expect(isDesktopSlashSuggestion('/update_smart')).toBe(false)
     expect(resolveDesktopCommand('/update_smart')?.surface).toEqual({ kind: 'exec' })
+  })
+
+  it('surfaces desktop-only smart update once and hides its underscore alias from suggestions', () => {
+    expect(isDesktopSlashCommand('/update-desktop')).toBe(true)
+    expect(isDesktopSlashSuggestion('/update-desktop')).toBe(true)
+    expect(resolveDesktopCommand('/update-desktop')?.surface).toEqual({ kind: 'exec' })
+    expect(resolveDesktopCommand('/update-desktop')?.args).toBe(true)
+
+    expect(isDesktopSlashCommand('/update_desktop')).toBe(true)
+    expect(isDesktopSlashSuggestion('/update_desktop')).toBe(false)
+    expect(resolveDesktopCommand('/update_desktop')?.surface).toEqual({ kind: 'exec' })
+  })
+
+  it('routes /journey (and aliases) to the memory graph overlay action', () => {
+    expect(resolveDesktopCommand('/journey')?.surface).toEqual({ kind: 'action', action: 'journey' })
+    expect(resolveDesktopCommand('/memory-graph')?.surface).toEqual({ kind: 'action', action: 'journey' })
+    expect(resolveDesktopCommand('/learning')?.surface).toEqual({ kind: 'action', action: 'journey' })
+    expect(isDesktopSlashCommand('/journey')).toBe(true)
+    expect(isDesktopSlashCommand('/memory-graph')).toBe(true)
+    expect(isDesktopSlashSuggestion('/journey')).toBe(true)
+    // Aliases execute but stay out of the popover.
+    expect(isDesktopSlashSuggestion('/memory-graph')).toBe(false)
+    expect(desktopSlashUnavailableMessage('/journey')).toBeNull()
   })
 
   it('allows aliases to execute without cluttering the popover', () => {
