@@ -817,7 +817,17 @@ def normalize_usage(
             cache_write_tokens = _to_int(
                 getattr(response_usage, "cache_creation_input_tokens", 0)
             )
-        input_tokens = max(0, prompt_total - cache_read_tokens - cache_write_tokens)
+        # OpenAI's contract says ``prompt_tokens`` includes cached tokens and
+        # ``prompt_tokens_details.cached_tokens`` is a subset.  Some
+        # Anthropic/Claude OpenAI-compatible proxies (notably CLIProxyAPIPlus)
+        # instead report ``prompt_tokens`` as the non-cached remainder while
+        # exposing cached reads separately, producing impossible shapes such as
+        # cached_tokens > prompt_tokens.  Treat that shape as additive so
+        # context accounting and cost math stay non-negative.
+        if cache_read_tokens > prompt_total:
+            input_tokens = prompt_total
+        else:
+            input_tokens = max(0, prompt_total - cache_read_tokens - cache_write_tokens)
 
     reasoning_tokens = 0
     # Responses API shape: output_tokens_details.reasoning_tokens.

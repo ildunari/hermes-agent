@@ -326,6 +326,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     "mimo-v2-omni": 262144,
     "mimo-v2-flash": 262144,
     "zai-org/GLM-5": 202752,
+    "glm-5.2": 1000000,
 }
 
 # xAI Grok models that ACCEPT the `reasoning.effort` parameter on
@@ -1809,6 +1810,31 @@ def _resolve_codex_oauth_context_length(
     return None
 
 
+def _model_name_matches_context_override(model: str, configured_model: str | None) -> bool:
+    """Return True when a top-level model.context_length belongs to model.
+
+    Profile-level ``model.context_length`` describes the configured default
+    model. Session-scoped /model switches must not inherit that number, because
+    it can silently mask the switched model's real window (for example a GPT
+    profile's 300K default masking DeepSeek V4's 1M window after /clear).
+    """
+    if not model or not configured_model:
+        return False
+    left = _strip_provider_prefix(str(model)).strip().lower()
+    right = _strip_provider_prefix(str(configured_model)).strip().lower()
+    if not left or not right:
+        return False
+    return left == right or left.rsplit("/", 1)[-1] == right.rsplit("/", 1)[-1]
+
+
+def _is_deepseek_v4_family(model: str) -> bool:
+    model_lower = _strip_provider_prefix(str(model or "")).lower()
+    return any(
+        slug in model_lower
+        for slug in ("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner")
+    )
+
+
 def _resolve_nous_context_length(
     model: str,
     base_url: str = "",
@@ -1890,6 +1916,7 @@ def get_model_context_length(
     config_context_length: int | None = None,
     provider: str = "",
     custom_providers: list | None = None,
+    config_model: str | None = None,
 ) -> int:
     """Get the context length for a model.
 
@@ -1915,9 +1942,6 @@ def get_model_context_length(
     7. Local server query (before hardcoded defaults for local endpoints)
     8. Hardcoded defaults (broad family patterns, longest-key-first)
     9. Default fallback (256K)"""
-    # 0. Explicit config override — user knows best
-    if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
-        return config_context_length
 
     # 0a. MoA virtual provider — ``model`` is a preset name, not a real model,
     # and ``base_url`` is the local virtual endpoint, so every probe below would
@@ -1963,6 +1987,13 @@ def get_model_context_length(
                 return cp_ctx
         except Exception:
             pass  # fall through to probing
+
+    # 0b. Explicit top-level config override (model.context_length). Only apply
+    # it to the profile's configured default model when the caller supplies
+    # config_model. Runtime /model overrides should resolve their own window.
+    if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
+        if config_model is None or _model_name_matches_context_override(model, config_model):
+            return config_context_length
 
     # Normalise provider-prefixed model names (e.g. "local:model-name" →
     # "model-name") so cache lookups and server queries use the bare ID that
@@ -2037,6 +2068,13 @@ def get_model_context_length(
                     model, base_url,
                 )
                 # Fall through; step 5b reconciles and overwrites if portal responds.
+            elif _is_deepseek_v4_family(model) and cached < 1_000_000:
+                logger.info(
+                    "Dropping stale DeepSeek V4 cache entry %s@%s -> %s; "
+                    "re-resolving with 1M V4 defaults",
+                    model, base_url, f"{cached:,}",
+                )
+                _invalidate_cached_context_length(model, base_url)
             else:
                 if is_local_endpoint(base_url):
                     return _reconcile_local_cached_context_length(

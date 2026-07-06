@@ -32,6 +32,12 @@ from typing import Any
 from providers import register_provider
 from providers.base import ProviderProfile
 
+
+def _model_supports_reasoning_effort(model: str | None) -> bool:
+    """Return True for GLM coding-plan models with an effort dial."""
+    name = (model or "").strip().lower().rsplit("/", 1)[-1]
+    return name.startswith("glm-5.2")
+
 _GLM_VERSION_RE = re.compile(r"^glm-(\d+)(?:\.(\d+))?")
 
 
@@ -83,7 +89,7 @@ def _glm_5_2_reasoning_effort(reasoning_config: dict | None) -> str | None:
 
 
 class ZaiProfile(ProviderProfile):
-    """Z.AI / GLM — extra_body.thinking on/off + GLM-5.2 reasoning_effort."""
+    """Z.AI / GLM — thinking on/off plus GLM-5.2 effort mapping."""
 
     def build_api_kwargs_extras(
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
@@ -99,6 +105,12 @@ class ZaiProfile(ProviderProfile):
         if isinstance(reasoning_config, dict):
             enabled = reasoning_config.get("enabled") is not False
             extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
+            if enabled and _model_supports_reasoning_effort(model):
+                effort = str(reasoning_config.get("effort") or "").strip().lower()
+                if effort in {"xhigh", "max", "ultracode"}:
+                    top_level["reasoning_effort"] = "max"
+                elif effort in {"low", "medium", "high"}:
+                    top_level["reasoning_effort"] = "high"
 
         if _is_glm_5_2(model):
             effort = _glm_5_2_reasoning_effort(reasoning_config)
@@ -117,8 +129,13 @@ zai = ZaiProfile(
     signup_url="https://z.ai/",
     fallback_models=(
         "glm-5.2",
+        "glm-5.1",
         "glm-5",
-        "glm-4-9b",
+        "glm-5v-turbo",
+        "glm-5-turbo",
+        "glm-4.7",
+        "glm-4.5",
+        "glm-4.5-flash",
     ),
     base_url="https://api.z.ai/api/paas/v4",
     default_aux_model="glm-4.5-flash",
