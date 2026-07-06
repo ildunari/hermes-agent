@@ -12,6 +12,9 @@ export interface DesktopFsRemotePicker {
 
 let remotePicker: DesktopFsRemotePicker | null = null
 
+const REMOTE_DIR_CACHE_TTL_MS = 2_000
+const remoteDirCache = new Map<string, { promise: Promise<HermesReadDirResult>; timestamp: number }>()
+
 export function setDesktopFsRemotePicker(next: DesktopFsRemotePicker | null) {
   remotePicker = next
 }
@@ -42,6 +45,30 @@ function fsPath(endpoint: string, filePath: string) {
   return `/api/fs/${endpoint}?path=${encodeURIComponent(filePath)}`
 }
 
+function normalizeFsCachePath(path: string) {
+  return path.replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+}
+
+function remoteDirCacheKey(path: string) {
+  return `${desktopFsCacheKey()}:${normalizeFsCachePath(path)}`
+}
+
+export function clearDesktopDirCache(path?: string): void {
+  if (!path) {
+    remoteDirCache.clear()
+
+    return
+  }
+
+  const key = remoteDirCacheKey(path)
+  const childPrefix = `${key}/`
+  for (const existingKey of Array.from(remoteDirCache.keys())) {
+    if (existingKey === key || existingKey.startsWith(childPrefix)) {
+      remoteDirCache.delete(existingKey)
+    }
+  }
+}
+
 function bridge() {
   const desktop = window.hermesDesktop
 
@@ -63,7 +90,21 @@ export async function readDesktopDir(path: string): Promise<HermesReadDirResult>
     return bridge().readDir(path)
   }
 
-  return remoteFsApi<HermesReadDirResult>(fsPath('list', path))
+  const key = remoteDirCacheKey(path)
+  const now = Date.now()
+  const cached = remoteDirCache.get(key)
+
+  if (cached && now - cached.timestamp < REMOTE_DIR_CACHE_TTL_MS) {
+    return cached.promise
+  }
+
+  const promise = remoteFsApi<HermesReadDirResult>(fsPath('list', path)).catch(error => {
+    remoteDirCache.delete(key)
+    throw error
+  })
+  remoteDirCache.set(key, { promise, timestamp: now })
+
+  return promise
 }
 
 export async function readDesktopFileText(path: string): Promise<HermesReadFileTextResult> {
@@ -172,15 +213,22 @@ export async function desktopFileDiff(repoRoot: string, filePath: string): Promi
 }
 
 export async function selectDesktopPaths(options?: HermesSelectPathsOptions): Promise<string[]> {
-  const desktop = bridge()
-
   if (!isDesktopFsRemoteMode()) {
-    return desktop.selectPaths(options)
+    return selectLocalDesktopPaths(options)
   }
 
   if (!options?.directories) {
-    return desktop.selectPaths(options)
+    return bridge().selectPaths(options)
   }
 
   return remotePicker ? remotePicker.selectPaths({ ...options, multiple: false }) : []
+}
+
+// Always use the native Electron picker on this desktop, even while the chat is
+// connected to a remote backend. This is intentionally separate from
+// selectDesktopPaths(): context/project picks should be remote-aware, but image
+// attachments selected from Finder live on the local desktop until their bytes
+// are uploaded to the backend.
+export async function selectLocalDesktopPaths(options?: HermesSelectPathsOptions): Promise<string[]> {
+  return bridge().selectPaths(options)
 }

@@ -1,3 +1,4 @@
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { readDesktopFileDataUrl } from '@/lib/desktop-fs'
 import { capitalize } from '@/lib/text'
 import { $connection } from '@/store/session'
@@ -121,14 +122,26 @@ export function isRemoteGateway(): boolean {
 // (workspace, skills, ~/.hermes/cache, etc.); /api/media is intentionally
 // narrower and rejects non-images plus images outside its media roots.
 export async function gatewayMediaDataUrl(path: string): Promise<string> {
-  return readDesktopFileDataUrl(filePathFromMediaPath(path))
+  const file = filePathFromMediaPath(path)
+  const profile = $connection.get()?.profile || normalizeProfileKey($activeGatewayProfile.get())
+
+  if (!isRemoteGateway()) {
+    return readDesktopFileDataUrl(file)
+  }
+
+  const result = await window.hermesDesktop!.api<string | { dataUrl?: string }>({
+    path: `/api/fs/read-data-url?path=${encodeURIComponent(file)}`,
+    ...(profile ? { profile } : {})
+  })
+
+  return typeof result === 'string' ? result : result.dataUrl || ''
 }
 
 // Remote-mode replacement for opening gateway-local file paths with file://.
 // The file lives on the gateway, so fetch it over the authenticated fs bridge
 // and hand the bytes to the local browser shell as a download.
 export async function downloadGatewayMediaFile(path: string): Promise<void> {
-  const dataUrl = await readDesktopFileDataUrl(filePathFromMediaPath(path))
+  const dataUrl = await gatewayMediaDataUrl(path)
 
   if (!dataUrl) {
     throw new Error('Gateway returned no file data')

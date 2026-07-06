@@ -399,7 +399,6 @@ def _apply_profile_override() -> None:
         "-t", "--toolsets",
         "-r", "--resume",
         "-s", "--skills",
-        "--usage-file",
     }
     optional_value_flags = {"-c", "--continue"}
     i = 0
@@ -2869,6 +2868,15 @@ def select_provider_and_model(args=None):
             return ""
 
         custom_provider_map = {}
+        try:
+            from hermes_cli.models import CANONICAL_PROVIDERS, normalize_provider
+            canonical_provider_slugs = {p.slug.lower() for p in CANONICAL_PROVIDERS}
+        except Exception:
+            canonical_provider_slugs = set()
+
+            def normalize_provider(value: str) -> str:  # type: ignore[no-redef]
+                return str(value or "").strip().lower()
+
         for entry in get_compatible_custom_providers(cfg):
             if not isinstance(entry, dict):
                 continue
@@ -2879,6 +2887,12 @@ def select_provider_and_model(args=None):
             key = "custom:" + name.lower().replace(" ", "-")
             provider_key = (entry.get("provider_key") or "").strip()
             if provider_key:
+                try:
+                    normalized_provider_key = normalize_provider(provider_key).lower()
+                except Exception:
+                    normalized_provider_key = provider_key.lower()
+                if normalized_provider_key in canonical_provider_slugs:
+                    continue
                 try:
                     resolve_provider(provider_key)
                 except AuthError:
@@ -2978,7 +2992,13 @@ def select_provider_and_model(args=None):
     # resolves back to a concrete slug, so the dispatch chain below is
     # unchanged. Custom providers and the trailing actions stay flat.
     canonical_descs = {p.slug: p.tui_desc for p in CANONICAL_PROVIDERS}
-    grouped_rows = group_providers([p.slug for p in CANONICAL_PROVIDERS])
+    from hermes_cli.model_switch import expand_hidden_provider_slugs, load_hidden_provider_policy
+
+    hidden_provider_slugs = expand_hidden_provider_slugs(load_hidden_provider_policy(config))
+    grouped_rows = group_providers([
+        p.slug for p in CANONICAL_PROVIDERS
+        if p.slug.lower() not in hidden_provider_slugs
+    ])
 
     # The group/slug that should be pre-selected: the active provider's group
     # if it's grouped, otherwise the active slug itself.
@@ -5405,12 +5425,12 @@ def _desktop_macos_relaunchable_fixup(desktop_dir: Path) -> None:
     Clearing the quarantine xattrs and re-applying a clean deep ad-hoc signature
     (omitting the hardened-runtime flag, which is meaningless without a real
     Developer ID) lets the rebuilt app relaunch. No-op when a real signing
-    identity is configured (CSC_LINK / APPLE_SIGNING_IDENTITY) so a properly
+    identity is configured (CSC_LINK / CSC_NAME / APPLE_SIGNING_IDENTITY) so a properly
     signed/notarized build is never clobbered. Best-effort: never raises.
     """
     if sys.platform != "darwin":
         return
-    if os.environ.get("CSC_LINK") or os.environ.get("APPLE_SIGNING_IDENTITY"):
+    if os.environ.get("CSC_LINK") or os.environ.get("CSC_NAME") or os.environ.get("APPLE_SIGNING_IDENTITY"):
         return
     exe = _desktop_packaged_executable(desktop_dir)
     if exe is None:
@@ -5429,27 +5449,27 @@ def _desktop_macos_relaunchable_fixup(desktop_dir: Path) -> None:
         print(f"  (warning: macOS relaunch fixup skipped: {exc})")
 
 
+def _desktop_prepare_local_signing_env(env: dict) -> None:
+    """Keep local macOS desktop packs from auto-selecting a Developer ID identity."""
+    if sys.platform != "darwin":
+        return
+    if env.get("CSC_IDENTITY_AUTO_DISCOVERY") is not None:
+        return
+    explicit_signing = (
+        env.get("CSC_LINK")
+        or env.get("CSC_NAME")
+        or env.get("APPLE_SIGNING_IDENTITY")
+    )
+    if explicit_signing:
+        return
+    env["CSC_IDENTITY_AUTO_DISCOVERY"] = "false"
+
+
 def _force_adhoc_macos_signing(env: dict, *, source_mode: bool) -> bool:
-    """Stop electron-builder grabbing a random keychain identity on self-update.
-
-    The desktop self-updater rebuilds *and re-signs the .app on the end user's
-    machine* (``hermes desktop --build-only`` → electron-builder ``--dir``).
-    With ``CSC_IDENTITY_AUTO_DISCOVERY`` on (its default), electron-builder
-    signs the ``type=distribution``, hardened-runtime bundle with whatever it
-    finds in that user's keychain — typically a personal "Apple Development"
-    cert. That stalls/fails the sign step (no Developer ID + no provisioning
-    profile) or clobbers your real notarized signature with an unusable one, so
-    every post-update launch trips Gatekeeper.
-
-    Force ad-hoc signing for the local packaged rebuild instead: deterministic,
-    and exactly what ``_desktop_macos_relaunchable_fixup`` already finishes off.
-    No-op for source runs, off-macOS, when a real identity is configured
-    (``CSC_LINK`` / ``APPLE_SIGNING_IDENTITY``), or when the caller already
-    pinned the flag. Mutates ``env``; returns True when it set the flag.
-    """
+    """Stop electron-builder grabbing a random keychain identity on self-update."""
     if sys.platform != "darwin" or source_mode:
         return False
-    if env.get("CSC_LINK") or env.get("APPLE_SIGNING_IDENTITY"):
+    if env.get("CSC_LINK") or env.get("CSC_NAME") or env.get("APPLE_SIGNING_IDENTITY"):
         return False
     if "CSC_IDENTITY_AUTO_DISCOVERY" in env:
         return False
@@ -5598,8 +5618,7 @@ def cmd_gui(args: argparse.Namespace):
         env["HERMES_DESKTOP_HERMES_ROOT"] = str(Path(args.hermes_root).expanduser().resolve())
     if getattr(args, "cwd", None):
         env["HERMES_DESKTOP_CWD"] = str(Path(args.cwd).expanduser().resolve())
-    else:
-        env["HERMES_DESKTOP_CWD"] = os.getcwd()
+    _desktop_prepare_local_signing_env(env)
 
     # Desktop launch options from config.yaml (`desktop.electron_flags`,
     # `desktop.disable_gpu`). The GPU policy is bridged to the env var the
@@ -10192,6 +10211,26 @@ def _cmd_update_impl(args, gateway_mode: bool):
         else:
             print("  ✓ Configuration is up to date")
 
+        # If update temporarily moved from a local customization branch to
+        # main, restore that branch before any managed gateway restart. The
+        # running Python process keeps executing this code, but launchd will
+        # start the next gateway from the checked-out working tree.
+        if current_branch not in ("main", "HEAD"):
+            restore_branch = subprocess.run(
+                git_cmd + ["checkout", current_branch],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if restore_branch.returncode == 0:
+                print(f"  ✓ Restored branch '{current_branch}' after update")
+            else:
+                stderr = (restore_branch.stderr or "").strip()
+                print(f"  ⚠ Could not restore branch '{current_branch}' after update")
+                if stderr:
+                    print(f"    {stderr.splitlines()[0]}")
+
         # Safety net: config-version migrations have been observed to leave
         # cron/jobs.json valid-but-empty, silently dropping every scheduled
         # job (issue #34600). The desktop scheduler can also overwrite with
@@ -10786,23 +10825,17 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         launchd_restart,
                         get_launchd_label,
                         get_launchd_plist_path,
+                        _probe_launchd_service_running,
                     )
 
                     plist_path = get_launchd_plist_path()
-                    if plist_path.exists():
-                        check = subprocess.run(
-                            ["launchctl", "list", get_launchd_label()],
-                            capture_output=True,
-                            text=True,
-                            timeout=5,
-                        )
-                        if check.returncode == 0:
-                            try:
-                                launchd_restart()
-                                restarted_services.append(get_launchd_label())
-                            except subprocess.CalledProcessError as e:
-                                stderr = (getattr(e, "stderr", "") or "").strip()
-                                print(f"  ⚠ Gateway restart failed: {stderr}")
+                    if plist_path.exists() and _probe_launchd_service_running():
+                        try:
+                            launchd_restart()
+                            restarted_services.append(get_launchd_label())
+                        except subprocess.CalledProcessError as e:
+                            stderr = (getattr(e, "stderr", "") or "").strip()
+                            print(f"  ⚠ Gateway restart failed: {stderr}")
                 except (FileNotFoundError, subprocess.TimeoutExpired, ImportError):
                     pass
 
@@ -11928,11 +11961,6 @@ def cmd_dashboard(args):
         remaining = _find_stale_dashboard_pids()
         sys.exit(1 if remaining else 0)
 
-    # `serve` is the headless backend: no UI build, no SPA mount, neutral
-    # ready sentinel. Resolved once and threaded through the re-exec, the
-    # build gate, and start_server.
-    _headless_backend = getattr(args, "headless_backend", False)
-
     # ── Unified profile launch routing ────────────────────────────────
     # The dashboard is a MACHINE management surface: it can read/write any
     # profile via the per-request ?profile= scoping. Running one dashboard
@@ -11978,9 +12006,7 @@ def cmd_dashboard(args):
         reexec_argv = [
             sys.executable, "-m", "hermes_cli.main",
             "-p", "default",
-            # Preserve the lean serve path across the re-exec so a named-profile
-            # `serve` doesn't silently rebuild the UI as `dashboard`.
-            "serve" if _headless_backend else "dashboard",
+            "dashboard",
             "--port", str(args.port),
             "--host", args.host,
             "--open-profile", _launch_profile,
@@ -12049,11 +12075,7 @@ def cmd_dashboard(args):
     # backend is the desktop's primary entrypoint and needs the same.
     _sync_bundled_skills_quietly()
 
-    if _headless_backend:
-        # Don't build the SPA, and tell mount_spa() (read at web_server import
-        # below) to disable it even if a stray dist exists. Set it first.
-        os.environ["HERMES_SERVE_HEADLESS"] = "1"
-    elif "HERMES_WEB_DIST" not in os.environ and not getattr(args, "skip_build", False):
+    if "HERMES_WEB_DIST" not in os.environ and not getattr(args, "skip_build", False):
         if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
             sys.exit(1)
     elif getattr(args, "skip_build", False):
@@ -12126,7 +12148,6 @@ def cmd_dashboard(args):
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
         initial_profile=getattr(args, "open_profile", "") or "",
-        headless=_headless_backend,
     )
 
 
@@ -12226,9 +12247,8 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
         "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
-        "project", "proxy",
-        "prompt-size",
-        "send", "sessions", "setup",
+        "project", "proxy", "prompt-size", "send", "sessions", "setup",
+        "stack",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -12255,7 +12275,6 @@ _TOP_LEVEL_VALUE_FLAGS = frozenset(
         "-t", "--toolsets",
         "-r", "--resume",
         "-s", "--skills",
-        "--usage-file",
         # ``-c / --continue`` is nargs='?' (optional value). Treat it as
         # value-taking: if the next token is a subcommand-looking word
         # the user almost certainly meant it as the session name, and
@@ -12479,7 +12498,6 @@ def _try_termux_fast_cli_launch() -> bool:
                 model=getattr(args, "model", None),
                 provider=getattr(args, "provider", None),
                 toolsets=getattr(args, "toolsets", None),
-                usage_file=getattr(args, "usage_file", None),
             )
         )
 
@@ -12894,6 +12912,13 @@ def main():
     build_gateway_parser(
         subparsers, cmd_gateway=cmd_gateway, cmd_proxy=cmd_proxy, cmd_gateway_enroll=cmd_gateway_enroll
     )
+
+    # =========================================================================
+    # stack command — one supervisor for Mac-local Hermes gateways/web helpers
+    # =========================================================================
+    from hermes_cli.stack import register_stack_parser
+
+    register_stack_parser(subparsers)
 
     # =========================================================================
     # lsp command
@@ -14129,7 +14154,6 @@ def main():
                 model=getattr(args, "model", None),
                 provider=getattr(args, "provider", None),
                 toolsets=getattr(args, "toolsets", None),
-                usage_file=getattr(args, "usage_file", None),
             )
         )
 

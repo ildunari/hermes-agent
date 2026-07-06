@@ -1,7 +1,7 @@
 import ignore from 'ignore'
 
 import type { HermesReadDirEntry, HermesReadDirResult } from '@/global'
-import { desktopFsCacheKey, desktopGitRoot, readDesktopDir, readDesktopFileDataUrl } from '@/lib/desktop-fs'
+import { clearDesktopDirCache, desktopFsCacheKey, desktopGitRoot, readDesktopDir, readDesktopFileDataUrl } from '@/lib/desktop-fs'
 import { ALWAYS_EXCLUDED } from '@/lib/excluded-paths'
 
 export type ProjectTreeEntry = HermesReadDirEntry
@@ -146,6 +146,7 @@ export function clearProjectDirCache(rootPath?: string) {
   if (!rootPath) {
     gitRootCache.clear()
     gitignoreCache.clear()
+    clearDesktopDirCache()
 
     return
   }
@@ -153,4 +154,5 @@ export function clearProjectDirCache(rootPath?: string) {
   const key = `${desktopFsCacheKey()}:${clean(rootPath)}`
   gitRootCache.delete(key)
   gitignoreCache.delete(key)
+  clearDesktopDirCache(rootPath)
 }

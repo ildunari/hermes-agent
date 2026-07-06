@@ -1,5 +1,8 @@
+import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { readDesktopFileDataUrl, selectLocalDesktopPaths } from '@/lib/desktop-fs'
+import { $composerAttachments } from '@/store/composer'
 import { $connection } from '@/store/session'
 
 import {
@@ -7,8 +10,20 @@ import {
   type DroppedFile,
   extractDroppedFiles,
   HERMES_PATHS_MIME,
-  partitionDroppedFiles
+  imageDropPreviewOptions,
+  partitionDroppedFiles,
+  useComposerActions
 } from './use-composer-actions'
+
+vi.mock('@/lib/desktop-fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/lib/desktop-fs')>()
+
+  return {
+    ...actual,
+    readDesktopFileDataUrl: vi.fn(),
+    selectLocalDesktopPaths: vi.fn()
+  }
+})
 
 // A Finder/Explorer drop carries a native File handle; an in-app drag (project
 // tree, gutter line ref) is path-only. The split decides whether a drop becomes
@@ -17,6 +32,12 @@ import {
 // can't read, plus image bytes for vision).
 const osDrop = (path: string): DroppedFile => ({ file: new File(['x'], path.split('/').pop() || 'f'), path })
 const inAppRef = (path: string, extra: Partial<DroppedFile> = {}): DroppedFile => ({ path, ...extra })
+
+afterEach(() => {
+  $composerAttachments.set([])
+  vi.clearAllMocks()
+  delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+})
 
 describe('partitionDroppedFiles', () => {
   it('routes File-bearing OS drops to osDrops and path-only in-app drags to inAppRefs', () => {
@@ -73,6 +94,39 @@ describe('partitionDroppedFiles', () => {
 
   it('returns empty groups for an empty drop', () => {
     expect(partitionDroppedFiles([])).toEqual({ inAppRefs: [], osDrops: [] })
+  })
+
+  it('previews File-bearing image drops locally even when Chromium exposes an absolute path', () => {
+    const screenshot = osDrop('/Users/kosta/Desktop/Screenshot 2026-06-30.png')
+
+    expect(imageDropPreviewOptions(screenshot)).toEqual({ localPreview: true })
+  })
+
+  it('does not force local preview for path-only in-app image drags', () => {
+    const remoteTreeImage = inAppRef('/remote/work/image.png')
+
+    expect(imageDropPreviewOptions(remoteTreeImage)).toEqual({})
+  })
+
+  it('previews native image picker paths through the local desktop bridge', async () => {
+    const readFileDataUrl = vi.fn().mockResolvedValue('data:image/png;base64,cGljaw==')
+
+    window.hermesDesktop = { readFileDataUrl } as never
+    vi.mocked(selectLocalDesktopPaths).mockResolvedValue(['/Users/kosta/Desktop/pick.png'])
+
+    const { result } = renderHook(() =>
+      useComposerActions({ activeSessionId: null, currentCwd: '/Users/kosta', requestGateway: vi.fn() })
+    )
+
+    await act(async () => {
+      await result.current.pickImages()
+    })
+
+    expect(readFileDataUrl).toHaveBeenCalledWith('/Users/kosta/Desktop/pick.png')
+    expect(readDesktopFileDataUrl).not.toHaveBeenCalled()
+    expect($composerAttachments.get()).toContainEqual(
+      expect.objectContaining({ path: '/Users/kosta/Desktop/pick.png', previewUrl: 'data:image/png;base64,cGljaw==' })
+    )
   })
 })
 
@@ -225,12 +279,11 @@ describe('attachmentPreviewDataUrl', () => {
 
     vi.stubGlobal('window', { hermesDesktop: { api, readFileDataUrl } })
     $connection.set({ mode: 'remote' } as never)
+    vi.mocked(readDesktopFileDataUrl).mockResolvedValue(REMOTE_PREVIEW)
 
     await expect(attachmentPreviewDataUrl('/home/gateway/shot.png')).resolves.toBe(REMOTE_PREVIEW)
 
-    expect(api).toHaveBeenCalledWith({
-      path: '/api/fs/read-data-url?path=%2Fhome%2Fgateway%2Fshot.png'
-    })
+    expect(readDesktopFileDataUrl).toHaveBeenCalledWith('/home/gateway/shot.png')
   })
 
   it('falls back when the local bridge returns an empty read', async () => {
@@ -240,7 +293,9 @@ describe('attachmentPreviewDataUrl', () => {
 
     vi.stubGlobal('window', { hermesDesktop: { api, readFileDataUrl } })
     $connection.set({ mode: 'remote' } as never)
+    vi.mocked(readDesktopFileDataUrl).mockResolvedValue(REMOTE_PREVIEW)
 
     await expect(attachmentPreviewDataUrl('/home/gateway/shot.png')).resolves.toBe(REMOTE_PREVIEW)
+    expect(readDesktopFileDataUrl).toHaveBeenCalledWith('/home/gateway/shot.png')
   })
 })

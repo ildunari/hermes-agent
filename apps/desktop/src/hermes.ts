@@ -57,6 +57,8 @@ import type {
   ToolsetModelsResponse
 } from '@/types/hermes'
 
+import { WEBUI_HIDDEN_SESSION_SOURCE_IDS } from './lib/session-source'
+
 // Desktop startup fires a burst of read-only data calls (config, profiles,
 // model info/options, cron) the moment the backend passes readiness. On a
 // profile-heavy or remote install these can each take tens of seconds — e.g.
@@ -71,6 +73,7 @@ import type {
 export const STARTUP_REQUEST_TIMEOUT_MS = 60_000
 const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
+const AUDIO_SPEAK_REQUEST_TIMEOUT_MS = 180_000
 // prompt.submit is effectively fire-and-forget: turn completion is signaled by
 // stream / message.complete events, NOT by the RPC return. A long turn (MoA
 // presets running references + aggregator in series, deep reasoning, large tool
@@ -199,12 +202,17 @@ export async function listSessions(
   limit = 40,
   minMessages = 0,
   archived: 'exclude' | 'include' | 'only' = 'exclude',
-  order: 'created' | 'recent' = 'recent'
+  order: 'created' | 'recent' = 'recent',
+  filter: SessionSourceFilter = {}
 ): Promise<PaginatedSessions> {
+  const sourceParam = filter.source ? `&source=${encodeURIComponent(filter.source)}` : ''
+  const excludeSources = filter.excludeSources ?? (filter.source ? [] : WEBUI_HIDDEN_SESSION_SOURCE_IDS)
+  const excludeParam = excludeSources.length ? `&exclude_sources=${encodeURIComponent(excludeSources.join(','))}` : ''
+
   const result = await window.hermesDesktop.api<PaginatedSessions>({
     path:
       `/api/sessions?limit=${limit}&offset=0&min_messages=${Math.max(0, minMessages)}` +
-      `&archived=${archived}&order=${order}`,
+      `&archived=${archived}&order=${order}${sourceParam}${excludeParam}`,
     timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
   })
 
@@ -228,6 +236,8 @@ export interface SessionSourceFilter {
   excludeSources?: string[]
 }
 
+export const WEBUI_VISIBLE_SESSION_SOURCE_IDS = ['api_server', 'cli', 'codex', 'desktop', 'gateway', 'local', 'tui'] as const
+
 export async function listAllProfileSessions(
   limit = 40,
   minMessages = 0,
@@ -238,8 +248,9 @@ export async function listAllProfileSessions(
 ): Promise<PaginatedSessions> {
   const sourceParam = filter.source ? `&source=${encodeURIComponent(filter.source)}` : ''
 
-  const excludeParam = filter.excludeSources?.length
-    ? `&exclude_sources=${encodeURIComponent(filter.excludeSources.join(','))}`
+  const excludeSources = filter.excludeSources ?? (filter.source ? [] : WEBUI_HIDDEN_SESSION_SOURCE_IDS)
+  const excludeParam = excludeSources.length
+    ? `&exclude_sources=${encodeURIComponent(excludeSources.join(','))}`
     : ''
 
   const result = await window.hermesDesktop.api<PaginatedSessions>({
@@ -977,6 +988,7 @@ export function getActionStatus(name: string, lines = 200): Promise<ActionStatus
 
 export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<AudioTranscriptionResponse> {
   return window.hermesDesktop.api<AudioTranscriptionResponse>({
+    ...profileScoped(),
     path: '/api/audio/transcribe',
     method: 'POST',
     body: {
@@ -986,16 +998,30 @@ export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<Aud
   })
 }
 
-export function speakText(text: string): Promise<AudioSpeakResponse> {
+export type SpeechSource = 'read-aloud' | 'voice-conversation'
+
+export interface SpeakTextOptions {
+  rewrite?: 'auto' | 'off' | 'on'
+  source?: SpeechSource
+}
+
+export function speakText(text: string, options: SpeakTextOptions = {}): Promise<AudioSpeakResponse> {
   return window.hermesDesktop.api<AudioSpeakResponse>({
+    ...profileScoped(),
     path: '/api/audio/speak',
     method: 'POST',
-    body: { text }
+    body: {
+      text,
+      ...(options.source ? { source: options.source } : {}),
+      ...(options.rewrite ? { rewrite: options.rewrite } : {})
+    },
+    timeoutMs: AUDIO_SPEAK_REQUEST_TIMEOUT_MS
   })
 }
 
 export function getElevenLabsVoices(): Promise<ElevenLabsVoicesResponse> {
   return window.hermesDesktop.api<ElevenLabsVoicesResponse>({
+    ...profileScoped(),
     path: '/api/audio/elevenlabs/voices'
   })
 }

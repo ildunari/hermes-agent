@@ -5,7 +5,7 @@ import { droppedFileInlineRef } from '@/app/chat/composer/inline-refs'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { useI18n } from '@/i18n'
 import { attachmentId, contextPath, pathLabel } from '@/lib/chat-runtime'
-import { readDesktopFileDataUrl, selectDesktopPaths } from '@/lib/desktop-fs'
+import { readDesktopFileDataUrl, selectDesktopPaths, selectLocalDesktopPaths } from '@/lib/desktop-fs'
 import { normalize } from '@/lib/text'
 import {
   addComposerAttachment,
@@ -255,6 +255,10 @@ export function partitionDroppedFiles(candidates: DroppedFile[]): {
   return { osDrops, inAppRefs }
 }
 
+export function imageDropPreviewOptions(candidate: Pick<DroppedFile, 'file'>): { localPreview?: boolean } {
+  return candidate.file ? { localPreview: true } : {}
+}
+
 interface ComposerActionsOptions {
   activeSessionId: string | null
   currentCwd: string
@@ -375,7 +379,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
   )
 
   const attachImagePath = useCallback(
-    async (filePath: string) => {
+    async (filePath: string, options: { localPreview?: boolean } = {}) => {
       if (!filePath) {
         return false
       }
@@ -428,7 +432,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
           return false
         }
 
-        return attachImagePath(savedPath)
+        return attachImagePath(savedPath, { localPreview: true })
       } catch (err) {
         notifyError(err, copy.imageAttachFailed)
 
@@ -439,7 +443,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
   )
 
   const pickImages = useCallback(async () => {
-    const paths = await selectDesktopPaths({
+    const paths = await selectLocalDesktopPaths({
       title: copy.attachImages,
       defaultPath: currentCwd || undefined,
       filters: [
@@ -455,7 +459,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
     }
 
     for (const path of paths) {
-      await attachImagePath(path)
+      await attachImagePath(path, { localPreview: true })
     }
   }, [attachImagePath, copy.attachImages, currentCwd, t.composer.images])
 
@@ -476,7 +480,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
           return false
         }
 
-        await attachImagePath(path)
+        await attachImagePath(path, { localPreview: true })
 
         return true
       } catch (err) {
@@ -568,7 +572,7 @@ export function useComposerActions({ activeSessionId, currentCwd, requestGateway
         const isImage = file.type.startsWith('image/') || isImagePath(file.name) || (filePath && isImagePath(filePath))
 
         if (isImage) {
-          if ((filePath && (await attachImagePath(filePath))) || (await attachImageBlob(file))) {
+          if ((filePath && (await attachImagePath(filePath, imageDropPreviewOptions(candidate)))) || (await attachImageBlob(file))) {
             attached = true
 
             continue

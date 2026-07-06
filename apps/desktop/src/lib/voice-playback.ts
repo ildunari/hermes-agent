@@ -73,7 +73,7 @@ export async function playSpeechText(text: string, options: VoicePlaybackOptions
   setVoicePlaybackState(currentState('preparing', options))
 
   try {
-    const response = await speakText(speakableText)
+    const response = await speakText(speakableText, { source: options.source })
 
     if (!isCurrent()) {
       return false

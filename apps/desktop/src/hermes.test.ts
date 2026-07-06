@@ -10,7 +10,8 @@ import {
   getSessionMessages,
   getStatus,
   listAllProfileSessions,
-  listSessions
+  listSessions,
+  speakText
 } from './hermes'
 import { refreshActiveProfile } from './store/profile'
 
@@ -37,24 +38,54 @@ describe('Hermes REST session helpers', () => {
     Reflect.deleteProperty(window, 'hermesDesktop')
   })
 
-  it('uses a longer timeout for the single-profile session list', async () => {
+  it('uses a longer timeout for the single-profile session list and hides internal/non-WebUI sources', async () => {
     await listSessions(50, 1)
 
     expect(api).toHaveBeenCalledWith(
       expect.objectContaining({
-        path: '/api/sessions?limit=50&offset=0&min_messages=1&archived=exclude&order=recent',
+        path:
+          '/api/sessions?limit=50&offset=0&min_messages=1&archived=exclude&order=recent' +
+          '&exclude_sources=subagent%2Ctool%2Csmoke-test%2Ctelegram%2Cdiscord%2Cslack%2Cmattermost%2Cmatrix%2Csignal%2Cwhatsapp%2Cbluebubbles%2Chomeassistant%2Cemail%2Csms%2Cwebhook%2Cweixin%2Cwecom%2Cqqbot%2Cyuanbao%2Cdingtalk%2Cfeishu',
         timeoutMs: 60_000
       })
     )
   })
 
-  it('uses a longer timeout for the all-profile session list', async () => {
+  it('uses a longer timeout for the all-profile session list and applies the same hidden-source filter', async () => {
     await listAllProfileSessions(50, 1)
 
     expect(api).toHaveBeenCalledWith(
       expect.objectContaining({
-        path: '/api/profiles/sessions?limit=50&offset=0&min_messages=1&archived=exclude&order=recent&profile=all',
+        path:
+          '/api/profiles/sessions?limit=50&offset=0&min_messages=1&archived=exclude&order=recent&profile=all' +
+          '&exclude_sources=subagent%2Ctool%2Csmoke-test%2Ctelegram%2Cdiscord%2Cslack%2Cmattermost%2Cmatrix%2Csignal%2Cwhatsapp%2Cbluebubbles%2Chomeassistant%2Cemail%2Csms%2Cwebhook%2Cweixin%2Cwecom%2Cqqbot%2Cyuanbao%2Cdingtalk%2Cfeishu',
         timeoutMs: 60_000
+      })
+    )
+  })
+
+  it('does not apply default hidden exclusions to explicit source-scoped fetches', async () => {
+    await listAllProfileSessions(50, 1, 'exclude', 'recent', 'all', { source: 'cron' })
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/api/profiles/sessions?limit=50&offset=0&min_messages=1&archived=exclude&order=recent&profile=all&source=cron',
+        timeoutMs: 60_000
+      })
+    )
+  })
+
+  it('uses a longer timeout and read-aloud metadata for speech synthesis', async () => {
+    api.mockResolvedValue({ ok: true, data_url: 'data:audio/wav;base64,AAAA' })
+
+    await speakText('hello there', { rewrite: 'auto', source: 'read-aloud' })
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/api/audio/speak',
+        method: 'POST',
+        body: { text: 'hello there', source: 'read-aloud', rewrite: 'auto' },
+        timeoutMs: 180_000
       })
     )
   })

@@ -112,6 +112,9 @@ let lastConnectionKey = ''
 // reappears after a checkout, a remote that wasn't ready), keep retrying on a
 // slow cadence so the tree self-heals instead of staying "UNREADABLE" forever.
 const ROOT_ERROR_RETRY_MS = 3_000
+const REVALIDATE_DEBOUNCE_MS = 500
+const MAX_REVALIDATE_DIRS = 50
+let revalidateTimer: number | null = null
 
 function setProjectTree(updater: (current: ProjectTreeState) => ProjectTreeState) {
   $projectTree.set(updater($projectTree.get()))
@@ -234,8 +237,14 @@ async function revalidateTree(cwd: string): Promise<void> {
 
   const rootPath = state.resolvedCwd || cwd
   clearProjectDirCache()
+  let visitedDirs = 0
 
   const reconcile = async (dirPath: string, existing: TreeNode[]): Promise<TreeNode[]> => {
+    visitedDirs += 1
+    if (visitedDirs > MAX_REVALIDATE_DIRS) {
+      return existing
+    }
+
     const { entries, error } = await readProjectDir(dirPath, rootPath)
 
     if (error) {
@@ -264,6 +273,17 @@ async function revalidateTree(cwd: string): Promise<void> {
   const nextData = await reconcile(rootPath, state.data)
 
   setProjectTree(latest => (latest.cwd === cwd && latest.loaded ? { ...latest, data: nextData } : latest))
+}
+
+function scheduleRevalidateTree(cwd: string) {
+  if (revalidateTimer !== null) {
+    window.clearTimeout(revalidateTimer)
+  }
+
+  revalidateTimer = window.setTimeout(() => {
+    revalidateTimer = null
+    void revalidateTree(cwd)
+  }, REVALIDATE_DEBOUNCE_MS)
 }
 
 /**
@@ -360,7 +380,7 @@ export function useProjectTree(cwd: string): UseProjectTreeResult {
   // very first render: tick 0 is the initial value, not a real change).
   useEffect(() => {
     if (workspaceTick > 0) {
-      void revalidateTree(cwd)
+      scheduleRevalidateTree(cwd)
     }
   }, [workspaceTick, cwd])
 

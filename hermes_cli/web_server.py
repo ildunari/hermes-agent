@@ -12,6 +12,7 @@ Usage:
 from contextlib import asynccontextmanager, contextmanager
 
 import asyncio
+import contextlib
 import atexit
 import base64
 import binascii
@@ -42,7 +43,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
@@ -407,7 +408,83 @@ def should_require_auth(host: str, allow_public: bool = False) -> bool:
     return host not in _LOOPBACK_HOST_VALUES
 
 
-def _is_accepted_host(host_header: str, bound_host: str) -> bool:
+def _host_only(value: str) -> str:
+    """Return a normalized host name from a Host header or config value."""
+    if not value:
+        return ""
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    # Operators sometimes paste the full public URL into host allowlists.
+    # Accept that shape, but store only the hostname so path/scheme changes
+    # don't affect the DNS-rebinding gate.
+    if "://" in raw:
+        try:
+            from urllib.parse import urlsplit
+
+            raw = urlsplit(raw).hostname or ""
+        except Exception:
+            raw = ""
+    if not raw:
+        return ""
+    if raw.startswith("["):
+        # IPv6 bracketed — port (if any) follows "]:".
+        close = raw.find("]")
+        if close != -1:
+            host_only = raw[1:close]
+        else:
+            host_only = raw.strip("[]")
+    elif raw.count(":") > 1:
+        # Bare IPv6 literal. Treat the whole value as the host; host:port
+        # IPv6 must use bracket notation per RFC 3986.
+        host_only = raw
+    else:
+        host_only = raw.rsplit(":", 1)[0] if ":" in raw else raw
+    return host_only.strip().lower().rstrip(".")
+
+
+def _configured_dashboard_allowed_hosts() -> frozenset[str]:
+    """Exact extra hostnames the dashboard may accept for reverse proxies.
+
+    This is intentionally an exact allowlist, not a wildcard/suffix matcher.
+    It lets a trusted local proxy such as Tailscale Serve present
+    ``macstudio.tailnet.ts.net`` to a loopback-bound dashboard without
+    disabling the DNS-rebinding Host-header protection for arbitrary names.
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+    dashboard = cfg.get("dashboard") if isinstance(cfg, dict) else {}
+    if not isinstance(dashboard, dict):
+        return frozenset()
+    raw_hosts = dashboard.get("allowed_hosts") or []
+    if isinstance(raw_hosts, str):
+        parsed_hosts = None
+        try:
+            parsed_hosts = yaml.safe_load(raw_hosts)
+        except Exception:
+            parsed_hosts = None
+        raw_hosts = parsed_hosts if isinstance(parsed_hosts, list) else [raw_hosts]
+    hosts: set[str] = set()
+    if isinstance(raw_hosts, (list, tuple, set)):
+        for item in raw_hosts:
+            host = _host_only(str(item))
+            if host and host not in {"*", "."}:
+                hosts.add(host)
+    public_url = dashboard.get("public_url")
+    if isinstance(public_url, str):
+        host = _host_only(public_url)
+        if host:
+            hosts.add(host)
+    return frozenset(hosts)
+
+
+def _is_accepted_host(
+    host_header: str,
+    bound_host: str,
+    allowed_hosts: Iterable[str] | None = None,
+) -> bool:
     """True if the Host header targets the interface we bound to.
 
     Accepts:
@@ -418,23 +495,13 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     """
     if not host_header:
         return False
-    # Strip port suffix. IPv6 addresses use bracket notation:
-    #   [::1]         — no port
-    #   [::1]:9119    — with port
-    # Plain hosts/v4:
-    #   localhost:9119
-    #   127.0.0.1:9119
-    h = host_header.strip()
-    if h.startswith("["):
-        # IPv6 bracketed — port (if any) follows "]:"
-        close = h.find("]")
-        if close != -1:
-            host_only = h[1:close]  # strip brackets
-        else:
-            host_only = h.strip("[]")
-    else:
-        host_only = h.rsplit(":", 1)[0] if ":" in h else h
-    host_only = host_only.lower()
+    host_only = _host_only(host_header)
+    if not host_only:
+        return False
+    configured_allowed = {_host_only(str(h)) for h in (allowed_hosts or [])}
+    configured_allowed.discard("")
+    if host_only in configured_allowed:
+        return True
 
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
@@ -443,7 +510,7 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
         return True
 
     # Loopback bind: accept the loopback names
-    bound_lc = bound_host.lower()
+    bound_lc = _host_only(bound_host)
     if bound_lc in _LOOPBACK_HOST_VALUES:
         return host_only in _LOOPBACK_HOST_VALUES
 
@@ -468,7 +535,8 @@ async def host_header_middleware(request: Request, call_next):
     bound_host = getattr(app.state, "bound_host", None)
     if bound_host:
         host_header = request.headers.get("host", "")
-        if not _is_accepted_host(host_header, bound_host):
+        allowed_hosts = getattr(app.state, "dashboard_allowed_hosts", frozenset())
+        if not _is_accepted_host(host_header, bound_host, allowed_hosts):
             return JSONResponse(
                 status_code=400,
                 content={
@@ -947,6 +1015,8 @@ class ModelAssignment(BaseModel):
 class MoaModelSlot(BaseModel):
     provider: str = ""
     model: str = ""
+    reasoning_effort: str = ""
+    extra_body: Dict[str, Any] = {}
 
 
 class MoaPresetPayload(BaseModel):
@@ -956,7 +1026,7 @@ class MoaPresetPayload(BaseModel):
     # single-model agent behavior.
     reference_temperature: Optional[float] = None
     aggregator_temperature: Optional[float] = None
-    max_tokens: int = 4096
+    max_tokens: Optional[int] = None
     enabled: bool = True
 
 
@@ -970,7 +1040,7 @@ class MoaConfigPayload(BaseModel):
     aggregator: MoaModelSlot = MoaModelSlot()
     reference_temperature: Optional[float] = None
     aggregator_temperature: Optional[float] = None
-    max_tokens: int = 4096
+    max_tokens: Optional[int] = None
     enabled: bool = True
     profile: Optional[str] = None
 
@@ -1198,6 +1268,8 @@ _FS_READDIR_HIDDEN = {
     "target",
     "venv",
 }
+_FS_LIST_MAX_ENTRIES = 2_000
+
 
 # Filenames that must never be listed, read, or downloaded through the
 # managed-files API.  These typically contain credentials (API keys, tokens)
@@ -1469,7 +1541,7 @@ def _media_serve_roots() -> list[Path]:
 
 
 @app.get("/api/media")
-async def get_media(path: str):
+async def get_media(path: str, profile: Optional[str] = None):
     """Return a gateway-local image file as a base64 data URL.
 
     Lets remote clients (the desktop app over the network, or the web dashboard
@@ -1488,17 +1560,18 @@ async def get_media(path: str):
     if target.suffix.lower() not in _MEDIA_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail="Unsupported media type")
 
-    roots = _media_serve_roots()
-    if not any(target == root or root in target.parents for root in roots):
-        raise HTTPException(status_code=403, detail="Path outside media roots")
+    with _config_profile_scope(profile):
+        roots = _media_serve_roots()
+        if not any(target == root or root in target.parents for root in roots):
+            raise HTTPException(status_code=403, detail="Path outside media roots")
 
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-    if target.stat().st_size > _MEDIA_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="File too large")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+        if target.stat().st_size > _MEDIA_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="File too large")
 
-    encoded = base64.b64encode(target.read_bytes()).decode("ascii")
-    return {"data_url": f"data:{_MEDIA_CONTENT_TYPES[target.suffix.lower()]};base64,{encoded}"}
+        encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+        return {"data_url": f"data:{_MEDIA_CONTENT_TYPES[target.suffix.lower()]};base64,{encoded}"}
 
 
 def _canonical_path(path: Path, *, require_exists: bool = False) -> Path:
@@ -1954,19 +2027,27 @@ async def delete_managed_file(payload: ManagedFileDelete, request: Request):
 @app.get("/api/fs/list")
 async def fs_list(path: str):
     target = _fs_path(path)
+    return await asyncio.to_thread(_fs_list_entries, target)
+
+
+def _fs_list_entries(target: Path):
     try:
         entries = []
+        truncated = False
         with os.scandir(target) as scan:
             for entry in scan:
                 if entry.name in _FS_READDIR_HIDDEN:
                     continue
+                if len(entries) >= _FS_LIST_MAX_ENTRIES:
+                    truncated = True
+                    break
                 entries.append({
                     "name": entry.name,
                     "path": str(target / entry.name),
                     "isDirectory": entry.is_dir(follow_symlinks=False),
                 })
         entries.sort(key=lambda item: (not item["isDirectory"], item["name"].lower(), item["name"]))
-        return {"entries": entries}
+        return {"entries": entries, "truncated": True} if truncated else {"entries": entries}
     except FileNotFoundError:
         return {"entries": [], "error": "ENOENT"}
     except NotADirectoryError:
@@ -2320,7 +2401,14 @@ async def get_status(profile: Optional[str] = None):
         if runtime:
             gateway_state = runtime.get("gateway_state")
             gateway_platforms = runtime.get("platforms") or {}
-            if configured_gateway_platforms is not None:
+            runtime_pid = runtime.get("pid")
+            runtime_is_live_gateway = (
+                gateway_running
+                and gateway_pid is not None
+                and runtime_pid is not None
+                and str(runtime_pid) == str(gateway_pid)
+            )
+            if configured_gateway_platforms is not None and not runtime_is_live_gateway:
                 gateway_platforms = {
                     key: value
                     for key, value in gateway_platforms.items()
@@ -3383,6 +3471,9 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
 
 class TTSSpeakRequest(BaseModel):
     text: str
+    source: str = "read-aloud"
+    rewrite: str = "auto"
+    profile: Optional[str] = None
 
 
 def _elevenlabs_voice_label(voice: Dict[str, Any]) -> str:
@@ -3483,7 +3574,7 @@ async def get_elevenlabs_voices():
 
 
 @app.post("/api/audio/speak")
-async def speak_text(payload: TTSSpeakRequest):
+async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
     """Synthesize speech and return audio as base64 data URL.
 
     Used by the desktop voice-conversation mode to play back assistant
@@ -3495,10 +3586,52 @@ async def speak_text(payload: TTSSpeakRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Text is required")
 
+    requested_profile = payload.profile or profile
+
+    try:
+        from tools.tts_text_formatter import prepare_spoken_text
+
+        with _config_profile_scope(requested_profile):
+            formatter_cfg = {}
+            try:
+                tts_cfg = load_config().get("tts", {})
+                if isinstance(tts_cfg, dict):
+                    raw_formatter_cfg = tts_cfg.get("spoken_formatter", {})
+                    if isinstance(raw_formatter_cfg, dict):
+                        formatter_cfg = raw_formatter_cfg
+            except Exception:
+                formatter_cfg = {}
+
+            model_enabled = bool(formatter_cfg.get("enabled", False))
+            try:
+                formatter_timeout = float(formatter_cfg.get("timeout", 14.0))
+            except (TypeError, ValueError):
+                formatter_timeout = 14.0
+
+            speech_text = prepare_spoken_text(
+                text,
+                source=(payload.source or "read-aloud"),
+                rewrite=(payload.rewrite or "auto"),
+                timeout=formatter_timeout,
+                model_enabled=model_enabled,
+            )
+        if not speech_text:
+            raise HTTPException(status_code=400, detail="Text is empty after speech cleanup")
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("Desktop voice TTS formatting failed; falling back to raw text")
+        speech_text = text
+
     try:
         from tools.tts_tool import text_to_speech_tool
         loop = asyncio.get_running_loop()
-        result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
+
+        def _run_tts() -> str:
+            with _config_profile_scope(requested_profile):
+                return text_to_speech_tool(speech_text)
+
+        result_json = await loop.run_in_executor(None, _run_tts)
     except Exception as exc:
         _log.exception("Desktop voice TTS failed")
         raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}")
@@ -3585,6 +3718,58 @@ async def get_action_status(name: str, lines: int = 200):
     }
 
 
+_SESSION_LIST_DTO_FIELDS = frozenset({
+    "id",
+    "source",
+    "user_id",
+    "model",
+    "title",
+    "started_at",
+    "ended_at",
+    "end_reason",
+    "message_count",
+    "tool_call_count",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "estimated_cost_usd",
+    "actual_cost_usd",
+    "cost_status",
+    "cost_source",
+    "pricing_version",
+    "api_call_count",
+    "parent_session_id",
+    "last_active",
+    "preview",
+    "_lineage_root_id",
+    "cwd",
+    "git_branch",
+    "git_repo_root",
+    "archived",
+    "is_active",
+    "profile",
+    "is_default_profile",
+    "handoff_platform",
+    "handoff_state",
+    "handoff_error",
+})
+
+
+def _session_list_dto(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the lean session-list shape used by dashboard sidebars.
+
+    ``SessionDB.list_sessions_rich()`` intentionally returns full rows for
+    internal callers. HTTP list endpoints should not ship raw prompts or model
+    config blobs to every sidebar refresh.
+    """
+    dto = {key: row.get(key) for key in _SESSION_LIST_DTO_FIELDS if key in row}
+    dto["has_system_prompt"] = bool(row.get("system_prompt"))
+    dto["has_model_config"] = bool(row.get("model_config"))
+    return dto
+
+
 @app.get("/api/sessions")
 async def get_sessions(
     limit: int = 20,
@@ -3654,6 +3839,7 @@ async def get_sessions(
                 exclude_children=True,
             )
             now = time.time()
+            session_dtos = []
             for s in sessions:
                 s["is_active"] = (
                     s.get("ended_at") is None
@@ -3664,7 +3850,8 @@ async def get_sessions(
                     s["is_default_profile"] = profile_name == "default"
                 # SQLite stores the flag as 0/1; expose a real JSON boolean.
                 s["archived"] = bool(s.get("archived"))
-            return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
+                session_dtos.append(_session_list_dto(s))
+            return {"sessions": session_dtos, "total": total, "limit": limit, "offset": offset}
         finally:
             db.close()
     except HTTPException:
@@ -3774,7 +3961,7 @@ def get_profiles_sessions(
                     and (now - s.get("last_active", s.get("started_at", 0))) < 300
                 )
                 s["archived"] = bool(s.get("archived"))
-                merged.append(s)
+                merged.append(_session_list_dto(s))
         except Exception as exc:
             errors.append({"profile": name, "error": str(exc)})
         finally:
@@ -3794,7 +3981,7 @@ def get_profiles_sessions(
 
 
 @app.get("/api/sessions/search")
-async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] = None):
+async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] = None, exclude_sources: str = None):
     """Search sessions by ID plus full-text message content using FTS5.
 
     Direct session-id matches are surfaced first, then FTS message-content
@@ -3811,6 +3998,14 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
         db = _open_session_db_for_profile(profile)
         try:
             safe_limit = max(1, min(int(limit or 20), 100))
+            excluded_sources = {
+                item.strip().lower()
+                for item in (exclude_sources or "").split(",")
+                if item.strip()
+            }
+
+            def source_hidden(source: object) -> bool:
+                return bool(excluded_sources and str(source or "").strip().lower() in excluded_sources)
 
             # Walk parent_session_id to the compression root, memoized so a
             # chain of compression segments only costs one walk. We deliberately
@@ -3889,7 +4084,7 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
             seen: dict = {}
 
             def add_lineage_result(raw_sid: str, payload: dict) -> None:
-                if not raw_sid:
+                if not raw_sid or source_hidden(payload.get("source")):
                     return
                 root = compression_root(raw_sid)
                 if root in seen or len(seen) >= safe_limit:
@@ -4462,30 +4657,37 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
         with _profile_scope(body.profile or profile):
             cfg = load_config()
             if body.presets:
+                presets = {}
+                for name, preset in body.presets.items():
+                    item = {
+                        "reference_models": [slot.dict() for slot in preset.reference_models],
+                        "aggregator": preset.aggregator.dict(),
+                        "enabled": preset.enabled,
+                    }
+                    if preset.reference_temperature is not None:
+                        item["reference_temperature"] = preset.reference_temperature
+                    if preset.aggregator_temperature is not None:
+                        item["aggregator_temperature"] = preset.aggregator_temperature
+                    if preset.max_tokens is not None:
+                        item["max_tokens"] = preset.max_tokens
+                    presets[name] = item
                 raw = {
                     "default_preset": body.default_preset,
                     "active_preset": body.active_preset,
-                    "presets": {
-                        name: {
-                            "reference_models": [slot.dict() for slot in preset.reference_models],
-                            "aggregator": preset.aggregator.dict(),
-                            "reference_temperature": preset.reference_temperature,
-                            "aggregator_temperature": preset.aggregator_temperature,
-                            "max_tokens": preset.max_tokens,
-                            "enabled": preset.enabled,
-                        }
-                        for name, preset in body.presets.items()
-                    },
+                    "presets": presets,
                 }
             else:
                 raw = {
                     "reference_models": [slot.dict() for slot in body.reference_models],
                     "aggregator": body.aggregator.dict(),
-                    "reference_temperature": body.reference_temperature,
-                    "aggregator_temperature": body.aggregator_temperature,
-                    "max_tokens": body.max_tokens,
                     "enabled": body.enabled,
                 }
+                if body.reference_temperature is not None:
+                    raw["reference_temperature"] = body.reference_temperature
+                if body.aggregator_temperature is not None:
+                    raw["aggregator_temperature"] = body.aggregator_temperature
+                if body.max_tokens is not None:
+                    raw["max_tokens"] = body.max_tokens
             normalized = normalize_moa_config(raw)
             cfg["moa"] = normalized
             save_config(cfg)
@@ -12489,6 +12691,138 @@ async def get_models_analytics(days: int = 30, profile: Optional[str] = None):
 
 
 # ---------------------------------------------------------------------------
+# Provider subscription usage (CodexBar-backed)
+# ---------------------------------------------------------------------------
+
+
+def _codexbar_cli_path() -> Optional[str]:
+    configured = os.getenv("CODEXBAR_CLI") or os.getenv("HERMES_CODEXBAR_CLI")
+    candidates = [
+        configured,
+        shutil.which("codexbar"),
+        "/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if path.exists() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def _redact_provider_usage_error(message: str) -> str:
+    text = message or ""
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+\-/=]+", r"\1[redacted]", text)
+    text = re.sub(r"(?i)(authorization[\"':=\s]+)[^,}\s]+", r"\1[redacted]", text)
+    text = re.sub(r"(?i)(cookie[\"':=\s]+)[^,}\n]+", r"\1[redacted]", text)
+    return text[:2000]
+
+
+async def _codexbar_usage_payload(provider: str = "all") -> Dict[str, Any]:
+    cli = _codexbar_cli_path()
+    if not cli:
+        return {
+            "ok": False,
+            "source": "codexbar",
+            "provider": provider,
+            "error": "CodexBar CLI not found. Install CodexBar or set HERMES_CODEXBAR_CLI.",
+            "providers": [],
+        }
+
+    allowed = {
+        "codex", "claude", "cursor", "opencode", "opencodego",
+        "alibaba-coding-plan", "factory", "gemini", "antigravity",
+        "copilot", "zai", "minimax", "kimi", "kilo", "kiro",
+        "vertexai", "augment", "jetbrains", "kimik2", "amp", "ollama",
+        "synthetic", "warp", "openrouter", "perplexity", "both", "all",
+        "enabled",
+    }
+    selected = (provider or "all").strip().lower()
+    if selected not in allowed:
+        selected = "all"
+
+    cmd = [cli, "usage", "--format", "json", "--no-color"]
+    if selected != "enabled":
+        cmd.extend(["--provider", selected])
+    if selected == "claude":
+        claude_source = os.getenv("HERMES_CODEXBAR_CLAUDE_SOURCE", "oauth").strip().lower()
+        if claude_source in {"auto", "web", "cli", "oauth"}:
+            cmd.extend(["--source", claude_source])
+
+    started = time.time()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(Exception):
+            proc.kill()  # type: ignore[possibly-undefined]
+        return {
+            "ok": False,
+            "source": "codexbar",
+            "provider": selected,
+            "error": "CodexBar usage collection timed out.",
+            "providers": [],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "source": "codexbar",
+            "provider": selected,
+            "error": _redact_provider_usage_error(str(exc)),
+            "providers": [],
+        }
+
+    text = stdout.decode("utf-8", errors="replace").strip()
+    err_text = stderr.decode("utf-8", errors="replace").strip()
+    try:
+        if not text:
+            raw: Any = []
+        else:
+            start = min([idx for idx in (text.find("["), text.find("{")) if idx >= 0], default=0)
+            raw, _ = json.JSONDecoder().raw_decode(text[start:])
+    except Exception:
+        return {
+            "ok": False,
+            "source": "codexbar",
+            "provider": selected,
+            "error": "CodexBar returned non-JSON output.",
+            "stderr": _redact_provider_usage_error(err_text),
+            "providers": [],
+        }
+
+    if isinstance(raw, dict):
+        providers = [raw]
+    elif isinstance(raw, list):
+        providers = raw
+    else:
+        providers = []
+
+    ok_count = sum(1 for item in providers if isinstance(item, dict) and item.get("usage"))
+    error_count = sum(1 for item in providers if isinstance(item, dict) and item.get("error"))
+    return {
+        "ok": proc.returncode == 0 or ok_count > 0,
+        "source": "codexbar",
+        "provider": selected,
+        "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "durationMs": int((time.time() - started) * 1000),
+        "okCount": ok_count,
+        "errorCount": error_count,
+        "providers": providers,
+        "stderr": _redact_provider_usage_error(err_text) if err_text else "",
+    }
+
+
+@app.get("/api/subscription-usage")
+async def get_subscription_usage(provider: str = "all"):
+    return await _codexbar_usage_payload(provider)
+
+
+# ---------------------------------------------------------------------------
 # /api/pty — PTY-over-WebSocket bridge for the dashboard "Chat" tab.
 #
 # The endpoint spawns the same ``hermes --tui`` binary the CLI uses, behind
@@ -12617,9 +12951,10 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     bound_host = getattr(app.state, "bound_host", None)
     if not bound_host:
         return None
+    allowed_hosts = getattr(app.state, "dashboard_allowed_hosts", frozenset())
 
     host_header = ws.headers.get("host", "")
-    if not _is_accepted_host(host_header, bound_host):
+    if not _is_accepted_host(host_header, bound_host, allowed_hosts):
         return f"host_mismatch host={host_header or '?'} bound={bound_host}"
 
     origin = ws.headers.get("origin", "")
@@ -12636,7 +12971,7 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     if not parsed.netloc:
         return f"origin_mismatch origin={origin} bound={bound_host}"
 
-    if not _is_accepted_host(parsed.netloc, bound_host):
+    if not _is_accepted_host(parsed.netloc, bound_host, allowed_hosts):
         return f"origin_mismatch origin={origin} bound={bound_host}"
     return None
 
@@ -13931,21 +14266,13 @@ def mount_spa(application: FastAPI):
     and the SPA's runtime ``__HERMES_BASE_PATH__`` honour that prefix
     without rebuilding the bundle.
     """
-    # `hermes serve` is the headless backend: it must NEVER serve the browser
-    # SPA, even if a dist is lying around from a prior `dashboard`/build. Take
-    # the no-frontend path so only the JSON-RPC/WS/API surface is reachable.
-    _headless = os.environ.get("HERMES_SERVE_HEADLESS") == "1"
-    if _headless or not WEB_DIST.exists():
-        _msg = (
-            "Headless backend (hermes serve): web UI disabled — use "
-            "`hermes dashboard` for the browser UI."
-            if _headless
-            else "Frontend not built. Run: cd web && npm run build"
-        )
-
+    if not WEB_DIST.exists():
         @application.get("/{full_path:path}")
         async def no_frontend(full_path: str):
-            return JSONResponse({"error": _msg}, status_code=404)
+            return JSONResponse(
+                {"error": "Frontend not built. Run: cd web && npm run build"},
+                status_code=404,
+            )
         return
 
     _index_path = WEB_DIST / "index.html"
@@ -15185,7 +15512,6 @@ def start_server(
     open_browser: bool = True,
     allow_public: bool = False,
     initial_profile: str = "",
-    headless: bool = False,
 ):
     """Start the web UI server.
 
@@ -15193,10 +15519,6 @@ def start_server(
     URL as ``?profile=<name>`` so the SPA's profile switcher preselects it
     — used when a profile alias (``<profile> dashboard``) routes to the
     machine dashboard.
-
-    ``headless`` is the ``serve`` path: the JSON-RPC/WS backend with no UI
-    build and no SPA mount (mount_spa() honours ``HERMES_SERVE_HEADLESS``), so
-    the banner announces the bind rather than a browser URL.
     """
     import uvicorn
 
@@ -15282,9 +15604,12 @@ def start_server(
             ", ".join(p.name for p in list_providers()),
         )
 
-    # Record the bound host so host_header_middleware can validate incoming
-    # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
+    # Record the bound host and exact proxy host allowlist so
+    # host_header_middleware can validate incoming Host headers. Defends
+    # against DNS rebinding (GHSA-ppp5-vxwm-4cf7) while still allowing an
+    # explicitly trusted reverse-proxy hostname such as Tailscale Serve.
     app.state.bound_host = host
+    app.state.dashboard_allowed_hosts = _configured_dashboard_allowed_hosts()
 
     # ── Start uvicorn with direct Server API ─────────────────────────
     # We use uvicorn.Server directly (not uvicorn.run) so we can split
@@ -15353,17 +15678,8 @@ def start_server(
             app.state.bound_port = actual_port
 
             _write_dashboard_ready_file(actual_port)
-            # Port-discovery sentinel parsed by the desktop spawn. `serve` is a
-            # plain backend, not a dashboard, so it announces a neutral token;
-            # `dashboard` keeps the legacy one. The desktop matches either.
-            ready_token = "HERMES_BACKEND_READY" if headless else "HERMES_DASHBOARD_READY"
-            print(f"{ready_token} port={actual_port}", flush=True)
-            if headless:
-                # No SPA, and the JSON-RPC/WS endpoints are auth-gated — don't
-                # advertise a paste-and-connect URL, just announce the bind.
-                print(f"  Hermes backend listening on {host}:{actual_port}")
-            else:
-                print(f"  Hermes Web UI → http://{host}:{actual_port}")
+            print(f"HERMES_DASHBOARD_READY port={actual_port}", flush=True)
+            print(f"  Hermes Web UI → http://{host}:{actual_port}")
             _maybe_open_browser(host, actual_port, open_browser, initial_profile)
 
             # Collapse the peer-hangup teardown flood (#50005). When the Desktop
