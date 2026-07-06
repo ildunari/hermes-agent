@@ -265,6 +265,7 @@ def _run_with_current_provider_and_model(job, current_provider, current_model, t
                  "api_mode": "chat_completions",
              },
          ), \
+         patch.dict("os.environ", {"HERMES_MODEL": ""}), \
          patch("run_agent.AIAgent") as mock_agent_cls:
         mock_agent = MagicMock()
         mock_agent.run_conversation.return_value = {"final_response": "ok"}

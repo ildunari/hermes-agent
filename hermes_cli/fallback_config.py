@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 
@@ -70,3 +72,33 @@ def get_fallback_chain(config: dict[str, Any] | None) -> list[dict[str, Any]]:
             chain.append(entry)
 
     return chain
+
+
+def codex_home_access_token(entry: dict[str, Any] | None) -> str | None:
+    """Return a Codex CLI access token for an openai-codex fallback entry.
+
+    Hermes' normal ``openai-codex`` auth lives in the active Hermes
+    ``auth.json``. A fallback entry can opt into a specific Codex CLI account
+    with ``codex_home: /path/to/.codex-home``; this reads that home's
+    ``auth.json`` so the fallback uses the requested account instead of the
+    active Hermes profile's Codex OAuth state.
+    """
+
+    if not isinstance(entry, dict):
+        return None
+    provider = str(entry.get("provider") or "").strip().lower()
+    if provider not in {"openai-codex", "codex"}:
+        return None
+    raw_home = str(entry.get("codex_home") or "").strip()
+    if not raw_home:
+        return None
+    auth_path = Path(raw_home).expanduser() / "auth.json"
+    try:
+        data = json.loads(auth_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    tokens = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(tokens, dict):
+        return None
+    token = str(tokens.get("access_token") or "").strip()
+    return token or None
