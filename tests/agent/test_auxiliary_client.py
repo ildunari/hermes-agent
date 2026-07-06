@@ -5365,6 +5365,13 @@ class TestCompressionFallbackContextFilter:
 
 
 class TestCustomEndpointApiKeyInheritance:
+    @pytest.fixture(autouse=True)
+    def _clear_runtime_main(self):
+        import agent.auxiliary_client as ac
+        ac.clear_runtime_main()
+        yield
+        ac.clear_runtime_main()
+
     """Issue #9318: when an auxiliary task uses provider=custom with an
     explicit base_url but empty api_key, the custom_key fallback chain must
     inherit ``model.api_key`` from config.yaml before falling to the
