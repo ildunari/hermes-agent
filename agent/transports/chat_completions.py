@@ -99,6 +99,15 @@ def _is_gemini_openai_compat_base_url(base_url: Any) -> bool:
     return normalized.endswith("/openai")
 
 
+def _is_vibeproxy_claude_family(provider_name: str, model: str) -> bool:
+    model_lower = (model or "").strip().lower()
+
+    return provider_name == "vibeproxy" and (
+        "claude" in model_lower
+        or any(alias in model_lower for alias in ("opus", "sonnet", "haiku", "mythos", "fable"))
+    )
+
+
 def _model_consumes_thought_signature(model: Any) -> bool:
     """True when the outgoing model is a Gemini family model that requires
     ``extra_content`` (thought_signature) to be replayed on tool calls.
@@ -385,6 +394,7 @@ class ChatCompletionsTransport(ProviderTransport):
         is_github_models = params.get("is_github_models", False)
         provider_name = str(params.get("provider_name") or "").strip().lower()
         base_url = params.get("base_url")
+        is_vibeproxy_claude_family = _is_vibeproxy_claude_family(provider_name, model)
 
         provider_prefs = params.get("provider_preferences")
         if provider_prefs and is_openrouter:
@@ -430,8 +440,10 @@ class ChatCompletionsTransport(ProviderTransport):
                         _reasoning_effort = "low"
                     elif _e in {"medium"}:
                         _reasoning_effort = "medium"
-                    elif _e in {"high", "xhigh"}:
+                    elif _e == "high":
                         _reasoning_effort = "high"
+                    elif _e == "xhigh":
+                        _reasoning_effort = "xhigh" if is_vibeproxy_claude_family else "high"
                 extra_body["reasoning"] = {"enabled": True, "effort": _reasoning_effort}
 
         if provider_name == "gemini":

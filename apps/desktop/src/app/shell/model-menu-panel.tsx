@@ -17,6 +17,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import type { HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { displayProviderName } from '@/lib/model-display-name'
 import { requestModelOptions } from '@/lib/model-options'
 import {
   currentPickerSelection,
@@ -155,10 +156,15 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
   }
 
   // Selecting a model row restores that model's remembered preset onto the
-  // session (effort/fast), gated by capability. Unset → Hermes defaults.
+  // session (effort/fast), gated by capability. If the model has no saved
+  // preset, preserve the current composer/session effort instead of silently
+  // snapping back to Medium. That keeps a deliberate "High → choose Fable"
+  // flow from becoming "Fable Medium" just because the provider/model preset
+  // key is new or was stored under an old provider alias.
   const selectFamily = async (family: ModelFamily, provider: ModelOptionProvider) => {
     const caps = provider.capabilities?.[family.id]
     const preset = modelPresets[modelPresetKey(provider.slug, family.id)] ?? {}
+    const nextEffort = preset.effort ?? (currentReasoningEffort || undefined)
 
     // Variant-fast models (no speed param) express "fast" as a separate `-fast`
     // id, so honor the saved preset by selecting that sibling. Param-fast is
@@ -172,7 +178,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
 
     await applyModelPreset(
       {
-        effort: (caps?.reasoning ?? true) ? (preset.effort ?? 'medium') : undefined,
+        effort: (caps?.reasoning ?? true) ? nextEffort : undefined,
         fast: (caps?.fast ?? false) ? (preset.fast ?? false) : undefined
       },
       { failMessage: t.shell.modelOptions.updateFailed, request: requestGateway, sessionId: activeSessionId }
@@ -232,7 +238,9 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
         <div className="max-h-[max(150px,30dvh)] overflow-y-auto py-0.5">
           {groups.map(group => (
             <DropdownMenuGroup className="py-0.5" key={group.provider.slug}>
-              <DropdownMenuLabel className={dropdownMenuSectionLabel}>{group.provider.name}</DropdownMenuLabel>
+              <DropdownMenuLabel className={dropdownMenuSectionLabel} title={group.provider.name || group.provider.slug}>
+                {displayProviderName(group.provider.slug, group.provider.name)}
+              </DropdownMenuLabel>
               {group.families.map(family => {
                 // The active id may be the base or its -fast sibling; either
                 // way this one family row represents both.
@@ -243,7 +251,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
                     : null
 
                 const isCurrent = activeId !== null
-                const name = modelDisplayParts(family.id).name
+                const name = modelDisplayParts(family.id, { provider: group.provider.slug }).name
                 // Capabilities are looked up against the active/base id; the
                 // -fast variant carries the same param support as its base.
                 const caps = group.provider.capabilities?.[family.id]
@@ -394,7 +402,7 @@ function groupModels(
     }
 
     const matches = (family: ModelFamily) =>
-      `${family.id} ${family.fastId ?? ''} ${provider.name} ${provider.slug} ${displayModelName(family.id)}`
+      `${family.id} ${family.fastId ?? ''} ${provider.name} ${provider.slug} ${displayModelName(family.id, { provider: provider.slug })} ${displayProviderName(provider.slug, provider.name)}`
         .toLowerCase()
         .includes(q)
 
@@ -431,7 +439,9 @@ function groupModels(
 
   // Stable, logical group order: alphabetical by provider name. (The backend
   // floats the current provider first, which would reshuffle on every switch.)
-  groups.sort((a, b) => a.provider.name.localeCompare(b.provider.name))
+  groups.sort((a, b) =>
+    displayProviderName(a.provider.slug, a.provider.name).localeCompare(displayProviderName(b.provider.slug, b.provider.name))
+  )
 
   return groups
 }

@@ -18,7 +18,30 @@ export interface ModelPreset {
 type RequestGateway = <T>(method: string, params?: Record<string, unknown>) => Promise<T>
 
 /** Stable `provider::model` key (matches the visibility-store format). */
-export const modelPresetKey = (provider: string, model: string): string => `${provider}::${model}`
+function normalizePresetProvider(provider: string): string {
+  const key = provider.trim().toLowerCase()
+
+  if (key === 'vibe' || key === 'vibe-proxy' || key === 'vibe_proxy') {
+    return 'vibeproxy'
+  }
+
+  return key || provider
+}
+
+/** Stable `provider::model` key (matches the visibility-store format). */
+export const modelPresetKey = (provider: string, model: string): string => `${normalizePresetProvider(provider)}::${model}`
+
+function normalizePresetMap(presets: Record<string, ModelPreset>): Record<string, ModelPreset> {
+  const next: Record<string, ModelPreset> = {}
+
+  for (const [key, preset] of Object.entries(presets)) {
+    const [provider, ...modelParts] = key.split('::')
+    const normalizedKey = modelParts.length > 0 ? modelPresetKey(provider, modelParts.join('::')) : key
+    next[normalizedKey] = { ...next[normalizedKey], ...preset }
+  }
+
+  return next
+}
 
 function load(): Record<string, ModelPreset> {
   const raw = storedString(STORAGE_KEY)
@@ -30,7 +53,17 @@ function load(): Record<string, ModelPreset> {
   try {
     const parsed = JSON.parse(raw)
 
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, ModelPreset>) : {}
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {}
+    }
+
+    const normalized = normalizePresetMap(parsed as Record<string, ModelPreset>)
+
+    if (JSON.stringify(normalized) !== JSON.stringify(parsed)) {
+      persistString(STORAGE_KEY, JSON.stringify(normalized))
+    }
+
+    return normalized
   } catch {
     return {}
   }
