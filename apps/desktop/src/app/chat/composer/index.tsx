@@ -24,6 +24,7 @@ import { AttachmentList } from './attachments'
 import { COMPOSER_FADE_BACKGROUND, type QueueEditState, slashArgStage } from './composer-utils'
 import { ContextMenu } from './context-menu'
 import { ComposerControls } from './controls'
+import { DraftPendingNotice } from './draft-pending-notice'
 import { COMPOSER_DROP_ACTIVE_CLASS, COMPOSER_DROP_FADE_CLASS } from './drop-affordance'
 import { markActiveComposer } from './focus'
 import { HelpHint } from './help-hint'
@@ -961,6 +962,7 @@ export function ChatBar({
                     </div>
                   </div>
                 )}
+                {busy && hasComposerPayload && !queueEdit && <DraftPendingNotice />}
                 {attachments.length > 0 && <AttachmentList attachments={attachments} onRemove={onRemoveAttachment} />}
                 <div
                   className={cn(

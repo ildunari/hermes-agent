@@ -775,8 +775,23 @@ def skill(
     # Be forgiving for the common model slip where it supplies a skill name (and
     # optionally a support-file path) but omits the required action. That shape
     # is unambiguously a read, while management still requires the explicit
-    # action='manage' + confirm=true guard below.
-    if not action and name and not manage_action:
+    # action='manage' + confirm=true guard below. If mutation-adjacent arguments
+    # are present, force an explicit action instead of quietly treating the call
+    # as a view.
+    mutation_args_present = any(
+        value not in (None, False, "")
+        for value in (
+            confirm,
+            manage_action,
+            content,
+            file_content,
+            old_string,
+            new_string,
+            replace_all,
+            absorbed_into,
+        )
+    )
+    if not action and name and not mutation_args_present:
         action = "view"
 
     if action == "list":
@@ -1781,7 +1796,6 @@ SKILL_SCHEMA = {
                 "description": "For manage_action='delete': umbrella skill that absorbed this one, or empty string for pruning.",
             },
         },
-        "required": ["action"],
     },
 }
 
