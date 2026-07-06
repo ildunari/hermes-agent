@@ -16,9 +16,10 @@ Two lists per platform scope (DM vs group, mirroring ``allow_from`` vs
 Backward compatibility:
 
   If ``allow_admin_from`` is not set for a scope, slash command gating
-  is disabled entirely for that scope. Every allowed user can run every
-  slash command, exactly like before. This means existing installs are
-  unaffected until an operator opts in by listing at least one admin.
+  is disabled entirely for that scope. Every allowed non-guest user can run
+  every slash command, exactly like before. Guest-routed sources are the
+  exception: they always fail closed to a tiny read-only command set plus
+  optional ``guest_allowed_commands`` / ``group_guest_allowed_commands``.
 
 The gate is applied at the slash command dispatch site in
 ``gateway/run.py`` so it covers BOTH built-in and plugin-registered
@@ -37,19 +38,56 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, FrozenSet, Iterable, Optional, Tuple
 
+try:
+    from gateway.guest_access import normalize_identity as _normalize_identity
+except Exception:  # pragma: no cover - defensive import fallback
+    def _normalize_identity(value: Any) -> str:
+        return str(value).strip() if value is not None else ""
+
 
 # Slash commands that MUST stay reachable for any allowed user, even when
 # slash gating is enabled and the user has no commands listed. Without this
 # carve-out, a non-admin user has no way to discover what they can or
 # can't do (``/help``, ``/whoami``) and no way to see what state the agent
 # is in (``/status``). These mirror the smallest set of read-only commands
-# we'd hand to a guest. Operators can still narrow this further by writing
-# their own ``user_allowed_commands`` (this set is only the implicit
-# fallback floor — anything in ``user_allowed_commands`` overrides it
-# additively, never restrictively).
+# we'd hand to a guest.
 _ALWAYS_ALLOWED_FOR_USERS: FrozenSet[str] = frozenset({
     "help",
+    "status",
     "whoami",
+})
+
+# Guest-routed sources are already allowed to chat by the BlueBubbles contact
+# registry, but slash commands must fail closed even when an operator has not
+# configured allow_admin_from yet. Keep the implicit guest surface tiny and
+# read-only; operators can add only commands on this hard allowlist via
+# guest_allowed_commands / group_guest_allowed_commands. The explicit blocklist
+# prevents dangerous commands from becoming guest-runnable by misconfiguration.
+_GUEST_DEFAULT_ALLOWED_COMMANDS: FrozenSet[str] = _ALWAYS_ALLOWED_FOR_USERS
+_GUEST_CONFIGURABLE_ALLOWED_COMMANDS: FrozenSet[str] = frozenset({
+    *_GUEST_DEFAULT_ALLOWED_COMMANDS,
+    "usage",
+})
+_GUEST_BLOCKED_COMMANDS: FrozenSet[str] = frozenset({
+    "approve",
+    "background",
+    "bgnotify",
+    "compress",
+    "config",
+    "cwd",
+    "deny",
+    "mcp",
+    "memory",
+    "model",
+    "new",
+    "restart",
+    "restart-hermes",
+    "rollback",
+    "snapshot",
+    "stop",
+    "toolset",
+    "update",
+    "yolo",
 })
 
 
@@ -74,7 +112,7 @@ class SlashAccessPolicy:
             return True
         if not user_id:
             return False
-        return str(user_id) in self.admin_user_ids
+        return _normalize_identity(user_id) in self.admin_user_ids
 
     def can_run(self, user_id: Optional[str], canonical_cmd: str) -> bool:
         if not self.enabled:
@@ -108,7 +146,7 @@ def _coerce_id_list(raw: Any) -> FrozenSet[str]:
         items = (raw,)
     out: list[str] = []
     for it in items:
-        s = str(it).strip()
+        s = _normalize_identity(it)
         if s:
             out.append(s)
     return frozenset(out)
@@ -141,6 +179,10 @@ def _scope_for_chat_type(chat_type: Optional[str]) -> str:
     if chat_type and chat_type.lower() in _DM_CHAT_TYPES:
         return "dm"
     return "group"
+
+
+def _is_guest_source(source: Any) -> bool:
+    return str(getattr(source, "user_id_alt", "") or "").startswith("guest:")
 
 
 def _platform_extra(platform_config: Any) -> dict:
@@ -219,7 +261,22 @@ def policy_for_source(gateway_config: Any, source: Any) -> SlashAccessPolicy:
             platform_config = None
     extra = _platform_extra(platform_config)
     scope = _scope_for_chat_type(getattr(source, "chat_type", None))
-    return policy_from_extra(extra, scope)
+    policy = policy_from_extra(extra, scope)
+    if not _is_guest_source(source):
+        return policy
+
+    guest_cmd_key = "group_guest_allowed_commands" if scope == "group" else "guest_allowed_commands"
+    guest_cmds = _coerce_command_list(extra.get(guest_cmd_key))
+    if scope == "dm" and not guest_cmds:
+        guest_cmds = _coerce_command_list(extra.get("group_guest_allowed_commands"))
+    configured_allowed = guest_cmds & _GUEST_CONFIGURABLE_ALLOWED_COMMANDS
+    configured_allowed = configured_allowed - _GUEST_BLOCKED_COMMANDS
+    allowed = frozenset(set(_GUEST_DEFAULT_ALLOWED_COMMANDS) | set(configured_allowed))
+    return SlashAccessPolicy(
+        enabled=True,
+        admin_user_ids=policy.admin_user_ids,
+        user_allowed_commands=allowed,
+    )
 
 
 __all__ = [

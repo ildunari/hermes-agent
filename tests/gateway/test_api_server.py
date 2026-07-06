@@ -13,6 +13,8 @@ Tests cover:
 """
 
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import stat
@@ -30,6 +32,7 @@ from gateway.platforms.api_server import (
     ResponseStore,
     _IdempotencyCache,
     _derive_chat_session_id,
+    _extract_edit_stats,
     _redact_api_error_text,
     check_api_server_requirements,
     cors_middleware,
@@ -82,6 +85,12 @@ class TestRedactApiErrorText:
 # ---------------------------------------------------------------------------
 # ResponseStore
 # ---------------------------------------------------------------------------
+
+
+def test_extract_edit_stats_from_file_tool_result():
+    payload = json.dumps({"edit_stats": {"lines_added": 12, "lines_deleted": 3}})
+    assert _extract_edit_stats("patch", payload) == {"lines_added": 12, "lines_deleted": 3}
+    assert _extract_edit_stats("terminal", payload) is None
 
 
 class TestResponseStore:
@@ -526,6 +535,35 @@ class TestAuth:
         assert result is not None
         assert result.status == 401
 
+    def test_telegram_init_data_hmac_passes_without_bearer(self, monkeypatch):
+        bot_token = "123456:test-token"
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", bot_token)
+        monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "5320274083")
+        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "sk-test123"}))
+
+        import json as _json
+        import urllib.parse as _urlparse
+
+        params = {
+            "auth_date": str(int(time.time())),
+            "query_id": "AAE-test",
+            "user": _json.dumps({"id": 5320274083, "first_name": "Kosta"}, separators=(",", ":")),
+        }
+        data_check = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
+        secret = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+        params["hash"] = hmac.new(secret, data_check.encode("utf-8"), hashlib.sha256).hexdigest()
+        init_data = _urlparse.urlencode(params)
+
+        class Req(dict):
+            pass
+
+        req = Req()
+        req.headers = {"X-Telegram-Init-Data": init_data}
+
+        assert adapter._check_auth(req) is None
+        assert req["auth_mode"] == "telegram"
+        assert req["telegram_user"]["id"] == 5320274083
+
 
 # ---------------------------------------------------------------------------
 # Concurrency cap (gateway.api_server.max_concurrent_runs) — #7483
@@ -596,6 +634,10 @@ def _make_adapter(api_key: str = "", cors_origins=None) -> APIServerAdapter:
         extra["key"] = api_key
     if cors_origins is not None:
         extra["cors_origins"] = cors_origins
+    else:
+        # Keep tests deterministic on developer machines that export a broad
+        # API_SERVER_CORS_ORIGINS for the live gateway.
+        extra["cors_origins"] = []
     config = PlatformConfig(enabled=True, extra=extra)
     return APIServerAdapter(config)
 
@@ -616,6 +658,8 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
+    app.router.add_get("/miniapp", adapter._handle_miniapp_index)
+    app.router.add_get("/miniapp/index.html", adapter._handle_miniapp_index)
     return app
 
 
@@ -684,6 +728,29 @@ class TestHealthEndpoint:
             assert resp.headers.get("X-Frame-Options") == "DENY"
             assert resp.headers.get("X-XSS-Protection") == "0"
             assert resp.headers.get("Referrer-Policy") == "no-referrer"
+
+    @pytest.mark.asyncio
+    async def test_miniapp_headers_allow_inline_ui_and_telegram_webapp(self, adapter, tmp_path):
+        """Mini app HTML must not inherit the API-only locked-down CSP."""
+        miniapp_dir = tmp_path / "miniapp"
+        miniapp_dir.mkdir()
+        (miniapp_dir / "index.html").write_text(
+            "<!doctype html><style>body{color:red}</style><script>window.ok=true</script>",
+            encoding="utf-8",
+        )
+        adapter._miniapp_dir = miniapp_dir
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/miniapp/index.html")
+            assert resp.status == 200
+            csp = resp.headers.get("Content-Security-Policy") or ""
+            assert "default-src 'self'" in csp
+            assert "style-src 'self' 'unsafe-inline'" in csp
+            assert "script-src 'self' 'unsafe-inline' https://telegram.org" in csp
+            assert "frame-ancestors 'none'" not in csp
+            assert resp.headers.get("X-Frame-Options") is None
+            assert resp.headers.get("Permissions-Policy") == "camera=(), microphone=(self), geolocation=()"
 
     @pytest.mark.asyncio
     async def test_health_returns_ok(self, adapter):
@@ -3290,7 +3357,10 @@ class TestCORS:
                 },
             )
             assert resp.status == 200
-            assert "Idempotency-Key" in resp.headers.get("Access-Control-Allow-Headers", "")
+            allowed_headers = resp.headers.get("Access-Control-Allow-Headers", "")
+            assert "Idempotency-Key" in allowed_headers
+            assert "X-Telegram-Init-Data" in allowed_headers
+            assert "X-Hermes-Session-Id" in allowed_headers
 
     @pytest.mark.asyncio
     async def test_cors_sets_vary_origin_header(self):

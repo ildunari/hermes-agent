@@ -1,8 +1,8 @@
 """Tests for native draft streaming in GatewayStreamConsumer.
 
-Telegram Bot API 9.5 (March 2026) introduced sendMessageDraft for native
-animated streaming previews in private chats.  This test suite covers the
-consumer's transport-selection, fallback, and tool-boundary handling for
+Telegram sendMessageDraft provides native animated streaming previews in
+private chats. This test suite covers the consumer's transport-selection,
+fallback, and tool-boundary handling for
 that path.
 
 Adapter under test is a runtime subclass of BasePlatformAdapter that
@@ -46,12 +46,25 @@ def _make_draft_capable_adapter(
     adapter._typing_paused = set()
     adapter._fatal_error_message = None
 
-    # Track every send_draft call for assertions.
+    # Track every send_draft / send_thinking_draft call for assertions.
     adapter.draft_calls = []
+    adapter.thinking_draft_calls = []
 
     def _supports(chat_type=None, metadata=None):
         return bool(supports_draft) and (chat_type or "").lower() == "dm"
     adapter.supports_draft_streaming = _supports
+
+    async def _send_thinking_draft(*, chat_id, draft_id, content="Thinking…", metadata=None):
+        adapter.thinking_draft_calls.append({
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "content": content,
+            "metadata": metadata,
+        })
+        if draft_succeeds:
+            return SendResult(success=True, message_id=None)
+        return SendResult(success=False, error="thinking_draft_rejected")
+    adapter.send_thinking_draft = _send_thinking_draft
 
     async def _send_draft(*, chat_id, draft_id, content, metadata=None):
         adapter.draft_calls.append({
@@ -139,7 +152,16 @@ class TestDraftStreamingHappyPath:
         consumer.finish()
         await task
 
-        # At least one draft frame landed.
+        assert adapter.thinking_draft_calls == [
+            {
+                "chat_id": "12345",
+                "draft_id": adapter.thinking_draft_calls[0]["draft_id"],
+                "content": "Thinking…",
+                "metadata": None,
+            }
+        ]
+        assert adapter.thinking_draft_calls[0]["draft_id"] == adapter.draft_calls[0]["draft_id"]
+        # At least one answer draft frame landed.
         assert len(adapter.draft_calls) >= 1, (
             "expected at least one send_draft frame"
         )
@@ -150,15 +172,19 @@ class TestDraftStreamingHappyPath:
         assert len(draft_ids) == 1
         # Final answer was delivered as a regular sendMessage so the user
         # sees a real message in their history (drafts have no message_id).
-        adapter.send.assert_awaited()
+        assert getattr(adapter.send, "await_count", 0) > 0
         # And the final send carried the complete reply.
-        final_call = adapter.send.call_args
+        final_call = getattr(adapter.send, "call_args")
         sent_content = (
             final_call.kwargs.get("content")
             if "content" in final_call.kwargs
             else final_call.args[1] if len(final_call.args) > 1 else None
         )
         assert sent_content == "Hello world!"
+        sent_metadata = final_call.kwargs.get("metadata")
+        assert sent_metadata is not None
+        assert sent_metadata.get("notify") is True
+        assert "expect_edits" not in sent_metadata
 
     @pytest.mark.asyncio
     async def test_group_chat_skips_draft_path(self):

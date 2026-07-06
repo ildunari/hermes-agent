@@ -132,6 +132,184 @@ class TestFinalizeCapabilityGate:
         picky.edit_message.assert_called_once()
         assert picky.edit_message.call_args[1]["finalize"] is True
 
+    @pytest.mark.asyncio
+    async def test_done_tick_does_not_duplicate_finalize_edit(self):
+        """A done tick already calls _send_or_edit(..., finalize=True).
+
+        Do not immediately send the same finalize=True edit again for adapters
+        with REQUIRES_EDIT_FINALIZE; Telegram rich messages visibly twitch when
+        the duplicate final edit arrives after the real final edit.
+        """
+        adapter = MagicMock()
+        adapter.REQUIRES_EDIT_FINALIZE = True
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.send = AsyncMock(return_value=SimpleNamespace(
+            success=True, message_id="msg_1",
+        ))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(
+            success=True, message_id="msg_1",
+        ))
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor="", buffer_threshold=1, edit_interval=999),
+        )
+
+        consumer.on_delta("hello")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.1)
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2)
+
+        adapter.edit_message.assert_awaited_once()
+        assert adapter.edit_message.await_args.kwargs["finalize"] is True
+
+
+class TestStreamDeliveryStats:
+    """Diagnostics distinguish final delivery from visible response streaming."""
+
+    @staticmethod
+    def _adapter():
+        adapter = MagicMock()
+        adapter.REQUIRES_EDIT_FINALIZE = False
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.send = AsyncMock(return_value=SimpleNamespace(
+            success=True, message_id="msg_1",
+        ))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(
+            success=True, message_id="msg_1",
+        ))
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_final_only_delivery_has_no_progressive_visible_updates(self):
+        adapter = self._adapter()
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor="", buffer_threshold=999, edit_interval=999),
+        )
+
+        consumer.on_delta("final only")
+        consumer.finish()
+        await asyncio.wait_for(asyncio.create_task(consumer.run()), timeout=2)
+
+        stats = consumer.delivery_stats
+        assert consumer.final_response_sent is True
+        assert stats.delta_count == 1
+        assert stats.visible_update_count == 0
+        assert stats.progressive_visible_updates is False
+        assert stats.first_delta_ts is not None
+        assert stats.first_visible_update_ts is None
+        assert stats.finalize_ts is not None
+
+    @pytest.mark.asyncio
+    async def test_midstream_send_counts_as_progressive_visible_update(self):
+        adapter = self._adapter()
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor="", buffer_threshold=1, edit_interval=999),
+        )
+
+        consumer.on_delta("hello")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.1)
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2)
+
+        stats = consumer.delivery_stats
+        assert consumer.final_response_sent is True
+        assert stats.delta_count == 1
+        assert stats.visible_update_count == 1
+        assert stats.progressive_visible_updates is True
+        assert stats.first_visible_update_ts is not None
+        assert stats.finalize_ts is not None
+
+
+    @pytest.mark.asyncio
+    async def test_segment_break_preamble_counts_as_visible_update(self):
+        adapter = self._adapter()
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor="", buffer_threshold=999, edit_interval=999),
+        )
+
+        consumer.on_delta("I'll check that first.")
+        consumer.on_delta(None)  # tool boundary finalizes a pre-final preamble
+        consumer.finish()
+        await asyncio.wait_for(asyncio.create_task(consumer.run()), timeout=2)
+
+        stats = consumer.delivery_stats
+        assert stats.delta_count == 1
+        assert stats.visible_update_count == 1
+        assert stats.progressive_visible_updates is True
+        assert stats.first_visible_update_ts is not None
+
+
+    @pytest.mark.asyncio
+    async def test_fresh_final_segment_break_counts_as_visible_update(self):
+        adapter = self._adapter()
+        adapter.REQUIRES_EDIT_FINALIZE = True
+        adapter.delete_message = AsyncMock()
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(
+                cursor="",
+                buffer_threshold=1,
+                edit_interval=999,
+                fresh_final_after_seconds=0.01,
+            ),
+        )
+
+        consumer.on_delta("I'll check that first.")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.05)  # initial preview send lands and ages past threshold
+        consumer.on_delta(None)  # fresh-final closes a pre-final preamble
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2)
+
+        stats = consumer.delivery_stats
+        assert stats.visible_update_count == 2
+        assert stats.progressive_visible_updates is True
+
+
+class TestOverflowSplitting:
+    """Regression coverage for streaming overflow chunk finalization."""
+
+    @pytest.mark.asyncio
+    async def test_existing_message_overflow_finalizes_sealed_chunk(self):
+        adapter = MagicMock()
+        adapter.REQUIRES_EDIT_FINALIZE = True
+        adapter.MAX_MESSAGE_LENGTH = 620
+        adapter.send = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id="msg_1"),
+            SimpleNamespace(success=True, message_id="msg_2"),
+        ])
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(
+            success=True, message_id="msg_1",
+        ))
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor="", buffer_threshold=1, edit_interval=999),
+        )
+
+        consumer.on_delta("seed")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.1)
+        assert consumer._message_id == "msg_1"
+
+        consumer.on_delta("## Heading\n" + "body " * 140)
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2)
+
+        assert adapter.edit_message.call_args_list[0].kwargs["finalize"] is True
+
 
 class TestEditMessageFinalizeSignature:
     """Every concrete platform adapter must accept the ``finalize`` kwarg.
@@ -365,8 +543,8 @@ class TestBeforeFinalizeHook:
     """Verify the optional pre-finalize hook fires at the right time."""
 
     @pytest.mark.asyncio
-    async def test_hook_runs_before_finalize_edit(self):
-        """Adapters that require finalize should pause typing before the edit."""
+    async def test_hook_runs_before_final_send_when_no_preview_edit_needed(self):
+        """If the first visible update is already final, skip a redundant edit."""
         events = []
         adapter = MagicMock()
         adapter.REQUIRES_EDIT_FINALIZE = True
@@ -395,7 +573,7 @@ class TestBeforeFinalizeHook:
 
         await consumer.run()
 
-        assert events == ["send", "pause", "edit"]
+        assert events == ["send", "pause"]
 
     @pytest.mark.asyncio
     async def test_hook_runs_once_when_final_text_already_visible(self):
@@ -629,6 +807,8 @@ class TestSegmentBreakOnToolBoundary:
         # The undelivered "world" tail must reach the user, and the next
         # segment must not duplicate "Hello" that was already visible.
         assert sent_texts == ["Hello ▉", "world", "Next segment"]
+        assert consumer.delivery_stats.visible_update_count >= 2
+        assert consumer.delivery_stats.progressive_visible_updates is True
 
     @pytest.mark.asyncio
     async def test_segment_break_after_mid_stream_edit_failure_preserves_tail(self):
@@ -1045,31 +1225,28 @@ class TestFinalContentDeliveredGuard:
     leaving the user with an incomplete partial message."""
 
     @pytest.mark.asyncio
-    async def test_mid_stream_edit_success_does_not_mark_content_delivered(self):
-        """When the mid-stream edit with finalize=True succeeds but the
-        subsequent finalize edit fails, _final_content_delivered must stay
-        False so the gateway does not suppress its fallback send (#25010).
+    async def test_done_tick_finalize_success_marks_content_delivered_once(self):
+        """A successful done-tick finalize is the final delivery.
 
-        Simulates TelegramAdapter which sets REQUIRES_EDIT_FINALIZE=True,
-        requiring a second finalize edit even when content is unchanged."""
+        The gateway used to send a second identical finalize edit for adapters
+        with REQUIRES_EDIT_FINALIZE=True. That was unnecessary once the done
+        tick itself called _send_or_edit(..., finalize=True), and on Telegram
+        rich messages it caused a visible up/down twitch.
+        """
         adapter = MagicMock()
-        adapter.REQUIRES_EDIT_FINALIZE = True  # Telegram adapter behavior
-        # First send (initial streaming message) succeeds.
-        # Mid-stream edit succeeds.
-        # Final finalize edit fails, and the consumer's own fallback send also
-        # fails, so no path has confirmed the complete final response reached
-        # the user.
-        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=False))
-        adapter.send = AsyncMock(side_effect=[
-            SimpleNamespace(success=True, message_id="msg_1"),
-            SimpleNamespace(success=False, error="network down"),
+        adapter.REQUIRES_EDIT_FINALIZE = True
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1"),
+        )
+        adapter.edit_message = AsyncMock(side_effect=[
+            SimpleNamespace(success=True),  # done-tick finalize edit
+            SimpleNamespace(success=False),  # would be the old duplicate final edit
         ])
         adapter.MAX_MESSAGE_LENGTH = 4096
 
         config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
-        # Simulate streaming: send initial text, then more text, then done
         consumer.on_delta("Part one of the response...\n")
         task = asyncio.create_task(consumer.run())
         await asyncio.sleep(0.05)
@@ -1084,18 +1261,10 @@ class TestFinalContentDeliveredGuard:
         consumer.finish()
         await task
 
-        # The key assertion: _final_content_delivered must NOT be True,
-        # because the final edit failed and the complete response was never
-        # confirmed delivered.
-        assert consumer._final_content_delivered is False, (
-            "_final_content_delivered was prematurely set to True — gateway "
-            "will wrongly suppress its fallback send, leaving the user with "
-            "an incomplete partial message (#25010)"
-        )
-        # The gateway must still be allowed to send the complete response
-        assert consumer._final_response_sent is False, (
-            "_final_response_sent must also be False when the final edit failed"
-        )
+        assert consumer._final_content_delivered is True
+        assert consumer._final_response_sent is True
+        assert adapter.send.await_count == 1
+        assert adapter.edit_message.await_count == 1
 
     @pytest.mark.asyncio
     async def test_final_edit_success_does_mark_content_delivered(self):
@@ -2018,6 +2187,14 @@ class TestUtf16OverflowDetection:
         # auto-attr mock. Verified indirectly by all the other tests in
         # this file passing — they all use MagicMock adapters.
         assert consumer is not None
+
+
+
+def test_unfinished_empty_fence_does_not_crash_rich_card_detection():
+    from gateway.stream_consumer import GatewayStreamConsumer
+
+    assert GatewayStreamConsumer._has_rich_card_fence_candidate("```") is False
+    assert GatewayStreamConsumer._clean_for_display("hello\n```") == "hello\n```"
 
 
 class TestFreshFinalRespectsAdapterDecline:

@@ -310,7 +310,7 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
             "chat_id": "-1001",
             "content": '💻 Running pwd',
             "reply_to": None,
-            "metadata": {"thread_id": "17585"},
+            "metadata": {"thread_id": "17585", "disable_rich_messages": "true"},
         }
     ]
     assert adapter.edits
@@ -352,7 +352,10 @@ async def test_run_agent_progress_edits_keep_originating_topic_metadata(monkeypa
 
     assert result["final_response"] == "done"
     assert adapter.edits
-    assert all(call["metadata"] == {"thread_id": "17585"} for call in adapter.edits)
+    assert all(
+        call["metadata"] == {"thread_id": "17585", "disable_rich_messages": "true"}
+        for call in adapter.edits
+    )
 
 
 @pytest.mark.asyncio
@@ -393,7 +396,7 @@ async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(
 
     assert result["final_response"] == "done"
     assert adapter.sent
-    assert adapter.sent[0]["metadata"] is None
+    assert adapter.sent[0]["metadata"] == {"disable_rich_messages": "true"}
     assert all(call["metadata"] is None for call in adapter.typing)
 
 
@@ -975,6 +978,71 @@ async def test_run_agent_previewed_final_marks_already_sent(monkeypatch, tmp_pat
 
     assert result.get("already_sent") is True
     assert [call["content"] for call in adapter.sent] == ["You're welcome."]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_completed_stream_without_confirmed_final_does_not_suppress_send(
+    monkeypatch, tmp_path
+):
+    class PartialThenFinalAgent:
+        def __init__(self, **kwargs):
+            self.stream_delta_callback = kwargs.get("stream_delta_callback")
+            self.tools = []
+
+        def run_conversation(self, message, conversation_history=None, task_id=None):
+            if self.stream_delta_callback:
+                self.stream_delta_callback("partial preview")
+            return {
+                "final_response": "Recovered final answer",
+                "messages": [],
+                "api_calls": 1,
+            }
+
+    import gateway.stream_consumer as stream_mod
+
+    class FakeCompletedConsumer:
+        def __init__(self, adapter, chat_id, config=None, metadata=None):
+            self.adapter = adapter
+            self.chat_id = chat_id
+            self.config = config
+            self.metadata = metadata
+            self.final_response_sent = False
+            self.completed = False
+            self.ever_sent = True
+            self._done = asyncio.Event()
+
+        def on_delta(self, text):
+            return None
+
+        def on_commentary(self, text):
+            return None
+
+        def on_segment_break(self):
+            return None
+
+        def finish(self):
+            self.completed = True
+            self._done.set()
+
+        async def run(self):
+            await self._done.wait()
+
+    monkeypatch.setattr(stream_mod, "GatewayStreamConsumer", FakeCompletedConsumer)
+
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        PartialThenFinalAgent,
+        session_id="sess-partial-preview-no-confirm",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True},
+        },
+    )
+
+    assert result.get("already_sent") is not True
+    assert result.get("final_response") == "Recovered final answer"
+    assert adapter.sent == []
 
 
 @pytest.mark.asyncio

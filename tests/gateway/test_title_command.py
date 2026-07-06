@@ -100,6 +100,8 @@ class TestHandleTitleCommand:
         event = _make_event(text="/title")
         result = await runner._handle_title_command(event)
         assert "No title set" in result
+        assert "short label you would recognize later" in result
+        assert "Fix Login Timeout" in result
         assert "/title" in result
         db.close()
 

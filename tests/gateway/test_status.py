@@ -223,6 +223,36 @@ class TestGatewayPidState:
 
         assert status.get_running_pid() == os.getpid()
 
+    def test_get_running_pid_rejects_runtime_state_for_other_profile(self, tmp_path, monkeypatch):
+        """A stale profile runtime record must not claim another profile's gateway.
+
+        Named launchd gateways can run side-by-side. If a profile's
+        gateway_state.json still points at a live default-profile gateway from an
+        old self-replace loop, startup for the named profile must not refuse with
+        "Gateway already running".
+        """
+        profile_home = tmp_path / ".hermes" / "profiles" / "gpt"
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+        state_path = profile_home / "gateway_state.json"
+        state_path.write_text(json.dumps({
+            "gateway_state": "running",
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "--profile", "default", "gateway", "run"],
+            "start_time": 123,
+        }))
+
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(
+            status,
+            "_read_process_cmdline",
+            lambda pid: "python -m hermes_cli.main --profile default gateway run",
+        )
+
+        assert status.get_running_pid() is None
+
     def test_get_running_pid_cleans_stale_metadata_from_dead_foreign_pid(self, tmp_path, monkeypatch):
         """Stale PID file from a *different* PID (crashed process) must still be cleaned.
 
@@ -445,7 +475,9 @@ class TestGatewayRuntimeStatus:
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 1000)
         for cmdline in (
             "hermes -p coder gateway run --replace",
+            "hermes -p=coder gateway run --replace",
             "/opt/hermes/.venv/bin/hermes --profile coder gateway run --replace",
+            "/opt/hermes/.venv/bin/hermes --profile=coder gateway run --replace",
             "hermes_home=/opt/data/profiles/coder hermes gateway run --replace",
         ):
             monkeypatch.setattr(status, "_read_process_cmdline", lambda pid, c=cmdline: c)
@@ -468,14 +500,17 @@ class TestGatewayRuntimeStatus:
 
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
-        monkeypatch.setattr(
-            status, "_read_process_cmdline", lambda pid: "hermes -p coder gateway run --replace"
-        )
-
-        assert (
-            status.get_runtime_status_running_pid(payload, expected_home=default_home)
-            is None
-        )
+        for cmdline in (
+            "hermes -p coder gateway run --replace",
+            "hermes -p=coder gateway run --replace",
+            "hermes --profile coder gateway run --replace",
+            "hermes --profile=coder gateway run --replace",
+        ):
+            monkeypatch.setattr(status, "_read_process_cmdline", lambda pid, c=cmdline: c)
+            assert (
+                status.get_runtime_status_running_pid(payload, expected_home=default_home)
+                is None
+            )
 
     def test_runtime_status_running_pid_default_profile_accepts_bare_cmdline(self, monkeypatch):
         """The default/root gateway (bare ``hermes gateway run``) is reported
@@ -540,6 +575,33 @@ class TestGatewayRuntimeStatus:
         assert payload["platforms"]["telegram"]["state"] == "fatal"
         assert payload["platforms"]["telegram"]["error_code"] == "telegram_polling_conflict"
         assert payload["platforms"]["telegram"]["error_message"] == "another poller is active"
+
+    def test_write_runtime_status_records_platform_metadata(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        status.write_runtime_status(
+            platform="bluebubbles",
+            platform_state="connected",
+            platform_metadata={
+                "mode": "ingress-owner",
+                "ingress_owner": True,
+                "guest_routing_enabled": True,
+                "guest_profile": "guest",
+            },
+        )
+        status.write_runtime_status(
+            platform="bluebubbles",
+            error_message=None,
+            platform_metadata={"listener": True},
+        )
+
+        payload = status.read_runtime_status()
+        assert payload is not None
+        metadata = payload["platforms"]["bluebubbles"]["metadata"]
+        assert metadata["mode"] == "ingress-owner"
+        assert metadata["ingress_owner"] is True
+        assert metadata["listener"] is True
+        assert metadata["guest_profile"] == "guest"
 
     def test_write_runtime_status_explicit_none_clears_stale_fields(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
