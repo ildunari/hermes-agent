@@ -1274,6 +1274,7 @@ def _read_configured_image_provider():
 def _dispatch_to_plugin_provider(
     prompt: str,
     aspect_ratio: str,
+    *,
     image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None,
 ):
@@ -1517,15 +1518,21 @@ def _handle_image_generate(args, **kw):
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
     image_url = args.get("image_url")
     reference_image_urls = args.get("reference_image_urls")
+    if isinstance(reference_image_urls, str):
+        reference_image_urls = [reference_image_urls]
+    if not isinstance(reference_image_urls, list):
+        reference_image_urls = None
     task_id = kw.get("task_id")
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path). When ``image_gen.provider == "krea"`` this
     # already reaches the Krea plugin's managed gateway path.
     dispatched = _dispatch_to_plugin_provider(
-        prompt, aspect_ratio,
-        image_url=image_url,
-        reference_image_urls=reference_image_urls,
+        prompt,
+        aspect_ratio,
+        image_url=image_url if isinstance(image_url, str) else None,
+        reference_image_urls=[x for x in reference_image_urls if isinstance(x, str) and x.strip()]
+        if reference_image_urls else None,
     )
     if dispatched is not None:
         return _postprocess_image_generate_result(dispatched, task_id=task_id)

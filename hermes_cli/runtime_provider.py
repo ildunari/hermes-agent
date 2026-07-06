@@ -17,6 +17,7 @@ from hermes_cli.auth import (
     AuthError,
     DEFAULT_CODEX_BASE_URL,
     DEFAULT_QWEN_BASE_URL,
+    DEFAULT_VIBEPROXY_BASE_URL,
     DEFAULT_XAI_OAUTH_BASE_URL,
     PROVIDER_REGISTRY,
     _agent_key_is_usable,
@@ -303,6 +304,8 @@ def _provider_supports_explicit_api_mode(provider: Optional[str], configured_pro
     provider (or when no configured provider is recorded).
     """
     normalized_provider = (provider or "").strip().lower()
+    if normalized_provider == "vibeproxy":
+        return False
     normalized_configured = (configured_provider or "").strip().lower()
     if not normalized_configured:
         return True
@@ -1483,9 +1486,13 @@ def _resolve_explicit_runtime(
             api_mode = _copilot_runtime_api_mode(model_cfg, api_key)
         elif provider == "xai":
             api_mode = "codex_responses"
+        elif provider == "vibeproxy":
+            base_url = base_url or DEFAULT_VIBEPROXY_BASE_URL
+            api_mode = "chat_completions"
         else:
+            configured_provider = str(model_cfg.get("provider") or "").strip().lower()
             configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
-            if configured_mode:
+            if configured_mode and _provider_supports_explicit_api_mode(provider, configured_provider):
                 api_mode = configured_mode
             else:
                 # Auto-detect from URL (Anthropic /anthropic suffix,
@@ -1512,6 +1519,7 @@ def resolve_runtime_provider(
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
     target_model: Optional[str] = None,
+    credential_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution.
 
@@ -1522,6 +1530,11 @@ def resolve_runtime_provider(
     api_mode is derived from the model they are switching TO, not the stale
     persisted default. Other callers can leave it None to preserve existing
     behavior (api_mode derived from config).
+
+    credential_label: Optional exact credential-pool label or id to use for
+    this runtime resolution.  This is intentionally narrow and currently used
+    for unattended jobs that must bill a specific subscription-backed OAuth
+    account instead of the provider singleton.
     """
     requested_provider = resolve_requested_provider(requested)
 
@@ -1655,6 +1668,52 @@ def resolve_runtime_provider(
         explicit_base_url=explicit_base_url,
     )
     model_cfg = _get_model_config()
+    requested_credential_label = str(credential_label or "").strip()
+    if requested_credential_label and not explicit_api_key:
+        try:
+            pool = load_pool(provider)
+        except Exception as exc:
+            raise AuthError(
+                f"No credential pool available for {provider!r} while resolving "
+                f"credential {requested_credential_label!r}.",
+                provider=provider,
+                code="credential_pool_unavailable",
+            ) from exc
+        matches = [
+            entry
+            for entry in pool._available_entries(clear_expired=True, refresh=True)
+            if str(getattr(entry, "label", "") or "") == requested_credential_label
+            or str(getattr(entry, "id", "") or "") == requested_credential_label
+        ]
+        if not matches:
+            raise AuthError(
+                f"No usable {provider!r} credential named {requested_credential_label!r}.",
+                provider=provider,
+                code="credential_label_not_found",
+                relogin_required=True,
+            )
+        entry = matches[0]
+        pool_api_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
+        if not pool_api_key:
+            raise AuthError(
+                f"Credential {requested_credential_label!r} for {provider!r} has no usable runtime token.",
+                provider=provider,
+                code="credential_label_unusable",
+                relogin_required=True,
+            )
+        selected_runtime = _resolve_runtime_from_pool_entry(
+            provider=provider,
+            entry=entry,
+            requested_provider=requested_provider,
+            model_cfg=model_cfg,
+            pool=pool,
+            target_model=target_model,
+        )
+        if explicit_base_url:
+            selected_runtime["base_url"] = str(explicit_base_url).strip().rstrip("/")
+        selected_runtime["credential_label"] = requested_credential_label
+        return selected_runtime
+
     explicit_runtime = _resolve_explicit_runtime(
         provider=provider,
         requested_provider=requested_provider,

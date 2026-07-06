@@ -12,6 +12,35 @@ def _response(content="done", *, tool_calls=None):
     return SimpleNamespace(choices=[choice], usage=None, model="fake-model")
 
 
+def test_aggregate_moa_context_omits_sampling_temperature_by_default(monkeypatch):
+    calls = []
+
+    def fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        if kwargs["task"] == "moa_reference":
+            return _response("reference advice")
+        return _response("aggregator synthesis")
+
+    monkeypatch.setattr("agent.moa_loop.call_llm", fake_call_llm)
+
+    from agent.moa_loop import aggregate_moa_context
+
+    result = aggregate_moa_context(
+        user_prompt="solve this",
+        api_messages=[{"role": "user", "content": "solve this"}],
+        reference_models=[{"provider": "openai-codex", "model": "gpt-5.5"}],
+        aggregator={"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
+    )
+
+    assert "aggregator synthesis" in result
+    ref_call = next(c for c in calls if c["task"] == "moa_reference")
+    agg_call = next(c for c in calls if c["task"] == "moa_aggregator")
+    assert ref_call.get("temperature") is None
+    assert agg_call.get("temperature") is None
+    assert ref_call.get("max_tokens") is None
+    assert agg_call.get("max_tokens") is None
+
+
 def test_moa_virtual_provider_aggregator_is_actor(monkeypatch, tmp_path):
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -69,6 +98,250 @@ moa:
         ("moa_aggregator", "openrouter", "anthropic/claude-opus-4.8"),
     ]
     assert calls[1]["tools"] is not None
+    assert calls[0]["request_overrides"] == {"service_tier": "priority"}
+
+
+def test_moa_aggregator_merges_caller_and_slot_extra_body(monkeypatch, tmp_path):
+    """Aggregator slot overrides must not pass duplicate extra_body kwargs."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+moa:
+  default_preset: review
+  presets:
+    review:
+      reference_models: []
+      aggregator:
+        provider: openrouter
+        model: anthropic/claude-opus-4.8
+        reasoning_effort: high
+        extra_body:
+          thinking:
+            type: enabled
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured.update(kwargs)
+        return _response("aggregator acted")
+
+    monkeypatch.setattr("agent.moa_loop.call_llm", fake_call_llm)
+
+    from agent.moa_loop import MoAChatCompletions
+
+    result = MoAChatCompletions("review").create(
+        messages=[{"role": "user", "content": "solve this"}],
+        extra_body={"existing": True},
+    )
+
+    assert result.choices[0].message.content == "aggregator acted"
+    assert captured["task"] == "moa_aggregator"
+    assert captured["extra_body"] == {
+        "existing": True,
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+        "reasoning": {"effort": "high"},
+    }
+
+
+def test_moa_vibeproxy_claude_xhigh_keeps_nested_effort_without_top_level_alias():
+    from agent.moa_loop import _slot_extra_body
+
+    extra = _slot_extra_body(
+        {
+            "provider": "vibeproxy",
+            "model": "claude-opus-4-8",
+            "reasoning_effort": "xhigh",
+        }
+    )
+
+    assert extra == {"reasoning": {"effort": "xhigh"}}
+
+
+def test_moa_non_vibeproxy_slots_keep_top_level_reasoning_effort():
+    from agent.moa_loop import _slot_extra_body
+
+    extra = _slot_extra_body(
+        {
+            "provider": "openai-codex",
+            "model": "gpt-5.5",
+            "reasoning_effort": "xhigh",
+        }
+    )
+
+    assert extra == {
+        "reasoning_effort": "xhigh",
+        "reasoning": {"effort": "xhigh"},
+    }
+
+
+def test_moa_primary_restore_rebuilds_virtual_facade(monkeypatch, tmp_path):
+    """MoA sessions must restore from fallback without constructing OpenAI().
+
+    Regression for a long-lived MoA session that failed over to a real provider:
+    the next turn restored provider/model to MoA but tried to rebuild the shared
+    client from MoA's empty client_kwargs, raising "api_key client option must be
+    set" and then "Failed to recreate closed OpenAI client".
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+moa:
+  default_preset: review
+  presets:
+    review:
+      reference_models:
+        - provider: openai-codex
+          model: gpt-5.5
+      aggregator:
+        provider: openrouter
+        model: anthropic/claude-opus-4.8
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    agent = AIAgent(
+        api_key="moa-virtual-provider",
+        base_url="moa://local",
+        model="review",
+        provider="moa",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        enabled_toolsets=["file"],
+        max_iterations=1,
+    )
+    primary_client = agent.client
+
+    def fail_openai_rebuild(*_args, **_kwargs):
+        raise AssertionError("MoA restore must not build a real OpenAI client")
+
+    monkeypatch.setattr(agent, "_create_openai_client", fail_openai_rebuild)
+    setattr(agent, "_fallback_activated", True)
+    setattr(agent, "provider", "zai")
+    setattr(agent, "model", "glm-5.2")
+    agent.base_url = "https://api.z.ai/api/coding/paas/v4"
+    agent.api_key = "fallback-key"
+    setattr(agent, "_client_kwargs", {"api_key": "fallback-key", "base_url": agent.base_url})
+    agent.client = SimpleNamespace(close=lambda: None, _client=SimpleNamespace(is_closed=True))
+
+    assert agent._restore_primary_runtime() is True
+    assert getattr(agent, "provider") == "moa"
+    assert getattr(agent, "model") == "review"
+    assert agent.client is not primary_client
+    assert hasattr(agent.client.chat, "completions")
+    assert getattr(agent, "_fallback_activated") is False
+
+
+def test_switch_model_to_moa_builds_virtual_facade(monkeypatch, tmp_path):
+    """In-place /model switches to MoA must not build an OpenAI network client."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+moa:
+  default_preset: review
+  presets:
+    review:
+      reference_models:
+        - provider: openai-codex
+          model: gpt-5.5
+      aggregator:
+        provider: openrouter
+        model: anthropic/claude-opus-4.8
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    agent = AIAgent(
+        api_key="old-key",
+        base_url="https://chatgpt.com/backend-api/codex",
+        model="gpt-5.5",
+        provider="openai-codex",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        enabled_toolsets=["file"],
+        max_iterations=1,
+    )
+
+    def fail_openai_rebuild(*_args, **_kwargs):
+        raise AssertionError("MoA switch must not build a real OpenAI client")
+
+    monkeypatch.setattr(agent, "_create_openai_client", fail_openai_rebuild)
+
+    agent.switch_model(
+        new_model="review",
+        new_provider="moa",
+        api_key="moa-virtual-provider",
+        base_url="moa://local",
+        api_mode="chat_completions",
+    )
+
+    assert agent.provider == "moa"
+    assert agent.model == "review"
+    assert agent.base_url == "moa://local"
+    assert agent.api_key == "moa-virtual-provider"
+    assert agent._client_kwargs == {}
+    assert hasattr(agent.client.chat, "completions")
+
+
+def test_moa_primary_transport_recovery_rebuilds_virtual_facade(monkeypatch, tmp_path):
+    """Transient recovery for a MoA primary must not POST to stale base_url."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+moa:
+  default_preset: review
+  presets:
+    review:
+      reference_models:
+        - provider: openai-codex
+          model: gpt-5.5
+      aggregator:
+        provider: openrouter
+        model: anthropic/claude-opus-4.8
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr("agent.agent_runtime_helpers.time.sleep", lambda *_: None)
+
+    agent = AIAgent(
+        api_key="moa-virtual-provider",
+        base_url="moa://local",
+        model="review",
+        provider="moa",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        enabled_toolsets=["file"],
+        max_iterations=1,
+    )
+
+    def fail_openai_rebuild(*_args, **_kwargs):
+        raise AssertionError("MoA recovery must not build a real OpenAI client")
+
+    monkeypatch.setattr(agent, "_create_openai_client", fail_openai_rebuild)
+
+    from agent.agent_runtime_helpers import try_recover_primary_transport
+
+    err = type("APIConnectionError", (Exception,), {})()
+    assert try_recover_primary_transport(agent, err, retry_count=3, max_retries=3) is True
+    assert agent.provider == "moa"
+    assert agent.model == "review"
+    assert agent.base_url == "moa://local"
+    assert agent._client_kwargs == {}
+    assert hasattr(agent.client.chat, "completions")
+
 
 
 def test_moa_runtime_provider_uses_virtual_endpoint():
@@ -140,6 +413,106 @@ moa:
     assert agg_call.get("max_tokens") is None
 
 
+def test_moa_omits_sampling_temperature_when_preset_does_not_configure_it(monkeypatch, tmp_path):
+    """Missing MoA temperature config should preserve provider/model defaults."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+moa:
+  default_preset: review
+  presets:
+    review:
+      reference_models:
+        - provider: openai-codex
+          model: gpt-5.5
+      aggregator:
+        provider: openrouter
+        model: anthropic/claude-opus-4.8
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    calls = []
+
+    def fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        if kwargs["task"] == "moa_reference":
+            return _response("reference advice")
+        return _response("aggregator acted")
+
+    monkeypatch.setattr("agent.moa_loop.call_llm", fake_call_llm)
+
+    agent = AIAgent(
+        api_key="moa-virtual-provider",
+        base_url="moa://local",
+        model="review",
+        provider="moa",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        enabled_toolsets=["file"],
+        max_iterations=1,
+    )
+    agent.run_conversation("solve this")
+
+    ref_call = next(c for c in calls if c["task"] == "moa_reference")
+    agg_call = next(c for c in calls if c["task"] == "moa_aggregator")
+    assert ref_call.get("temperature") is None
+    assert agg_call.get("temperature") is None
+
+
+def test_moa_preserves_explicit_sampling_temperature(monkeypatch, tmp_path):
+    """Explicit per-preset sampling values remain opt-in knobs."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+moa:
+  default_preset: review
+  presets:
+    review:
+      reference_temperature: 0.2
+      aggregator_temperature: 0.1
+      reference_models:
+        - provider: openai-codex
+          model: gpt-5.5
+      aggregator:
+        provider: openrouter
+        model: anthropic/claude-opus-4.8
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    calls = []
+
+    def fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        if kwargs["task"] == "moa_reference":
+            return _response("reference advice")
+        return _response("aggregator acted")
+
+    monkeypatch.setattr("agent.moa_loop.call_llm", fake_call_llm)
+
+    agent = AIAgent(
+        api_key="moa-virtual-provider",
+        base_url="moa://local",
+        model="review",
+        provider="moa",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        enabled_toolsets=["file"],
+        max_iterations=1,
+    )
+    agent.run_conversation("solve this")
+
+    ref_call = next(c for c in calls if c["task"] == "moa_reference")
+    agg_call = next(c for c in calls if c["task"] == "moa_aggregator")
+    assert ref_call.get("temperature") == 0.2
+    assert agg_call.get("temperature") == 0.1
+
+
 def test_moa_slots_routed_through_resolve_runtime_provider(monkeypatch):
     """Reference + aggregator slots must be called via their provider's real
     runtime (resolve_runtime_provider), not a bare provider/model call.
@@ -174,45 +547,89 @@ def test_moa_slots_routed_through_resolve_runtime_provider(monkeypatch):
     assert rt["api_key"] == "key-for-minimax"
 
 
-def test_moa_codex_slot_preserves_provider_identity(monkeypatch):
-    """Codex slots must not become custom chat-completions endpoints.
+def test_moa_openai_codex_slot_uses_auxiliary_wrapper_not_raw_runtime(monkeypatch):
+    """Codex references must not receive raw ChatGPT backend credentials.
 
-    _slot_runtime forwards the resolved base_url/api_key/api_mode; the single
-    chokepoint that must NOT collapse openai-codex to provider=custom is
-    _resolve_task_provider_model (via _preserve_provider_with_base_url). If it
-    collapsed, the Codex auxiliary branch — Cloudflare headers + Responses
-    adapter for chatgpt.com/backend-api/codex — would be bypassed.
+    The regular openai-codex auxiliary client adds the right wrapper/headers.
+    Passing resolve_runtime_provider's raw base_url/api_key into call_llm
+    bypasses that path and can trigger Cloudflare HTML challenges.
+    """
+    from agent import moa_loop
+
+    def fail_if_called(*, requested, target_model=None):
+        raise AssertionError("openai-codex should not use raw runtime resolution")
+
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider", fail_if_called
+    )
+
+    rt = moa_loop._slot_runtime({"provider": "openai-codex", "model": "gpt-5.5"})
+    assert rt == {"provider": "openai-codex", "model": "gpt-5.5"}
+    assert "base_url" not in rt
+    assert "api_key" not in rt
+
+
+def test_moa_vibeproxy_slot_uses_provider_profile_not_raw_custom_runtime(monkeypatch):
+    """VibeProxy slots must keep provider identity so plugin sanitizers run.
+
+    resolve_runtime_provider can resolve VibeProxy to its local base URL and a
+    placeholder key, but passing those raw values into call_llm makes the
+    auxiliary path log and behave as generic ``custom``. That bypasses the
+    VibeProxy provider plugin's final request sanitizer.
     """
     from agent import moa_loop
     from agent.auxiliary_client import _resolve_task_provider_model
 
     def fake_resolve(*, requested, target_model=None):
         return {
-            "provider": requested,
-            "api_mode": "codex_responses",
-            "base_url": "https://chatgpt.com/backend-api/codex",
-            "api_key": "codex-oauth-token",
+            "provider": "vibeproxy",
+            "api_mode": "chat_completions",
+            "base_url": "http://127.0.0.1:8485/v1",
+            "api_key": "dummy-vibeproxy-api-key",
         }
 
     monkeypatch.setattr(
         "hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve
     )
 
-    rt = moa_loop._slot_runtime({"provider": "openai-codex", "model": "gpt-5.5"})
-    # _slot_runtime forwards the resolved endpoint unconditionally now.
-    assert rt["provider"] == "openai-codex"
-    assert rt["model"] == "gpt-5.5"
-    assert rt["base_url"] == "https://chatgpt.com/backend-api/codex"
+    rt = moa_loop._slot_runtime({"provider": "vibeproxy", "model": "claude-opus-4-8"})
+    assert rt == {"provider": "vibeproxy", "model": "claude-opus-4-8"}
+    assert "base_url" not in rt
+    assert "api_key" not in rt
 
-    # The chokepoint preserves openai-codex identity despite the explicit
-    # base_url (api_mode is forwarded to call_llm directly, not the resolver).
-    resolver_kwargs = {k: v for k, v in rt.items() if k != "api_mode"}
-    resolved_provider, _model, base_url, _api_key, _mode = _resolve_task_provider_model(
-        task="moa_reference",
-        **resolver_kwargs,
+
+def test_moa_slot_runtime_preserves_slot_reasoning_overrides(monkeypatch):
+    """MoA reference slots can carry independent thinking/reasoning controls."""
+    from agent import moa_loop
+
+    def fake_resolve(*, requested, target_model=None):
+        return {
+            "provider": requested,
+            "api_mode": "chat_completions",
+            "base_url": "https://zai.example/v1",
+            "api_key": "zai-key",
+        }
+
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve
     )
-    assert resolved_provider == "openai-codex"
-    assert base_url == "https://chatgpt.com/backend-api/codex"
+
+    rt = moa_loop._slot_runtime(
+        {
+            "provider": "zai",
+            "model": "glm-5.2",
+            "reasoning_effort": "high",
+            "extra_body": {"thinking": {"type": "enabled"}},
+        }
+    )
+
+    assert rt["provider"] == "zai"
+    assert rt["model"] == "glm-5.2"
+    assert rt["extra_body"] == {
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+        "reasoning": {"effort": "high"},
+    }
 
 
 @pytest.mark.parametrize("provider", ["minimax-oauth", "qwen-oauth"])
@@ -309,9 +726,13 @@ def test_reference_messages_drops_system_but_renders_tools_as_text():
     assert all("tool_calls" not in m for m in view)
     # System prompt is gone.
     assert all("huge hermes system prompt" not in m["content"] for m in view)
-    # The agent's action and the tool result are PRESERVED as text.
+    # The agent's action and the tool result are PRESERVED as text, but raw
+    # tool argument JSON is deliberately not replayed into reference prompts.
+    # Claude/VibeProxy can 502 on flattened fs/terminal argument blobs even
+    # though the same-size plain-text advisory payload succeeds.
     joined = "\n".join(m["content"] for m in view)
-    assert "[called tool: f(" in joined
+    assert "[called tool: f]" in joined
+    assert "[called tool: f(" not in joined
     assert "[tool result: tool result]" in joined
     assert "here is my answer" in joined
     # Ends on a user turn (advisory request appended after the final assistant).
@@ -349,17 +770,51 @@ def test_reference_messages_ends_with_user_not_assistant_prefill():
     joined = "\n".join(m["content"] for m in view)
     # The agent's latest action and its result are preserved, not dropped.
     assert "let me reason then call a tool" in joined
-    assert "[called tool: f(" in joined
+    assert "[called tool: f]" in joined
+    assert "[called tool: f(" not in joined
     assert "[tool result: the tool output]" in joined
     # Earlier context preserved too.
     assert "q1" in joined and "a1" in joined and "q2 current" in joined
 
 
+def test_reference_tool_result_budget_stays_opus_safe():
+    """Reference tool-result previews stay below the live Opus/VibeProxy failure range."""
+    from agent.moa_loop import _REFERENCE_TOOL_RESULT_BUDGET
+
+    assert _REFERENCE_TOOL_RESULT_BUDGET <= 1200
+
+
+def test_reference_messages_summarizes_json_tool_result_envelopes():
+    """Reference prompts keep useful tool output without raw JSON envelopes."""
+    from agent.moa_loop import _reference_messages
+
+    messages = [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "fs", "arguments": "{\"path\":\"secret/path\"}"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": '{"content":"1|important file text","path":"/secret/path","api_key":"do-not-leak"}',
+        },
+    ]
+
+    joined = "\n".join(m["content"] for m in _reference_messages(messages))
+
+    assert "[called tool: fs]" in joined
+    assert "1|important file text" in joined
+    assert "secret/path" not in joined
+    assert "do-not-leak" not in joined
+
+
 def test_reference_messages_truncates_large_tool_results():
-    """Large tool results are previewed head+tail, not replayed verbatim."""
+    """Large tool results are previewed head-only, not replayed verbatim."""
     from agent.moa_loop import _REFERENCE_TOOL_RESULT_BUDGET, _reference_messages
 
-    huge = "A" * (_REFERENCE_TOOL_RESULT_BUDGET * 3)
+    huge = "A" * (_REFERENCE_TOOL_RESULT_BUDGET * 3) + "B-tail-marker"
     messages = [
         {"role": "user", "content": "q"},
         {
@@ -373,6 +828,8 @@ def test_reference_messages_truncates_large_tool_results():
     view = _reference_messages(messages)
     joined = "\n".join(m["content"] for m in view)
     assert "chars omitted" in joined
+    assert "A" * 100 in joined
+    assert "B-tail-marker" not in joined
     # The folded result is far smaller than the raw payload.
     assert len(joined) < len(huge)
 
@@ -476,7 +933,8 @@ moa:
     assert all("tool_calls" not in m for m in ref_msgs)
     # The agent's action + tool result ARE preserved, rendered as text.
     joined = "\n".join(m["content"] for m in ref_msgs[1:])
-    assert "[called tool: lookup(" in joined
+    assert "[called tool: lookup]" in joined
+    assert "[called tool: lookup(" not in joined
     assert "[tool result: tool output]" in joined
     # Ends on a user turn (advisory request after the final assistant block).
     assert ref_msgs[-1]["role"] == "user"
@@ -702,6 +1160,108 @@ def test_moa_facade_reruns_references_on_new_turn(monkeypatch, tmp_path):
     # 2 references × 2 distinct turns = 4 reference runs.
     assert len(ref_runs) == 4
 
+
+def test_moa_reference_fire_turn_skips_tool_result_refires(monkeypatch, tmp_path):
+    """reference_fire: turn keys the cache on user turns only, so a new tool
+    result within the same turn is a cache HIT (no reference re-run) and the
+    injected guidance block stays byte-stable for aggregator prompt caching."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+moa:
+  default_preset: review
+  presets:
+    review:
+      reference_fire: turn
+      reference_models:
+        - provider: openai-codex
+          model: gpt-5.5
+      aggregator:
+        provider: openrouter
+        model: anthropic/claude-opus-4.8
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    ref_runs = []
+    agg_messages_seen = []
+
+    def fake_call_llm(**kwargs):
+        if kwargs["task"] == "moa_reference":
+            ref_runs.append(kwargs["model"])
+            return _response("advice")
+        agg_messages_seen.append(kwargs["messages"])
+        return _response("acted")
+
+    monkeypatch.setattr("agent.moa_loop.call_llm", fake_call_llm)
+
+    from agent.moa_loop import MoAChatCompletions
+
+    facade = MoAChatCompletions("review")
+    base_msgs = [{"role": "user", "content": "turn one"}]
+    facade.create(messages=base_msgs, tools=[])
+    after_tool = base_msgs + [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "result"},
+    ]
+    # New tool result but same user turn → cache HIT in turn mode.
+    facade.create(messages=after_tool, tools=[])
+    assert len(ref_runs) == 1
+
+    # A genuinely new user message still re-fires.
+    facade.create(messages=after_tool + [{"role": "user", "content": "turn two"}], tools=[])
+    assert len(ref_runs) == 2
+
+    # The guidance block injected into the last user message is identical
+    # across the two create() calls of the same turn.
+    first_guidance = next(
+        m["content"] for m in reversed(agg_messages_seen[0]) if m["role"] == "user"
+    )
+    second_guidance = next(
+        m["content"] for m in reversed(agg_messages_seen[1]) if m["role"] == "user"
+    )
+    assert "[Mixture of Agents reference context]" in first_guidance
+    assert first_guidance.split("[Mixture of Agents reference context]")[1] == \
+        second_guidance.split("[Mixture of Agents reference context]")[1]
+
+
+def test_moa_guidance_includes_aggregation_contract(monkeypatch, tmp_path):
+    """The aggregator prompt carries the compliance contract so flagged
+    reference risks and output contracts are not silently dropped."""
+    home = tmp_path / ".hermes"
+    _ref_config(home)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    agg_calls = []
+
+    def fake_call_llm(**kwargs):
+        if kwargs["task"] == "moa_reference":
+            return _response("advice")
+        agg_calls.append(kwargs)
+        return _response("acted")
+
+    monkeypatch.setattr("agent.moa_loop.call_llm", fake_call_llm)
+
+    from agent.moa_loop import MoAChatCompletions
+
+    facade = MoAChatCompletions("review")
+    facade.create(messages=[{"role": "user", "content": "do the task"}], tools=[])
+
+    guidance = next(
+        m["content"] for m in reversed(agg_calls[0]["messages"]) if m["role"] == "user"
+    )
+    assert "Aggregation contract:" in guidance
+    assert "OUTPUT CONTRACT" in guidance
+    assert "never silently ignore a flagged issue" in guidance
+
+
+def test_reference_system_prompt_requests_output_contract():
+    from agent.moa_loop import _REFERENCE_SYSTEM_PROMPT
+
+    assert "OUTPUT CONTRACT" in _REFERENCE_SYSTEM_PROMPT
+    assert "forbidden strings" in _REFERENCE_SYSTEM_PROMPT
 
 def test_slot_runtime_anthropic_oauth_routes_through_provider_branch(monkeypatch):
     """Native anthropic slots must keep their provider identity, not collapse to custom.

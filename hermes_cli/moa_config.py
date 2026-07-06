@@ -10,14 +10,25 @@ from typing import Any
 MOA_MARKER_PREFIX = "__HERMES_MOA_TURN_V1__"
 DEFAULT_MOA_PRESET_NAME = "default"
 
-DEFAULT_MOA_REFERENCE_MODELS: list[dict[str, str]] = [
-    {"provider": "openai-codex", "model": "gpt-5.5"},
-    {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
+DEFAULT_MOA_REFERENCE_MODELS: list[dict[str, Any]] = [
+    {
+        "provider": "openai-codex",
+        "model": "gpt-5.5",
+        "reasoning_effort": "medium",
+        "service_tier": "fast",
+    },
+    {
+        "provider": "zai",
+        "model": "glm-5.2",
+        "reasoning_effort": "high",
+        "extra_body": {"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
+    },
 ]
 
-DEFAULT_MOA_AGGREGATOR: dict[str, str] = {
-    "provider": "openrouter",
-    "model": "anthropic/claude-opus-4.8",
+DEFAULT_MOA_AGGREGATOR: dict[str, Any] = {
+    "provider": "vibeproxy",
+    "model": "claude-opus-4-8",
+    "reasoning_effort": "high",
 }
 
 
@@ -49,12 +60,37 @@ def _coerce_int(value: Any, default: int) -> int:
             return default
 
 
-def _coerce_int_or_none(value: Any) -> int | None:
-    """Coerce to a positive int, or None when unset/blank/invalid/non-positive.
+def _default_reasoning_effort(provider: str, model: str) -> str:
+    provider_key = provider.strip().lower()
+    model_key = model.strip().lower()
+    model_leaf = model_key.rsplit("/", 1)[-1]
+    if provider_key == "openai-codex" and model_leaf == "gpt-5.5":
+        return "medium"
+    if provider_key == "zai" and model_leaf == "glm-5.2":
+        return "high"
+    if model_leaf in {"claude-opus-4-8", "claude-opus-4.8"}:
+        return "high"
+    return ""
 
-    Used for optional caps (e.g. reference_max_tokens) where None means
-    'no cap' — the safe default that preserves prior uncapped behavior.
-    """
+
+def _default_service_tier(provider: str, model: str) -> str:
+    provider_key = provider.strip().lower()
+    model_leaf = model.strip().lower().rsplit("/", 1)[-1]
+    if provider_key == "openai-codex" and model_leaf == "gpt-5.5":
+        return "fast"
+    return ""
+
+
+def _default_extra_body(provider: str, model: str) -> dict[str, Any]:
+    provider_key = provider.strip().lower()
+    model_leaf = model.strip().lower().rsplit("/", 1)[-1]
+    if provider_key == "zai" and model_leaf == "glm-5.2":
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": "high"}
+    return {}
+
+
+def _coerce_int_or_none(value: Any) -> int | None:
+    """Coerce to a positive int, or None when unset/blank/invalid/non-positive."""
     if value is None or value == "":
         return None
     try:
@@ -67,13 +103,7 @@ def _coerce_int_or_none(value: Any) -> int | None:
     return n if n > 0 else None
 
 
-def _coerce_fanout(value: Any) -> str:
-    """Normalize the fan-out cadence; unknown values fall back to default."""
-    mode = str(value or "").strip().lower()
-    return mode if mode in {"per_iteration", "user_turn"} else "per_iteration"
-
-
-def _clean_slot(slot: Any) -> dict[str, str] | None:
+def _clean_slot(slot: Any) -> dict[str, Any] | None:
     if not isinstance(slot, dict):
         return None
     provider = str(slot.get("provider") or "").strip()
@@ -87,7 +117,43 @@ def _clean_slot(slot: Any) -> dict[str, str] | None:
     # an invalid slot is dropped, falling back to the preset's defaults.
     if provider.lower() == "moa":
         return None
-    return {"provider": provider, "model": model}
+    cleaned: dict[str, Any] = {"provider": provider, "model": model}
+    service_tier = str(slot.get("service_tier") or "").strip().lower()
+    if not service_tier:
+        service_tier = _default_service_tier(provider, model)
+    if service_tier in {"fast", "priority", "on"}:
+        cleaned["service_tier"] = "fast"
+    effort = str(slot.get("reasoning_effort") or "").strip().lower()
+    if not effort:
+        effort = _default_reasoning_effort(provider, model)
+    if effort:
+        cleaned["reasoning_effort"] = effort
+    extra_body = slot.get("extra_body")
+    if isinstance(extra_body, dict) and extra_body:
+        cleaned["extra_body"] = deepcopy(extra_body)
+    elif not isinstance(extra_body, dict) or not extra_body:
+        default_extra_body = _default_extra_body(provider, model)
+        if default_extra_body:
+            cleaned["extra_body"] = default_extra_body
+    return cleaned
+
+
+def _coerce_fanout(value: Any, *, legacy_reference_fire: Any = None) -> str:
+    """Normalize the reference fan-out cadence.
+
+    ``reference_fire`` was the local Studio spelling; upstream now exposes the
+    clearer ``fanout`` value. Accept both so existing local presets keep their
+    cadence after the merge.
+    """
+    mode = str(value or "").strip().lower()
+    if mode in {"per_iteration", "user_turn"}:
+        return mode
+    legacy = str(legacy_reference_fire or "").strip().lower()
+    if legacy == "turn":
+        return "user_turn"
+    if legacy == "state":
+        return "per_iteration"
+    return "per_iteration"
 
 
 def _default_preset() -> dict[str, Any]:
@@ -122,7 +188,7 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
 
     aggregator = _clean_slot(raw.get("aggregator")) or deepcopy(DEFAULT_MOA_AGGREGATOR)
 
-    return {
+    normalized = {
         "enabled": bool(raw.get("enabled", True)),
         "reference_models": refs,
         "aggregator": aggregator,
@@ -130,12 +196,7 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         "aggregator_temperature": _coerce_float_or_none(raw.get("aggregator_temperature")),
         "max_tokens": _coerce_int(raw.get("max_tokens"), 4096),
         # Optional cap on how much each reference ADVISOR may generate per turn.
-        # None (default) = uncapped: advisors write full-length advice, matching
-        # prior behavior so existing presets are unchanged. Set a value (e.g.
-        # 600) to make advisors give concise advice — the dominant MoA latency
-        # is advisor generation (turn latency correlates ~0.88 with output
-        # tokens), and the aggregator only needs the gist of each advisor's
-        # judgement, so capping roughly halves per-turn wall time. Does NOT cap
+        # None (default) = uncapped, matching prior behavior. Does NOT cap
         # the acting aggregator (its output is the user-visible answer).
         "reference_max_tokens": _coerce_int_or_none(raw.get("reference_max_tokens")),
         # When the reference fan-out runs. "per_iteration" (default) re-runs
@@ -144,8 +205,17 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         # advisors ONCE per user turn (the original MoA shape): the
         # aggregator gets their upfront plan-level advice, then acts alone
         # for the rest of the tool loop.
-        "fanout": _coerce_fanout(raw.get("fanout")),
+        "fanout": _coerce_fanout(
+            raw.get("fanout"),
+            legacy_reference_fire=raw.get("reference_fire"),
+        ),
     }
+    fire_mode = str(raw.get("reference_fire") or "").strip().lower()
+    if fire_mode in {"state", "turn"}:
+        normalized["reference_fire"] = fire_mode
+    if "max_tokens" in raw:
+        normalized["max_tokens"] = _coerce_int(raw.get("max_tokens"), 4096)
+    return normalized
 
 
 def normalize_moa_config(raw: Any) -> dict[str, Any]:
@@ -180,7 +250,7 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
         active_name = ""
 
     active = presets[default_name]
-    return {
+    normalized = {
         "default_preset": default_name,
         "active_preset": active_name,
         "presets": presets,
@@ -194,6 +264,10 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
         "fanout": active.get("fanout", "per_iteration"),
         "enabled": active["enabled"],
     }
+    for key in ("reference_fire", "reference_temperature", "aggregator_temperature", "max_tokens"):
+        if key in active:
+            normalized[key] = active[key]
+    return normalized
 
 
 def list_moa_presets(config: Any) -> list[str]:

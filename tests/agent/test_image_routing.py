@@ -476,6 +476,87 @@ class TestBuildNativeContentParts:
             f"Expected MIME sniffing to detect PNG bytes regardless of .webp suffix, got: {url[:60]}"
         )
 
+    def test_heic_local_attachment_converts_to_jpeg_data_url(self, tmp_path: Path):
+        img = tmp_path / "iphone-upload.HEIC"
+        img.write_bytes(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 32)
+
+        def fake_sips(args, **kwargs):
+            out_path = Path(args[-1])
+            out_path.write_bytes(b"\xff\xd8\xff" + b"jpeg")
+            return None
+
+        with (
+            patch("agent.image_normalization.sys.platform", "darwin"),
+            patch("agent.image_normalization.subprocess.run", side_effect=fake_sips),
+        ):
+            parts, skipped = build_native_content_parts("scan this", [str(img)])
+
+        assert skipped == []
+        url = parts[1]["image_url"]["url"]
+        assert url.startswith("data:image/jpeg;base64,")
+        assert "image/heic" not in url.lower()
+
+    def test_heic_data_url_part_converts_to_jpeg(self):
+        from agent.image_routing import normalize_heic_image_parts_in_messages
+
+        heic_bytes = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 32
+        heic_url = "data:image/heic;base64," + base64.b64encode(heic_bytes).decode("ascii")
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "scan"},
+                    {"type": "image_url", "image_url": {"url": heic_url}},
+                ],
+            }
+        ]
+
+        def fake_sips(args, **kwargs):
+            out_path = Path(args[-1])
+            out_path.write_bytes(b"\xff\xd8\xff" + b"jpeg")
+            return None
+
+        with (
+            patch("agent.image_normalization.sys.platform", "darwin"),
+            patch("agent.image_normalization.subprocess.run", side_effect=fake_sips),
+        ):
+            normalized = normalize_heic_image_parts_in_messages(messages)
+
+        url = normalized[0]["content"][1]["image_url"]["url"]
+        assert url.startswith("data:image/jpeg;base64,")
+        assert normalized is not messages
+        assert messages[0]["content"][1]["image_url"]["url"] == heic_url
+
+    def test_mislabeled_heic_input_image_data_url_converts_to_jpeg(self):
+        from agent.image_routing import normalize_heic_image_parts_in_messages
+
+        heic_bytes = b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00heicmif1" + b"\x00" * 32
+        mislabeled_url = "data:image/jpeg;base64," + base64.b64encode(heic_bytes).decode("ascii")
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": mislabeled_url},
+                ],
+            }
+        ]
+
+        def fake_sips(args, **kwargs):
+            out_path = Path(args[-1])
+            out_path.write_bytes(b"\xff\xd8\xff" + b"jpeg")
+            return None
+
+        with (
+            patch("agent.image_normalization.sys.platform", "darwin"),
+            patch("agent.image_normalization.subprocess.run", side_effect=fake_sips),
+        ):
+            normalized = normalize_heic_image_parts_in_messages(messages)
+
+        url = normalized[0]["content"][0]["image_url"]
+        assert url.startswith("data:image/jpeg;base64,")
+        assert url != mislabeled_url
+        assert messages[0]["content"][0]["image_url"] == mislabeled_url
+
 
 # ─── Oversize handling ───────────────────────────────────────────────────────
 

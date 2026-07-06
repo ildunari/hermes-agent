@@ -219,6 +219,52 @@ def test_is_aggregator_leaves_unknown_provider_non_aggregator():
     assert providers_mod.is_aggregator("not-a-provider") is False
 
 
+def test_vibeproxy_provider_dict_does_not_emit_custom_duplicate(monkeypatch):
+    """providers.vibeproxy compatibility entries must not shadow canonical vibeproxy."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", lambda *a, **kw: [])
+
+    providers = list_authenticated_providers(
+        current_provider="vibeproxy",
+        user_providers={
+            "vibeproxy": {
+                "name": "VibeProxy",
+                "api": "http://127.0.0.1:8484/v1",
+                "models": {
+                    "claude-opus-4-8": {},
+                    "claude-sonnet-4-6": {},
+                    "claude-haiku-4-5-20251001": {},
+                },
+            }
+        },
+        custom_providers=[
+            {
+                "provider_key": "vibeproxy",
+                "name": "VibeProxy",
+                "base_url": "http://127.0.0.1:8484/v1",
+                "models": {
+                    "claude-opus-4-8": {},
+                    "claude-sonnet-4-6": {},
+                    "claude-haiku-4-5-20251001": {},
+                },
+            }
+        ],
+        max_models=50,
+    )
+
+    vibe_rows = [p for p in providers if p["slug"] == "vibeproxy"]
+    duplicate_rows = [p for p in providers if p["slug"] == "custom:vibeproxy"]
+    assert len(vibe_rows) == 1
+    assert duplicate_rows == []
+    assert vibe_rows[0]["models"] == [
+        "claude-fable-5",
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+        "claude-haiku-4-5-20251001",
+    ]
+
+
 def test_is_routing_aggregator_excludes_flat_namespace_resellers():
     """opencode-go / opencode-zen stay ``is_aggregator=True`` (model-switch
     relies on it to search their flat bare-name catalog), but they are NOT
@@ -993,6 +1039,40 @@ def test_custom_providers_discover_models_false_string_is_normalised(monkeypatch
     assert gateway_prov["models"] == ["only-model"]
 
 
+def test_custom_providers_discover_models_force_uses_live_catalog_without_api_key(monkeypatch):
+    """``discover_models: force`` makes local gateways use live /models even
+    when config keeps a seed ``models:`` block for per-model overrides.
+    """
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    calls = []
+
+    def fake_fetch_api_models(api_key, base_url, **kwargs):
+        calls.append((api_key, base_url, kwargs))
+        return ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-4-6"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
+
+    providers = list_authenticated_providers(
+        current_provider="openai-codex",
+        custom_providers=[
+            {
+                "name": "vibe-proxy",
+                "base_url": "http://127.0.0.1:8318/v1",
+                "discover_models": "force",
+                "models": {"claude-opus-4-8": {"context_length": 500000}},
+            }
+        ],
+        max_models=50,
+    )
+
+    vibe = next(p for p in providers if p.get("name") == "vibe-proxy")
+    assert calls == [("", "http://127.0.0.1:8318/v1", {"headers": None})]
+    assert vibe["models"] == ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-4-6"]
+    assert vibe["total_models"] == 3
+
+
 def test_custom_providers_discover_models_false_list_of_dict_ids(monkeypatch):
     """List-of-dicts ``models: [{id: ...}]`` must be preserved as configured
     model IDs when discovery is disabled."""
@@ -1064,6 +1144,7 @@ def test_list_of_dict_models_prefers_id_over_label(monkeypatch):
 
     assert gateway_prov is not None
     assert gateway_prov["models"] == ["real-model-id"]
+
 
 
 def test_resolve_custom_provider_passes_key_env():

@@ -46,6 +46,12 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.image_normalization import (
+    normalize_image_data_url_for_vision,
+    normalize_image_file_for_vision,
+    sniff_image_mime_from_bytes,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +64,8 @@ _VALID_MODES = frozenset({"auto", "native", "text"})
 # them differently (send_document), and we don't want to attach a PDF as a
 # vision part.
 _IMAGE_EXTS = (
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif",
+    ".heic", ".heif", ".avif", ".ico", ".svg",
 )
 _IMAGE_EXT_PATTERN = "|".join(e.lstrip(".") for e in _IMAGE_EXTS)
 
@@ -622,9 +629,10 @@ def _file_to_data_url(path: Path) -> Optional[str]:
     Format compatibility IS handled here: if the sniffed MIME isn't one
     of ``_UNIVERSALLY_SUPPORTED_MIMES`` (i.e. it's something like AVIF,
     HEIC, BMP, TIFF, or ICO that some providers reject outright), we
-    transcode to PNG with Pillow before declaring media_type. This fixes
-    the user-visible "Could not process image" HTTP 400 from Anthropic on
-    Discord-attached AVIF/HEIC/BMP files.
+    normalize it before declaring media_type. HEIC/HEIF uses the shared
+    JPEG converter (macOS sips / pillow-heif); other raster formats transcode
+    to PNG with Pillow. This fixes the user-visible "Could not process image"
+    HTTP 400 from Anthropic on Discord-attached AVIF/HEIC/BMP files.
 
     Returns None if the file can't be read OR if the format isn't
     universally supported AND Pillow can't transcode it (Pillow missing,
@@ -632,6 +640,7 @@ def _file_to_data_url(path: Path) -> Optional[str]:
     caller reports those paths in ``skipped`` and the rest of the turn
     proceeds.
     """
+    cleanup_path: Optional[Path] = None
     try:
         from agent.file_safety import raise_if_read_blocked
 
@@ -645,28 +654,99 @@ def _file_to_data_url(path: Path) -> Optional[str]:
 
     try:
         raw = path.read_bytes()
-    except Exception as exc:
-        logger.warning("image_routing: failed to read %s — %s", path, exc)
-        return None
-    mime = _guess_mime(path, raw=raw)
-    if mime not in _UNIVERSALLY_SUPPORTED_MIMES:
-        transcoded = _transcode_to_png(raw)
-        if transcoded is None:
-            logger.warning(
-                "image_routing: %s is %s which is not accepted by all major "
-                "vision providers and could not be transcoded to PNG; "
-                "skipping this attachment.",
-                path, mime,
+        mime = _guess_mime(path, raw=raw)
+        encode_path, mime, cleanup = normalize_image_file_for_vision(path, mime)
+        if cleanup:
+            cleanup_path = encode_path
+            raw = encode_path.read_bytes()
+        elif mime not in _UNIVERSALLY_SUPPORTED_MIMES:
+            transcoded = _transcode_to_png(raw)
+            if transcoded is None:
+                logger.warning(
+                    "image_routing: %s is %s which is not accepted by all major "
+                    "vision providers and could not be transcoded to PNG; "
+                    "skipping this attachment.",
+                    path, mime,
+                )
+                return None
+            logger.info(
+                "image_routing: transcoded %s (%s) -> image/png for provider compatibility",
+                path.name, mime,
             )
-            return None
-        logger.info(
-            "image_routing: transcoded %s (%s) -> image/png for provider compatibility",
-            path.name, mime,
-        )
-        raw = transcoded
-        mime = "image/png"
-    b64 = base64.b64encode(raw).decode("ascii")
-    return f"data:{mime};base64,{b64}"
+            raw = transcoded
+            mime = "image/png"
+        b64 = base64.b64encode(raw).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except Exception as exc:
+        logger.warning("image_routing: failed to read/normalize %s — %s", path, exc)
+        return None
+    finally:
+        if cleanup_path is not None:
+            cleanup_path.unlink(missing_ok=True)
+
+
+def _normalized_image_part(part: Dict[str, Any]) -> tuple[Dict[str, Any], bool]:
+    """Normalize HEIC data URLs inside one image content part."""
+    ptype = part.get("type")
+    if ptype not in {"image_url", "input_image"}:
+        return part, False
+
+    image_ref = part.get("image_url")
+    if isinstance(image_ref, dict):
+        url_value = image_ref.get("url")
+        if not isinstance(url_value, str):
+            return part, False
+        normalized, changed = normalize_image_data_url_for_vision(url_value)
+        if not changed:
+            return part, False
+        new_ref = {**image_ref, "url": normalized}
+        return {**part, "image_url": new_ref}, True
+
+    if isinstance(image_ref, str):
+        normalized, changed = normalize_image_data_url_for_vision(image_ref)
+        if changed:
+            return {**part, "image_url": normalized}, True
+
+    return part, False
+
+
+def _normalize_heic_content_value(value: Any) -> tuple[Any, bool]:
+    if isinstance(value, list):
+        changed = False
+        new_items = []
+        for item in value:
+            new_item, item_changed = _normalize_heic_content_value(item)
+            changed = changed or item_changed
+            new_items.append(new_item)
+        return (new_items, True) if changed else (value, False)
+
+    if isinstance(value, dict):
+        image_part, image_changed = _normalized_image_part(value)
+        if image_changed:
+            return image_part, True
+
+        changed = False
+        new_dict: Dict[str, Any] = {}
+        for key, item in value.items():
+            new_item, item_changed = _normalize_heic_content_value(item)
+            changed = changed or item_changed
+            new_dict[key] = new_item
+        return (new_dict, True) if changed else (value, False)
+
+    return value, False
+
+
+def normalize_heic_image_parts_in_messages(api_messages: list) -> list:
+    """Convert HEIC/HEIF data-URL image parts in API messages to JPEG.
+
+    Local file attachments are normalized earlier by ``build_native_content_parts``.
+    This guard covers WebUI/API/Desktop clients that submit multimodal content
+    directly as ``data:image/heic;base64,...`` or mislabeled HEIC data URLs.
+    """
+    normalized, changed = _normalize_heic_content_value(api_messages)
+    if changed:
+        logger.info("image_routing: normalized HEIC/HEIF data URL image part(s) to JPEG")
+    return normalized if changed else api_messages
 
 
 def build_native_content_parts(

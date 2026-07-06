@@ -110,7 +110,7 @@ def test_handle_image_generate_postprocesses_plugin_result(monkeypatch, tmp_path
     monkeypatch.setattr(
         image_generation_tool,
         "_dispatch_to_plugin_provider",
-        lambda prompt, aspect_ratio, **kw: json.dumps({"success": True, "image": str(image_path)}),
+        lambda prompt, aspect_ratio, **kwargs: json.dumps({"success": True, "image": str(image_path)}),
     )
 
     result = json.loads(
@@ -122,3 +122,36 @@ def test_handle_image_generate_postprocesses_plugin_result(monkeypatch, tmp_path
 
     assert seen_task_ids == ["plugin-task"]
     assert result["agent_visible_image"] == "/home/remote/.hermes/cache/images/plugin.png"
+
+
+def test_handle_image_generate_forwards_reference_images(monkeypatch):
+    from tools import image_generation_tool
+
+    seen = {}
+
+    def fake_dispatch(prompt, aspect_ratio, *, image_url=None, reference_image_urls=None):
+        seen["prompt"] = prompt
+        seen["aspect_ratio"] = aspect_ratio
+        seen["image_url"] = image_url
+        seen["reference_image_urls"] = reference_image_urls
+        return json.dumps({"success": True, "image": "https://example.com/out.png"})
+
+    monkeypatch.setattr(image_generation_tool, "_dispatch_to_plugin_provider", fake_dispatch)
+    result = json.loads(
+        image_generation_tool._handle_image_generate(
+            {
+                "prompt": "keep the same bird, make wings down",
+                "aspect_ratio": "square",
+                "image_url": "/tmp/base.png",
+                "reference_image_urls": ["https://example.com/style.png", 123, ""],
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert seen == {
+        "prompt": "keep the same bird, make wings down",
+        "aspect_ratio": "square",
+        "image_url": "/tmp/base.png",
+        "reference_image_urls": ["https://example.com/style.png"],
+    }

@@ -7,6 +7,7 @@ and asserts the output is identical. This catches any behavioral drift between t
 import pytest
 from agent.transports.chat_completions import ChatCompletionsTransport
 from providers import get_provider_profile
+from providers.base import ProviderProfile
 
 
 @pytest.fixture
@@ -20,6 +21,36 @@ def _msgs():
 
 def _max_tokens_fn(n):
     return {"max_completion_tokens": n}
+
+
+class TestCustomProviderProfile:
+    def test_custom_named_provider_uses_custom_profile(self):
+        assert get_provider_profile("custom:RTX").name == "custom"
+
+    def test_qwopus_disables_llamacpp_thinking_for_plain_text(self, transport):
+        kwargs = transport.build_kwargs(
+            model="qwopus-gpu",
+            messages=_msgs(),
+            tools=None,
+            provider_profile=get_provider_profile("custom:RTX"),
+            base_url="http://100.93.10.54:8010/v1",
+        )
+
+        assert kwargs["extra_body"]["think"] is False
+        assert kwargs["extra_body"]["enable_thinking"] is False
+        assert kwargs["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+        assert kwargs["extra_body"]["reasoning"] == {"enabled": False}
+
+    def test_qwopus_keeps_thinking_template_for_tool_turns(self, transport):
+        kwargs = transport.build_kwargs(
+            model="qwopus-gpu",
+            messages=_msgs(),
+            tools=[{"type": "function", "function": {"name": "session_search", "parameters": {"type": "object"}}}],
+            provider_profile=get_provider_profile("custom:RTX"),
+            base_url="http://100.93.10.54:8010/v1",
+        )
+
+        assert "extra_body" not in kwargs
 
 
 class TestNvidiaProfileParity:
@@ -294,3 +325,24 @@ class TestRequestOverridesParity:
             request_overrides={"top_p": 0.9},
         )
         assert kw["top_p"] == 0.9
+
+
+class TestProviderFinalizeHook:
+    def test_finalize_runs_after_request_overrides(self, transport):
+        class FinalizingProfile(ProviderProfile):
+            def finalize_api_kwargs(self, api_kwargs, *, model=None, **context):
+                cleaned = dict(api_kwargs)
+                cleaned.pop("top_p", None)
+                cleaned["finalized_model"] = model
+                return cleaned
+
+        kw = transport.build_kwargs(
+            model="claude-opus-4-8",
+            messages=_msgs(),
+            tools=None,
+            provider_profile=FinalizingProfile(name="test-finalizer"),
+            request_overrides={"top_p": 0.9},
+        )
+
+        assert "top_p" not in kw
+        assert kw["finalized_model"] == "claude-opus-4-8"
