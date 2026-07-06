@@ -329,6 +329,9 @@ class TestMigrate:
         # profile name (prefixed with ":"). NOT a [permissions] section
         # (which is for *user-defined* profiles with structured fields).
         assert 'default_permissions = ":workspace"' in text
+        import tomllib
+        parsed = tomllib.loads(text)
+        assert parsed.get("default_permissions") == ":workspace"
         assert report.wrote_permissions_default == ":workspace"
 
     def test_explicit_none_permissions_skips_block(self, tmp_path):
@@ -835,18 +838,72 @@ class TestHermesHomeLeakGuard:
             f"{env.get('HERMES_HOME')!r}"
         )
 
-    def test_real_hermes_home_propagates(self, monkeypatch, tmp_path):
-        """A legitimate HERMES_HOME (not a tempdir path) DOES propagate so the
-        MCP subprocess sees the same config as the parent CLI."""
-        # Use a path that looks real — under /Users or /home, not /var/folders.
-        # We can't easily create one in the test, so just use a stable path
-        # outside any tempdir-detector needle. The detector checks for tempdir
-        # markers, not for path existence.
-        real_path = "/Users/alice/.hermes"
-        monkeypatch.setenv("HERMES_HOME", real_path)
+    def test_named_profile_home_not_burned_into_mcp_env(self, monkeypatch):
+        """Codex config is global, so even a legitimate profile HERMES_HOME
+        must not be written into the static hermes-tools MCP entry. The child
+        should inherit the live launcher env for the current profile instead."""
+        profile_home = "/Users/alice/.hermes/profiles/bookie"
+        monkeypatch.setenv("HERMES_HOME", profile_home)
         entry = _build_hermes_tools_mcp_entry()
         env = entry.get("env", {})
-        assert env.get("HERMES_HOME") == real_path
+        assert "HERMES_HOME" not in env
+
+    def test_migrate_removes_stale_unmanaged_hermes_tools_env(self, monkeypatch, tmp_path):
+        """A prior global Codex config may already contain an unmanaged
+        hermes-tools block with a baked profile HERMES_HOME. Re-running migrate
+        must replace it with the managed block and leave no stale env table."""
+        target = tmp_path / "config.toml"
+        target.write_text(
+            'model = "gpt-5.5"\n'
+            '\n'
+            '[mcp_servers."hermes-tools"]\n'
+            'command = "/old/python"\n'
+            'args = ["-m", "agent.transports.hermes_tools_mcp_server"]\n'
+            '\n'
+            '[mcp_servers."hermes-tools".env]\n'
+            'HERMES_HOME = "/Users/Kosta/.hermes/profiles/gpt"\n'
+            'HERMES_QUIET = "1"\n'
+            '\n'
+            '[mcp_servers.context7]\n'
+            'command = "npx"\n'
+            'args = ["-y", "@upstash/context7-mcp"]\n'
+        )
+        monkeypatch.setenv("HERMES_HOME", "/Users/Kosta/.hermes/profiles/bookie")
+
+        report = migrate({}, codex_home=tmp_path, discover_plugins=False)
+        assert report.written
+        text = target.read_text()
+        assert text.count("[mcp_servers.hermes-tools]") == 1
+        assert "[mcp_servers.hermes-tools.env]" not in text
+        assert 'HERMES_HOME = "/Users/Kosta/.hermes/profiles/gpt"' not in text
+        assert "[mcp_servers.context7]" in text
+        import tomllib
+        tomllib.loads(text)
+
+    def test_migrate_opt_out_removes_stale_unmanaged_hermes_tools(self, tmp_path):
+        """Opting out should leave no hermes-tools callback at all, including
+        stale unmanaged copies from older migrations."""
+        target = tmp_path / "config.toml"
+        target.write_text(
+            '[mcp_servers."hermes-tools"]\n'
+            'command = "/old/python"\n'
+            '\n'
+            '[mcp_servers."hermes-tools".env]\n'
+            'HERMES_HOME = "/Users/Kosta/.hermes/profiles/gpt"\n'
+            '\n'
+            '[mcp_servers.context7]\n'
+            'command = "npx"\n'
+        )
+
+        migrate({}, codex_home=tmp_path, discover_plugins=False, expose_hermes_tools=False)
+        text = target.read_text()
+        assert "hermes-tools" not in text
+        assert "HERMES_HOME" not in text
+        assert "[mcp_servers.context7]" in text
+        import tomllib
+        parsed = tomllib.loads(text)
+        assert "hermes-tools" not in parsed.get("mcp_servers", {})
+        assert "context7" in parsed.get("mcp_servers", {})
 
     def test_unset_hermes_home_omits_env_key(self, monkeypatch):
         """When HERMES_HOME is unset in the environment, the MCP entry MUST

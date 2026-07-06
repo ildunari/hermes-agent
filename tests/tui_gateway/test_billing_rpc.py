@@ -180,6 +180,14 @@ def test_billing_auto_reload_validation_error_envelope(monkeypatch):
     assert res["ok"] is False and res["error"] == "validation_failed"
 
 
+def test_billing_auto_reload_disable_allows_missing_amounts(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(nb, "patch_auto_top_up", lambda **kw: seen.update(kw) or {"ok": True})
+    res = _call("billing.auto_reload", {"enabled": False})
+    assert res["ok"] is True
+    assert seen == {"enabled": False, "threshold": None, "top_up_amount": None}
+
+
 def test_billing_auto_reload_requires_fields():
     res = _call("billing.auto_reload", {"enabled": True})
     assert res["ok"] is False and res["error"] == "invalid_request"

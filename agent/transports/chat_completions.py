@@ -423,10 +423,16 @@ class ChatCompletionsTransport(ProviderTransport):
                 if gh_reasoning is not None:
                     extra_body["reasoning"] = gh_reasoning
             else:
-                _effort = "medium"
+                _reasoning_effort = "medium"
                 if reasoning_config and isinstance(reasoning_config, dict):
-                    _effort = reasoning_config.get("effort", "medium") or "medium"
-                extra_body["reasoning"] = {"enabled": True, "effort": _effort}
+                    _e = (reasoning_config.get("effort") or "").strip().lower()
+                    if _e in {"minimal", "low"}:
+                        _reasoning_effort = "low"
+                    elif _e in {"medium"}:
+                        _reasoning_effort = "medium"
+                    elif _e in {"high", "xhigh"}:
+                        _reasoning_effort = "high"
+                extra_body["reasoning"] = {"enabled": True, "effort": _reasoning_effort}
 
         if provider_name == "gemini":
             raw_thinking_config = _build_gemini_thinking_config(model, reasoning_config)
@@ -535,6 +541,7 @@ class ChatCompletionsTransport(ProviderTransport):
                 base_url=params.get("base_url"),
                 ollama_num_ctx=params.get("ollama_num_ctx"),
                 session_id=params.get("session_id"),
+                tools_present=bool(tools),
             )
         )
         api_kwargs.update(top_level_from_profile)
@@ -595,6 +602,12 @@ class ChatCompletionsTransport(ProviderTransport):
                 }
             if extra_body:
                 api_kwargs["extra_body"] = extra_body
+
+        api_kwargs = profile.finalize_api_kwargs(
+            api_kwargs,
+            model=model,
+            params=params,
+        )
 
         return api_kwargs
 

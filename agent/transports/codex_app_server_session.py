@@ -203,6 +203,9 @@ class CodexAppServerSession:
         cwd: Optional[str] = None,
         codex_bin: str = "codex",
         codex_home: Optional[str] = None,
+        codex_profile: Optional[str] = None,
+        codex_config_overrides: Optional[list[str]] = None,
+        codex_extra_args: Optional[list[str]] = None,
         permission_profile: Optional[str] = None,
         approval_callback: Optional[Callable[..., str]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
@@ -211,7 +214,11 @@ class CodexAppServerSession:
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
-        self._codex_home = codex_home
+        # Default to Kosta's normal Codex home unless explicitly overridden.
+        self._codex_home = codex_home or os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+        self._codex_profile = codex_profile
+        self._codex_config_overrides = list(codex_config_overrides or [])
+        self._codex_extra_args = list(codex_extra_args or [])
         self._permission_profile = (
             permission_profile or _HERMES_TO_CODEX_PERMISSION_PROFILE.get(
                 os.environ.get("HERMES_TERMINAL_SECURITY_MODE", "auto"),
@@ -244,12 +251,17 @@ class CodexAppServerSession:
             return self._thread_id
         if self._client is None:
             self._client = self._client_factory(
-                codex_bin=self._codex_bin, codex_home=self._codex_home
+                codex_bin=self._codex_bin,
+                codex_home=self._codex_home,
+                config_profile=self._codex_profile,
+                config_overrides=self._codex_config_overrides,
+                extra_args=self._codex_extra_args or None,
             )
         self._client.initialize(
             client_name="hermes",
             client_title="Hermes Agent",
             client_version=_get_hermes_version(),
+            timeout=30,
         )
         # Permission selection is intentionally NOT sent on thread/start.
         # Two reasons (live-tested against codex 0.130.0):
@@ -267,7 +279,7 @@ class CodexAppServerSession:
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
         params: dict[str, Any] = {"cwd": self._cwd}
-        result = self._client.request("thread/start", params, timeout=15)
+        result = self._client.request("thread/start", params, timeout=30)
         # Cross-fill thread.id/sessionId — different codex versions have
         # serialized this under either key. Mirrors openclaw beta.8's
         # tolerance fix so future codex drops/renames don't KeyError us

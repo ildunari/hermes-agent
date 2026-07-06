@@ -304,6 +304,44 @@ def render_codex_toml_section(
     return "\n".join(out) + "\n"
 
 
+def _existing_plugin_tables(toml_text: str) -> set[str]:
+    """Return qualified plugin table names already present in user config."""
+    existing: set[str] = set()
+    prefix = "[plugins."
+    for line in toml_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(prefix) or not stripped.endswith("]"):
+            continue
+        key = stripped[len(prefix):-1].strip()
+        if key.startswith('"') and key.endswith('"'):
+            key = key[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+        existing.add(key)
+    return existing
+
+
+def _set_top_level_default_permissions(toml_text: str, profile: Optional[str]) -> str:
+    """Set or remove Codex's top-level default_permissions key.
+
+    TOML bare keys belong to the current table after the first `[table]`, so
+    writing `default_permissions` inside the appended managed block would nest
+    it under the preceding table and Codex would ignore it. Keep this key in
+    the root preamble instead.
+    """
+    lines = toml_text.splitlines(keepends=True)
+    first_table = next((i for i, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines))
+
+    # Remove existing root-level default_permissions only; leave user-defined
+    # table-local keys alone.
+    root = [line for line in lines[:first_table] if not line.lstrip().startswith("default_permissions")]
+    rest = lines[first_table:]
+    if profile:
+        normalized = profile if profile.startswith(":") else f":{profile}"
+        root.append(f"default_permissions = {_format_toml_value(normalized)}\n")
+        if rest and root and root[-1].strip() and rest[0].strip():
+            root.append("\n")
+    return "".join(root + rest)
+
+
 def _insert_managed_block_at_top_level(user_text: str, managed_block: str) -> str:
     """Insert Hermes' managed Codex TOML block while keeping root keys root-scoped.
 
@@ -376,6 +414,80 @@ def _strip_unmanaged_plugin_tables(toml_text: str) -> str:
                 continue
         if in_plugin_table:
             # Swallow keys/comments/blanks until the next table header.
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def _toml_table_segments(stripped_header: str) -> list[str]:
+    """Return dotted TOML table path segments for a simple table header."""
+    head = stripped_header.split("#", 1)[0].strip()
+    if head.startswith("[[") and head.endswith("]]"):
+        inner = head[2:-2].strip()
+    elif head.startswith("[") and head.endswith("]"):
+        inner = head[1:-1].strip()
+    else:
+        return []
+
+    segments: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    escape = False
+    for ch in inner:
+        if quote:
+            buf.append(ch)
+            if quote == '"' and ch == "\\" and not escape:
+                escape = True
+                continue
+            if ch == quote and not escape:
+                quote = None
+            escape = False
+            continue
+        if ch in {'"', "'"}:
+            quote = ch
+            buf.append(ch)
+            continue
+        if ch == ".":
+            segments.append("".join(buf).strip())
+            buf = []
+            continue
+        buf.append(ch)
+    if buf or inner.endswith("."):
+        segments.append("".join(buf).strip())
+
+    normalized: list[str] = []
+    for part in segments:
+        if len(part) >= 2 and part[0] == part[-1] and part[0] in {'"', "'"}:
+            part = part[1:-1]
+        normalized.append(part)
+    return normalized
+
+
+def _is_hermes_tools_table_header(stripped_header: str) -> bool:
+    segments = _toml_table_segments(stripped_header)
+    return len(segments) >= 2 and segments[:2] == ["mcp_servers", "hermes-tools"]
+
+
+def _strip_unmanaged_hermes_tools_tables(toml_text: str) -> str:
+    """Remove stale unmanaged ``[mcp_servers.hermes-tools]`` tables.
+
+    Hermes owns this MCP callback server when ``expose_hermes_tools`` is true.
+    Older migrations could leave a duplicate unmanaged table outside the managed
+    block, including a nested ``[mcp_servers.hermes-tools.env]`` table with a
+    baked-in profile ``HERMES_HOME``. If we only insert the fresh managed block,
+    Codex still sees duplicate table headers or the stale env. Strip that one
+    server and its subtables while preserving all other user MCP entries.
+    """
+    lines = toml_text.splitlines(keepends=True)
+    out: list[str] = []
+    in_hermes_tools_table = False
+    for line in lines:
+        stripped = line.lstrip()
+        if _looks_like_table_header(stripped):
+            in_hermes_tools_table = _is_hermes_tools_table_header(stripped)
+            if in_hermes_tools_table:
+                continue
+        if in_hermes_tools_table:
             continue
         out.append(line)
     return "".join(out)
@@ -561,29 +673,21 @@ def _build_hermes_tools_mcp_entry() -> dict:
 
     The command runs the worktree's Python via the current sys.executable
     so a hermes installed under /opt/, /usr/local/, or a venv all work.
-    HERMES_HOME and PYTHONPATH are passed through so the spawned process
-    sees the same config + module layout the user is running."""
+    PYTHONPATH is passed through so the spawned process sees the same module
+    layout the user is running."""
     import sys
 
     env: dict[str, str] = {}
-    # HERMES_HOME passes through IF SET so the MCP subprocess sees the same
-    # config / auth / sessions DB as the parent CLI. Read from os.environ
-    # (not get_hermes_home()) on purpose: when the env var is unset we want
-    # codex's subprocess to inherit whatever HERMES_HOME its launcher sets
-    # at runtime (systemd unit, gateway, kanban dispatcher, custom shell),
-    # rather than burning the migrate-time resolved default into config.toml
-    # — that would override the launcher's HERMES_HOME and pin the subprocess
-    # to the wrong profile.
+    # Do NOT write HERMES_HOME into ~/.codex/config.toml. That file is global,
+    # while Hermes profiles are per launcher/session. If migration runs under
+    # one named profile (for example GPT), baking that path into the hermes-tools
+    # MCP entry makes every other profile's Codex app-server turn call back into
+    # the wrong Hermes home. Leave HERMES_HOME absent here so Codex's MCP child
+    # inherits the live Codex launcher environment instead.
     #
-    # The pytest-tempdir guard below catches the issue #26250 Bug C scenario:
-    # a sibling test's monkeypatch.setenv("HERMES_HOME", tmp_path) would
-    # otherwise leak a transient pytest tempdir into the user's real
-    # ~/.codex/config.toml and silently brick codex once the tempdir is GC'd.
-    hermes_home = os.environ.get("HERMES_HOME") or ""
-    if hermes_home and _looks_like_test_tempdir(hermes_home):
-        hermes_home = ""
-    if hermes_home:
-        env["HERMES_HOME"] = hermes_home
+    # _looks_like_test_tempdir is retained for backwards-compatible tests and
+    # as documentation of the old failure mode: static profile paths in Codex
+    # config are brittle, whether they are pytest tempdirs or real profiles.
     # PYTHONPATH passes through so a worktree-launched hermes finds the
     # branch's modules instead of the installed package.
     pythonpath = os.environ.get("PYTHONPATH")
@@ -666,12 +770,27 @@ def migrate(
             report.skipped_keys_per_server[str(name)] = skipped
         report.migrated.append(str(name))
 
+    # Read existing codex config if any and strip the prior managed block before
+    # deciding which native plugin tables to write; many Codex configs already
+    # have [plugins.*] entries, and TOML forbids redeclaring them.
+    existing = ""
+    without_managed = ""
+    if target.exists():
+        try:
+            existing = target.read_text(encoding="utf-8")
+        except Exception as exc:
+            report.errors.append(f"could not read {target}: {exc}")
+            return report
+        without_managed = _strip_existing_managed_block(existing)
+        without_managed = _strip_unmanaged_hermes_tools_tables(without_managed)
+    existing_plugins = _existing_plugin_tables(without_managed)
+
     # Discover installed Codex curated plugins. Best-effort — never blocks
     # the migration if codex is unreachable or the RPC fails.
     plugins: list[dict] = []
     plugin_query_succeeded = False
     if discover_plugins and not dry_run:
-        plugins, plugin_err = _query_codex_plugins(codex_home=codex_home)
+        discovered_plugins, plugin_err = _query_codex_plugins(codex_home=codex_home)
         if plugin_err:
             report.plugin_query_error = plugin_err
         else:
@@ -679,8 +798,10 @@ def migrate(
             # That means we own [plugins.*] for this re-render and can safely
             # strip any pre-existing tables outside the managed block.
             plugin_query_succeeded = True
-        for p in plugins:
-            report.migrated_plugins.append(f"{p['name']}@{p['marketplace']}")
+        for p in discovered_plugins:
+            qualified = f"{p['name']}@{p['marketplace']}"
+            report.migrated_plugins.append(qualified)
+            plugins.append(p)
 
     # Track whether we wrote a default permission profile so the report
     # surfaces it to the user.
@@ -698,32 +819,24 @@ def migrate(
         if "hermes-tools" not in report.migrated:
             report.migrated.append("hermes-tools")
 
-    # Build the new managed block
+    # Build the new managed block. default_permissions is handled separately
+    # as a true root key; if rendered in the appended block TOML would nest it
+    # under the preceding table.
     managed_block = render_codex_toml_section(
         translated, plugins=plugins,
-        default_permission_profile=default_permission_profile,
+        default_permission_profile=None,
     )
 
-    # Read existing codex config if any, strip the prior managed block,
-    # append the new one.
-    if target.exists():
-        try:
-            existing = target.read_text(encoding="utf-8")
-        except Exception as exc:
-            report.errors.append(f"could not read {target}: {exc}")
-            return report
-        without_managed = _strip_existing_managed_block(existing)
-        # Bug B: when plugin/list ran authoritatively, codex's own
-        # [plugins."<name>@<marketplace>"] tables outside our managed block
-        # would survive _strip_existing_managed_block and then collide with
-        # the entries we re-emit inside the managed block — producing
-        # duplicate-table-header parse errors on codex's next startup. Drop
-        # those pre-existing tables since plugin/list is the source of truth.
+    # Insert the new managed block without accidentally nesting root keys under
+    # a preceding user table, and strip duplicate plugin tables when Codex gave
+    # us an authoritative plugin list.
+    if without_managed:
         if plugin_query_succeeded:
             without_managed = _strip_unmanaged_plugin_tables(without_managed)
         new_text = _insert_managed_block_at_top_level(without_managed, managed_block)
+        new_text = _set_top_level_default_permissions(new_text, default_permission_profile)
     else:
-        new_text = managed_block
+        new_text = _set_top_level_default_permissions(managed_block, default_permission_profile)
 
     if dry_run:
         return report
