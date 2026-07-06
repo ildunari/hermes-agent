@@ -35,6 +35,7 @@ from agent.auxiliary_client import (
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
     _pool_runtime_base_url,
+    _reset_aux_unhealthy_cache,
 )
 
 
@@ -954,6 +955,7 @@ class TestResolveProviderClientMoA:
         assert seen == {"explicit_api_key": None, "model": None}
 
     def test_auto_with_moa_main_returns_aggregator_model_not_preset_name(self):
+        _reset_aux_unhealthy_cache()
         seen = {}
 
         def fake_try_openrouter(*, explicit_api_key=None, model=None):
