@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, AsyncMock, ANY
 
 import pytest
 
@@ -3557,7 +3557,13 @@ class TestAuxiliaryAuthRefreshRetry:
             assert _refresh_provider_credentials("anthropic") is True
 
         mock_refresh_oauth.assert_called_once_with("refresh-token", use_json=False)
-        mock_write.assert_called_once_with("fresh-token", "refresh-token-2", 9999999999999)
+        mock_write.assert_called_once_with(
+            "fresh-token",
+            "refresh-token-2",
+            9999999999999,
+            scopes=ANY,
+        )
+        assert "user:inference" in mock_write.call_args.kwargs["scopes"]
         stale_client.close.assert_called_once()
 
     @pytest.mark.asyncio
