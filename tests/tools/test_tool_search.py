@@ -45,6 +45,9 @@ class TestConfigParsing:
         cfg = ToolSearchConfig.from_raw(None)
         assert cfg.enabled == "auto"
         assert cfg.threshold_pct == 10.0
+        assert cfg.directory_in_prompt is True
+        assert cfg.directory_max_entries == 80
+        assert cfg.directory_description_chars == 180
 
     def test_bool_true_maps_to_auto(self):
         from tools.tool_search import ToolSearchConfig
@@ -96,7 +99,8 @@ class TestClassification:
         for core_name in ["terminal", "read_file", "write_file", "patch",
                           "search_files", "todo", "memory", "browser_navigate",
                           "web_search", "session_search", "clarify",
-                          "execute_code", "delegate_task", "send_message"]:
+                          "execute_code", "delegate_task", "send_message",
+                          "image_process"]:
             assert not is_deferrable_tool_name(core_name), (
                 f"Core tool '{core_name}' must NEVER be deferrable"
             )
@@ -344,6 +348,102 @@ class TestBridgeDispatch:
         })
         assert err is not None
         assert "bridge tool" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Prompt directory formatting
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredToolDirectory:
+    @staticmethod
+    def _register(name, toolset, description):
+        from tools.registry import registry
+
+        def _handler(args, task_id=None, **kw):
+            return json.dumps({"ok": True, "tool": name})
+
+        registry.register(
+            name=name,
+            handler=_handler,
+            schema=_td(name, description, {"query": {"type": "string"}})["function"],
+            toolset=toolset,
+        )
+
+    def test_directory_lists_mcp_and_plugin_sources(self):
+        from tools.tool_search import format_deferred_tool_directory, ToolSearchConfig
+        import model_tools
+
+        self._register(
+            "mcp_dir_x_read_post",
+            "mcp-dir-xapi",
+            "Read exact X posts through the X API. Supports post lookup and author metadata.",
+        )
+        self._register(
+            "dir_grok_research",
+            "x_search",
+            "Research X threads and web pages through Grok. Can summarize users, posts, and media.",
+        )
+        defs = model_tools.get_tool_definitions(
+            enabled_toolsets=["mcp-dir-xapi", "x_search"],
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+
+        rendered = format_deferred_tool_directory(
+            defs,
+            config=ToolSearchConfig.from_raw({"enabled": "on", "directory_description_chars": 90}),
+        )
+
+        assert "# Deferred tool directory" in rendered
+        assert "mcp_dir_x_read_post [mcp-dir-xapi]" in rendered
+        assert "dir_grok_research [x_search]" in rendered
+        assert "Read exact X posts" in rendered
+        assert "Research X threads" in rendered
+
+    def test_directory_respects_scope_and_omits_removed_tools(self):
+        from tools.tool_search import format_deferred_tool_directory, ToolSearchConfig
+        import model_tools
+
+        self._register("mcp_dir_scope_in", "mcp-dir-scope-in", "In-scope MCP action.")
+        self._register("mcp_dir_scope_out", "mcp-dir-scope-out", "Out-of-scope MCP action.")
+        defs = model_tools.get_tool_definitions(
+            enabled_toolsets=["mcp-dir-scope-in"],
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+
+        rendered = format_deferred_tool_directory(
+            defs,
+            config=ToolSearchConfig.from_raw({"enabled": "on"}),
+        )
+
+        assert "mcp_dir_scope_in" in rendered
+        assert "mcp_dir_scope_out" not in rendered
+
+    def test_directory_can_be_disabled_and_truncates(self):
+        from tools.tool_search import format_deferred_tool_directory, ToolSearchConfig
+        import model_tools
+
+        for i in range(3):
+            self._register(f"mcp_dir_many_{i}", "mcp-dir-many", f"Tool {i} does useful MCP work.")
+        defs = model_tools.get_tool_definitions(
+            enabled_toolsets=["mcp-dir-many"],
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+
+        disabled = format_deferred_tool_directory(
+            defs,
+            config=ToolSearchConfig.from_raw({"enabled": "on", "directory_in_prompt": False}),
+        )
+        truncated = format_deferred_tool_directory(
+            defs,
+            config=ToolSearchConfig.from_raw({"enabled": "on", "directory_max_entries": 2}),
+        )
+
+        assert disabled == ""
+        assert "… 1 more deferred tools" in truncated
 
 
 # ---------------------------------------------------------------------------

@@ -95,10 +95,83 @@ def get_safe_write_roots() -> set[str]:
     return roots
 
 
+def _configured_denied_paths() -> list[tuple[str, str | None]]:
+    """Return config.yaml file-access denied paths as (resolved_path, reason).
+
+    Shape:
+
+        file_access:
+          denied_paths:
+            - /private/path
+            - path: /private/path
+              reason: why this profile should not read/write it
+
+    This is defense-in-depth, not a sandbox. The terminal tool runs as the
+    same OS user and can still bypass it, but file tools, context attachments,
+    and provider local-file loading share this guard.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+    except Exception:
+        return []
+
+    section = cfg.get("file_access")
+    if not isinstance(section, dict):
+        return []
+    raw_entries = section.get("denied_paths") or section.get("deny_paths") or []
+    if isinstance(raw_entries, (str, os.PathLike)):
+        raw_entries = [raw_entries]
+    if not isinstance(raw_entries, list):
+        return []
+
+    denied: list[tuple[str, str | None]] = []
+    for entry in raw_entries:
+        reason: str | None = None
+        raw_path: object = entry
+        if isinstance(entry, dict):
+            raw_path = entry.get("path")
+            raw_reason = entry.get("reason")
+            if isinstance(raw_reason, str) and raw_reason.strip():
+                reason = raw_reason.strip()
+        if not isinstance(raw_path, (str, os.PathLike)):
+            continue
+        text = os.path.expandvars(os.path.expanduser(str(raw_path))).strip()
+        if not text:
+            continue
+        try:
+            denied.append((os.path.realpath(text), reason))
+        except (OSError, ValueError):
+            continue
+    return denied
+
+
+def get_configured_denied_path_error(path: str, *, operation: str = "access") -> Optional[str]:
+    """Return a model-facing error if *path* is under config-denied paths."""
+    try:
+        resolved = os.path.realpath(os.path.expandvars(os.path.expanduser(str(path))))
+    except (OSError, ValueError):
+        return None
+    for denied_path, reason in _configured_denied_paths():
+        if resolved == denied_path or resolved.startswith(denied_path + os.sep):
+            reason_text = f" Reason: {reason}." if reason else ""
+            return (
+                f"Access denied: {path} is blocked for {operation} by "
+                f"config.yaml file_access.denied_paths.{reason_text} "
+                "(Defense-in-depth — not a security boundary; the terminal "
+                "tool can still bypass.)"
+            )
+    return None
+
+
 def is_write_denied(path: str) -> bool:
     """Return True if path is blocked by the write denylist or safe root."""
     home = os.path.realpath(os.path.expanduser("~"))
     resolved = os.path.realpath(os.path.expanduser(str(path)))
+
+    if get_configured_denied_path_error(resolved, operation="write"):
+        return True
 
     if resolved in build_write_denied_paths(home):
         return True
@@ -218,6 +291,12 @@ def get_read_block_error(path: str) -> Optional[str]:
                 hermes_dirs.append(real)
         except Exception:
             continue
+
+    # Profile-configured path denies. Used for privacy-sensitive local state
+    # that should be hidden from specific profiles, e.g. guest sessions.
+    configured_error = get_configured_denied_path_error(str(resolved), operation="read")
+    if configured_error:
+        return configured_error
 
     # Skills .hub: prompt-injection carriers.
     for hd in hermes_dirs:

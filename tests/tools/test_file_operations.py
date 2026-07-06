@@ -56,6 +56,16 @@ class TestIsWriteDenied:
         path = str(tmp_path / "safe_file.txt")
         assert _is_write_denied(path) is False
 
+    def test_configured_denied_path_blocks_write(self, monkeypatch, tmp_path):
+        private_root = tmp_path / "contacts"
+        private_root.mkdir()
+        target = private_root / "profiles" / "joe.md"
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"file_access": {"denied_paths": [str(private_root)]}},
+        )
+        assert _is_write_denied(str(target)) is True
+
     def test_project_file_allowed(self):
         assert _is_write_denied("/tmp/project/main.py") is False
 

@@ -178,6 +178,7 @@ class TestDevicePathBlocking(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("device file", result["error"])
 
+
     @patch("tools.file_tools._get_file_ops")
     def test_read_file_tool_rejects_device_symlink_before_io(self, mock_ops):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -219,6 +220,25 @@ class TestDevicePathBlocking(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("device file", result["error"])
         mock_ops.assert_not_called()
+
+
+class TestConfiguredReadDeny(unittest.TestCase):
+    def test_read_file_tool_blocks_denied_docx_before_extraction(self):
+        """Configured denies must run before structured-document extraction."""
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
+            private_root = os.path.join(tmpdir, "contacts")
+            os.makedirs(private_root)
+            denied_docx = os.path.join(private_root, "secret.docx")
+            with open(denied_docx, "wb") as handle:
+                handle.write(b"not a real docx, but the guard must fire before extraction")
+
+            config = {"file_access": {"denied_paths": [private_root]}}
+            with patch("hermes_cli.config.load_config", return_value=config):
+                result = json.loads(read_file_tool(denied_docx, task_id="deny_docx_test"))
+
+        self.assertIn("error", result)
+        self.assertIn("file_access.denied_paths", result["error"])
+        self.assertNotIn("extracted_document", result)
 
 
 # ---------------------------------------------------------------------------

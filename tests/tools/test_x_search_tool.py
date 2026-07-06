@@ -723,3 +723,202 @@ def test_x_search_not_degraded_when_no_filters_active(monkeypatch):
     assert result["degraded"] is False
     assert result["degraded_reason"] is None
 
+
+
+def test_grok_research_help_mentions_x_web_and_xurl():
+    from tools.x_search_tool import grok_research_tool
+
+    result = json.loads(grok_research_tool(action="help"))
+
+    assert result["success"] is True
+    assert "x" in result["sources"]
+    assert "web" in result["sources"]
+    assert any("x_twitter/xurl" in line for line in result["routing"])
+
+
+def test_grok_research_routes_x_url_to_x_search(monkeypatch):
+    from tools.x_search_tool import grok_research_tool
+
+    captured = {}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse({"output_text": "Thread summary", "citations": []})
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    result = json.loads(
+        grok_research_tool(
+            url="https://x.com/akshay_pachaar/status/2058584154292584853",
+            query="Summarize this thread and image",
+            options={"enable_image_understanding": True, "enable_video_understanding": True},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["source"] == "x"
+    assert result["server_tool"] == "x_search"
+    tool_def = captured["json"]["tools"][0]
+    assert tool_def["type"] == "x_search"
+    assert tool_def["enable_image_understanding"] is True
+    assert tool_def["enable_video_understanding"] is True
+    assert "x_twitter/xurl" in result["exact_x_fetch_hint"]
+
+
+def test_grok_research_routes_web_url_to_web_search(monkeypatch):
+    from tools.x_search_tool import grok_research_tool
+
+    captured = {}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse({"output_text": "Page summary", "citations": [{"url": "https://docs.x.ai/developers/tools/web-search"}]})
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    result = json.loads(
+        grok_research_tool(
+            source="auto",
+            intent="summarize",
+            url="https://docs.x.ai/developers/tools/web-search",
+            options={"allowed_domains": ["docs.x.ai"], "enable_image_understanding": True},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["source"] == "web"
+    assert result["server_tool"] == "web_search"
+    assert result["model"] == "grok-4.3"
+    tool_def = captured["json"]["tools"][0]
+    assert tool_def["type"] == "web_search"
+    assert tool_def["filters"] == {"allowed_domains": ["docs.x.ai"]}
+    assert tool_def["enable_image_understanding"] is True
+
+
+def test_grok_research_rejects_web_video_option(monkeypatch):
+    from tools.x_search_tool import grok_research_tool
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    _no_post_allowed(monkeypatch)
+
+    result = json.loads(
+        grok_research_tool(
+            source="web",
+            query="search docs",
+            options={"enable_video_understanding": True},
+        )
+    )
+
+    assert "enable_video_understanding is only supported for source=x" in result["error"]
+
+
+def test_grok_research_rejects_unknown_options(monkeypatch):
+    from tools.x_search_tool import grok_research_tool
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    _no_post_allowed(monkeypatch)
+
+    result = json.loads(grok_research_tool(query="anything", options={"lang": "en"}))
+
+    assert "unsupported options: lang" in result["error"]
+    assert "action=help" in result["error"]
+
+
+def test_grok_research_registered_without_env_only_requirement():
+    import tools.x_search_tool  # noqa: F401 — ensures registration runs
+    from tools.registry import registry
+
+    entry = registry.get_entry("grok_research")
+    assert entry is not None
+    assert entry.toolset == "x_search"
+    assert entry.check_fn is not None
+    assert entry.requires_env == []
+    assert entry.emoji == "🐦"
+
+
+def test_grok_research_auto_routes_embedded_x_url_to_x(monkeypatch):
+    from tools.x_search_tool import grok_research_tool
+
+    captured = {}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse({"output_text": "Embedded URL routed correctly", "citations": []})
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    result = json.loads(grok_research_tool(query="summarize https://x.com/u/status/123 with context"))
+
+    assert result["source"] == "x"
+    assert captured["json"]["tools"][0]["type"] == "x_search"
+
+
+def test_grok_research_intent_is_case_insensitive_and_prompt_suffix(monkeypatch):
+    from tools.x_search_tool import grok_research_tool
+
+    captured = {}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["content"] = json["input"][0]["content"]
+        return _FakeResponse({"output_text": "Summary", "citations": []})
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    result = json.loads(grok_research_tool(source="web", intent="Summarize", url="https://docs.x.ai/"))
+
+    assert result["intent"] == "summarize"
+    assert captured["content"].endswith("Task: summarize.")
+
+
+def test_x_search_401_oauth_refreshes_once(monkeypatch):
+    from tools.x_search_tool import x_search_tool
+
+    calls = {"resolve": [], "post": 0}
+
+    def _fake_resolve(*, force_refresh=False):
+        calls["resolve"].append(force_refresh)
+        token = "refreshed-token" if force_refresh else "stale-token"
+        return {"provider": "xai-oauth", "api_key": token, "base_url": "https://api.x.ai/v1"}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        calls["post"] += 1
+        if calls["post"] == 1:
+            return _FakeResponse({"code": "unauthorized", "error": "expired"}, status_code=401)
+        assert headers["Authorization"] == "Bearer refreshed-token"
+        return _FakeResponse({"output_text": "Recovered after refresh"})
+
+    monkeypatch.setattr("tools.x_search_tool.resolve_xai_http_credentials", _fake_resolve)
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    result = json.loads(x_search_tool(query="anything"))
+
+    assert result["success"] is True
+    assert result["answer"] == "Recovered after refresh"
+    assert calls["resolve"] == [False, True]
+    assert calls["post"] == 2
+
+
+def test_x_search_retries_429_then_succeeds(monkeypatch):
+    from tools.x_search_tool import x_search_tool
+
+    calls = {"count": 0}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return _FakeResponse({"code": "rate_limit", "error": "try later"}, status_code=429)
+        return _FakeResponse({"output_text": "Recovered after 429 retry."})
+
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+    monkeypatch.setattr("requests.post", _fake_post)
+    monkeypatch.setattr("tools.x_search_tool.time.sleep", lambda *_: None)
+
+    result = json.loads(x_search_tool(query="grok xai"))
+
+    assert calls["count"] == 2
+    assert result["success"] is True
+    assert result["answer"] == "Recovered after 429 retry."

@@ -1191,6 +1191,15 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         _resolved = _resolve_path_for_task(path, task_id)
 
+        # ── Hermes/configured read guard ──────────────────────────────
+        # Prevent prompt injection via catalog/hub metadata, block credential
+        # stores under HERMES_HOME, and honor profile-configured private-state
+        # denies. Run this before structured-document extraction so .docx/.xlsx
+        # and notebooks cannot bypass the shared read boundary.
+        block_error = get_read_block_error(str(_resolved))
+        if block_error:
+            return json.dumps({"error": block_error})
+
         # ── Structured-document extraction ────────────────────────────
         # Try before the binary-extension guard so .docx/.xlsx can render as text.
         # Malformed documents fall through to the normal path/binary guard.
@@ -1260,17 +1269,6 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                     "Use vision_analyze for images, or terminal to inspect binary files."
                 ),
             })
-
-        # ── Hermes internal path guard ────────────────────────────────
-        # Prevent prompt injection via catalog or hub metadata files,
-        # and block credential stores under HERMES_HOME.  Pass the
-        # already-resolved path so a relative-path read against
-        # TERMINAL_CWD == HERMES_HOME (e.g. "auth.json") still hits the
-        # denylist — get_read_block_error's own resolve() runs against
-        # the Python process cwd, which can differ.
-        block_error = get_read_block_error(str(_resolved))
-        if block_error:
-            return json.dumps({"error": block_error})
 
         # ── Dedup check ───────────────────────────────────────────────
         # If we already read this exact (path, offset, limit) and the
@@ -1846,6 +1844,9 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 return tool_error(f"Unknown mode: {mode}")
 
             result_dict = result.to_dict()
+            if result_dict.get("success") and result_dict.get("diff") and not result_dict.get("edit_stats"):
+                from tools.file_operations import compute_unified_diff_line_stats
+                result_dict["edit_stats"] = compute_unified_diff_line_stats(str(result_dict.get("diff") or ""))
             if stale_warnings:
                 result_dict["_warning"] = stale_warnings[0] if len(stale_warnings) == 1 else " | ".join(stale_warnings)
             # Report the ABSOLUTE path(s) actually patched so a wrong-cwd
@@ -2112,6 +2113,50 @@ SEARCH_FILES_SCHEMA = {
     }
 }
 
+FS_SCHEMA = {
+    "name": "fs",
+    "description": (
+        "File operations wrapper: read, write, patch, and search. Use this instead of "
+        "cat/head/tail/grep/find/ls/sed/awk or shell heredocs. Preserves Hermes file "
+        "guards, cross-profile protections, fuzzy patching, and post-write syntax checks."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["read", "write", "patch", "search"],
+                "description": "File operation to perform.",
+            },
+            "path": {"type": "string", "description": "Path for read/write/patch/search operations."},
+            "offset": {"type": "integer", "description": "For read/search pagination: starting line or result offset.", "default": 1, "minimum": 0},
+            "limit": {"type": "integer", "description": "Maximum lines/results to return.", "default": 500},
+            "content": {"type": "string", "description": "For action='write': complete file content."},
+            "cross_profile": {
+                "type": "boolean",
+                "description": "Opt out of Hermes cross-profile write/patch guard only after explicit user direction.",
+                "default": False,
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["replace", "patch"],
+                "description": "For action='patch': replace mode or V4A patch mode.",
+                "default": "replace",
+            },
+            "old_string": {"type": "string", "description": "For action='patch' mode='replace': exact/fuzzy text to replace."},
+            "new_string": {"type": "string", "description": "For action='patch' mode='replace': replacement text; empty string deletes."},
+            "replace_all": {"type": "boolean", "description": "For action='patch': replace all occurrences.", "default": False},
+            "patch": {"type": "string", "description": "For action='patch' mode='patch': V4A multi-file patch content."},
+            "pattern": {"type": "string", "description": "For action='search': regex content pattern or file glob."},
+            "target": {"type": "string", "enum": ["content", "files"], "description": "For action='search': content or filename search.", "default": "content"},
+            "file_glob": {"type": "string", "description": "For action='search': restrict content search to matching files."},
+            "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "description": "For action='search': result display mode.", "default": "content"},
+            "context": {"type": "integer", "description": "For action='search': context lines before/after matches.", "default": 0},
+        },
+        "required": ["action"],
+    },
+}
+
 
 def _handle_read_file(args, **kw):
     tid = kw.get("task_id") or "default"
@@ -2167,7 +2212,21 @@ def _handle_search_files(args, **kw):
         output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid)
 
 
-registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=100_000)
-registry.register(name="write_file", toolset="file", schema=WRITE_FILE_SCHEMA, handler=_handle_write_file, check_fn=_check_file_reqs, emoji="✍️", max_result_size_chars=100_000)
-registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000)
-registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000)
+def _handle_fs(args, **kw):
+    action = args.get("action")
+    if action == "read":
+        return _handle_read_file(args, **kw)
+    if action == "write":
+        return _handle_write_file(args, **kw)
+    if action == "patch":
+        return _handle_patch(args, **kw)
+    if action == "search":
+        return _handle_search_files(args, **kw)
+    return tool_error("Unknown fs action. Use one of: read, write, patch, search.")
+
+
+registry.register(name="fs", toolset="file", schema=FS_SCHEMA, handler=_handle_fs, check_fn=_check_file_reqs, emoji="🗂️", max_result_size_chars=100_000)
+registry.register(name="read_file", toolset="file_legacy", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=100_000)
+registry.register(name="write_file", toolset="file_legacy", schema=WRITE_FILE_SCHEMA, handler=_handle_write_file, check_fn=_check_file_reqs, emoji="✍️", max_result_size_chars=100_000)
+registry.register(name="patch", toolset="file_legacy", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000)
+registry.register(name="search_files", toolset="file_legacy", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000)

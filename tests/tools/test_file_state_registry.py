@@ -216,7 +216,7 @@ class FileToolsIntegrationTests(unittest.TestCase):
 
     def setUp(self) -> None:
         file_state.get_registry().clear()
-        self._tmpdir = tempfile.mkdtemp(prefix="hermes_file_state_int_")
+        self._tmpdir = tempfile.mkdtemp(prefix="hermes_file_state_int_", dir=os.getcwd())
 
     def tearDown(self) -> None:
         import shutil
@@ -281,6 +281,24 @@ class FileToolsIntegrationTests(unittest.TestCase):
         w = json.loads(write_file_tool(path=p, content="hi\n", task_id="agentX"))
         self.assertFalse(w.get("_warning"))
         self.assertNotIn("error", w)
+
+    def test_write_file_reports_edit_line_stats(self):
+        p = self._write_seed("stats-write.txt", "one\ntwo\nthree\n")
+        r = json.loads(write_file_tool(path=p, content="one\nTWO\nfour\n", task_id="statsW"))
+        self.assertEqual(r.get("edit_stats"), {"lines_added": 2, "lines_deleted": 2})
+
+    def test_patch_reports_edit_line_stats(self):
+        p = self._write_seed("stats-patch.txt", "one\ntwo\nthree\n")
+        r = json.loads(
+            patch_tool(
+                mode="replace",
+                path=p,
+                old_string="two\nthree",
+                new_string="TWO\nfour\nfive",
+                task_id="statsP",
+            )
+        )
+        self.assertEqual(r.get("edit_stats"), {"lines_added": 3, "lines_deleted": 2})
 
 
 if __name__ == "__main__":
