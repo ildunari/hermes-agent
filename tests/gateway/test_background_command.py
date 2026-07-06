@@ -298,7 +298,9 @@ class TestRunBackgroundTask:
         # (default mode requires the file to exist as a regular file).
         import os as _os
         import tempfile as _tempfile
-        _tmpdir = _tempfile.mkdtemp(prefix="bg_media_")
+        # realpath so expected paths match validate_media_delivery_path(), which
+        # resolves symlinks (macOS /var/folders -> /private/var/folders).
+        _tmpdir = _os.path.realpath(_tempfile.mkdtemp(prefix="bg_media_"))
         _ogg = _os.path.join(_tmpdir, "clip.ogg")
         _mp4 = _os.path.join(_tmpdir, "render.mp4")
         _png = _os.path.join(_tmpdir, "chart.png")

@@ -16695,56 +16695,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         finally:
             self._clear_task_cwd(task_id)
 
-
-
-
-
-
-        # Display toggle (per-platform)
-        platform_key = _platform_config_key(event.source.platform)
-        if args in {"show", "on"}:
-            self._show_reasoning = True
-            _save_config_key(f"display.platforms.{platform_key}.show_reasoning", True)
-            return t("gateway.reasoning.display_set_on", platform=platform_key)
-
-        if args in {"hide", "off"}:
-            self._show_reasoning = False
-            _save_config_key(f"display.platforms.{platform_key}.show_reasoning", False)
-            return t("gateway.reasoning.display_set_off", platform=platform_key)
-
-        # Effort level change
-        effort = args.strip()
-        if effort == "reset":
-            if persist_global:
-                return t("gateway.reasoning.reset_global_unsupported")
-            self._set_session_reasoning_override(session_key, None)
-            self._reasoning_config = self._load_reasoning_config()
-            self._evict_cached_agent(session_key)
-            return t("gateway.reasoning.reset_done")
-        if effort == "none":
-            parsed = {"enabled": False}
-        elif effort in {"minimal", "low", "medium", "high", "xhigh"}:
-            parsed = {"enabled": True, "effort": effort}
-        else:
-            return t(
-                "gateway.reasoning.unknown_arg",
-                arg=effort or raw_args.lower(),
-            )
-
-        self._reasoning_config = parsed
-        if persist_global:
-            if _save_config_key("agent.reasoning_effort", effort):
-                self._set_session_reasoning_override(session_key, None)
-                self._evict_cached_agent(session_key)
-                return t("gateway.reasoning.set_global", effort=effort)
-            self._set_session_reasoning_override(session_key, parsed)
-            self._evict_cached_agent(session_key)
-            return t("gateway.reasoning.set_global_save_failed", effort=effort)
-
-        self._set_session_reasoning_override(session_key, parsed)
-        self._evict_cached_agent(session_key)
-        return t("gateway.reasoning.set_session", effort=effort)
-
     async def _handle_fast_command(self, event: MessageEvent) -> str:
         """Handle /fast — mirror the CLI Priority Processing toggle in gateway chats."""
         import yaml
