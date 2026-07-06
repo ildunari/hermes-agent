@@ -69,6 +69,25 @@ export const MESSAGING_SESSION_SOURCE_IDS = [
 ]
 const MESSAGING_SOURCE_IDS = new Set(MESSAGING_SESSION_SOURCE_IDS)
 
+// Kosta's WebUI/sidebar preference: keep local/terminal/desktop/API sessions
+// visible while hiding external messaging-platform transcripts from history panes.
+// `api_server` backs browser/API-created WebUI sessions, so do not hide it.
+export const WEBUI_HIDDEN_MESSAGING_SESSION_SOURCE_IDS = MESSAGING_SESSION_SOURCE_IDS.filter(
+  source => source !== 'api_server'
+)
+
+// Internal agent-run sources are not user-facing conversations. They may still
+// exist in state.db for search/debugging, but WebUI recents should not mix them
+// into the normal session list. This is especially important for the all-profile
+// frontend list, which otherwise surfaces subagent/adversarial-review lanes from
+// GPT/coding as top-level sessions.
+export const WEBUI_HIDDEN_SESSION_SOURCE_IDS = [
+  'subagent',
+  'tool',
+  'smoke-test',
+  ...WEBUI_HIDDEN_MESSAGING_SESSION_SOURCE_IDS
+]
+
 /** True when a source id is an external messaging platform (gets its own
  *  sidebar section) rather than a local/CLI/desktop session. */
 export function isMessagingSource(source: null | string | undefined): boolean {
