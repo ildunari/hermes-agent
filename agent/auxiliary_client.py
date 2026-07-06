@@ -893,10 +893,19 @@ class _CodexCompletionsAdapter:
         # prompt and toolset land on the same warm cache shard, and mirror
         # it into the x-client-request-id header the Codex backend uses for
         # cache-scope routing.
+        # Guard the same way the main transport does: xAI Responses takes the
+        # key in extra_body (not top-level) and GitHub/Copilot Responses opts
+        # out of cache-key routing entirely — for those hosts, skip both the
+        # top-level prompt_cache_key and the x-client-request-id header here so
+        # the host-skip guard below is not defeated by an unconditional set.
         try:
             from agent.transports.codex import _content_cache_key as _codex_pck
+            from utils import base_url_host_matches
 
-            _aux_cache_key = _codex_pck(instructions, kwargs.get("tools"))
+            _host_src = str(getattr(self._client, "base_url", "") or "")
+            _is_xai = base_url_host_matches(_host_src, "x.ai") or base_url_host_matches(_host_src, "api.x.ai")
+            _is_github = base_url_host_matches(_host_src, "githubcopilot.com")
+            _aux_cache_key = None if (_is_xai or _is_github) else _codex_pck(instructions, kwargs.get("tools"))
         except Exception:
             _aux_cache_key = None
         if _aux_cache_key:
