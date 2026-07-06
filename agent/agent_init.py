@@ -68,22 +68,93 @@ def _ra():
     return run_agent
 
 
-def _build_codex_gpt55_autoraise_notice(autoraise: Dict[str, float]) -> str:
-    """Build the one-time notice shown when Codex gpt-5.5 raises compaction.
+def _build_codex_gpt5_autoraise_notice(autoraise: Dict[str, Any]) -> str:
+    """Build the one-time notice shown when Codex gpt-5.x raises compaction.
 
-    ``autoraise`` is ``{"from": <old_ratio>, "to": <new_ratio>}``. The same
-    text is printed inline for CLI users and replayed via ``status_callback``
-    for gateway users, so it must be self-contained and include the exact
-    opt-back-out command.
+    ``autoraise`` is ``{"model": <slug>, "from": <old_ratio>, "to": <new_ratio>}``.
+    The same text is printed inline for CLI users and replayed via
+    ``status_callback`` for gateway users, so it must be self-contained and
+    include the exact opt-back-out command.
     """
+    model = str(autoraise.get("model") or "gpt-5.4/5.5").strip().lower().rsplit("/", 1)[-1]
+    # gpt-5.3-codex-spark has a native 128K window; the gpt-5.4/5.5 family is
+    # capped at 272K by the Codex OAuth backend.
+    cap = "128K" if model.startswith("gpt-5.3-codex-spark") else "272K"
     from_pct = int(round(autoraise["from"] * 100))
     to_pct = int(round(autoraise["to"] * 100))
     return (
-        f"ℹ Codex gpt-5.5 caps context at 272K, so auto-compaction was raised "
+        f"ℹ Codex {model} caps context at {cap}, so auto-compaction was raised "
         f"to {to_pct}% (from {from_pct}%) to use more of the window before "
         f"summarizing.\n"
         f"  Opt back out: hermes config set compression.codex_gpt55_autoraise false"
     )
+
+
+def _resolve_compression_threshold(
+    global_threshold: float,
+    model_cthresh: Optional[float],
+    *,
+    model: Optional[str] = None,
+    is_codex_autoraise: bool,
+) -> tuple[float, Optional[Dict[str, Any]]]:
+    """Combine the user's global compaction threshold with a per-model override.
+
+    Returns ``(effective_threshold, autoraise_notice)``. ``autoraise_notice`` is
+    ``{"model": <slug>, "from": <old>, "to": <new>}`` only when a Codex
+    autoraise actually raises the threshold, otherwise ``None``.
+    """
+    if model_cthresh is None:
+        return global_threshold, None
+    if is_codex_autoraise:
+        if model_cthresh <= global_threshold + 1e-9:
+            # Autoraise never lowers; keep the user's higher/equal threshold.
+            return global_threshold, None
+        return model_cthresh, {
+            "model": model,
+            "from": global_threshold,
+            "to": model_cthresh,
+        }
+    return model_cthresh, None
+
+
+def _codex_gpt55_autoraise_notice_marker():
+    """Path to the per-profile marker recording that the autoraise notice ran."""
+    return get_hermes_home() / ".codex_gpt55_autoraise_notice"
+
+
+def _codex_gpt55_autoraise_notice_state(autoraise: Dict[str, Any]) -> str:
+    """Stable identity for one autoraise notice, keyed on what it displays."""
+    model = str(autoraise.get("model") or "").strip().lower().rsplit("/", 1)[-1]
+    from_pct = int(round(float(autoraise["from"]) * 100))
+    to_pct = int(round(float(autoraise["to"]) * 100))
+    return f"{model}:{from_pct}:{to_pct}"
+
+
+def _codex_gpt55_autoraise_notice_seen(autoraise: Dict[str, Any]) -> bool:
+    """True if this exact autoraise notice was already shown for this profile."""
+    try:
+        current = _codex_gpt55_autoraise_notice_state(autoraise)
+        return _codex_gpt55_autoraise_notice_marker().read_text(
+            encoding="utf-8"
+        ).strip() == current
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _record_codex_gpt55_autoraise_notice(autoraise: Dict[str, Any]) -> None:
+    """Persist that the autoraise notice was shown for this profile/config state."""
+    try:
+        marker = _codex_gpt55_autoraise_notice_marker()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            _codex_gpt55_autoraise_notice_state(autoraise), encoding="utf-8"
+        )
+    except (OSError, KeyError, TypeError, ValueError):
+        pass
+
+
+# Backward-compatible alias for local code/tests that still use the old helper name.
+_build_codex_gpt55_autoraise_notice = _build_codex_gpt5_autoraise_notice
 
 
 def _normalized_custom_base_url(value: Any) -> str:
@@ -1438,28 +1509,25 @@ def init_agent(
     try:
         from agent.auxiliary_client import (
             _compression_threshold_for_model as _cthresh_fn,
-            _is_codex_gpt55 as _is_codex_gpt55_fn,
+            _is_codex_gpt54_or_gpt55 as _is_codex_gpt54_or_gpt55_fn,
+            _is_codex_spark as _is_codex_spark_fn,
         )
         _model_cthresh = _cthresh_fn(
             agent.model,
             agent.provider,
             allow_codex_gpt55_autoraise=_codex_gpt55_autoraise,
         )
-        if _model_cthresh is not None:
-            _prev_threshold = compression_threshold
-            compression_threshold = _model_cthresh
-            # Notify only for the Codex gpt-5.5 autoraise (the Arcee Trinity
-            # override is a long-standing silent default). Skip the notice when
-            # the user's global threshold already meets/exceeds the raised
-            # value, since nothing actually changed for them.
-            if (
-                _is_codex_gpt55_fn(agent.model, agent.provider)
-                and _model_cthresh > _prev_threshold + 1e-9
-            ):
-                agent._compression_threshold_autoraised = {
-                    "from": _prev_threshold,
-                    "to": _model_cthresh,
-                }
+        compression_threshold, agent._compression_threshold_autoraised = (
+            _resolve_compression_threshold(
+                compression_threshold,
+                _model_cthresh,
+                model=agent.model,
+                is_codex_autoraise=(
+                    _is_codex_gpt54_or_gpt55_fn(agent.model, agent.provider)
+                    or _is_codex_spark_fn(agent.model, agent.provider)
+                ),
+            )
+        )
     except Exception:
         pass
     compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
@@ -1910,29 +1978,43 @@ def init_agent(
             agent._ollama_num_ctx,
         )
 
+    # Codex gpt-5.x autoraise notice: show at most once per profile/config
+    # state. Without the persisted marker the notice re-fires on every agent
+    # init — and the gateway rebuilds the agent per inbound message, so Discord
+    # etc. saw it repeatedly (#54432). A change in the raised threshold (or the
+    # autoraised model) updates the marker state and re-notifies once.
+    _autoraise = getattr(agent, "_compression_threshold_autoraised", None)
+    _show_autoraise_notice = (
+        bool(_autoraise)
+        and compression_enabled
+        and _codex_gpt55_autoraise_notice
+        and not _codex_gpt55_autoraise_notice_seen(_autoraise)
+    )
+
     if not agent.quiet_mode:
         if compression_enabled:
-            print(f"📊 Context limit: {agent.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {agent.context_compressor.threshold_tokens:,})")
+            _active_threshold_pct = getattr(
+                agent.context_compressor, "threshold_percent", compression_threshold
+            )
+            print(f"📊 Context limit: {agent.context_compressor.context_length:,} tokens (compress at {int(_active_threshold_pct*100)}% = {agent.context_compressor.threshold_tokens:,})")
         else:
             print(f"📊 Context limit: {agent.context_compressor.context_length:,} tokens (auto-compression disabled)")
-        # One-time notice when the Codex gpt-5.5 autoraise kicked in, with the
-        # exact opt-back-out command. Printed inline at startup for CLI users;
-        # gateway users get the same text replayed via _compression_warning on
-        # turn 1 (set below, after the warning slot is initialized).
-        _autoraise = getattr(agent, "_compression_threshold_autoraised", None)
-        if _autoraise and compression_enabled and _codex_gpt55_autoraise_notice:
-            print(_build_codex_gpt55_autoraise_notice(_autoraise))
+        # Notice with the exact opt-back-out command. Printed inline at startup
+        # for CLI users; gateway users get the same text replayed via
+        # _compression_warning on turn 1 (set below).
+        if _show_autoraise_notice:
+            print(_build_codex_gpt5_autoraise_notice(_autoraise))
 
     # Check immediately so CLI users see the warning at startup.
     # Gateway status_callback is not yet wired, so any warning is stored
     # in _compression_warning and replayed in the first run_conversation().
     agent._compression_warning = None
-    # Gateway parity for the Codex gpt-5.5 autoraise notice: the startup print
+    # Gateway parity for the Codex gpt-5.x autoraise notice: the startup print
     # above only reaches the CLI, so stash the same text here to be replayed
     # through status_callback on the first turn (Telegram/Discord/Slack/etc.).
-    _autoraise = getattr(agent, "_compression_threshold_autoraised", None)
-    if _autoraise and compression_enabled and _codex_gpt55_autoraise_notice:
-        agent._compression_warning = _build_codex_gpt55_autoraise_notice(_autoraise)
+    if _show_autoraise_notice:
+        agent._compression_warning = _build_codex_gpt5_autoraise_notice(_autoraise)
+        _record_codex_gpt55_autoraise_notice(_autoraise)
     # Lazy feasibility check: deferred to the first turn that approaches the
     # compression threshold. Running it eagerly here costs ~400ms cold (network
     # probe of the auxiliary provider chain + /models lookup) on every agent
