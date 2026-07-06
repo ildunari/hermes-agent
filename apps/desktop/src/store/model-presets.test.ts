@@ -20,6 +20,13 @@ describe('model presets', () => {
     expect(modelPresetKey('openai', 'gpt-5.5')).toBe('openai::gpt-5.5')
   })
 
+  it('canonicalizes old VibeProxy provider aliases in preset keys', () => {
+    setModelPreset('vibe-proxy', 'claude-fable-5', { effort: 'high' })
+
+    expect(modelPresetKey('vibe-proxy', 'claude-fable-5')).toBe('vibeproxy::claude-fable-5')
+    expect(getModelPreset('vibeproxy', 'claude-fable-5')).toEqual({ effort: 'high' })
+  })
+
   it('pushes only the provided dimensions to the gateway', async () => {
     const calls: { method: string; params?: Record<string, unknown> }[] = []
 

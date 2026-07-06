@@ -938,6 +938,29 @@ class TestInit:
                 skip_memory=True,
             )
             assert a._use_prompt_caching is False
+            assert a._supports_reasoning_extra_body() is False
+
+    def test_vibeproxy_claude_family_supports_reasoning_extra_body(self):
+        """VibeProxy Claude-family aliases should send nested reasoning effort."""
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            for model in ("claude-fable-5", "opus-4-8", "sonnet-5", "haiku-4-5", "mythos", "fable"):
+                a = AIAgent(
+                    api_key="test-key-1234567890",
+                    provider="vibeproxy",
+                    model=model,
+                    base_url="http://127.0.0.1:8485/v1",
+                    reasoning_config={"enabled": True, "effort": "xhigh"},
+                    quiet_mode=True,
+                    skip_context_files=True,
+                    skip_memory=True,
+                )
+                assert a._supports_reasoning_extra_body() is True, model
+                kwargs = a._build_api_kwargs([{"role": "user", "content": "hi"}])
+                assert kwargs["extra_body"]["reasoning"] == {"enabled": True, "effort": "xhigh"}, model
 
     def test_prompt_caching_vibeproxy_claude_marks_tool_schema_without_mutating_agent_tools(self):
         """VibeProxy Claude cache markers include the stable tool schema prefix."""
