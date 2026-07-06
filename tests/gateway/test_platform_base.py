@@ -18,7 +18,9 @@ from gateway.platforms.base import (
     validate_inbound_media_size,
     _log_safe_path,
     _prefix_within_utf16_limit,
+    _thread_metadata_for_source,
 )
+from gateway.session import Platform, SessionSource
 
 
 class TestInboundMediaSizeCap:
@@ -107,6 +109,28 @@ class TestSafeUrlForLog:
 # ---------------------------------------------------------------------------
 # MessageEvent — command parsing
 # ---------------------------------------------------------------------------
+
+
+class TestTelegramThreadMetadata:
+    def test_private_dm_topic_uses_reply_fallback_metadata(self):
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="5320274083",
+            chat_type="dm",
+            user_id="5320274083",
+            thread_id="11757",
+            message_id="901",
+        )
+
+        metadata = _thread_metadata_for_source(source, reply_to_message_id="902")
+
+        assert metadata == {
+            "thread_id": "11757",
+            "chat_type": "dm",
+            "telegram_dm_topic_reply_fallback": True,
+            "direct_messages_topic_id": "11757",
+            "telegram_reply_to_message_id": "902",
+        }
 
 
 class TestMessageEventIsCommand:
@@ -614,7 +638,8 @@ class TestMediaExtensionAllowlistParity:
     """
 
     DROPPED_BEFORE = ["md", "json", "yaml", "yml", "xml", "html", "htm",
-                      "tsv", "svg"]
+                      "tsv", "svg", "css", "tdesktop-theme", "tgios-theme",
+                      "attheme", "tgx-theme", "palette"]
 
     def test_previously_dropped_extensions_now_extract(self):
         for ext in self.DROPPED_BEFORE:
@@ -626,8 +651,15 @@ class TestMediaExtensionAllowlistParity:
         from gateway.platforms.base import MEDIA_DELIVERY_EXTS
         # Both functions reference MEDIA_DELIVERY_EXTS; assert the documents
         # that motivated the bug are present in the shared set.
-        for ext in (".md", ".json", ".yaml", ".yml", ".xml", ".html", ".htm"):
+        for ext in (".md", ".json", ".yaml", ".yml", ".xml", ".html", ".htm",
+                    ".css", ".tdesktop-theme", ".tgios-theme", ".attheme",
+                    ".tgx-theme", ".palette", ".theme"):
             assert ext in MEDIA_DELIVERY_EXTS
+
+    def test_theme_files_are_supported_documents(self):
+        from gateway.platforms.base import SUPPORTED_DOCUMENT_TYPES
+        for ext in (".tdesktop-theme", ".tgios-theme", ".attheme", ".tgx-theme", ".palette", ".theme"):
+            assert ext in SUPPORTED_DOCUMENT_TYPES
 
     def test_unknown_extension_not_black_holed_by_cleanup(self):
         """A MEDIA: tag with an unknown extension is NOT stripped from the

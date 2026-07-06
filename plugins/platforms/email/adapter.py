@@ -43,6 +43,12 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from gateway.config import Platform, PlatformConfig
+from gateway.email_auth import (
+    allowed_inbound_email_senders,
+    email_password_configured,
+    email_recipient_allowed,
+    resolve_email_password,
+)
 from utils import env_int, env_bool
 
 logger = logging.getLogger(__name__)
@@ -165,7 +171,7 @@ def check_email_requirements() -> bool:
     left empty ``EMAIL_*`` keys in ``.env`` does not enable the platform (#40715).
     """
     addr = os.getenv("EMAIL_ADDRESS", "").strip()
-    pwd = os.getenv("EMAIL_PASSWORD", "").strip()
+    pwd = email_password_configured()
     imap = os.getenv("EMAIL_IMAP_HOST", "").strip()
     smtp = os.getenv("EMAIL_SMTP_HOST", "").strip()
     return all([addr, pwd, imap, smtp])
@@ -223,7 +229,15 @@ def _extract_text_body(msg: email_lib.message.Message) -> str:
 
 def _strip_html(html: str) -> str:
     """Naive HTML tag stripper for fallback text extraction."""
-    text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
+    text = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(
+        r"<([a-z0-9]+)\b[^>]*style=[\"'][^\"']*(?:display\s*:\s*none|visibility\s*:\s*hidden)[^\"']*[\"'][^>]*>.*?</\1>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<p[^>]*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
@@ -435,7 +449,7 @@ class EmailAdapter(BasePlatformAdapter):
         # instead of an obvious "host not set" error.
         extra = config.extra or {}
         self._address = (os.getenv("EMAIL_ADDRESS", "") or extra.get("address", "")).strip()
-        self._password = os.getenv("EMAIL_PASSWORD", "")
+        self._password = resolve_email_password()
         self._imap_host = (os.getenv("EMAIL_IMAP_HOST", "") or extra.get("imap_host", "")).strip()
         self._imap_port = env_int("EMAIL_IMAP_PORT", 993)
         self._smtp_host = (os.getenv("EMAIL_SMTP_HOST", "") or extra.get("smtp_host", "")).strip()
@@ -481,8 +495,11 @@ class EmailAdapter(BasePlatformAdapter):
         self._seen_uids_max: int = 2000   # cap to prevent unbounded memory growth
         self._poll_task: Optional[asyncio.Task] = None
 
-        # Map chat_id (sender email) -> last subject + message-id for threading
+        # Map chat_id (sender email) -> last subject + message-id for threading.
+        # Also keep per-message context so concurrent emails from the same
+        # sender do not race and reply under the wrong subject/thread.
         self._thread_context: Dict[str, Dict[str, str]] = {}
+        self._message_context: Dict[str, Dict[str, str]] = {}
 
         logger.info("[Email] Adapter initialized for %s", self._address)
 
@@ -710,6 +727,11 @@ class EmailAdapter(BasePlatformAdapter):
                         logger.debug("[Email] Skipping automated sender: %s", sender_addr)
                         continue
 
+                    allowed = allowed_inbound_email_senders()
+                    if allowed and sender_addr.lower() not in allowed:
+                        logger.debug("[Email] Dropping non-allowlisted sender before decode/cache: %s", sender_addr)
+                        continue
+
                     # Verify the From: domain is authenticated (SPF/DKIM/DMARC)
                     # while the raw message — and its trusted
                     # Authentication-Results header — is still in scope. The
@@ -719,6 +741,18 @@ class EmailAdapter(BasePlatformAdapter):
                     sender_authenticated, auth_reason = _verify_sender_authentication(
                         msg, sender_addr, authserv_id=self._authserv_id
                     )
+                    if (
+                        self._require_authenticated_sender
+                        and self._allowlist_in_effect()
+                        and not self._allow_all_senders()
+                        and not sender_authenticated
+                    ):
+                        logger.warning(
+                            "[Email] Dropping sender with unauthenticated From before decode/cache: %s (%s)",
+                            sender_addr,
+                            auth_reason,
+                        )
+                        continue
 
                     body = _extract_text_body(msg)
                     attachments = _extract_attachments(msg, skip_attachments=self._skip_attachments)
@@ -793,8 +827,8 @@ class EmailAdapter(BasePlatformAdapter):
         # that the gateway will never authorize.  Without this early guard,
         # a race between dispatch and authorization can result in the adapter
         # sending a reply even though the handler returned None.
-        allowed_raw = os.getenv("EMAIL_ALLOWED_USERS", "").strip()
-        if not allowed_raw:
+        allowed = allowed_inbound_email_senders()
+        if not allowed:
             if os.getenv("EMAIL_ALLOW_ALL_USERS", "").strip().lower() not in {"true", "1", "yes"} and (
                 os.getenv("GATEWAY_ALLOW_ALL_USERS", "").strip().lower() not in {"true", "1", "yes"}
             ):
@@ -805,7 +839,6 @@ class EmailAdapter(BasePlatformAdapter):
                 )
                 return
         else:
-            allowed = {addr.strip().lower() for addr in allowed_raw.split(",") if addr.strip()}
             if sender_addr.lower() not in allowed:
                 logger.debug("[Email] Dropping non-allowlisted sender at dispatch: %s", sender_addr)
                 return
@@ -864,10 +897,13 @@ class EmailAdapter(BasePlatformAdapter):
                 msg_type = MessageType.DOCUMENT
 
         # Store thread context for reply threading
-        self._thread_context[sender_addr] = {
+        context = {
             "subject": subject,
             "message_id": msg_data["message_id"],
         }
+        self._thread_context[sender_addr] = context
+        if msg_data["message_id"]:
+            self._message_context[msg_data["message_id"]] = context
 
         source = self.build_source(
             chat_id=sender_addr,
@@ -875,6 +911,9 @@ class EmailAdapter(BasePlatformAdapter):
             chat_type="dm",
             user_id=sender_addr,
             user_name=msg_data["sender_name"] or sender_addr,
+            thread_id=msg_data["in_reply_to"] or msg_data["message_id"],
+            parent_chat_id=sender_addr,
+            message_id=msg_data["message_id"],
         )
 
         event = MessageEvent(
@@ -925,12 +964,17 @@ class EmailAdapter(BasePlatformAdapter):
         reply_to_msg_id: Optional[str] = None,
     ) -> str:
         """Send an email via SMTP. Runs in executor thread."""
+        if not email_recipient_allowed(to_addr):
+            raise PermissionError(f"Email recipient not allowlisted: {to_addr}")
+
         msg = MIMEMultipart()
         msg["From"] = self._address
         msg["To"] = to_addr
 
-        # Thread context for reply
-        ctx = self._thread_context.get(to_addr, {})
+        # Thread context for reply. Prefer the specific inbound message being
+        # answered; fall back to the latest sender-level context for older
+        # callers that do not pass reply_to.
+        ctx = self._message_context.get(reply_to_msg_id or "", self._thread_context.get(to_addr, {}))
         subject = ctx.get("subject", "Hermes Agent")
         if not subject.startswith("Re:"):
             subject = f"Re: {subject}"
@@ -1205,7 +1249,7 @@ async def _standalone_send(
 
     extra = getattr(pconfig, "extra", {}) or {}
     address = extra.get("address") or os.getenv("EMAIL_ADDRESS", "")
-    password = os.getenv("EMAIL_PASSWORD", "")
+    password = resolve_email_password()
     smtp_host = extra.get("smtp_host") or os.getenv("EMAIL_SMTP_HOST", "")
     try:
         smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587"))
@@ -1214,6 +1258,8 @@ async def _standalone_send(
 
     if not all([address, password, smtp_host]):
         return {"error": "Email not configured (EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_SMTP_HOST required)"}
+    if not email_recipient_allowed(chat_id):
+        return {"error": f"Email recipient not allowlisted: {chat_id}"}
 
     try:
         msg = MIMEText(message, "plain", "utf-8")
