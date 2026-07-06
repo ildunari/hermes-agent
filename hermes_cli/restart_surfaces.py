@@ -45,10 +45,12 @@ GATEWAY_TARGETS: tuple[RestartTarget, ...] = (
     RestartTarget("user/{uid}", "ai.hermes.gateway-coding", required=False, description="coding profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-email-assistant", required=False, description="email-assistant profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-browser-agent", required=False, description="browser-agent profile gateway"),
+    RestartTarget("user/{uid}", "ai.hermes.gateway-design", required=False, description="design profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-bookie", required=False, description="bookie profile gateway"),
     # Some profile LaunchAgents with LimitLoadToSessionType Aqua/Background load
     # into the gui domain instead of user. Keep both optional targets so a full
     # restart touches whichever domain launchd actually chose.
+    RestartTarget("gui/{uid}", "ai.hermes.gateway-design", required=False, description="design profile gateway"),
     RestartTarget("gui/{uid}", "ai.hermes.gateway-bookie", required=False, description="bookie profile gateway"),
     # The WebUI/dashboard LaunchAgent owns the local dashboard backend on 9119.
     # It must move with /restart-gateways after smart updates; otherwise the
@@ -92,6 +94,7 @@ GATEWAY_STATUS_PATHS: dict[str, Path] = {
     "ai.hermes.gateway-coding": Path.home() / ".hermes" / "profiles" / "coding" / "gateway_state.json",
     "ai.hermes.gateway-email-assistant": Path.home() / ".hermes" / "profiles" / "email-assistant" / "gateway_state.json",
     "ai.hermes.gateway-browser-agent": Path.home() / ".hermes" / "profiles" / "browser-agent" / "gateway_state.json",
+    "ai.hermes.gateway-design": Path.home() / ".hermes" / "profiles" / "design" / "gateway_state.json",
     "ai.hermes.gateway-bookie": Path.home() / ".hermes" / "profiles" / "bookie" / "gateway_state.json",
 }
 # A queued restart should behave like a staged operation: if another Hermes

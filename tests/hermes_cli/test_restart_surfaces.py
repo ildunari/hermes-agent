@@ -9,14 +9,16 @@ from hermes_cli.restart_surfaces import (
 )
 
 
-def test_gateway_scope_plan_includes_user_domain_and_bookie_gui_domain():
+def test_gateway_scope_plan_includes_profile_gateway_domains():
     plan = describe_plan("gateways", uid=503)
     assert "user/503/ai.hermes.gateway" in plan
     assert "user/503/ai.hermes.gateway-gpt" in plan
     assert "user/503/ai.hermes.gateway-coding" in plan
     assert "user/503/ai.hermes.gateway-email-assistant" in plan
     assert "user/503/ai.hermes.gateway-browser-agent" in plan
+    assert "user/503/ai.hermes.gateway-design" in plan
     assert "user/503/ai.hermes.gateway-bookie" in plan
+    assert "gui/503/ai.hermes.gateway-design" in plan
     assert "gui/503/ai.hermes.gateway-bookie" in plan
     assert "user/503/ai.hermes.webui" in plan
     assert "system/com.kosta.hermes-dashboard-system" in plan
@@ -30,6 +32,7 @@ def test_full_hermes_scope_includes_known_surfaces():
     labels = {target.label for target in targets_for_scope("hermes")}
     assert "ai.hermes.gateway" in labels
     assert "ai.hermes.gateway-gpt" in labels
+    assert "ai.hermes.gateway-design" in labels
     assert "ai.hermes.gateway-bookie" in labels
     assert "ai.hermes.webui" in labels
     assert "ai.hermes.desktop-remote-dashboard" in labels
