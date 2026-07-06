@@ -51,7 +51,7 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
-from gateway.platforms.base import MessageEvent, MessageType, SessionSource
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult, SessionSource
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +486,7 @@ class TestSendVoiceReply:
         assert call_kwargs["reply_to"] == "462"
         assert call_kwargs["metadata"] == {
             "thread_id": "20197",
+            "chat_type": "dm",
             "telegram_dm_topic_reply_fallback": True,
             "direct_messages_topic_id": "20197",
             "telegram_reply_to_message_id": "462",

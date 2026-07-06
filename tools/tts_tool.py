@@ -635,6 +635,26 @@ def _is_command_tts_voice_compatible(config: Dict[str, Any]) -> bool:
     return bool(value)
 
 
+def _command_tts_allows_long_text(config: Dict[str, Any]) -> bool:
+    """Return True when a command provider owns long-text chunking itself.
+
+    Hermes normally truncates provider input to avoid upstream hard failures.
+    Some local command providers, like Kosta's Chatterbox Turbo wrapper, do
+    their own sentence chunking and should receive the complete input.
+    """
+    value = config.get("allow_long_text") or config.get("long_text_mode")
+    if isinstance(value, str):
+        return value.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+            "provider_chunked",
+            "chunked",
+        }
+    return bool(value)
+
+
 def _shell_quote_context(command_template: str, position: int) -> Optional[str]:
     """Return the shell quote character active right before *position*.
 
@@ -2187,11 +2207,17 @@ def text_to_speech_tool(
     # (OpenAI 4096, xAI 15k, MiniMax 10k, ElevenLabs model-aware, etc.).
     max_len = _resolve_max_text_length(provider, tts_config)
     if len(text) > max_len:
-        logger.warning(
-            "TTS text too long for provider %s (%d chars), truncating to %d",
-            provider, len(text), max_len,
-        )
-        text = text[:max_len]
+        if command_provider_config is not None and _command_tts_allows_long_text(command_provider_config):
+            logger.info(
+                "TTS text longer than nominal cap for provider %s (%d > %d), passing through because provider owns long-text chunking",
+                provider, len(text), max_len,
+            )
+        else:
+            logger.warning(
+                "TTS text too long for provider %s (%d chars), truncating to %d",
+                provider, len(text), max_len,
+            )
+            text = text[:max_len]
 
     # Detect platform from gateway env var to choose the best output format.
     # Telegram voice bubbles require Opus (.ogg); OpenAI and ElevenLabs can
