@@ -1221,9 +1221,9 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - moa: high-cost slash mode, available through /hermes moa to avoid
 #     displacing existing native Slack slash commands at the 50-command cap.
 #   - debug: the log/report upload surface; reached via /hermes debug on Slack.
-#   - insights/platform/update/update-smart/version: lower-frequency ops surfaces;
+#   - insights/platform/update/update-smart/update-desktop/version: lower-frequency ops surfaces;
 #     routed via /hermes to keep Slack under its native slash-command cap.
-_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "moa", "debug", "insights", "platform", "update", "update-smart", "update_smart", "version"})
+_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "moa", "debug", "insights", "platform", "update", "update-smart", "update_smart", "update-desktop", "update_desktop", "version"})
 
 
 def _sanitize_slack_name(raw: str) -> str:
