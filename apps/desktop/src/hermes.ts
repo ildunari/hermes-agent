@@ -71,6 +71,7 @@ import type {
 export const STARTUP_REQUEST_TIMEOUT_MS = 60_000
 const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
+const AUDIO_TRANSCRIBE_REQUEST_TIMEOUT_MS = 180_000
 const AUDIO_SPEAK_REQUEST_TIMEOUT_MS = 180_000
 // prompt.submit is effectively fire-and-forget: turn completion is signaled by
 // stream / message.complete events, NOT by the RPC return. A long turn (MoA
@@ -984,7 +985,8 @@ export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<Aud
     body: {
       data_url: dataUrl,
       mime_type: mimeType
-    }
+    },
+    timeoutMs: AUDIO_TRANSCRIBE_REQUEST_TIMEOUT_MS
   })
 }
 
