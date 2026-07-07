@@ -42,6 +42,13 @@ from agent.transports.codex_event_projector import CodexEventProjector
 logger = logging.getLogger(__name__)
 
 
+# Codex Desktop/app-server can take longer than normal JSON-RPC requests to
+# start under load because it has to spin up the app-server process and create
+# a thread. Keep this above the old 30s request default so codex_subtask does
+# not fail before the worker receives its prompt on a slow start.
+_CODEX_APP_SERVER_STARTUP_TIMEOUT_SECONDS = 90.0
+
+
 # How many tailing stderr lines from the codex subprocess to attach to a
 # user-facing error when we don't have a more specific classification (OAuth,
 # wedge watchdog, etc.). Small enough to keep error messages legible, large
@@ -212,6 +219,7 @@ class CodexAppServerSession:
         on_event: Optional[Callable[[dict], None]] = None,
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
+        startup_timeout_seconds: float = _CODEX_APP_SERVER_STARTUP_TIMEOUT_SECONDS,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
@@ -230,6 +238,7 @@ class CodexAppServerSession:
         self._on_event = on_event  # Display hook (kawaii spinner ticks etc.)
         self._routing = request_routing or _ServerRequestRouting()
         self._client_factory = client_factory or CodexAppServerClient
+        self._startup_timeout_seconds = float(startup_timeout_seconds or _CODEX_APP_SERVER_STARTUP_TIMEOUT_SECONDS)
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
@@ -262,7 +271,7 @@ class CodexAppServerSession:
             client_name="hermes",
             client_title="Hermes Agent",
             client_version=_get_hermes_version(),
-            timeout=30,
+            timeout=self._startup_timeout_seconds,
         )
         # Permission selection is intentionally NOT sent on thread/start.
         # Two reasons (live-tested against codex 0.130.0):
@@ -280,7 +289,7 @@ class CodexAppServerSession:
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
         params: dict[str, Any] = {"cwd": self._cwd}
-        result = self._client.request("thread/start", params, timeout=30)
+        result = self._client.request("thread/start", params, timeout=self._startup_timeout_seconds)
         # Cross-fill thread.id/sessionId — different codex versions have
         # serialized this under either key. Mirrors openclaw beta.8's
         # tolerance fix so future codex drops/renames don't KeyError us

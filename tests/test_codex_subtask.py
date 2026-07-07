@@ -51,6 +51,22 @@ class FakeSession:
         self.closed = True
 
 
+
+def test_minimal_reasoning_is_normalized_for_codex():
+    overrides = sup._overrides(
+        model=None,
+        reasoning_effort="minimal",
+        sandbox_mode=None,
+        allow_plugins=None,
+        deny_plugins=None,
+        skills=None,
+    )
+    assert 'model_reasoning_effort="low"' in overrides
+    assert 'web_search="disabled"' in overrides
+    assert 'features.image_generation=false' in overrides
+    assert 'model_reasoning_effort="minimal"' not in overrides
+
+
 def test_registry_restart_marks_live_jobs(tmp_path):
     reg = JobRegistry(tmp_path / "jobs.db")
     job = reg.create_job(prompt="p", cwd=str(tmp_path), profile="general", model=None, reasoning_effort=None, sandbox_mode=None, timeout_seconds=10)
@@ -70,6 +86,7 @@ def test_sync_submit_completes_and_echoes_timeout(monkeypatch, tmp_path):
     assert resp["status"] == "completed"
     assert resp["final_text"] == "ok"
     assert FakeSession.instances[-1].kwargs["codex_profile"] is None
+    assert FakeSession.instances[-1].kwargs["startup_timeout_seconds"] == sup.STARTUP_TIMEOUT_SECONDS
     assert resp["timeout_seconds"] == 600
     assert "clamped" in resp["message"]
     assert FakeSession.instances[-1].turn_timeout == 600

@@ -131,7 +131,7 @@ CODEX_SUBTASK_SCHEMA = {
             "model": {"type": "string"},
             "profile": {
                 "type": "string",
-                "description": "Codex profile from ~/.codex/config.toml. Defaults to gpt for Hermes GPT sessions.",
+                "description": "Codex v2 profile name (loads ~/.codex/<name>.config.toml). Defaults to gpt for Hermes GPT sessions.",
             },
             "reasoning_effort": {"type": "string", "enum": ["minimal", "low", "medium", "high"]},
             "timeout_seconds": {"type": "integer", "minimum": 1, "description": _TIMEOUT},

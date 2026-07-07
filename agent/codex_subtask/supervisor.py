@@ -4,7 +4,7 @@ import argparse, json, os, socketserver, threading, time
 from pathlib import Path
 from agent.codex_subtask.registry import TERMINAL_STATUSES, JobRegistry, now_ms, utc_iso
 from agent.transports.codex_app_server_session import CodexAppServerSession, _ServerRequestRouting
-DEFAULT_SOCKET=Path('~/.hermes/shared/codex-subtask.sock').expanduser(); DEFAULT_DB=Path('~/.hermes/shared/codex_subtask_jobs.db').expanduser(); SYNC_TIMEOUT_DEFAULT=600; SYNC_TIMEOUT_CAP=600; ASYNC_TIMEOUT_CAP=86400
+DEFAULT_SOCKET=Path('~/.hermes/shared/codex-subtask.sock').expanduser(); DEFAULT_DB=Path('~/.hermes/shared/codex_subtask_jobs.db').expanduser(); SYNC_TIMEOUT_DEFAULT=600; SYNC_TIMEOUT_CAP=600; ASYNC_TIMEOUT_CAP=86400; STARTUP_TIMEOUT_SECONDS=90
 def _build_prompt(prompt, context_files, cwd):
     if not context_files: return prompt
     base=Path(cwd).expanduser().resolve(); parts=[prompt,'\n\n---\nContext files inlined by Hermes codex_subtask:']
@@ -16,6 +16,15 @@ def _build_prompt(prompt, context_files, cwd):
 def _overrides(model, reasoning_effort, sandbox_mode, allow_plugins, deny_plugins, skills):
     out=[]
     if model: out.append('model='+json.dumps(model))
+    # Hermes tools expose the OpenAI-style `minimal` enum, but current Codex
+    # GPT-5.5 profiles reject `minimal` and accept `low`. Normalize here so a
+    # codex_subtask does not fail before the prompt runs. Minimal reasoning is
+    # also incompatible with some Codex tools, so disable those if a stale caller
+    # still passes it through.
+    if reasoning_effort == 'minimal':
+        reasoning_effort = 'low'
+        out.append('web_search='+json.dumps('disabled'))
+        out.append('features.image_generation=false')
     if reasoning_effort: out.append('model_reasoning_effort='+json.dumps(reasoning_effort))
     if sandbox_mode: out.append('sandbox_mode='+json.dumps(sandbox_mode))
     if allow_plugins: out.append('plugins.allow='+json.dumps(allow_plugins))
@@ -31,7 +40,7 @@ class Worker:
         if not rec: return
         self.registry.update(self.job_id, status='starting', started_at=now_ms())
         try:
-            self.session=CodexAppServerSession(cwd=rec.cwd, codex_profile=None, codex_config_overrides=_overrides(self.opts.get('model'), self.opts.get('reasoning_effort'), self.opts.get('sandbox_mode'), self.opts.get('allow_plugins'), self.opts.get('deny_plugins'), self.opts.get('skills')), request_routing=_ServerRequestRouting(auto_approve_exec=True, auto_approve_apply_patch=True), on_event=self._event)
+            self.session=CodexAppServerSession(cwd=rec.cwd, codex_profile=None, codex_config_overrides=_overrides(self.opts.get('model'), self.opts.get('reasoning_effort'), self.opts.get('sandbox_mode'), self.opts.get('allow_plugins'), self.opts.get('deny_plugins'), self.opts.get('skills')), request_routing=_ServerRequestRouting(auto_approve_exec=True, auto_approve_apply_patch=True), on_event=self._event, startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS)
             tid=self.session.ensure_started(); self.registry.update(self.job_id, status='running', codex_thread_id=tid); self.registry.append_transcript(self.job_id, {'status':'running','codex_thread_id':tid})
             result=self.session.run_turn(rec.prompt, turn_timeout=float(rec.timeout_seconds or ASYNC_TIMEOUT_CAP))
             status='completed'
