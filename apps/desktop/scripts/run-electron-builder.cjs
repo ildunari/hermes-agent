@@ -10,6 +10,15 @@ const fs = require("node:fs")
 const path = require("node:path")
 const { spawnSync } = require("node:child_process")
 
+function hasExplicitSigningConfig(argv) {
+  return (
+    process.env.CSC_NAME ||
+    process.env.CSC_LINK ||
+    process.env.CSC_IDENTITY_AUTO_DISCOVERY === "false" ||
+    argv.some(arg => arg.startsWith("-c.mac.identity=") || arg.startsWith("--config.mac.identity="))
+  )
+}
+
 function electronDistDir() {
   try {
     return path.join(path.dirname(require.resolve("electron/package.json")), "dist")
@@ -37,6 +46,7 @@ function electronBuilderCli() {
 
 const dist = electronDistDir()
 const args = []
+const passthroughArgs = process.argv.slice(2)
 if (dist && fs.existsSync(distBinary(dist))) {
   args.push(`-c.electronDist=${dist}`)
 } else {
@@ -45,7 +55,10 @@ if (dist && fs.existsSync(distBinary(dist))) {
       "via @electron/get (electronVersion + ELECTRON_MIRROR)."
   )
 }
-args.push(...process.argv.slice(2))
+if (process.platform === "darwin" && !hasExplicitSigningConfig(passthroughArgs)) {
+  process.env.CSC_IDENTITY_AUTO_DISCOVERY = "false"
+}
+args.push(...passthroughArgs)
 
 const result = spawnSync(process.execPath, [electronBuilderCli(), ...args], {
   stdio: "inherit",

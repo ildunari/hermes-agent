@@ -26,7 +26,33 @@ const { execFileSync, spawnSync } = require('node:child_process')
 
 const { stampExeIdentity } = require('./set-exe-identity.cjs')
 
+const HERMES_DEVELOPER_ID_SIGNING_IDENTITY = '3A22F53A48A189F4A8766CACE00192860CC37F8F'
+const HERMES_DEVELOPER_ID_KEYCHAIN_ITEM = 'Hermes Developer ID Signing Keychain'
 const HERMES_LOCAL_SIGNING_IDENTITY = 'Hermes Desktop Local Signing'
+
+let didTryUnlockSigningKeychains = false
+
+function unlockHermesSigningKeychains() {
+  if (didTryUnlockSigningKeychains || process.platform !== 'darwin') return
+  didTryUnlockSigningKeychains = true
+
+  const keychains = [
+    path.join(os.homedir(), 'Library', 'Keychains', 'hermes-developer-id-signing.keychain-db'),
+    path.join(os.homedir(), 'Library', 'Keychains', 'hermes-desktop-signing.keychain-db'),
+  ].filter(fs.existsSync)
+  if (keychains.length === 0) return
+
+  const op = spawnSync('op', ['item', 'get', HERMES_DEVELOPER_ID_KEYCHAIN_ITEM, '--vault', 'CLI', '--reveal', '--fields', 'password'], {
+    encoding: 'utf8',
+  })
+  if (op.status !== 0) return
+  const password = op.stdout.trim()
+  if (!password) return
+
+  for (const keychain of keychains) {
+    spawnSync('/usr/bin/security', ['unlock-keychain', '-p', password, keychain], { stdio: 'ignore' })
+  }
+}
 
 function canCodesignWithIdentity(identity) {
   if (process.platform !== 'darwin') return false
@@ -44,8 +70,17 @@ function canCodesignWithIdentity(identity) {
   }
 }
 
+function preferredMacSigningIdentity() {
+  if (process.env.CSC_NAME || process.env.CSC_LINK) return null
+  unlockHermesSigningKeychains()
+  if (canCodesignWithIdentity(HERMES_DEVELOPER_ID_SIGNING_IDENTITY)) return HERMES_DEVELOPER_ID_SIGNING_IDENTITY
+  if (canCodesignWithIdentity(HERMES_LOCAL_SIGNING_IDENTITY)) return HERMES_LOCAL_SIGNING_IDENTITY
+  return null
+}
+
 function localSignMacApp(context) {
-  if (process.env.CSC_NAME || process.env.CSC_LINK || !canCodesignWithIdentity(HERMES_LOCAL_SIGNING_IDENTITY)) {
+  const signingIdentity = preferredMacSigningIdentity()
+  if (!signingIdentity) {
     return
   }
 
@@ -66,12 +101,12 @@ function localSignMacApp(context) {
       '--entitlements',
       entitlements,
       '--sign',
-      HERMES_LOCAL_SIGNING_IDENTITY,
+      signingIdentity,
       appPath,
     ],
     { stdio: 'inherit' }
   )
-  console.log(`[after-pack] signed ${appPath} with ${HERMES_LOCAL_SIGNING_IDENTITY}`)
+  console.log(`[after-pack] signed ${appPath} with ${signingIdentity}`)
 }
 
 exports.default = async function afterPack(context) {
