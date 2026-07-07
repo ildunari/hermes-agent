@@ -179,12 +179,19 @@ def _append_log(message: str) -> None:
 def _run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     printable = " ".join(shlex.quote(part) for part in cmd)
     _append_log(f"$ {printable}")
-    proc = subprocess.run(
-        cmd,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        timeout_msg = f"timed out after {timeout}s"
+        stderr = f"{stderr}\n{timeout_msg}".strip()
+        proc = subprocess.CompletedProcess(cmd, 124, stdout, stderr)
     stdout = (proc.stdout or "").strip()
     stderr = (proc.stderr or "").strip()
     if stdout:
@@ -203,10 +210,43 @@ def _kickstart(service: str) -> subprocess.CompletedProcess[str]:
     proc = _run(["launchctl", "kickstart", "-k", service], timeout=30)
     if proc.returncode == 0 or not service.startswith("system/"):
         return proc
-    # Some system LaunchDaemons require root. If passwordless sudo is available,
-    # use it; otherwise log the failure and continue for best-effort targets.
-    sudo = _run(["sudo", "-n", "launchctl", "kickstart", "-k", service], timeout=30)
-    return sudo if sudo.returncode == 0 else proc
+    return _kickstart_with_sudo(service, proc)
+
+
+def _kickstart_with_sudo(
+    service: str,
+    original: subprocess.CompletedProcess[str],
+    *,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess[str]:
+    """Retry a system launchd kickstart through non-interactive sudo.
+
+    Touch ID / sudo policy prompts can hang even with ``sudo -n`` on some macOS
+    setups. _run() converts that into a normal return-code failure so the
+    detached helper can still notify the session and write completion markers.
+    """
+
+    sudo = _run(["sudo", "-n", "launchctl", "kickstart", "-k", service], timeout=timeout)
+    return sudo if sudo.returncode == 0 else original
+
+
+def _kickstart_optional(target: RestartTarget, service: str) -> subprocess.CompletedProcess[str]:
+    """Kickstart a best-effort target without privileged fallback.
+
+    Optional system LaunchDaemons are included in the plan for visibility, but
+    the detached helper must never block on sudo or fail the whole restart
+    because a root-owned plist could not be kicked by the user session. This
+    deliberately uses only ``launchctl kickstart -k``; it never unloads,
+    bootouts, removes, or rewrites plist files.
+    """
+
+    proc = _run(["launchctl", "kickstart", "-k", service], timeout=30)
+    if proc.returncode != 0 and service.startswith("system/"):
+        _append_log(
+            f"{service} optional system target not restarted without sudo "
+            f"({target.description or target.label})"
+        )
+    return proc
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -401,7 +441,7 @@ def restart_scope(
             if target.required:
                 failures.append(msg)
             continue
-        kicked = _kickstart(service)
+        kicked = _kickstart(service) if target.required else _kickstart_optional(target, service)
         if kicked.returncode != 0:
             msg = f"{service} restart failed"
             _append_log(msg)

@@ -1,6 +1,8 @@
 import json
+import subprocess
 
 from hermes_cli.restart_surfaces import (
+    RestartTarget,
     describe_plan,
     enqueue_detached_restart,
     normalize_scope,
@@ -240,6 +242,61 @@ def test_restart_scope_times_out_before_launchctl_when_gateway_stays_busy(monkey
     ) == 1
     assert calls == []
     assert "finished with errors" in notifications[0][1]
+
+
+def test_run_converts_subprocess_timeout_to_failed_process(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+
+    def fake_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["sudo", "-n", "launchctl"], timeout=3)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    proc = restart_surfaces._run(["sudo", "-n", "launchctl"], timeout=3)
+
+    assert proc.returncode == 124
+    assert "timed out after 3s" in proc.stderr
+    assert "exit=124" in (tmp_path / "restart.log").read_text()
+
+
+def test_optional_system_targets_do_not_try_sudo_or_modify_plists(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    calls = []
+
+    def fake_run(cmd, *, timeout=30):
+        calls.append(cmd)
+
+        class Proc:
+            returncode = 0 if cmd[:2] == ["launchctl", "print"] else 1
+            stdout = ""
+            stderr = "operation not permitted"
+
+        return Proc()
+
+    optional_system = RestartTarget(
+        "system",
+        "com.kosta.hermes-workspace-system",
+        required=False,
+        description="workspace backend",
+    )
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (optional_system,))
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": ()})
+    monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    assert restart_surfaces.restart_scope("hermes", delay=0) == 0
+
+    assert ["sudo", "-n", "launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] not in calls
+    flattened = "\n".join(" ".join(cmd) for cmd in calls)
+    assert "bootout" not in flattened
+    assert "unload" not in flattened
+    assert "remove" not in flattened
+    assert ["launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
 
 
 def test_gateway_busy_details_ignores_stale_dead_status(monkeypatch, tmp_path):
