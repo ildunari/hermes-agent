@@ -299,6 +299,48 @@ def test_optional_system_targets_do_not_try_sudo_or_modify_plists(monkeypatch, t
     assert ["launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
 
 
+def test_required_system_target_uses_sudo_fallback_and_reports_timeout(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    calls = []
+
+    def fake_run(cmd, *, timeout=30):
+        calls.append(cmd)
+
+        class Proc:
+            stdout = ""
+            stderr = ""
+
+        proc = Proc()
+        if cmd[:2] == ["launchctl", "print"]:
+            proc.returncode = 0
+        elif cmd == ["launchctl", "kickstart", "-k", "system/com.kosta.required"]:
+            proc.returncode = 1
+            proc.stderr = "operation not permitted"
+        elif cmd == ["sudo", "-n", "launchctl", "kickstart", "-k", "system/com.kosta.required"]:
+            proc.returncode = 124
+            proc.stderr = "timed out after 30s"
+        else:
+            proc.returncode = 0
+        return proc
+
+    required_system = RestartTarget("system", "com.kosta.required", required=True)
+    marker = tmp_path / "status.json"
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (required_system,))
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": ()})
+    monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    assert restart_surfaces.restart_scope("hermes", delay=0, completion_marker=str(marker)) == 1
+
+    assert ["sudo", "-n", "launchctl", "kickstart", "-k", "system/com.kosta.required"] in calls
+    payload = json.loads(marker.read_text())
+    assert payload["exit_code"] == 1
+    assert "finished with errors" in payload["message"]
+
+
 def test_gateway_busy_details_ignores_stale_dead_status(monkeypatch, tmp_path):
     status = tmp_path / "gateway_state.json"
     status.write_text(json.dumps({"pid": 123, "active_agents": 2, "gateway_state": "running"}))
@@ -377,25 +419,38 @@ def test_restart_scope_writes_completion_marker(monkeypatch, tmp_path):
     assert "Hermes gateways restart finished" in payload["message"]
 
 
-def test_main_writes_completion_marker_when_restart_scope_crashes(monkeypatch, tmp_path):
+def test_main_reports_completion_when_restart_scope_crashes(monkeypatch, tmp_path):
     from hermes_cli import restart_surfaces
 
     marker = tmp_path / "status.json"
+    notifications = []
     monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(restart_surfaces, "restart_scope", boom)
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_notify_origin",
+        lambda origin, message: notifications.append(("origin", origin, message)),
+    )
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_notify_tty",
+        lambda tty, message: notifications.append(("tty", tty, message)),
+    )
 
-    try:
-        restart_surfaces.main(["--scope", "gateways", "--completion-marker", str(marker)])
-    except RuntimeError:
-        pass
-    else:  # pragma: no cover - should not happen
-        raise AssertionError("main should propagate restart_scope errors")
+    assert restart_surfaces.main([
+        "--scope", "gateways",
+        "--completion-marker", str(marker),
+        "--notify-origin-json", '{"platform":"telegram","chat_id":"123"}',
+        "--notify-tty", "/dev/ttys001",
+    ]) == 1
 
     payload = json.loads(marker.read_text())
     assert payload["status"] == "complete"
     assert payload["exit_code"] == 1
     assert "finished with errors" in payload["message"]
+    assert notifications[0] == ("origin", '{"platform":"telegram","chat_id":"123"}', payload["message"])
+    assert notifications[1] == ("tty", "/dev/ttys001", payload["message"])

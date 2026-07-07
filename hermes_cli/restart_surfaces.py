@@ -583,8 +583,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     except Exception as exc:
         _append_log(f"restart helper crashed: {exc}")
         message = _completion_message(args.scope, 1)
+        _notify_origin(args.notify_origin_json, message)
+        _notify_tty(args.notify_tty, message)
         _write_completion_marker(args.completion_marker, args.scope, 1, message)
-        raise
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover
