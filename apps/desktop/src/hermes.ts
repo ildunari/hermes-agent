@@ -71,6 +71,7 @@ import type {
 export const STARTUP_REQUEST_TIMEOUT_MS = 60_000
 const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
+const AUDIO_SPEAK_REQUEST_TIMEOUT_MS = 180_000
 // prompt.submit is effectively fire-and-forget: turn completion is signaled by
 // stream / message.complete events, NOT by the RPC return. A long turn (MoA
 // presets running references + aggregator in series, deep reasoning, large tool
@@ -987,12 +988,24 @@ export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<Aud
   })
 }
 
-export function speakText(text: string): Promise<AudioSpeakResponse> {
+export type SpeechSource = "read-aloud" | "voice-conversation"
+
+export interface SpeakTextOptions {
+  rewrite?: 'auto' | 'off' | 'on'
+  source?: SpeechSource
+}
+
+export function speakText(text: string, options: SpeakTextOptions = {}): Promise<AudioSpeakResponse> {
   return window.hermesDesktop.api<AudioSpeakResponse>({
     ...profileScoped(),
     path: '/api/audio/speak',
     method: 'POST',
-    body: { text }
+    body: {
+      text,
+      ...(options.source ? { source: options.source } : {}),
+      ...(options.rewrite ? { rewrite: options.rewrite } : {})
+    },
+    timeoutMs: AUDIO_SPEAK_REQUEST_TIMEOUT_MS
   })
 }
 

@@ -3375,6 +3375,9 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
 
 class TTSSpeakRequest(BaseModel):
     text: str
+    profile: Optional[str] = None
+    rewrite: Optional[str] = None
+    source: Optional[str] = None
 
 
 def _elevenlabs_voice_label(voice: Dict[str, Any]) -> str:
@@ -3475,7 +3478,7 @@ async def get_elevenlabs_voices():
 
 
 @app.post("/api/audio/speak")
-async def speak_text(payload: TTSSpeakRequest):
+async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
     """Synthesize speech and return audio as base64 data URL.
 
     Used by the desktop voice-conversation mode to play back assistant
@@ -3487,10 +3490,52 @@ async def speak_text(payload: TTSSpeakRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Text is required")
 
+    requested_profile = payload.profile or profile
+
+    try:
+        from tools.tts_text_formatter import prepare_spoken_text
+
+        with _config_profile_scope(requested_profile):
+            formatter_cfg = {}
+            try:
+                tts_cfg = load_config().get("tts", {})
+                if isinstance(tts_cfg, dict):
+                    raw_formatter_cfg = tts_cfg.get("spoken_formatter", {})
+                    if isinstance(raw_formatter_cfg, dict):
+                        formatter_cfg = raw_formatter_cfg
+            except Exception:
+                formatter_cfg = {}
+
+            model_enabled = bool(formatter_cfg.get("enabled", False))
+            try:
+                formatter_timeout = float(formatter_cfg.get("timeout", 14.0))
+            except (TypeError, ValueError):
+                formatter_timeout = 14.0
+
+            speech_text = prepare_spoken_text(
+                text,
+                source=(payload.source or "read-aloud"),
+                rewrite=(payload.rewrite or "auto"),
+                timeout=formatter_timeout,
+                model_enabled=model_enabled,
+            )
+        if not speech_text:
+            raise HTTPException(status_code=400, detail="Text is empty after speech cleanup")
+    except HTTPException:
+        raise
+    except Exception:
+        _log.exception("Desktop voice TTS formatting failed; falling back to raw text")
+        speech_text = text
+
     try:
         from tools.tts_tool import text_to_speech_tool
         loop = asyncio.get_running_loop()
-        result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
+
+        def _run_tts() -> str:
+            with _config_profile_scope(requested_profile):
+                return text_to_speech_tool(speech_text)
+
+        result_json = await loop.run_in_executor(None, _run_tts)
     except Exception as exc:
         _log.exception("Desktop voice TTS failed")
         raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}")
