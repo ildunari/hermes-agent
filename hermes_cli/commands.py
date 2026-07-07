@@ -1355,6 +1355,19 @@ class SlashCommandCompleter(Completer):
         except Exception:
             return {}
 
+    _SKILL_BACKED_BUILTINS = frozenset({"/update-smart", "/update-desktop"})
+
+    def _builtin_shadowed_by_skill(self, cmd: str) -> bool:
+        """Return True when a built-in entry is only a launcher for a skill.
+
+        update-smart/update-desktop are kept in the command registry for gateway
+        menus and aliases, but the actual workflow lives in skills. If both the
+        registry entry and skill command are offered in completion, desktop/TUI
+        users see duplicate rows for the same action.
+        """
+        normalized = "/" + cmd.lstrip("/").replace("_", "-").lower()
+        return normalized in self._SKILL_BACKED_BUILTINS and normalized in self._iter_skill_commands()
+
     # -- stacked slash-skill completion helpers ---------------------------
 
     @staticmethod
@@ -2005,6 +2018,8 @@ class SlashCommandCompleter(Completer):
         for cmd, desc in COMMANDS.items():
             if not self._command_allowed(cmd):
                 continue
+            if self._builtin_shadowed_by_skill(cmd):
+                continue
             cmd_name = cmd[1:]
             if cmd_name.startswith(word):
                 yield Completion(
@@ -2092,8 +2107,11 @@ class SlashCommandAutoSuggest(AutoSuggest):
             # Still typing the command name: /upd → suggest "ate"
             word = text[1:].lower()
             for cmd in COMMANDS:
-                if self._completer is not None and not self._completer._command_allowed(cmd):
-                    continue
+                if self._completer is not None:
+                    if not self._completer._command_allowed(cmd):
+                        continue
+                    if self._completer._builtin_shadowed_by_skill(cmd):
+                        continue
                 cmd_name = cmd[1:]  # strip leading /
                 if cmd_name.startswith(word) and cmd_name != word:
                     return Suggestion(cmd_name[len(word):])
