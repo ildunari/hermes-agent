@@ -1729,7 +1729,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     webhook_enabled = is_truthy_value(getenv("WEBHOOK_ENABLED", ""))
     webhook_port = getenv("WEBHOOK_PORT")
     webhook_secret = getenv("WEBHOOK_SECRET", "")
-    if webhook_enabled:
+    if webhook_enabled and not (
+        Platform.WEBHOOK in config.platforms
+        and config.platforms[Platform.WEBHOOK].enabled is False
+    ):
         if Platform.WEBHOOK not in config.platforms:
             config.platforms[Platform.WEBHOOK] = PlatformConfig()
         config.platforms[Platform.WEBHOOK].enabled = True

@@ -1,4 +1,5 @@
 """Regression test for #25676 — nested gateway.streaming config must be loaded."""
+import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -41,3 +42,10 @@ class TestStreamingConfigNested:
         })
         assert cfg.streaming.enabled is True
         assert cfg.streaming.transport == "edit"
+
+    def test_webhook_explicit_false_beats_env_enable(self):
+        from gateway.config import Platform
+
+        with patch.dict(os.environ, {"WEBHOOK_ENABLED": "true"}):
+            cfg = _load_with_yaml_dict({"platforms": {"webhook": {"enabled": False}}})
+        assert cfg.platforms[Platform.WEBHOOK].enabled is False
