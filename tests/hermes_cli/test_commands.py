@@ -682,6 +682,23 @@ class TestSlashCommandCompleter:
         assert len(completions) == 1
         assert "Skill command" in completions[0].display_meta_text
 
+    def test_skill_backed_update_commands_do_not_duplicate_builtin_aliases(self):
+        completer = SlashCommandCompleter(
+            skill_commands_provider=lambda: {
+                "/update-smart": {"description": "Smart update skill"},
+                "/update-desktop": {"description": "Desktop update skill"},
+            }
+        )
+
+        completions = _completions(completer, "/update")
+        displays = [c.display_text for c in completions]
+
+        assert displays.count("/update-smart") == 1
+        assert displays.count("/update-desktop") == 1
+        assert "/update_smart" not in displays
+        assert "/update_desktop" not in displays
+        assert all(c.display_meta_text.startswith("⚡ ") for c in completions if c.display_text in {"/update-smart", "/update-desktop"})
+
 
 # ── Stacked slash-skill completion ──────────────────────────────────────
 
