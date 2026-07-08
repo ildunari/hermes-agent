@@ -54,6 +54,7 @@ def test_bound_server_writes_live_pidfile_and_cleanup_removes_it(
     assert [record["pid"] for record in live] == [os.getpid()]
     assert live[0]["port"] == 52341
     assert live[0]["requested_port"] == 0
+    assert "process_start_time" in live[0]
     assert live[0]["venv"] == sys.executable
 
     assert cleanup is not None
@@ -90,9 +91,36 @@ def test_dashboard_cmdline_mode_allows_top_level_flags(cmdline, mode):
     assert main_mod._dashboard_cmdline_mode(cmdline) == mode
 
 
-def test_dashboard_stop_uses_pid_registry_before_process_scan(monkeypatch):
+def test_registry_scan_rejects_reused_pid_with_different_start_time(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    path = run_dir / "dashboard-auto-1234.pid"
+    path.write_text(
+        '{"pid": 1234, "port": 54321, "requested_port": 0, '
+        '"profile": "default", "mode": "dashboard", "argv": [], '
+        f'"start_ts": {time.time()}, "process_start_time": 111, '
+        f'"venv": "{sys.executable}"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main_mod, "_dashboard_pid_exists", lambda pid: True)
+    monkeypatch.setattr(
+        main_mod,
+        "_read_dashboard_process_cmdline",
+        lambda pid: "python -m hermes_cli.main dashboard --port 0",
+    )
+    monkeypatch.setattr(main_mod, "_dashboard_process_start_time", lambda pid: 222)
+
+    assert main_mod._scan_dashboard_pid_registry(remove_dead=True) == []
+    assert not path.exists()
+
+
+def test_dashboard_stop_kills_registered_and_unregistered_pids(monkeypatch):
     calls = []
     registry_scans = iter([[4242], []])
+    process_scans = iter([[5252], []])
     monkeypatch.setattr(
         main_mod,
         "_dashboard_live_registry_pids",
@@ -101,7 +129,7 @@ def test_dashboard_stop_uses_pid_registry_before_process_scan(monkeypatch):
     monkeypatch.setattr(
         main_mod,
         "_find_stale_dashboard_pids",
-        lambda *a, **kw: pytest.fail("process scan should be fallback only"),
+        lambda *a, **kw: next(process_scans),
     )
 
     def fake_kill(**kwargs):
@@ -114,7 +142,7 @@ def test_dashboard_stop_uses_pid_registry_before_process_scan(monkeypatch):
 
     assert exc.value.code == 0
     assert calls == [
-        {"reason": "requested via --stop", "target_pids": [4242]},
+        {"reason": "requested via --stop", "target_pids": [4242, 5252]},
     ]
 
 
