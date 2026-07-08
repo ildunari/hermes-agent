@@ -1005,6 +1005,78 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     return last_result
 
 
+async def _send_ordered_rich_segments_to_platform(
+    platform,
+    pconfig,
+    chat_id,
+    rich_segments,
+    thread_id=None,
+    force_document=False,
+):
+    """Standalone cron/send_message helper for ordered rich-card segments.
+
+    Cron delivery can render rich-card responses into an ordered sequence of
+    text and MEDIA segments before it reaches the normal platform send helper.
+    Keep the standalone path conservative: send each text segment in order and
+    route media segments through the existing _send_to_platform media handling
+    so platform-specific standalone senders stay the single attachment surface.
+    """
+    from gateway.rich_cards.artifacts import MediaSegment, TextSegment
+    from gateway.platforms.base import BasePlatformAdapter
+
+    last_result = None
+    delivered_any = False
+    for segment in rich_segments or []:
+        if isinstance(segment, TextSegment):
+            text = (segment.markdown or "").strip()
+            if not text:
+                continue
+            result = await _send_to_platform(
+                platform,
+                pconfig,
+                chat_id,
+                text,
+                thread_id=thread_id,
+                force_document=force_document,
+            )
+        elif isinstance(segment, MediaSegment):
+            media_path = BasePlatformAdapter.validate_media_delivery_path(str(segment.path))
+            if not media_path:
+                fallback = (segment.fallback_markdown or "").strip()
+                if not fallback:
+                    continue
+                result = await _send_to_platform(
+                    platform,
+                    pconfig,
+                    chat_id,
+                    fallback,
+                    thread_id=thread_id,
+                    force_document=force_document,
+                )
+            else:
+                media_files = [(media_path, bool(getattr(segment, "is_voice", False)))]
+                result = await _send_to_platform(
+                    platform,
+                    pconfig,
+                    chat_id,
+                    segment.alt or "",
+                    thread_id=thread_id,
+                    media_files=media_files,
+                    force_document=force_document or bool(getattr(segment, "force_document", False)),
+                )
+        else:
+            continue
+
+        if isinstance(result, dict) and result.get("error"):
+            return result
+        last_result = result
+        delivered_any = True
+
+    if not delivered_any:
+        return {"success": True, "delivered": False}
+    return last_result or {"success": True}
+
+
 def _is_telegram_thread_not_found(error: Exception) -> bool:
     """Check if a Telegram error is a thread-not-found failure.
 

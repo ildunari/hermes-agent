@@ -1675,7 +1675,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         runtime_adapter._send_rendered_rich_response_ordered(
                             chat_id=chat_id,
                             rendered_response=delivery_content,
-                            metadata=send_metadata,
+                            metadata=route_metadata,
                             force_document=force_document_attachments,
                         ),
                         loop,
