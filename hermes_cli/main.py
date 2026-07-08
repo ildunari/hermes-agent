@@ -5943,6 +5943,15 @@ def _dashboard_pid_exists(pid: int) -> bool:
             return False
 
 
+def _dashboard_process_start_time(pid: int) -> int | None:
+    try:
+        from gateway.status import get_process_start_time
+
+        return get_process_start_time(pid)
+    except Exception:
+        return None
+
+
 def _find_stale_dashboard_pids(
     *,
     exclude_pids: set[int] | None = None,
@@ -6111,6 +6120,14 @@ def _dashboard_record_is_live(record: dict) -> bool:
     pid = int(record.get("pid", -1))
     if pid <= 0 or not _dashboard_pid_exists(pid):
         return False
+    recorded_start = record.get("process_start_time")
+    current_start = _dashboard_process_start_time(pid)
+    if recorded_start is not None and current_start is not None:
+        try:
+            if int(recorded_start) != int(current_start):
+                return False
+        except (TypeError, ValueError):
+            return False
     cmdline = _read_dashboard_process_cmdline(pid)
     if not cmdline and pid == os.getpid():
         cmdline = " ".join(sys.argv)
@@ -6280,6 +6297,7 @@ def _write_dashboard_pid_record_for_bound_port(args, actual_port: int):
         "mode": mode,
         "argv": list(sys.argv),
         "start_ts": time.time(),
+        "process_start_time": _dashboard_process_start_time(pid),
         "venv": sys.executable,
     }
     tmp_path: Path | None = None
@@ -12337,13 +12355,12 @@ def cmd_dashboard(args):
     # --stop: kill any running dashboards and exit, no deps needed.
     if getattr(args, "stop", False):
         exclude = _dashboard_excluded_pids_from_env()
-        pids = _dashboard_live_registry_pids(exclude_pids=exclude)
-        used_registry = bool(pids)
-        if not pids:
-            pids = (
-                _find_stale_dashboard_pids(exclude_pids=exclude)
-                if exclude else _find_stale_dashboard_pids()
-            )
+        registry_pids = _dashboard_live_registry_pids(exclude_pids=exclude)
+        scanned_pids = (
+            _find_stale_dashboard_pids(exclude_pids=exclude)
+            if exclude else _find_stale_dashboard_pids()
+        )
+        pids = sorted({*registry_pids, *scanned_pids})
         if not pids:
             print("No hermes dashboard processes running.")
             sys.exit(0)
@@ -12354,12 +12371,12 @@ def cmd_dashboard(args):
         )
         # _kill_stale_dashboard_processes prints outcomes itself.  Exit 0 if
         # we killed at least one, 1 if they were all unkillable.
-        remaining = _dashboard_live_registry_pids(exclude_pids=exclude)
-        if not remaining and not used_registry:
-            remaining = (
-                _find_stale_dashboard_pids(exclude_pids=exclude)
-                if exclude else _find_stale_dashboard_pids()
-            )
+        remaining_registry = _dashboard_live_registry_pids(exclude_pids=exclude)
+        remaining_scanned = (
+            _find_stale_dashboard_pids(exclude_pids=exclude)
+            if exclude else _find_stale_dashboard_pids()
+        )
+        remaining = sorted({*remaining_registry, *remaining_scanned})
         sys.exit(1 if remaining else 0)
 
     # ── Unified profile launch routing ────────────────────────────────
