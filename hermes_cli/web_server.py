@@ -8460,14 +8460,22 @@ async def get_session_latest_descendant(session_id: str):
     }
 
 @app.get("/api/sessions/{session_id}/messages")
-async def get_session_messages(session_id: str, profile: Optional[str] = None):
+async def get_session_messages(
+    session_id: str,
+    profile: Optional[str] = None,
+    limit: Optional[int] = None,
+    tail: Optional[int] = None,
+):
+    tail_limit = tail if tail is not None else limit
+    if tail_limit is not None and tail_limit < 0:
+        raise HTTPException(status_code=400, detail="limit must be non-negative")
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
         sid = db.resolve_resume_session_id(sid)
-        messages = db.get_messages(sid)
+        messages = db.get_messages(sid, tail_limit=tail_limit)
         return {"session_id": sid, "messages": messages}
     finally:
         db.close()
