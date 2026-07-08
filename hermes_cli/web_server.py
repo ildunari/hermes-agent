@@ -15785,6 +15785,7 @@ def start_server(
     open_browser: bool = True,
     allow_public: bool = False,
     initial_profile: str = "",
+    register_instance=None,
 ):
     """Start the web UI server.
 
@@ -15950,6 +15951,10 @@ def start_server(
             actual_port = _read_bound_port(server, fallback=port)
             app.state.bound_port = actual_port
 
+            cleanup_instance = None
+            if register_instance is not None:
+                cleanup_instance = register_instance(actual_port)
+
             _write_dashboard_ready_file(actual_port)
             print(f"HERMES_DASHBOARD_READY port={actual_port}", flush=True)
             print(f"  Hermes Web UI → http://{host}:{actual_port}")
@@ -15997,9 +16002,13 @@ def start_server(
                 _hb_interval, _loop_heartbeat, _hb_loop.time() + _hb_interval
             )
 
-            await server.main_loop()
-            if server.started:
-                await server.shutdown()
+            try:
+                await server.main_loop()
+                if server.started:
+                    await server.shutdown()
+            finally:
+                if cleanup_instance is not None:
+                    cleanup_instance()
 
     # On POSIX, keep the long-standing ``asyncio.run(_serve())`` behavior
     # unchanged — Python's default loop there is already a SelectorEventLoop
