@@ -964,6 +964,7 @@ class SessionDB:
         self._fts_enabled = False
         self._trigram_available = False
         self._fts_unavailable_warned = False
+        self._has_sessions_last_active = True
         self._conn = None
         try:
             if read_only:
@@ -983,6 +984,9 @@ class SessionDB:
                     isolation_level=None,
                 )
                 self._conn.row_factory = sqlite3.Row
+                self._has_sessions_last_active = self._table_has_column(
+                    self._conn, "sessions", "last_active"
+                )
                 return
 
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1103,6 +1107,22 @@ class SessionDB:
                 raise
             self._warn_fts5_unavailable(exc)
             return False
+
+    @staticmethod
+    def _table_has_column(
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+    ) -> bool:
+        try:
+            rows = conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+        except sqlite3.OperationalError:
+            return False
+        for row in rows:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            if name == column_name:
+                return True
+        return False
 
     @staticmethod
     def _drop_fts_triggers(cursor: sqlite3.Cursor) -> None:
@@ -1534,6 +1554,43 @@ class SessionDB:
             (session_id,),
         )
 
+    @staticmethod
+    def _compression_ancestor_ids(
+        conn: sqlite3.Connection,
+        session_ids: List[str],
+    ) -> List[str]:
+        """Return compression ancestors of the given sessions before mutation."""
+        ids = [sid for sid in session_ids if sid]
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"""
+            WITH RECURSIVE ancestors(id) AS (
+                SELECT parent.id
+                FROM sessions child
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE child.id IN ({placeholders})
+                  AND parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+                UNION
+                SELECT parent.id
+                FROM ancestors a
+                JOIN sessions child ON child.id = a.id
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+            )
+            SELECT DISTINCT id FROM ancestors
+            """,
+            ids,
+        ).fetchall()
+        return [row["id"] if isinstance(row, sqlite3.Row) else row[0] for row in rows]
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1609,7 +1666,9 @@ class SessionDB:
         cursor.execute("SELECT version FROM schema_version LIMIT 1")
         row = cursor.fetchone()
         if row is None:
-            self._backfill_session_last_active(cursor)
+            self._execute_write(
+                lambda conn: self._backfill_session_last_active(conn.cursor())
+            )
             cursor.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
                 (SCHEMA_VERSION,),
@@ -1748,7 +1807,9 @@ class SessionDB:
                     # rows until the gateway rewrites them.
                     logger.debug("v18 gateway metadata backfill skipped: %s", exc)
             if current_version < 20:
-                self._backfill_session_last_active(cursor)
+                self._execute_write(
+                    lambda conn: self._backfill_session_last_active(conn.cursor())
+                )
             if current_version < SCHEMA_VERSION and fts_migrations_complete:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -2222,20 +2283,38 @@ class SessionDB:
         intentionally need to re-end a closed session with a new reason.
         """
         def _do(conn):
-            conn.execute(
+            row = conn.execute(
+                "SELECT end_reason FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            previous_reason = row["end_reason"] if row is not None else None
+            result = conn.execute(
                 "UPDATE sessions SET ended_at = ?, end_reason = ? "
                 "WHERE id = ? AND ended_at IS NULL",
                 (time.time(), end_reason, session_id),
             )
+            if (
+                result.rowcount
+                and end_reason == "compression"
+                and previous_reason != "compression"
+            ):
+                self._refresh_session_last_active(conn, session_id)
         self._execute_write(_do)
 
     def reopen_session(self, session_id: str) -> None:
         """Clear ended_at/end_reason so a session can be resumed."""
         def _do(conn):
-            conn.execute(
+            row = conn.execute(
+                "SELECT end_reason FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            previous_reason = row["end_reason"] if row is not None else None
+            result = conn.execute(
                 "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
                 (session_id,),
             )
+            if result.rowcount and previous_reason == "compression":
+                self._refresh_session_last_active(conn, session_id)
         self._execute_write(_do)
 
     def update_session_cwd(
@@ -3263,6 +3342,15 @@ class SessionDB:
             where_clauses.append("s.archived = 0")
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        has_last_active = getattr(self, "_has_sessions_last_active", True)
+        fallback_last_active_select = """
+                    ,
+                    COALESCE(
+                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
+                        s.started_at
+                    ) AS last_active
+        """
+        last_active_select = "" if has_last_active else fallback_last_active_select
 
         # Optional session-id filter, pushed into SQL so callers (Desktop
         # session-id search) don't have to fetch every row and filter in
@@ -3274,7 +3362,7 @@ class SessionDB:
         # pass id_query=None.
         id_needle = (id_query or "").strip().lower()
         search_needle = (search_query or "").strip().lower()
-        if order_by_last_active:
+        if order_by_last_active and has_last_active:
             def _like_pattern(needle: str) -> str:
                 escaped = (
                     needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -3336,6 +3424,7 @@ class SessionDB:
                              ORDER BY m.timestamp, m.id LIMIT 1),
                             ''
                         ) AS _preview_raw
+                        {last_active_select}
                     FROM sessions s
                     {outer_where}
                     ORDER BY s.last_active DESC, s.started_at DESC, s.id DESC
@@ -3352,6 +3441,7 @@ class SessionDB:
                              ORDER BY m.timestamp, m.id LIMIT 1),
                             ''
                         ) AS _preview_raw
+                        {last_active_select}
                     FROM sessions s
                     {where_sql}
                     ORDER BY s.last_active DESC, s.started_at DESC, s.id DESC
@@ -3368,9 +3458,10 @@ class SessionDB:
                          ORDER BY m.timestamp, m.id LIMIT 1),
                         ''
                     ) AS _preview_raw
+                    {last_active_select}
                 FROM sessions s
                 {where_sql}
-                ORDER BY s.started_at DESC
+                ORDER BY s.started_at DESC, s.id DESC
                 LIMIT ? OFFSET ?
             """
             params.extend([limit, offset])
@@ -3498,6 +3589,15 @@ class SessionDB:
         ``list_sessions_rich`` (preview + last_active). Returns None if the
         session doesn't exist.
         """
+        last_active_select = ""
+        if not getattr(self, "_has_sessions_last_active", True):
+            last_active_select = """
+                ,
+                COALESCE(
+                    (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
+                    s.started_at
+                ) AS last_active
+            """
         query = """
             SELECT s.*,
                 COALESCE(
@@ -3507,9 +3607,10 @@ class SessionDB:
                      ORDER BY m.timestamp, m.id LIMIT 1),
                     ''
                 ) AS _preview_raw
+                {last_active_select}
             FROM sessions s
             WHERE s.id = ?
-        """
+        """.format(last_active_select=last_active_select)
         with self._lock:
             cursor = self._conn.execute(query, (session_id,))
             row = cursor.fetchone()
@@ -5328,7 +5429,11 @@ class SessionDB:
             )
             if cursor.fetchone()[0] == 0:
                 return False
+            affected_ancestors = set(self._compression_ancestor_ids(conn, [session_id]))
             removed_delegate_ids.extend(_delete_delegate_children(conn, [session_id]))
+            affected_ancestors.update(
+                self._compression_ancestor_ids(conn, removed_delegate_ids)
+            )
             # Orphan remaining child sessions (branches, etc.) so FK is satisfied.
             conn.execute(
                 "UPDATE sessions SET parent_session_id = NULL "
@@ -5337,6 +5442,8 @@ class SessionDB:
             )
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            for ancestor_id in affected_ancestors:
+                self._refresh_session_last_active(conn, ancestor_id)
             return True
 
         deleted = self._execute_write(_do)
@@ -5442,7 +5549,11 @@ class SessionDB:
                 return 0
 
             existing_placeholders = ",".join("?" * len(existing))
+            affected_ancestors = set(self._compression_ancestor_ids(conn, existing))
             removed_delegate_ids.extend(_delete_delegate_children(conn, existing))
+            affected_ancestors.update(
+                self._compression_ancestor_ids(conn, removed_delegate_ids)
+            )
             # Orphan remaining children whose parent is in the kill list so the
             # FK constraint stays satisfied. Pin children whose parent
             # is itself in the kill list rather than NULL-ing parents
@@ -5461,6 +5572,8 @@ class SessionDB:
                 f"DELETE FROM sessions WHERE id IN ({existing_placeholders})",
                 existing,
             )
+            for ancestor_id in affected_ancestors:
+                self._refresh_session_last_active(conn, ancestor_id)
             removed_ids.extend(existing)
             return len(existing)
 
@@ -5792,6 +5905,9 @@ class SessionDB:
 
             # Orphan any sessions whose parent is about to be deleted
             placeholders = ",".join("?" * len(session_ids))
+            affected_ancestors = set(
+                self._compression_ancestor_ids(conn, list(session_ids))
+            )
             conn.execute(
                 f"UPDATE sessions SET parent_session_id = NULL "
                 f"WHERE parent_session_id IN ({placeholders})",
@@ -5802,6 +5918,8 @@ class SessionDB:
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
                 conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
                 removed_ids.append(sid)
+            for ancestor_id in affected_ancestors:
+                self._refresh_session_last_active(conn, ancestor_id)
             return len(session_ids)
 
         count = self._execute_write(_do)
