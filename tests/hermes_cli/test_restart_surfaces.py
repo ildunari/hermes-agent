@@ -261,7 +261,7 @@ def test_run_converts_subprocess_timeout_to_failed_process(monkeypatch, tmp_path
     assert "exit=124" in (tmp_path / "restart.log").read_text()
 
 
-def test_optional_system_targets_do_not_try_sudo_or_modify_plists(monkeypatch, tmp_path):
+def test_optional_system_targets_try_noninteractive_sudo_without_modifying_plists(monkeypatch, tmp_path):
     from hermes_cli import restart_surfaces
 
     calls = []
@@ -291,12 +291,13 @@ def test_optional_system_targets_do_not_try_sudo_or_modify_plists(monkeypatch, t
 
     assert restart_surfaces.restart_scope("hermes", delay=0) == 0
 
-    assert ["sudo", "-n", "launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] not in calls
+    assert ["launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
+    assert ["sudo", "-n", "launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
     flattened = "\n".join(" ".join(cmd) for cmd in calls)
     assert "bootout" not in flattened
     assert "unload" not in flattened
     assert "remove" not in flattened
-    assert ["launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
+    assert "sudo was required but unavailable non-interactively" in (tmp_path / "restart.log").read_text()
 
 
 def test_required_system_target_uses_sudo_fallback_and_reports_timeout(monkeypatch, tmp_path):

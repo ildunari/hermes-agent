@@ -231,20 +231,23 @@ def _kickstart_with_sudo(
 
 
 def _kickstart_optional(target: RestartTarget, service: str) -> subprocess.CompletedProcess[str]:
-    """Kickstart a best-effort target without privileged fallback.
+    """Kickstart a best-effort target, using sudo only for system services.
 
-    Optional system LaunchDaemons are included in the plan for visibility, but
-    the detached helper must never block on sudo or fail the whole restart
-    because a root-owned plist could not be kicked by the user session. This
-    deliberately uses only ``launchctl kickstart -k``; it never unloads,
-    bootouts, removes, or rewrites plist files.
+    Optional system LaunchDaemons are included in the plan for visibility. They
+    are root-owned on macOS, so ``launchctl kickstart -k system/...`` usually
+    needs sudo even though user/gui LaunchAgents do not. Retry through
+    non-interactive ``sudo -n`` when needed, but keep the target best-effort: a
+    missing cached sudo credential must not fail the whole Hermes restart.
     """
 
     proc = _run(["launchctl", "kickstart", "-k", service], timeout=30)
     if proc.returncode != 0 and service.startswith("system/"):
+        sudo_proc = _kickstart_with_sudo(service, proc)
+        if sudo_proc.returncode == 0:
+            return sudo_proc
         _append_log(
-            f"{service} optional system target not restarted without sudo "
-            f"({target.description or target.label})"
+            f"{service} optional system target not restarted; sudo was required "
+            f"but unavailable non-interactively ({target.description or target.label})"
         )
     return proc
 
