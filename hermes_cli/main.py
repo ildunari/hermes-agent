@@ -255,12 +255,14 @@ if _try_termux_ultrafast_version():
     raise SystemExit(0)
 
 import argparse
+import atexit
 import hashlib
 import json
 import shlex
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -5804,6 +5806,152 @@ def cmd_gui(args: argparse.Namespace):
     sys.exit(launch_result.returncode)
 
 
+_DASHBOARD_PROCESS_PATTERNS = (
+    "hermes dashboard",
+    "hermes_cli.main dashboard",
+    "hermes_cli/main.py dashboard",
+    # The headless backend (`hermes serve`) is the same long-lived server
+    # under a different command name — the desktop app spawns it. Reap it
+    # on update for the same frontend/backend-mismatch reason.
+    "hermes serve",
+    "hermes_cli.main serve",
+    "hermes_cli/main.py serve",
+)
+
+
+def _dashboard_excluded_pids_from_env() -> set[int]:
+    """Return desktop-managed backend PIDs that must never be killed."""
+    raw_pid = os.environ.get("HERMES_DESKTOP_CHILD_PID")
+    if not raw_pid:
+        return set()
+    parsed: set[int] = set()
+    for part in raw_pid.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            parsed.add(int(part))
+        except (ValueError, TypeError):
+            pass
+    return parsed
+
+
+def _dashboard_cmdline_mode(cmdline: str) -> str | None:
+    try:
+        tokens = shlex.split(cmdline, posix=sys.platform != "win32")
+    except ValueError:
+        tokens = cmdline.split()
+    for idx, token in enumerate(tokens):
+        if token not in {"dashboard", "serve"}:
+            continue
+        prefix = tokens[:idx]
+        for pos, prev in enumerate(prefix):
+            prev_name = Path(prev).name
+            prev_path = prev.replace("\\", "/")
+            if (
+                prev_name == "hermes"
+                or prev == "hermes_cli.main"
+                or prev_path.endswith("hermes_cli/main.py")
+            ):
+                return token
+            if (
+                prev == "-m"
+                and pos + 1 < len(prefix)
+                and prefix[pos + 1] == "hermes_cli.main"
+            ):
+                return token
+    return None
+
+
+def _read_dashboard_process_cmdline(pid: int) -> str | None:
+    """Best-effort live cmdline read for dashboard/serve identity checks."""
+    try:
+        from gateway.status import _read_process_cmdline
+
+        cmdline = _read_process_cmdline(pid)
+        if cmdline:
+            return cmdline
+    except Exception:
+        pass
+
+    if sys.platform == "win32":
+        try:
+            from hermes_cli._subprocess_compat import windows_hide_flags
+
+            result = subprocess.run(
+                [
+                    "wmic", "process", "where",
+                    f"ProcessId={int(pid)}",
+                    "get", "CommandLine", "/FORMAT:LIST",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                encoding="utf-8",
+                errors="ignore",
+                creationflags=windows_hide_flags(),
+            )
+            if result.returncode == 0:
+                for line in (result.stdout or "").splitlines():
+                    if line.startswith("CommandLine="):
+                        return line[len("CommandLine=") :].strip() or None
+        except Exception:
+            return None
+        return None
+
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    try:
+        if cmdline_path.exists():
+            return (
+                cmdline_path.read_bytes()
+                .replace(b"\x00", b" ")
+                .decode("utf-8", errors="replace")
+                .strip()
+                or None
+            )
+    except OSError:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(int(pid)), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return (result.stdout or "").strip() or None
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    return None
+
+
+def _dashboard_pid_exists(pid: int) -> bool:
+    try:
+        from gateway.status import _pid_exists
+
+        return bool(_pid_exists(pid))
+    except Exception:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
+
+def _dashboard_process_start_time(pid: int) -> int | None:
+    try:
+        from gateway.status import get_process_start_time
+
+        return get_process_start_time(pid)
+    except Exception:
+        return None
+
+
 def _find_stale_dashboard_pids(
     *,
     exclude_pids: set[int] | None = None,
@@ -5833,17 +5981,6 @@ def _find_stale_dashboard_pids(
 
     Returns an empty list on any scan error (missing ps/wmic, timeout, etc.).
     """
-    patterns = [
-        "hermes dashboard",
-        "hermes_cli.main dashboard",
-        "hermes_cli/main.py dashboard",
-        # The headless backend (`hermes serve`) is the same long-lived server
-        # under a different command name — the desktop app spawns it. Reap it
-        # on update for the same frontend/backend-mismatch reason.
-        "hermes serve",
-        "hermes_cli.main serve",
-        "hermes_cli/main.py serve",
-    ]
     self_pid = os.getpid()
     dashboard_pids: list[int] = []
 
@@ -5880,7 +6017,7 @@ def _find_stale_dashboard_pids(
                 elif line.startswith("ProcessId="):
                     pid_str = line[len("ProcessId=") :]
                     if (
-                        any(p in current_cmd for p in patterns)
+                        any(p in current_cmd for p in _DASHBOARD_PROCESS_PATTERNS)
                         and int(pid_str) != self_pid
                     ):
                         try:
@@ -5913,7 +6050,7 @@ def _find_stale_dashboard_pids(
                     except ValueError:
                         continue
                     command = parts[1]
-                    if any(p in command for p in patterns) and pid != self_pid:
+                    if any(p in command for p in _DASHBOARD_PROCESS_PATTERNS) and pid != self_pid:
                         dashboard_pids.append(pid)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return []
@@ -5921,6 +6058,280 @@ def _find_stale_dashboard_pids(
     if exclude_pids:
         dashboard_pids = [p for p in dashboard_pids if p not in exclude_pids]
     return dashboard_pids
+
+
+def _dashboard_pid_dir() -> Path:
+    from hermes_constants import get_default_hermes_root
+
+    return get_default_hermes_root() / "run"
+
+
+def _dashboard_active_profile_name() -> str:
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        return get_active_profile_name()
+    except Exception:
+        return "default"
+
+
+def _dashboard_pid_record_path(
+    *, pid: int, requested_port: int, pid_dir: Path | None = None
+) -> Path:
+    port_part = "auto" if int(requested_port) == 0 else str(int(requested_port))
+    return (pid_dir or _dashboard_pid_dir()) / f"dashboard-{port_part}-{pid}.pid"
+
+
+def _read_dashboard_pid_record(path: Path) -> dict | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        raw["pid"] = int(raw.get("pid"))
+        raw["port"] = int(raw.get("port"))
+    except (TypeError, ValueError):
+        return None
+    return raw
+
+
+def _dashboard_record_mode(record: dict) -> str:
+    mode = str(record.get("mode") or "").strip()
+    if mode in {"dashboard", "serve"}:
+        return mode
+    argv = record.get("argv")
+    if isinstance(argv, list):
+        inferred = _dashboard_cmdline_mode(" ".join(str(part) for part in argv))
+        if inferred:
+            return inferred
+    return "dashboard"
+
+
+def _dashboard_record_requested_port(record: dict) -> int:
+    try:
+        return int(record.get("requested_port"))
+    except (TypeError, ValueError):
+        return int(record.get("port", 0) or 0)
+
+
+def _dashboard_record_is_live(record: dict) -> bool:
+    pid = int(record.get("pid", -1))
+    if pid <= 0 or not _dashboard_pid_exists(pid):
+        return False
+    recorded_start = record.get("process_start_time")
+    current_start = _dashboard_process_start_time(pid)
+    if recorded_start is not None and current_start is not None:
+        try:
+            if int(recorded_start) != int(current_start):
+                return False
+        except (TypeError, ValueError):
+            return False
+    cmdline = _read_dashboard_process_cmdline(pid)
+    if not cmdline and pid == os.getpid():
+        cmdline = " ".join(sys.argv)
+    if not cmdline:
+        return False
+    mode = _dashboard_cmdline_mode(cmdline)
+    if not mode:
+        return False
+    expected_mode = _dashboard_record_mode(record)
+    return mode == expected_mode
+
+
+def _scan_dashboard_pid_registry(*, remove_dead: bool = True) -> list[dict]:
+    pid_dir = _dashboard_pid_dir()
+    try:
+        entries = list(pid_dir.glob("dashboard-*.pid"))
+    except OSError:
+        return []
+
+    live: list[dict] = []
+    for path in entries:
+        record = _read_dashboard_pid_record(path)
+        if not record:
+            if remove_dead:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            continue
+        record["_path"] = str(path)
+        if _dashboard_record_is_live(record):
+            live.append(record)
+            continue
+        if remove_dead:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return live
+
+
+def _format_dashboard_record_age(record: dict) -> str:
+    try:
+        age = max(0, int(time.time() - float(record.get("start_ts", 0))))
+    except (TypeError, ValueError):
+        return "unknown age"
+    if age < 60:
+        return f"{age}s"
+    if age < 3600:
+        return f"{age // 60}m"
+    if age < 86400:
+        return f"{age // 3600}h"
+    return f"{age // 86400}d"
+
+
+def _dashboard_live_registry_pids(
+    *, exclude_pids: set[int] | None = None
+) -> list[int]:
+    excluded = exclude_pids or set()
+    return [
+        int(record["pid"])
+        for record in _scan_dashboard_pid_registry(remove_dead=True)
+        if int(record["pid"]) not in excluded
+    ]
+
+
+def _warn_or_replace_dashboard_duplicates(args) -> None:
+    """Warn about same-profile auto-port duplicates; kill them with --replace."""
+    mode = getattr(args, "command", "") or "dashboard"
+    if mode not in {"dashboard", "serve"}:
+        mode = "dashboard"
+    profile = _dashboard_active_profile_name()
+    exclude = _dashboard_excluded_pids_from_env()
+    self_pid = os.getpid()
+    duplicates = []
+    for record in _scan_dashboard_pid_registry(remove_dead=True):
+        pid = int(record["pid"])
+        if pid == self_pid or pid in exclude:
+            continue
+        if str(record.get("profile") or "default") != profile:
+            continue
+        if _dashboard_record_mode(record) != mode:
+            continue
+        if _dashboard_record_requested_port(record) != 0:
+            continue
+        duplicates.append(record)
+
+    if not duplicates:
+        return
+
+    lines = [
+        f"⚠ Found {len(duplicates)} existing auto-port Hermes {mode} "
+        f"backend(s) for profile '{profile}':"
+    ]
+    for record in duplicates:
+        lines.append(
+            "  "
+            f"PID {record['pid']} port={record.get('port')} "
+            f"age={_format_dashboard_record_age(record)} "
+            f"venv={record.get('venv') or 'unknown'}"
+        )
+    if getattr(args, "replace", False):
+        lines.append("  --replace set; stopping those duplicate backend(s).")
+    else:
+        lines.append("  Pass --replace to stop these duplicates before starting.")
+    warning = "\n".join(lines)
+    logger.warning(warning)
+    print(warning, file=sys.stderr)
+
+    if getattr(args, "replace", False):
+        _kill_stale_dashboard_processes(
+            reason=f"requested via --replace for duplicate {mode} backends",
+            target_pids=[int(record["pid"]) for record in duplicates],
+        )
+
+
+_DASHBOARD_PIDFILE_SIGNAL_CLEANUPS: list = []
+_DASHBOARD_PIDFILE_SIGNAL_PREVIOUS: dict[int, object] = {}
+
+
+def _install_dashboard_pidfile_signal_cleanup(cleanup) -> None:
+    import signal as _signal
+
+    _DASHBOARD_PIDFILE_SIGNAL_CLEANUPS.append(cleanup)
+    for signum in (_signal.SIGTERM, _signal.SIGINT):
+        if signum in _DASHBOARD_PIDFILE_SIGNAL_PREVIOUS:
+            continue
+        previous = _signal.getsignal(signum)
+        _DASHBOARD_PIDFILE_SIGNAL_PREVIOUS[signum] = previous
+
+        def _handler(sig, frame, *, _previous=previous):
+            for fn in list(_DASHBOARD_PIDFILE_SIGNAL_CLEANUPS):
+                try:
+                    fn()
+                except Exception:
+                    pass
+            if callable(_previous):
+                _previous(sig, frame)
+                return
+            if _previous == _signal.SIG_IGN:
+                return
+            _signal.signal(sig, _signal.SIG_DFL)
+            os.kill(os.getpid(), sig)
+
+        try:
+            _signal.signal(signum, _handler)
+        except (ValueError, OSError):
+            pass
+
+
+def _write_dashboard_pid_record_for_bound_port(args, actual_port: int):
+    """Write the dashboard/serve PID record after uvicorn has bound."""
+    requested_port = int(getattr(args, "port", actual_port) or 0)
+    pid = os.getpid()
+    pid_dir = _dashboard_pid_dir()
+    path = _dashboard_pid_record_path(
+        pid=pid, requested_port=requested_port, pid_dir=pid_dir
+    )
+    mode = getattr(args, "command", "") or "dashboard"
+    if mode not in {"dashboard", "serve"}:
+        mode = "dashboard"
+    payload = {
+        "pid": pid,
+        "port": int(actual_port),
+        "requested_port": requested_port,
+        "profile": _dashboard_active_profile_name(),
+        "mode": mode,
+        "argv": list(sys.argv),
+        "start_ts": time.time(),
+        "process_start_time": _dashboard_process_start_time(pid),
+        "venv": sys.executable,
+    }
+    tmp_path: Path | None = None
+    try:
+        pid_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        logger.warning("Failed to write dashboard PID file %s: %s", path, exc)
+        if tmp_path:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return None
+
+    cleaned = False
+
+    def _cleanup() -> None:
+        nonlocal cleaned
+        if cleaned:
+            return
+        cleaned = True
+        try:
+            current = _read_dashboard_pid_record(path)
+            if current and int(current.get("pid", -1)) == pid:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    atexit.register(_cleanup)
+    _install_dashboard_pidfile_signal_cleanup(_cleanup)
+    return _cleanup
 
 
 def _print_curator_first_run_notice() -> None:
@@ -6052,6 +6463,7 @@ def _format_time_ago(iso_ts: str) -> str:
 
 def _kill_stale_dashboard_processes(
     reason: str = "the running backend no longer matches the updated frontend",
+    target_pids: list[int] | None = None,
 ) -> None:
     """Kill running ``hermes dashboard`` processes.
 
@@ -6071,35 +6483,37 @@ def _kill_stale_dashboard_processes(
     launch args (--host, --port, --insecure, --tui, --no-open).  The user
     restarts it manually; a hint is printed.
     """
-    # When the Hermes Desktop Electron app spawns this dashboard as a
-    # backend child, it sets HERMES_DESKTOP_CHILD_PID so that the update
-    # path can skip killing the desktop-managed process.  (#37532)
-    exclude: set[int] | None = None
-    raw_pid = os.environ.get("HERMES_DESKTOP_CHILD_PID")
-    if raw_pid:
-        # The desktop may manage several backends (one per active profile) and
-        # passes them comma-separated; a lone int still parses for back-compat.
-        parsed: set[int] = set()
-        for part in raw_pid.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                parsed.add(int(part))
-            except (ValueError, TypeError):
-                pass
-        if parsed:
-            exclude = parsed
-
-    pids = _find_stale_dashboard_pids(exclude_pids=exclude)
+    exclude = _dashboard_excluded_pids_from_env()
+    if target_pids is None:
+        pids = _find_stale_dashboard_pids(exclude_pids=exclude)
+    else:
+        pids = [int(pid) for pid in target_pids if int(pid) not in exclude]
     if not pids:
+        return
+
+    verified: list[int] = []
+    skipped: list[tuple[int, str]] = []
+    if target_pids is not None:
+        # Refuse to terminate anything named only by a PID file unless the
+        # live process table still proves it is Hermes dashboard/serve.
+        # PID files are advisory; the cmdline is authoritative.
+        for pid in pids:
+            cmdline = _read_dashboard_process_cmdline(pid)
+            if cmdline and _dashboard_cmdline_mode(cmdline):
+                verified.append(pid)
+            else:
+                skipped.append((pid, "not a live hermes dashboard/serve process"))
+        pids = verified
+    if not pids:
+        for pid, why in skipped:
+            print(f"    ✗ skipped PID {pid}: {why}")
         return
 
     print()
     print(f"⟲ Stopping {len(pids)} dashboard process(es) ({reason})")
 
     killed: list[int] = []
-    failed: list[tuple[int, str]] = []
+    failed: list[tuple[int, str]] = list(skipped)
 
     if sys.platform == "win32":
         for pid in pids:
@@ -11940,15 +12354,29 @@ def cmd_dashboard(args):
 
     # --stop: kill any running dashboards and exit, no deps needed.
     if getattr(args, "stop", False):
-        pids = _find_stale_dashboard_pids()
+        exclude = _dashboard_excluded_pids_from_env()
+        registry_pids = _dashboard_live_registry_pids(exclude_pids=exclude)
+        scanned_pids = (
+            _find_stale_dashboard_pids(exclude_pids=exclude)
+            if exclude else _find_stale_dashboard_pids()
+        )
+        pids = sorted({*registry_pids, *scanned_pids})
         if not pids:
             print("No hermes dashboard processes running.")
             sys.exit(0)
         # Reuse the same SIGTERM-grace-SIGKILL path used after `hermes update`.
-        _kill_stale_dashboard_processes(reason="requested via --stop")
+        _kill_stale_dashboard_processes(
+            reason="requested via --stop",
+            target_pids=pids,
+        )
         # _kill_stale_dashboard_processes prints outcomes itself.  Exit 0 if
         # we killed at least one, 1 if they were all unkillable.
-        remaining = _find_stale_dashboard_pids()
+        remaining_registry = _dashboard_live_registry_pids(exclude_pids=exclude)
+        remaining_scanned = (
+            _find_stale_dashboard_pids(exclude_pids=exclude)
+            if exclude else _find_stale_dashboard_pids()
+        )
+        remaining = sorted({*remaining_registry, *remaining_scanned})
         sys.exit(1 if remaining else 0)
 
     # ── Unified profile launch routing ────────────────────────────────
@@ -12045,6 +12473,8 @@ def cmd_dashboard(args):
     except Exception:
         pass
 
+    _warn_or_replace_dashboard_duplicates(args)
+
     try:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
@@ -12138,6 +12568,9 @@ def cmd_dashboard(args):
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
         initial_profile=getattr(args, "open_profile", "") or "",
+        register_instance=lambda actual_port: _write_dashboard_pid_record_for_bound_port(
+            args, actual_port
+        ),
     )
 
 
