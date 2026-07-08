@@ -2961,6 +2961,10 @@ DEFAULT_CONFIG = {
         # GBs of disk on heavy users.  Opt in only if you have an external
         # tool that consumes the JSON files directly.
         "write_json_snapshots": False,
+        # Disable the optional trigram FTS5 index used for CJK/substring
+        # search.  When true, SessionDB drops messages_fts_trigram on init and
+        # falls back to the unicode FTS/LIKE search paths.
+        "disable_fts_trigram": False,
     },
 
     # Contextual first-touch onboarding hints (see agent/onboarding.py).
