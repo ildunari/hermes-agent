@@ -3573,6 +3573,121 @@ class TestListSessionsRich:
         assert top[0]["id"] == "tip1"
         assert top[0]["_lineage_root_id"] == "root1"
 
+    def test_last_active_refreshes_when_compression_edge_changes(self, db):
+        """A child with existing messages becomes/removes chain activity when
+        the parent transitions into/out of ``end_reason='compression'``.
+        """
+        t0 = 1709500000.0
+        db.create_session("root", "cli")
+        db.create_session("tip", "cli", parent_session_id="root")
+        db.create_session("solo", "cli")
+        with db._lock:
+            db._conn.execute(
+                "UPDATE sessions SET started_at=?, last_active=? WHERE id=?",
+                (t0, t0, "root"),
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at=?, last_active=? WHERE id=?",
+                (t0 + 10, t0 + 10, "tip"),
+            )
+            db._conn.execute(
+                "UPDATE sessions SET started_at=?, last_active=? WHERE id=?",
+                (t0 + 20, t0 + 20, "solo"),
+            )
+            db._conn.commit()
+        db.append_message("root", "user", "old root", timestamp=t0 + 1)
+        db.append_message("tip", "user", "new child", timestamp=t0 + 1000)
+        db.append_message("solo", "user", "middle", timestamp=t0 + 500)
+
+        assert [
+            s["id"] for s in db.list_sessions_rich(limit=2, order_by_last_active=True)
+        ] == ["solo", "root"]
+
+        db.end_session("root", "compression")
+        assert [
+            s["id"] for s in db.list_sessions_rich(limit=2, order_by_last_active=True)
+        ] == ["tip", "solo"]
+
+        db.reopen_session("root")
+        assert [
+            s["id"] for s in db.list_sessions_rich(limit=2, order_by_last_active=True)
+        ] == ["solo", "root"]
+
+    def test_last_active_refreshes_when_compression_descendant_removed(self, tmp_path):
+        """Deleting/pruning a compression tip must not leave ancestors sorted
+        by the removed descendant's activity.
+        """
+
+        def build_db(name: str) -> SessionDB:
+            db = SessionDB(db_path=tmp_path / f"{name}.db")
+            t0 = 1709500000.0
+            db.create_session("root", "cli")
+            with db._lock:
+                db._conn.execute(
+                    "UPDATE sessions SET started_at=?, last_active=? WHERE id=?",
+                    (t0, t0, "root"),
+                )
+                db._conn.commit()
+            db.append_message("root", "user", "old root", timestamp=t0 + 1)
+            db.end_session("root", "compression")
+            db.create_session("tip", "cli", parent_session_id="root")
+            with db._lock:
+                db._conn.execute(
+                    "UPDATE sessions SET started_at=?, last_active=? WHERE id=?",
+                    (t0 + 10, t0 + 10, "tip"),
+                )
+                db._conn.commit()
+            db.append_message("tip", "user", "new tip", timestamp=t0 + 1000)
+            db.create_session("solo", "cli")
+            with db._lock:
+                db._conn.execute(
+                    "UPDATE sessions SET started_at=?, last_active=? WHERE id=?",
+                    (t0 + 20, t0 + 20, "solo"),
+                )
+                db._conn.commit()
+            db.append_message("solo", "user", "middle", timestamp=t0 + 500)
+            assert [
+                s["id"] for s in db.list_sessions_rich(limit=2, order_by_last_active=True)
+            ] == ["tip", "solo"]
+            return db
+
+        db = build_db("single")
+        try:
+            assert db.delete_session("tip") is True
+            assert [
+                s["id"] for s in db.list_sessions_rich(limit=2, order_by_last_active=True)
+            ] == ["solo", "root"]
+        finally:
+            db.close()
+
+        db = build_db("bulk")
+        try:
+            assert db.delete_sessions(["tip"]) == 1
+            assert [
+                s["id"] for s in db.list_sessions_rich(limit=2, order_by_last_active=True)
+            ] == ["solo", "root"]
+        finally:
+            db.close()
+
+        db = build_db("prune")
+        try:
+            with db._lock:
+                db._conn.execute(
+                    "UPDATE sessions SET ended_at=?, end_reason=? WHERE id=?",
+                    (1709500100.0, "delete_me", "tip"),
+                )
+                db._conn.commit()
+            assert db.prune_sessions(
+                older_than_days=None,
+                end_reason="delete_me",
+                started_before=1709500200.0,
+            ) == 1
+            assert [
+                s["id"] for s in db.list_sessions_rich(limit=2, order_by_last_active=True)
+            ] == ["solo", "root"]
+        finally:
+            db.close()
+
     def test_rich_list_includes_title(self, db):
         db.create_session("s1", "cli")
         db.set_session_title("s1", "refactoring auth")
