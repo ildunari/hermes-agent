@@ -91,6 +91,28 @@ def test_scope_aliases():
     assert normalize_scope("all") == "hermes"
 
 
+def test_system_restart_sudoers_content_is_narrow():
+    from hermes_cli import restart_surfaces
+
+    content = restart_surfaces.system_restart_sudoers_content("Kosta")
+
+    assert "Kosta ALL=(root) NOPASSWD: HERMES_RESTART_SURFACES" in content
+    assert "/bin/launchctl kickstart -k system/com.kosta.hermes-dashboard-system" in content
+    assert "/bin/launchctl kickstart -k system/com.kosta.hermes-workspace-proxy-system" in content
+    assert "ALL" not in content.split("Cmnd_Alias HERMES_RESTART_SURFACES = ", 1)[1].split("\n", 1)[0]
+    assert "bootout" not in content
+    assert "unload" not in content
+
+
+def test_cli_can_print_system_restart_sudoers_dry_run(capsys):
+    from hermes_cli.restart_surfaces import main
+
+    assert main(["--install-system-restart-sudoers", "--dry-run", "--sudoers-user", "Kosta"]) == 0
+    output = capsys.readouterr().out
+    assert "Cmnd_Alias HERMES_RESTART_SURFACES" in output
+    assert "Kosta ALL=(root) NOPASSWD" in output
+
+
 def test_enqueue_restart_can_request_webui_completion_marker(monkeypatch, tmp_path):
     launched = {}
 
@@ -210,7 +232,7 @@ def test_restart_scope_waits_for_active_gateway_tasks_before_launchctl(monkeypat
 
     assert restart_scope("gateways", delay=0, safe_wait_timeout=10, safe_wait_interval=0.1) == 0
     assert calls
-    assert calls[0][:2] == ["launchctl", "print"]
+    assert calls[0][:2] == ["/bin/launchctl", "print"]
 
 
 def test_restart_scope_times_out_before_launchctl_when_gateway_stays_busy(monkeypatch, tmp_path):
@@ -250,11 +272,11 @@ def test_run_converts_subprocess_timeout_to_failed_process(monkeypatch, tmp_path
     monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
 
     def fake_run(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired(["sudo", "-n", "launchctl"], timeout=3)
+        raise subprocess.TimeoutExpired(["/usr/bin/sudo", "-n", "/bin/launchctl"], timeout=3)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    proc = restart_surfaces._run(["sudo", "-n", "launchctl"], timeout=3)
+    proc = restart_surfaces._run(["/usr/bin/sudo", "-n", "/bin/launchctl"], timeout=3)
 
     assert proc.returncode == 124
     assert "timed out after 3s" in proc.stderr
@@ -270,7 +292,7 @@ def test_optional_system_targets_try_noninteractive_sudo_without_modifying_plist
         calls.append(cmd)
 
         class Proc:
-            returncode = 0 if cmd[:2] == ["launchctl", "print"] else 1
+            returncode = 0 if cmd[:2] == ["/bin/launchctl", "print"] else 1
             stdout = ""
             stderr = "operation not permitted"
 
@@ -291,8 +313,8 @@ def test_optional_system_targets_try_noninteractive_sudo_without_modifying_plist
 
     assert restart_surfaces.restart_scope("hermes", delay=0) == 0
 
-    assert ["launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
-    assert ["sudo", "-n", "launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
+    assert ["/bin/launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
+    assert ["/usr/bin/sudo", "-n", "/bin/launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
     flattened = "\n".join(" ".join(cmd) for cmd in calls)
     assert "bootout" not in flattened
     assert "unload" not in flattened
@@ -313,12 +335,12 @@ def test_required_system_target_uses_sudo_fallback_and_reports_timeout(monkeypat
             stderr = ""
 
         proc = Proc()
-        if cmd[:2] == ["launchctl", "print"]:
+        if cmd[:2] == ["/bin/launchctl", "print"]:
             proc.returncode = 0
-        elif cmd == ["launchctl", "kickstart", "-k", "system/com.kosta.required"]:
+        elif cmd == ["/bin/launchctl", "kickstart", "-k", "system/com.kosta.required"]:
             proc.returncode = 1
             proc.stderr = "operation not permitted"
-        elif cmd == ["sudo", "-n", "launchctl", "kickstart", "-k", "system/com.kosta.required"]:
+        elif cmd == ["/usr/bin/sudo", "-n", "/bin/launchctl", "kickstart", "-k", "system/com.kosta.required"]:
             proc.returncode = 124
             proc.stderr = "timed out after 30s"
         else:
@@ -336,7 +358,7 @@ def test_required_system_target_uses_sudo_fallback_and_reports_timeout(monkeypat
 
     assert restart_surfaces.restart_scope("hermes", delay=0, completion_marker=str(marker)) == 1
 
-    assert ["sudo", "-n", "launchctl", "kickstart", "-k", "system/com.kosta.required"] in calls
+    assert ["/usr/bin/sudo", "-n", "/bin/launchctl", "kickstart", "-k", "system/com.kosta.required"] in calls
     payload = json.loads(marker.read_text())
     assert payload["exit_code"] == 1
     assert "finished with errors" in payload["message"]

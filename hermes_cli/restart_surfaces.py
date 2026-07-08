@@ -10,9 +10,11 @@ import argparse
 import asyncio
 import json
 import os
+import pwd
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,6 +23,10 @@ from typing import Any, Iterable
 
 
 LOG_PATH = Path.home() / ".hermes" / "logs" / "restart-surfaces.log"
+LAUNCHCTL_BIN = "/bin/launchctl"
+SUDO_BIN = "/usr/bin/sudo"
+VISUDO_BIN = "/usr/sbin/visudo"
+SUDOERS_DROPIN = Path("/private/etc/sudoers.d/hermes-restart-surfaces")
 
 
 @dataclass(frozen=True)
@@ -138,6 +144,12 @@ def targets_for_scope(scope: str) -> tuple[RestartTarget, ...]:
     return _unique_targets(targets)
 
 
+def system_restart_targets() -> tuple[RestartTarget, ...]:
+    """Return unique system LaunchDaemons the restart helper may sudo-kick."""
+
+    return tuple(target for target in _unique_targets(FULL_HERMES_TARGETS) if target.domain_template == "system")
+
+
 def describe_plan(scope: str, *, uid: int | None = None) -> str:
     """Return a human-readable dry-run plan without changing runtime state."""
 
@@ -164,6 +176,55 @@ def describe_plan(scope: str, *, uid: int | None = None) -> str:
         lines.append("Verification ports: " + ", ".join(str(p) for p in ports))
     lines.append(f"Log: {LOG_PATH}")
     return "\n".join(lines)
+
+
+def _default_sudoers_user() -> str:
+    return os.environ.get("SUDO_USER") or os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name
+
+
+def system_restart_sudoers_content(username: str | None = None) -> str:
+    """Return the narrow sudoers drop-in for unattended system-service restarts."""
+
+    user = username or _default_sudoers_user()
+    if not user or any(ch.isspace() or ch in {":", ",", "=", "\\"} for ch in user):
+        raise RestartError(f"Unsafe sudoers username: {user!r}")
+    commands = ", ".join(
+        f"{LAUNCHCTL_BIN} kickstart -k {target.service_name(os.getuid())}"
+        for target in system_restart_targets()
+    )
+    return (
+        "# Managed by Hermes Agent. Allows unattended restarts only for the\n"
+        "# Hermes-owned system LaunchDaemons used by /restart-gateways and /restart-hermes.\n"
+        f"Cmnd_Alias HERMES_RESTART_SURFACES = {commands}\n"
+        f"{user} ALL=(root) NOPASSWD: HERMES_RESTART_SURFACES\n"
+    )
+
+
+def install_system_restart_sudoers(username: str | None = None, *, dry_run: bool = False) -> str:
+    """Install the sudoers drop-in that lets detached restarts touch system daemons."""
+
+    content = system_restart_sudoers_content(username)
+    if dry_run:
+        return content
+    tmp_dir = Path(tempfile.mkdtemp(prefix="hermes-sudoers-"))
+    tmp_path = tmp_dir / SUDOERS_DROPIN.name
+    tmp_path.write_text(content, encoding="utf-8")
+    check = _run([VISUDO_BIN, "-cf", str(tmp_path)], timeout=15)
+    if check.returncode != 0:
+        raise RestartError(f"sudoers validation failed for {tmp_path}: {check.stderr}")
+    install = _run(
+        [SUDO_BIN, "-n", "install", "-o", "root", "-g", "wheel", "-m", "0440", str(tmp_path), str(SUDOERS_DROPIN)],
+        timeout=30,
+    )
+    if install.returncode != 0:
+        raise RestartError(
+            "sudoers drop-in validated but could not be installed non-interactively. "
+            f"Run once from a local shell: sudo install -o root -g wheel -m 0440 {tmp_path} {SUDOERS_DROPIN}"
+        )
+    verify = _run([SUDO_BIN, "-n", VISUDO_BIN, "-cf", str(SUDOERS_DROPIN)], timeout=15)
+    if verify.returncode != 0:
+        raise RestartError(f"installed sudoers drop-in failed validation: {verify.stderr}")
+    return f"Installed {SUDOERS_DROPIN} for user {username or _default_sudoers_user()}"
 
 
 def _timestamp() -> str:
@@ -203,11 +264,11 @@ def _run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[st
 
 
 def _launchctl_print(service: str) -> subprocess.CompletedProcess[str]:
-    return _run(["launchctl", "print", service], timeout=15)
+    return _run([LAUNCHCTL_BIN, "print", service], timeout=15)
 
 
 def _kickstart(service: str) -> subprocess.CompletedProcess[str]:
-    proc = _run(["launchctl", "kickstart", "-k", service], timeout=30)
+    proc = _run([LAUNCHCTL_BIN, "kickstart", "-k", service], timeout=30)
     if proc.returncode == 0 or not service.startswith("system/"):
         return proc
     return _kickstart_with_sudo(service, proc)
@@ -226,7 +287,7 @@ def _kickstart_with_sudo(
     detached helper can still notify the session and write completion markers.
     """
 
-    sudo = _run(["sudo", "-n", "launchctl", "kickstart", "-k", service], timeout=timeout)
+    sudo = _run([SUDO_BIN, "-n", LAUNCHCTL_BIN, "kickstart", "-k", service], timeout=timeout)
     return sudo if sudo.returncode == 0 else original
 
 
@@ -240,7 +301,7 @@ def _kickstart_optional(target: RestartTarget, service: str) -> subprocess.Compl
     missing cached sudo credential must not fail the whole Hermes restart.
     """
 
-    proc = _run(["launchctl", "kickstart", "-k", service], timeout=30)
+    proc = _run([LAUNCHCTL_BIN, "kickstart", "-k", service], timeout=30)
     if proc.returncode != 0 and service.startswith("system/"):
         sudo_proc = _kickstart_with_sudo(service, proc)
         if sudo_proc.returncode == 0:
@@ -544,6 +605,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--safe-wait-timeout", type=float, default=DEFAULT_SAFE_WAIT_TIMEOUT)
     parser.add_argument("--safe-wait-interval", type=float, default=DEFAULT_SAFE_WAIT_INTERVAL)
     parser.add_argument(
+        "--install-system-restart-sudoers",
+        action="store_true",
+        help="install the narrow sudoers drop-in needed for unattended system LaunchDaemon restarts",
+    )
+    parser.add_argument("--sudoers-user", default=None, help="user to grant in the generated sudoers drop-in")
+    parser.add_argument(
         "--enqueue-detached",
         action="store_true",
         help=(
@@ -552,6 +619,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.install_system_restart_sudoers:
+        print(install_system_restart_sudoers(args.sudoers_user, dry_run=args.dry_run))
+        return 0
     if args.describe:
         print(describe_plan(args.scope))
         return 0
