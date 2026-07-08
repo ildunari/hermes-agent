@@ -192,7 +192,7 @@ def main() -> int:
             "gpt_gateway": http_json("http://127.0.0.1:8643/health/detailed"),
             "api_auth_gate": http_json("http://127.0.0.1:8643/v1/models"),
             "chrome_cdp": http_json("http://127.0.0.1:9222/json/version"),
-            "vibeproxy_8484": http_json("http://127.0.0.1:8484/v1/models"),
+            "cli_proxy_8318": http_json("http://127.0.0.1:8318/v1/models"),
         },
         "miniapp": {
             "source_exists": mini_src.exists(),
