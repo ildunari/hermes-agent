@@ -557,6 +557,39 @@ class TestSyncSkills:
         assert "old-skill" not in result.get("user_modified", [])
         assert result["skipped"] >= 1
 
+    def test_repeated_sync_skips_bundled_hash_when_source_stat_unchanged(self, tmp_path):
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+        calls = []
+
+        def counting_dir_hash(path):
+            calls.append(Path(path).name)
+            return _dir_hash(path)
+
+        with self._patches(bundled, skills_dir, manifest_file), patch(
+            "tools.skills_sync._dir_hash",
+            side_effect=counting_dir_hash,
+        ):
+            first = sync_skills(quiet=True)
+            first_calls = len(calls)
+
+            calls.clear()
+            second = sync_skills(quiet=True)
+            second_calls = len(calls)
+
+            (bundled / "old-skill" / "SKILL.md").write_text("# Old v2")
+            calls.clear()
+            third = sync_skills(quiet=True)
+            third_calls = len(calls)
+
+        assert len(first["copied"]) == 2
+        assert first_calls == 2
+        assert second["skipped"] == 2
+        assert second_calls == 0
+        assert "old-skill" in third["updated"]
+        assert third_calls > 0
+
     def test_v1_manifest_migration_sets_baseline(self, tmp_path):
         """v1 manifest entries (no hash) should set baseline from user's current copy."""
         bundled = self._setup_bundled(tmp_path)

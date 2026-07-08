@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 HERMES_HOME = get_hermes_home()
 SKILLS_DIR = HERMES_HOME / "skills"
 MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"
+FAST_MANIFEST_VERSION = 1
 
 # Marker file written by `hermes profile create --no-skills` (named profiles)
 # and by the installer's `--no-skills` flag (the default ~/.hermes profile).
@@ -178,6 +179,105 @@ def _write_manifest(entries: Dict[str, str]):
             raise
     except Exception as e:
         logger.debug("Failed to write skills manifest %s: %s", MANIFEST_FILE, e, exc_info=True)
+
+
+def _bundled_skills_fast_manifest_file() -> Path:
+    """Stat-cache path scoped to the active Hermes profile home."""
+    return SKILLS_DIR.parent / ".bundled_skills_manifest.json"
+
+
+def _read_bundled_skills_fast_manifest() -> Dict[str, dict]:
+    path = _bundled_skills_fast_manifest_file()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict) or data.get("version") != FAST_MANIFEST_VERSION:
+        return {}
+    skills = data.get("skills")
+    return skills if isinstance(skills, dict) else {}
+
+
+def _write_bundled_skills_fast_manifest(entries: Dict[str, dict]) -> None:
+    path = _bundled_skills_fast_manifest_file()
+    payload = {
+        "version": FAST_MANIFEST_VERSION,
+        "skills": entries,
+    }
+    try:
+        import tempfile
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(path.parent),
+            prefix=".bundled_skills_manifest_",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            atomic_replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        logger.debug(
+            "Failed to write bundled skills fast manifest %s: %s",
+            path,
+            e,
+            exc_info=True,
+        )
+
+
+def _build_source_stat_manifest(skill_dir: Path) -> Optional[List[List[object]]]:
+    """Build a byte-free source manifest of relative path, mtime_ns, and size."""
+    manifest: List[List[object]] = []
+    try:
+        for fpath in sorted(skill_dir.rglob("*")):
+            if fpath.is_file():
+                st = fpath.stat()
+                manifest.append([
+                    fpath.relative_to(skill_dir).as_posix(),
+                    st.st_mtime_ns,
+                    st.st_size,
+                ])
+    except (OSError, IOError):
+        return None
+    return manifest
+
+
+def _fast_manifest_entry(
+    source_manifest: List[List[object]],
+    origin_hash: str,
+) -> dict:
+    return {
+        "source_manifest": source_manifest,
+        "content_hash": origin_hash,
+    }
+
+
+def _can_skip_bundled_hash(
+    fast_entry: object,
+    source_manifest: Optional[List[List[object]]],
+    origin_hash: str,
+    dest: Path,
+) -> bool:
+    if not origin_hash or source_manifest is None or not dest.exists():
+        return False
+    if not isinstance(fast_entry, dict):
+        return False
+    return (
+        fast_entry.get("source_manifest") == source_manifest
+        and fast_entry.get("content_hash") == origin_hash
+    )
 
 
 def _read_skill_name(skill_md: Path, fallback: str) -> str:
@@ -512,6 +612,8 @@ def sync_skills(quiet: bool = False) -> dict:
 
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     manifest = _read_manifest()
+    fast_manifest = _read_bundled_skills_fast_manifest()
+    next_fast_manifest: Dict[str, dict] = {}
     bundled_skills = _discover_bundled_skills(bundled_dir)
     bundled_names = {name for name, _ in bundled_skills}
     suppressed = _read_suppressed_names()
@@ -536,7 +638,7 @@ def sync_skills(quiet: bool = False) -> dict:
             continue
 
         dest = _compute_relative_dest(skill_src, bundled_dir)
-        bundled_hash = _dir_hash(skill_src)
+        source_manifest = _build_source_stat_manifest(skill_src)
 
         # Recover an orphaned backup before classifying. If a previous
         # update was interrupted between moving dest aside and copying the
@@ -557,6 +659,7 @@ def sync_skills(quiet: bool = False) -> dict:
                 )
 
         if skill_name in external_index:
+            bundled_hash = _dir_hash(skill_src)
             # An external_dirs source already provides this skill. Writing it
             # into the profile-local tree would create a name collision the
             # loader refuses to resolve (#28126). Defer to the external copy
@@ -580,6 +683,20 @@ def sync_skills(quiet: bool = False) -> dict:
                     print(f"  ✓ removed stale shadow of {skill_name}")
                 manifest.pop(skill_name, None)
             continue
+
+        origin_hash = manifest.get(skill_name, "")
+        if _can_skip_bundled_hash(
+            fast_manifest.get(skill_name),
+            source_manifest,
+            origin_hash,
+            dest,
+        ):
+            skipped += 1
+            next_fast_manifest[skill_name] = fast_manifest[skill_name]
+            continue
+
+        bundled_hash = _dir_hash(skill_src)
+        cacheable = True
 
         if skill_name not in manifest:
             # ── New skill — never offered before ──
@@ -612,13 +729,13 @@ def sync_skills(quiet: bool = False) -> dict:
                     if not quiet:
                         print(f"  + {skill_name}")
             except (OSError, IOError) as e:
+                cacheable = False
                 if not quiet:
                     print(f"  ! Failed to copy {skill_name}: {e}")
                 # Do NOT add to manifest — next sync should retry
 
         elif dest.exists():
             # ── Existing skill — in manifest AND on disk ──
-            origin_hash = manifest.get(skill_name, "")
             user_hash = _dir_hash(dest)
 
             if not origin_hash:
@@ -679,6 +796,7 @@ def sync_skills(quiet: bool = False) -> dict:
                                 shutil.move(str(backup), str(dest))
                         raise
                 except (OSError, IOError) as e:
+                    cacheable = False
                     if not quiet:
                         print(f"  ! Failed to update {skill_name}: {e}")
             else:
@@ -687,6 +805,13 @@ def sync_skills(quiet: bool = False) -> dict:
         else:
             # ── In manifest but not on disk — user deleted it ──
             skipped += 1
+
+        origin_hash = manifest.get(skill_name, "")
+        if cacheable and source_manifest is not None and origin_hash and dest.exists():
+            next_fast_manifest[skill_name] = _fast_manifest_entry(
+                source_manifest,
+                origin_hash,
+            )
 
     # Clean stale manifest entries (skills removed from bundled dir)
     cleaned = sorted(set(manifest.keys()) - bundled_names)
@@ -705,6 +830,7 @@ def sync_skills(quiet: bool = False) -> dict:
                 logger.debug("Could not copy %s: %s", desc_md, e)
 
     _write_manifest(manifest)
+    _write_bundled_skills_fast_manifest(next_fast_manifest)
     optional_provenance_backfilled = _backfill_optional_provenance(quiet=quiet)
 
     return {
