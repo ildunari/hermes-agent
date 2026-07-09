@@ -110,6 +110,15 @@ GATEWAY_STATUS_PATHS: dict[str, Path] = {
 DEFAULT_SAFE_WAIT_TIMEOUT = 24 * 60 * 60
 DEFAULT_SAFE_WAIT_INTERVAL = 2.0
 
+# WebUI busy probe: the WebUI (ai.hermes.webui) hosts live chat turns whose
+# worker state dies with the process. /health reports `active_runs` (worker
+# runs independent of SSE attachment), so a restart that includes the WebUI
+# target must wait until no runs are in flight — same contract as the
+# gateway active_agents drain check.
+WEBUI_BUSY_LABELS = frozenset({"ai.hermes.webui"})
+WEBUI_HEALTH_URL = "http://127.0.0.1:8787/health"
+WEBUI_HEALTH_TIMEOUT = 3.0
+
 
 class RestartError(RuntimeError):
     pass
@@ -343,6 +352,35 @@ def _gateway_status_path_for_target(target: RestartTarget) -> Path | None:
     return GATEWAY_STATUS_PATHS.get(target.label)
 
 
+def _webui_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
+    """Report the WebUI as busy while it has live chat worker runs.
+
+    Only consulted when the restart set actually includes a WebUI target.
+    A dead/unreachable WebUI is NOT busy (restart should proceed and revive
+    it); only a healthy server reporting active_runs > 0 blocks.
+    """
+    if not any(target.label in WEBUI_BUSY_LABELS for target in targets):
+        return []
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(WEBUI_HEALTH_URL, timeout=WEBUI_HEALTH_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:
+        return []
+    try:
+        active_runs = int(payload.get("active_runs") or 0)
+    except (TypeError, ValueError):
+        active_runs = 0
+    if active_runs > 0:
+        oldest = payload.get("oldest_run_age_seconds")
+        detail = f"ai.hermes.webui: active_runs={active_runs}"
+        if oldest is not None:
+            detail += f", oldest_run_age_seconds={oldest}"
+        return [detail]
+    return []
+
+
 def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
     busy: list[str] = []
     for target in targets:
@@ -378,7 +416,7 @@ def _wait_for_safe_restart(
     deadline = time.monotonic() + max(0.0, timeout)
     last_busy: list[str] = []
     while True:
-        last_busy = _gateway_busy_details(targets)
+        last_busy = _gateway_busy_details(targets) + _webui_busy_details(targets)
         if not last_busy:
             _append_log("safe restart check passed")
             return True, []
