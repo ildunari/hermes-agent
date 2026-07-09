@@ -178,6 +178,15 @@ def _xai_curated_models() -> list[str]:
 
 _PROVIDER_MODELS: dict[str, list[str]] = {
     "moa": ["default"],
+    # Local Claude/Vibe proxy. Keep this static because the proxy's /models
+    # endpoint is not the source of Kosta's curated picker list; profiles can
+    # further narrow it with model_picker.visible_models.
+    "vibeproxy": [
+        "claude-fable-5",
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+        "claude-haiku-4-5-20251001",
+    ],
     "nous": [
         # Anthropic
         "anthropic/claude-fable-5",
