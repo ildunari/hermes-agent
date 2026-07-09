@@ -1775,8 +1775,15 @@ class MCPServerTask:
             old_tool_names = set(self._registered_tool_names)
 
             # 1. Fetch current tool list from server
+            session = self.session
+            if session is None:
+                logger.debug(
+                    "MCP server '%s': skipping dynamic tool refresh; session is closed",
+                    self.name,
+                )
+                return
             async with self._rpc_lock:
-                tools_result = await self.session.list_tools()
+                tools_result = await session.list_tools()
             new_mcp_tools = tools_result.tools if hasattr(tools_result, "tools") else []
 
             # 2. Re-register with fresh tool list. Avoid nuke-and-repave for
