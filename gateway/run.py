@@ -9226,8 +9226,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.info("Ignoring /start platform ping for active session %s", _quick_key)
                 return ""
 
-            if _cmd_def_inner and _cmd_def_inner.name == "restart":
-                return await self._handle_restart_command(event)
+            if _cmd_def_inner and _cmd_def_inner.name in {
+                "restart",
+                "restart-gateways",
+                "restart-hermes",
+            }:
+                if _cmd_def_inner.name == "restart":
+                    return await self._handle_restart_command(event)
+                return await self._handle_detached_surface_restart_command(
+                    event,
+                    _cmd_def_inner.name,
+                )
 
             # /stop must hard-kill the session when an agent is running.
             # A soft interrupt (agent.interrupt()) doesn't help when the agent
@@ -9731,7 +9740,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "restart":
             return await self._handle_restart_command(event)
-        
+
+        if canonical in ("restart-gateways", "restart-hermes"):
+            return await self._handle_detached_surface_restart_command(event, canonical)
+
         if canonical == "stop":
             return await self._handle_stop_command(event)
         
@@ -12410,9 +12422,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if key == prefix or key.startswith(prefix + ":"):
                 matches.append(key)
         return matches
+    async def _handle_detached_surface_restart_command(
+        self,
+        event: MessageEvent,
+        canonical: str,
+    ) -> str:
+        """Queue cross-surface restart work outside the receiving gateway."""
+        from hermes_cli.restart_surfaces import enqueue_detached_restart
 
-
-
+        scope = "gateways" if canonical == "restart-gateways" else "hermes"
+        args = event.get_command_args().split()
+        dry_run = any(
+            arg.lower() in {"--dry-run", "dry-run", "smoke", "test", "plan"}
+            for arg in args
+        )
+        notify_origin = None
+        if event.source and event.source.platform and event.source.chat_id:
+            notify_origin = {
+                "platform": event.source.platform.value,
+                "chat_id": event.source.chat_id,
+            }
+            if event.source.thread_id:
+                notify_origin["thread_id"] = event.source.thread_id
+        return enqueue_detached_restart(
+            scope,
+            delay=1.0,
+            dry_run=dry_run,
+            notify_origin=notify_origin,
+        )
 
     def _is_stale_restart_redelivery(self, event: MessageEvent) -> bool:
         """Return True if this /restart is a Telegram re-delivery we already handled.

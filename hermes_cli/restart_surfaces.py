@@ -543,33 +543,48 @@ def _verify_http_url(url: str, expected: tuple[int, ...] = (200, 401)) -> str | 
     return None
 
 
-def _verify_scope_health(scope: str) -> list[str]:
+def _verify_scope_health(scope: str, *, active_labels: set[str] | None = None) -> list[str]:
     failures: list[str] = []
-    ports = VERIFY_PORTS.get(scope, ())
+    ports = list(VERIFY_PORTS.get(scope, ()))
+    # The MacBook remote dashboard is optional. Its absent port must not fail an
+    # otherwise healthy restart when that LaunchAgent is not loaded.
+    if active_labels is not None and "ai.hermes.desktop-remote-dashboard" not in active_labels:
+        ports = [port for port in ports if port != 9120]
     if not ports:
         return failures
-    for port in ports:  # listener smoke
+    for port in ports:
         failure = _verify_listen_port(port)
         if failure:
             failures.append(failure)
+    probes = []
     if scope == "hermes":
-        probes = (
-            "http://127.0.0.1:8787/health",
-            "http://127.0.0.1:9119/",
-            "http://127.0.0.1:9120/",
-            "https://macstudio.tailf7342a.ts.net:9119/",
-        )
-    else:
-        probes = (
-            "http://127.0.0.1:9119/",
-            "http://127.0.0.1:9120/",
-            "https://macstudio.tailf7342a.ts.net:9119/",
-        )
+        probes.append("http://127.0.0.1:8787/health")
+    probes.append("http://127.0.0.1:9119/")
+    if 9120 in ports:
+        probes.append("http://127.0.0.1:9120/")
+    probes.append("https://macstudio.tailf7342a.ts.net:9119/")
     for url in probes:
         failure = _verify_http_url(url)
         if failure:
             failures.append(failure)
     return failures
+
+
+def _wait_for_scope_health(
+    scope: str,
+    *,
+    active_labels: set[str],
+    timeout: float = 20.0,
+    interval: float = 0.5,
+) -> list[str]:
+    """Poll boundedly so normal launchd startup latency is not a false failure."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    failures: list[str] = []
+    while True:
+        failures = _verify_scope_health(scope, active_labels=active_labels)
+        if not failures or time.monotonic() >= deadline:
+            return failures
+        time.sleep(max(0.1, interval))
 
 
 def restart_scope(
@@ -613,6 +628,8 @@ def restart_scope(
         _write_completion_marker(completion_marker, normalized, 1, message)
         return 1
 
+    restarted_services: set[str] = set()
+    active_labels: set[str] = set()
     for target in targets:
         requested_service = target.service_name(uid)
         service, before = _resolve_loaded_service(requested_service)
@@ -622,6 +639,13 @@ def restart_scope(
             if target.required:
                 failures.append(msg)
             continue
+        active_labels.add(target.label)
+        if service in restarted_services:
+            _append_log(
+                f"{requested_service} resolves to already restarted {service}; "
+                "skipping duplicate"
+            )
+            continue
         kicked = _kickstart(service) if target.required else _kickstart_optional(target, service)
         if kicked.returncode != 0:
             msg = f"{service} restart failed"
@@ -629,6 +653,7 @@ def restart_scope(
             if target.required:
                 failures.append(msg)
             continue
+        restarted_services.add(service)
         time.sleep(0.4)
         after = _launchctl_print(service)
         if after.returncode != 0:
@@ -637,7 +662,7 @@ def restart_scope(
             if target.required:
                 failures.append(msg)
 
-    health_failures = _verify_scope_health(normalized)
+    health_failures = _wait_for_scope_health(normalized, active_labels=active_labels)
     for failure in health_failures:
         _append_log(f"restart verification failed: {failure}")
     failures.extend(health_failures)
@@ -705,11 +730,7 @@ def enqueue_detached_restart(
             close_fds=True,
         )
     notify_note = " I'll send a follow-up here when it finishes." if (notify_origin or notify_tty or completion_marker) else ""
-    drain_note = (
-        "active gateway tasks and live WebUI chat turns"
-        if normalized == "hermes"
-        else "active gateway tasks"
-    )
+    drain_note = "active gateway tasks and live WebUI chat turns"
     return (
         f"Queued detached Hermes {normalized} restart. "
         f"It will wait for {drain_note} to finish before restarting."

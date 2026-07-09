@@ -8771,6 +8771,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._handle_memory_command(cmd_original)
         elif canonical == "platforms":
             self._show_gateway_status()
+        elif canonical in ("restart-gateways", "restart-hermes"):
+            from hermes_cli.restart_surfaces import enqueue_detached_restart
+
+            scope = "gateways" if canonical == "restart-gateways" else "hermes"
+            args = cmd_original.split()[1:]
+            dry_run = any(
+                arg.lower() in {"--dry-run", "dry-run", "smoke", "test", "plan"}
+                for arg in args
+            )
+            print(enqueue_detached_restart(scope, delay=1.0, dry_run=dry_run))
         elif canonical == "status":
             self._show_session_status()
         elif canonical == "statusbar":
