@@ -12,7 +12,6 @@ Usage:
 from contextlib import asynccontextmanager, contextmanager
 
 import asyncio
-import contextlib
 import atexit
 import base64
 import binascii
@@ -22,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import hmac
+import inspect
 import importlib.util
 import json
 import logging
@@ -44,7 +44,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -78,6 +78,7 @@ from hermes_cli.config import (
 from gateway.status import (
     derive_gateway_busy,
     derive_gateway_drainable,
+    get_running_pid_cached,
     get_running_pid,
     get_runtime_status_running_pid,
     parse_active_agents,
@@ -94,6 +95,7 @@ try:
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
+    from starlette.concurrency import run_in_threadpool
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually
     # running `hermes dashboard` needs fastapi+uvicorn; lazy install keeps
@@ -109,6 +111,7 @@ except ImportError:
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
         from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel
+        from starlette.concurrency import run_in_threadpool
     except Exception:
         raise SystemExit(
             "Web UI requires fastapi and uvicorn.\n"
@@ -409,83 +412,7 @@ def should_require_auth(host: str, allow_public: bool = False) -> bool:
     return host not in _LOOPBACK_HOST_VALUES
 
 
-def _host_only(value: str) -> str:
-    """Return a normalized host name from a Host header or config value."""
-    if not value:
-        return ""
-    raw = str(value).strip()
-    if not raw:
-        return ""
-    # Operators sometimes paste the full public URL into host allowlists.
-    # Accept that shape, but store only the hostname so path/scheme changes
-    # don't affect the DNS-rebinding gate.
-    if "://" in raw:
-        try:
-            from urllib.parse import urlsplit
-
-            raw = urlsplit(raw).hostname or ""
-        except Exception:
-            raw = ""
-    if not raw:
-        return ""
-    if raw.startswith("["):
-        # IPv6 bracketed — port (if any) follows "]:".
-        close = raw.find("]")
-        if close != -1:
-            host_only = raw[1:close]
-        else:
-            host_only = raw.strip("[]")
-    elif raw.count(":") > 1:
-        # Bare IPv6 literal. Treat the whole value as the host; host:port
-        # IPv6 must use bracket notation per RFC 3986.
-        host_only = raw
-    else:
-        host_only = raw.rsplit(":", 1)[0] if ":" in raw else raw
-    return host_only.strip().lower().rstrip(".")
-
-
-def _configured_dashboard_allowed_hosts() -> frozenset[str]:
-    """Exact extra hostnames the dashboard may accept for reverse proxies.
-
-    This is intentionally an exact allowlist, not a wildcard/suffix matcher.
-    It lets a trusted local proxy such as Tailscale Serve present
-    ``macstudio.tailnet.ts.net`` to a loopback-bound dashboard without
-    disabling the DNS-rebinding Host-header protection for arbitrary names.
-    """
-    try:
-        cfg = load_config()
-    except Exception:
-        cfg = {}
-    dashboard = cfg.get("dashboard") if isinstance(cfg, dict) else {}
-    if not isinstance(dashboard, dict):
-        return frozenset()
-    raw_hosts = dashboard.get("allowed_hosts") or []
-    if isinstance(raw_hosts, str):
-        parsed_hosts = None
-        try:
-            parsed_hosts = yaml.safe_load(raw_hosts)
-        except Exception:
-            parsed_hosts = None
-        raw_hosts = parsed_hosts if isinstance(parsed_hosts, list) else [raw_hosts]
-    hosts: set[str] = set()
-    if isinstance(raw_hosts, (list, tuple, set)):
-        for item in raw_hosts:
-            host = _host_only(str(item))
-            if host and host not in {"*", "."}:
-                hosts.add(host)
-    public_url = dashboard.get("public_url")
-    if isinstance(public_url, str):
-        host = _host_only(public_url)
-        if host:
-            hosts.add(host)
-    return frozenset(hosts)
-
-
-def _is_accepted_host(
-    host_header: str,
-    bound_host: str,
-    allowed_hosts: Iterable[str] | None = None,
-) -> bool:
+def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     """True if the Host header targets the interface we bound to.
 
     Accepts:
@@ -496,13 +423,23 @@ def _is_accepted_host(
     """
     if not host_header:
         return False
-    host_only = _host_only(host_header)
-    if not host_only:
-        return False
-    configured_allowed = {_host_only(str(h)) for h in (allowed_hosts or [])}
-    configured_allowed.discard("")
-    if host_only in configured_allowed:
-        return True
+    # Strip port suffix. IPv6 addresses use bracket notation:
+    #   [::1]         — no port
+    #   [::1]:9119    — with port
+    # Plain hosts/v4:
+    #   localhost:9119
+    #   127.0.0.1:9119
+    h = host_header.strip()
+    if h.startswith("["):
+        # IPv6 bracketed — port (if any) follows "]:"
+        close = h.find("]")
+        if close != -1:
+            host_only = h[1:close]  # strip brackets
+        else:
+            host_only = h.strip("[]")
+    else:
+        host_only = h.rsplit(":", 1)[0] if ":" in h else h
+    host_only = host_only.lower()
 
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
@@ -511,7 +448,7 @@ def _is_accepted_host(
         return True
 
     # Loopback bind: accept the loopback names
-    bound_lc = _host_only(bound_host)
+    bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
         return host_only in _LOOPBACK_HOST_VALUES
 
@@ -536,8 +473,7 @@ async def host_header_middleware(request: Request, call_next):
     bound_host = getattr(app.state, "bound_host", None)
     if bound_host:
         host_header = request.headers.get("host", "")
-        allowed_hosts = getattr(app.state, "dashboard_allowed_hosts", frozenset())
-        if not _is_accepted_host(host_header, bound_host, allowed_hosts):
+        if not _is_accepted_host(host_header, bound_host):
             return JSONResponse(
                 status_code=400,
                 content={
@@ -1027,8 +963,6 @@ class ModelAssignment(BaseModel):
 class MoaModelSlot(BaseModel):
     provider: str = ""
     model: str = ""
-    reasoning_effort: str = ""
-    extra_body: Dict[str, Any] = {}
 
 
 class MoaPresetPayload(BaseModel):
@@ -1038,7 +972,7 @@ class MoaPresetPayload(BaseModel):
     # single-model agent behavior.
     reference_temperature: Optional[float] = None
     aggregator_temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
+    max_tokens: int = 4096
     enabled: bool = True
 
 
@@ -1052,7 +986,7 @@ class MoaConfigPayload(BaseModel):
     aggregator: MoaModelSlot = MoaModelSlot()
     reference_temperature: Optional[float] = None
     aggregator_temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
+    max_tokens: int = 4096
     enabled: bool = True
     profile: Optional[str] = None
 
@@ -1190,6 +1124,8 @@ except (ValueError, TypeError):
     )
     _GATEWAY_HEALTH_TIMEOUT = 3.0
 
+_STATUS_ACTIVE_SESSIONS_TIMEOUT = 0.75
+
 # DEPRECATED (scheduled for removal): GATEWAY_HEALTH_URL / GATEWAY_HEALTH_TIMEOUT.
 # Cross-container / cross-host gateway liveness detection will be folded into a
 # first-class dashboard config key so it's no longer Docker-adjacent lore buried
@@ -1240,6 +1176,51 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
     return False, None
 
 
+def _count_status_active_sessions() -> int:
+    """Return the dashboard status active-session count.
+
+    This is best-effort status garnish, not a critical path.  Use a read-only
+    connection so /api/status never tries to initialise or migrate state.db
+    while another Hermes process is writing to it.
+    """
+    from hermes_state import DEFAULT_DB_PATH, SessionDB
+
+    # read_only opens require the DB to already exist (see SessionDB.__init__
+    # read_only contract) — on a fresh install every /api/status poll would
+    # otherwise pay an OperationalError until the first session is written.
+    if not DEFAULT_DB_PATH.exists():
+        return 0
+
+    db = SessionDB(read_only=True)
+    try:
+        sessions = db.list_sessions_rich(limit=50, compact_rows=True)
+        now = time.time()
+        return sum(
+            1 for s in sessions
+            if s.get("ended_at") is None
+            and (now - s.get("last_active", s.get("started_at", 0))) < 300
+        )
+    finally:
+        db.close()
+
+
+async def _status_active_sessions() -> int:
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _count_status_active_sessions),
+            timeout=_STATUS_ACTIVE_SESSIONS_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        _log.debug(
+            "/api/status active session count exceeded %.2fs; returning 0",
+            _STATUS_ACTIVE_SESSIONS_TIMEOUT,
+        )
+    except Exception as exc:
+        _log.debug("/api/status active session count unavailable: %s", exc)
+    return 0
+
+
 # Image MIME types this endpoint will serve. Extension-allowlisted so an
 # authenticated caller can't pull non-image files through it.
 _MEDIA_CONTENT_TYPES = {
@@ -1280,8 +1261,6 @@ _FS_READDIR_HIDDEN = {
     "target",
     "venv",
 }
-_FS_LIST_MAX_ENTRIES = 2_000
-
 
 # Filenames that must never be listed, read, or downloaded through the
 # managed-files API.  These typically contain credentials (API keys, tokens)
@@ -1553,7 +1532,7 @@ def _media_serve_roots() -> list[Path]:
 
 
 @app.get("/api/media")
-async def get_media(path: str, profile: Optional[str] = None):
+async def get_media(path: str):
     """Return a gateway-local image file as a base64 data URL.
 
     Lets remote clients (the desktop app over the network, or the web dashboard
@@ -1572,18 +1551,17 @@ async def get_media(path: str, profile: Optional[str] = None):
     if target.suffix.lower() not in _MEDIA_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail="Unsupported media type")
 
-    with _config_profile_scope(profile):
-        roots = _media_serve_roots()
-        if not any(target == root or root in target.parents for root in roots):
-            raise HTTPException(status_code=403, detail="Path outside media roots")
+    roots = _media_serve_roots()
+    if not any(target == root or root in target.parents for root in roots):
+        raise HTTPException(status_code=403, detail="Path outside media roots")
 
-        if not target.is_file():
-            raise HTTPException(status_code=404, detail="File not found")
-        if target.stat().st_size > _MEDIA_MAX_BYTES:
-            raise HTTPException(status_code=413, detail="File too large")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    if target.stat().st_size > _MEDIA_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
 
-        encoded = base64.b64encode(target.read_bytes()).decode("ascii")
-        return {"data_url": f"data:{_MEDIA_CONTENT_TYPES[target.suffix.lower()]};base64,{encoded}"}
+    encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+    return {"data_url": f"data:{_MEDIA_CONTENT_TYPES[target.suffix.lower()]};base64,{encoded}"}
 
 
 def _canonical_path(path: Path, *, require_exists: bool = False) -> Path:
@@ -2039,27 +2017,19 @@ async def delete_managed_file(payload: ManagedFileDelete, request: Request):
 @app.get("/api/fs/list")
 async def fs_list(path: str):
     target = _fs_path(path)
-    return await asyncio.to_thread(_fs_list_entries, target)
-
-
-def _fs_list_entries(target: Path):
     try:
         entries = []
-        truncated = False
         with os.scandir(target) as scan:
             for entry in scan:
                 if entry.name in _FS_READDIR_HIDDEN:
                     continue
-                if len(entries) >= _FS_LIST_MAX_ENTRIES:
-                    truncated = True
-                    break
                 entries.append({
                     "name": entry.name,
                     "path": str(target / entry.name),
                     "isDirectory": entry.is_dir(follow_symlinks=False),
                 })
         entries.sort(key=lambda item: (not item["isDirectory"], item["name"].lower(), item["name"]))
-        return {"entries": entries, "truncated": True} if truncated else {"entries": entries}
+        return {"entries": entries}
     except FileNotFoundError:
         return {"entries": [], "error": "ENOENT"}
     except NotADirectoryError:
@@ -2204,7 +2174,6 @@ def _git_path(path: str) -> str:
 
 class GitPathBody(BaseModel):
     path: str
-
 
 class GitFileBody(BaseModel):
     path: str
@@ -2493,7 +2462,7 @@ async def get_status(profile: Optional[str] = None):
         # Try local PID check first (same-host).  If that fails and a remote
         # GATEWAY_HEALTH_URL is configured, probe the gateway over HTTP so the
         # dashboard works when the gateway runs in a separate container.
-        gateway_pid = get_running_pid()
+        gateway_pid = get_running_pid_cached()
         gateway_running = gateway_pid is not None
         remote_health_body: dict | None = None
 
@@ -2543,14 +2512,7 @@ async def get_status(profile: Optional[str] = None):
         if runtime:
             gateway_state = runtime.get("gateway_state")
             gateway_platforms = runtime.get("platforms") or {}
-            runtime_pid = runtime.get("pid")
-            runtime_is_live_gateway = (
-                gateway_running
-                and gateway_pid is not None
-                and runtime_pid is not None
-                and str(runtime_pid) == str(gateway_pid)
-            )
-            if configured_gateway_platforms is not None and not runtime_is_live_gateway:
+            if configured_gateway_platforms is not None:
                 gateway_platforms = {
                     key: value
                     for key, value in gateway_platforms.items()
@@ -2573,22 +2535,7 @@ async def get_status(profile: Optional[str] = None):
         if gateway_running and gateway_state is None and remote_health_body is not None:
             gateway_state = "running"
 
-        active_sessions = 0
-        try:
-            from hermes_state import SessionDB
-            db = SessionDB()
-            try:
-                sessions = db.list_sessions_rich(limit=50)
-                now = time.time()
-                active_sessions = sum(
-                    1 for s in sessions
-                    if s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0))) < 300
-                )
-            finally:
-                db.close()
-        except Exception:
-            pass
+        active_sessions = await _status_active_sessions()
 
         # Busy/drainable readout (NAS lifecycle-safety gate).  active_agents is
         # the in-flight gateway-turn count the gateway now persists at every
@@ -3099,6 +3046,9 @@ async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
 # ---------------------------------------------------------------------------
 
 _ACTION_LOG_DIR: Path = get_hermes_home() / "logs"
+_ACTION_LOG_TAIL_MAX_BYTES = 256 * 1024
+_ACTION_LOG_TAIL_INITIAL_CHUNK_BYTES = 8 * 1024
+_ACTION_LOG_TAIL_MAX_CHUNK_BYTES = 64 * 1024
 
 # Short ``name`` (from the URL) → absolute log file path.
 _ACTION_LOG_FILES: Dict[str, str] = {
@@ -3200,17 +3150,50 @@ def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
 
 
 def _tail_lines(path: Path, n: int) -> List[str]:
-    """Return the last ``n`` lines of ``path``.  Reads the whole file — fine
-    for our small per-action logs.  Binary-decoded with ``errors='replace'``
-    so log corruption doesn't 500 the endpoint."""
-    if not path.exists():
+    """Return the last ``n`` lines of ``path`` without loading huge logs."""
+    if n <= 0 or not path.exists():
         return []
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        size = path.stat().st_size
     except OSError:
         return []
-    lines = text.splitlines()
-    return lines[-n:] if n > 0 else lines
+    if size <= 0:
+        return []
+
+    min_offset = max(0, size - _ACTION_LOG_TAIL_MAX_BYTES)
+    offset = size
+    chunk_size = _ACTION_LOG_TAIL_INITIAL_CHUNK_BYTES
+    newline_count = 0
+    chunks: List[bytes] = []
+    drop_partial_first_line = False
+
+    try:
+        with path.open("rb") as handle:
+            while offset > min_offset and newline_count <= n:
+                read_size = min(chunk_size, offset - min_offset)
+                offset -= read_size
+                handle.seek(offset)
+                chunk = handle.read(read_size)
+                chunks.append(chunk)
+                newline_count += chunk.count(b"\n")
+                chunk_size = min(
+                    chunk_size * 2,
+                    _ACTION_LOG_TAIL_MAX_CHUNK_BYTES,
+                )
+            if offset > 0:
+                handle.seek(offset - 1)
+                drop_partial_first_line = handle.read(1) != b"\n"
+    except OSError:
+        return []
+
+    lines = (
+        b"".join(reversed(chunks))
+        .decode("utf-8", errors="replace")
+        .splitlines()
+    )
+    if drop_partial_first_line and lines:
+        lines = lines[1:]
+    return lines[-n:]
 
 
 def _gateway_subcommand(profile: Optional[str], verb: str) -> List[str]:
@@ -3649,9 +3632,6 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
 
 class TTSSpeakRequest(BaseModel):
     text: str
-    source: str = "read-aloud"
-    rewrite: str = "auto"
-    profile: Optional[str] = None
 
 
 def _elevenlabs_voice_label(voice: Dict[str, Any]) -> str:
@@ -3752,7 +3732,7 @@ async def get_elevenlabs_voices():
 
 
 @app.post("/api/audio/speak")
-async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
+async def speak_text(payload: TTSSpeakRequest):
     """Synthesize speech and return audio as base64 data URL.
 
     Used by the desktop voice-conversation mode to play back assistant
@@ -3764,52 +3744,10 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
     if not text:
         raise HTTPException(status_code=400, detail="Text is required")
 
-    requested_profile = payload.profile or profile
-
-    try:
-        from tools.tts_text_formatter import prepare_spoken_text
-
-        with _config_profile_scope(requested_profile):
-            formatter_cfg = {}
-            try:
-                tts_cfg = load_config().get("tts", {})
-                if isinstance(tts_cfg, dict):
-                    raw_formatter_cfg = tts_cfg.get("spoken_formatter", {})
-                    if isinstance(raw_formatter_cfg, dict):
-                        formatter_cfg = raw_formatter_cfg
-            except Exception:
-                formatter_cfg = {}
-
-            model_enabled = bool(formatter_cfg.get("enabled", False))
-            try:
-                formatter_timeout = float(formatter_cfg.get("timeout", 14.0))
-            except (TypeError, ValueError):
-                formatter_timeout = 14.0
-
-            speech_text = prepare_spoken_text(
-                text,
-                source=(payload.source or "read-aloud"),
-                rewrite=(payload.rewrite or "auto"),
-                timeout=formatter_timeout,
-                model_enabled=model_enabled,
-            )
-        if not speech_text:
-            raise HTTPException(status_code=400, detail="Text is empty after speech cleanup")
-    except HTTPException:
-        raise
-    except Exception:
-        _log.exception("Desktop voice TTS formatting failed; falling back to raw text")
-        speech_text = text
-
     try:
         from tools.tts_tool import text_to_speech_tool
         loop = asyncio.get_running_loop()
-
-        def _run_tts() -> str:
-            with _config_profile_scope(requested_profile):
-                return text_to_speech_tool(speech_text)
-
-        result_json = await loop.run_in_executor(None, _run_tts)
+        result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
     except Exception as exc:
         _log.exception("Desktop voice TTS failed")
         raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}")
@@ -3896,60 +3834,25 @@ async def get_action_status(name: str, lines: int = 200):
     }
 
 
-_SESSION_LIST_DTO_FIELDS = frozenset({
-    "id",
-    "source",
-    "user_id",
-    "model",
-    "title",
-    "started_at",
-    "ended_at",
-    "end_reason",
-    "message_count",
-    "tool_call_count",
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "reasoning_tokens",
-    "estimated_cost_usd",
-    "actual_cost_usd",
-    "cost_status",
-    "cost_source",
-    "pricing_version",
-    "api_call_count",
-    "parent_session_id",
-    "last_active",
-    "preview",
-    "_lineage_root_id",
-    "cwd",
-    "git_branch",
-    "git_repo_root",
-    "archived",
-    "is_active",
-    "profile",
-    "is_default_profile",
-    "handoff_platform",
-    "handoff_state",
-    "handoff_error",
-})
+# Per-row fields that no session LIST consumer reads but that dominate the
+# payload. ``system_prompt`` is the fully rendered prompt — tens of KB per
+# row — and made a 21-row /api/sessions response 528KB (96% dead weight),
+# re-fetched by the desktop sidebar on every refresh. The desktop's
+# SessionInfo type doesn't declare either field and the web UI never touches
+# them; ``GET /api/sessions/{id}`` detail reads stay complete. List callers
+# that genuinely need the full rows can pass ``?full=1``.
+_SESSION_LIST_HEAVY_FIELDS = ("system_prompt", "model_config")
 
 
-def _session_list_dto(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the lean session-list shape used by dashboard sidebars.
-
-    ``SessionDB.list_sessions_rich()`` intentionally returns full rows for
-    internal callers. HTTP list endpoints should not ship raw prompts or model
-    config blobs to every sidebar refresh.
-    """
-    dto = {key: row.get(key) for key in _SESSION_LIST_DTO_FIELDS if key in row}
-    dto["has_system_prompt"] = bool(row.get("system_prompt"))
-    dto["has_model_config"] = bool(row.get("model_config"))
-    return dto
+def _strip_session_list_rows(sessions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    for s in sessions:
+        for key in _SESSION_LIST_HEAVY_FIELDS:
+            s.pop(key, None)
+    return sessions
 
 
 @app.get("/api/sessions")
-async def get_sessions(
+def get_sessions(
     limit: int = 20,
     offset: int = 0,
     min_messages: int = 0,
@@ -3958,6 +3861,7 @@ async def get_sessions(
     source: str = None,
     exclude_sources: str = None,
     cwd_prefix: str = None,
+    full: bool = False,
     profile: Optional[str] = None,
 ):
     """List sessions.
@@ -3971,6 +3875,9 @@ async def get_sessions(
     start time) or ``recent`` (by latest activity across the compression
     chain). ``recent`` keeps a long-running conversation on the first page
     after it auto-compresses into a fresh continuation id.
+
+    Rows omit ``system_prompt``/``model_config`` (the payload-dominating
+    fields no list UI reads) unless ``full=1`` is passed.
     """
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(
@@ -4006,6 +3913,10 @@ async def get_sessions(
                 include_archived=include_archived,
                 archived_only=archived_only,
                 order_by_last_active=order == "recent",
+                # SQL-level projection: when the caller didn't ask for full
+                # rows, skip the system_prompt blob inside SQLite too (pairs
+                # with the API-level _strip_session_list_rows below).
+                compact_rows=not full,
             )
             total = db.session_count(
                 source=source or None,
@@ -4017,7 +3928,6 @@ async def get_sessions(
                 exclude_children=True,
             )
             now = time.time()
-            session_dtos = []
             for s in sessions:
                 s["is_active"] = (
                     s.get("ended_at") is None
@@ -4028,8 +3938,9 @@ async def get_sessions(
                     s["is_default_profile"] = profile_name == "default"
                 # SQLite stores the flag as 0/1; expose a real JSON boolean.
                 s["archived"] = bool(s.get("archived"))
-                session_dtos.append(_session_list_dto(s))
-            return {"sessions": session_dtos, "total": total, "limit": limit, "offset": offset}
+            if not full:
+                _strip_session_list_rows(sessions)
+            return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
         finally:
             db.close()
     except HTTPException:
@@ -4049,6 +3960,7 @@ def get_profiles_sessions(
     profile: str = "all",
     source: str = None,
     exclude_sources: str = None,
+    full: bool = False,
 ):
     """Unified, read-only session list aggregated across ALL profiles.
 
@@ -4058,6 +3970,9 @@ def get_profiles_sessions(
     browsable list and only spins up a profile's backend when the user actually
     interacts (sends a message). A user with a single (default) profile gets the
     same rows as ``/api/sessions``, just tagged ``profile="default"``.
+
+    Rows omit ``system_prompt``/``model_config`` unless ``full=1`` — same
+    list projection as ``/api/sessions``.
     """
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(status_code=400, detail="archived must be one of: exclude, only, include")
@@ -4120,6 +4035,8 @@ def get_profiles_sessions(
                 include_archived=include_archived,
                 archived_only=archived_only,
                 order_by_last_active=order == "recent",
+                # Same SQL-level blob skip as /api/sessions (see above).
+                compact_rows=not full,
             )
             profile_total = db.session_count(
                 source=source_filter,
@@ -4139,7 +4056,7 @@ def get_profiles_sessions(
                     and (now - s.get("last_active", s.get("started_at", 0))) < 300
                 )
                 s["archived"] = bool(s.get("archived"))
-                merged.append(_session_list_dto(s))
+                merged.append(s)
         except Exception as exc:
             errors.append({"profile": name, "error": str(exc)})
         finally:
@@ -4148,6 +4065,8 @@ def get_profiles_sessions(
     sort_key = "last_active" if order == "recent" else "started_at"
     merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
     window = merged[offset:offset + limit]
+    if not full:
+        _strip_session_list_rows(window)
     return {
         "sessions": window,
         "total": total,
@@ -4159,7 +4078,7 @@ def get_profiles_sessions(
 
 
 @app.get("/api/sessions/search")
-async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] = None, exclude_sources: str = None):
+async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] = None):
     """Search sessions by ID plus full-text message content using FTS5.
 
     Direct session-id matches are surfaced first, then FTS message-content
@@ -4176,14 +4095,6 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
         db = _open_session_db_for_profile(profile)
         try:
             safe_limit = max(1, min(int(limit or 20), 100))
-            excluded_sources = {
-                item.strip().lower()
-                for item in (exclude_sources or "").split(",")
-                if item.strip()
-            }
-
-            def source_hidden(source: object) -> bool:
-                return bool(excluded_sources and str(source or "").strip().lower() in excluded_sources)
 
             # Walk parent_session_id to the compression root, memoized so a
             # chain of compression segments only costs one walk. We deliberately
@@ -4262,7 +4173,7 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
             seen: dict = {}
 
             def add_lineage_result(raw_sid: str, payload: dict) -> None:
-                if not raw_sid or source_hidden(payload.get("source")):
+                if not raw_sid:
                     return
                 root = compression_root(raw_sid)
                 if root in seen or len(seen) >= safe_limit:
@@ -5510,37 +5421,30 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
         with _profile_scope(body.profile or profile):
             cfg = load_config()
             if body.presets:
-                presets = {}
-                for name, preset in body.presets.items():
-                    item = {
-                        "reference_models": [slot.dict() for slot in preset.reference_models],
-                        "aggregator": preset.aggregator.dict(),
-                        "enabled": preset.enabled,
-                    }
-                    if preset.reference_temperature is not None:
-                        item["reference_temperature"] = preset.reference_temperature
-                    if preset.aggregator_temperature is not None:
-                        item["aggregator_temperature"] = preset.aggregator_temperature
-                    if preset.max_tokens is not None:
-                        item["max_tokens"] = preset.max_tokens
-                    presets[name] = item
                 raw = {
                     "default_preset": body.default_preset,
                     "active_preset": body.active_preset,
-                    "presets": presets,
+                    "presets": {
+                        name: {
+                            "reference_models": [slot.dict() for slot in preset.reference_models],
+                            "aggregator": preset.aggregator.dict(),
+                            "reference_temperature": preset.reference_temperature,
+                            "aggregator_temperature": preset.aggregator_temperature,
+                            "max_tokens": preset.max_tokens,
+                            "enabled": preset.enabled,
+                        }
+                        for name, preset in body.presets.items()
+                    },
                 }
             else:
                 raw = {
                     "reference_models": [slot.dict() for slot in body.reference_models],
                     "aggregator": body.aggregator.dict(),
+                    "reference_temperature": body.reference_temperature,
+                    "aggregator_temperature": body.aggregator_temperature,
+                    "max_tokens": body.max_tokens,
                     "enabled": body.enabled,
                 }
-                if body.reference_temperature is not None:
-                    raw["reference_temperature"] = body.reference_temperature
-                if body.aggregator_temperature is not None:
-                    raw["aggregator_temperature"] = body.aggregator_temperature
-                if body.max_tokens is not None:
-                    raw["max_tokens"] = body.max_tokens
             normalized = normalize_moa_config(raw)
             cfg["moa"] = normalized
             save_config(cfg)
@@ -9183,6 +9087,54 @@ def _xai_device_poller(session_id: str) -> None:
             sess["error_message"] = str(e)
 
 
+def _http_response_error_detail(resp: Any) -> str:
+    """Best-effort extraction of a short provider error detail."""
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            parts = [
+                str(error.get(key, "")).strip()
+                for key in ("message", "error_description", "code", "type")
+                if str(error.get(key, "")).strip()
+            ]
+            if parts:
+                return ": ".join(parts)
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+        for key in ("detail", "message", "error_description"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    text = str(getattr(resp, "text", "") or "").strip()
+    return text[:500]
+
+
+def _codex_device_code_start_error(resp: Any) -> str:
+    """Dashboard-facing OpenAI Codex device-code start failure."""
+    status = getattr(resp, "status_code", "unknown")
+    detail = _http_response_error_detail(resp)
+    lower = detail.lower()
+    if "device" in lower and ("authori" in lower or "enable" in lower):
+        message = (
+            "OpenAI rejected the device-code login request. Your OpenAI "
+            "account may need device-code authorization enabled before Hermes "
+            "can start this dashboard login. Enable device-code authorization "
+            "in OpenAI, then return here and click Login again."
+        )
+    else:
+        message = (
+            "OpenAI rejected the device-code login request. Please try Login "
+            "again from the dashboard after checking your OpenAI account settings."
+        )
+    if detail:
+        return f"{message} (HTTP {status}: {detail})"
+    return f"{message} (HTTP {status})"
+
+
 def _codex_full_login_worker(session_id: str) -> None:
     """Run the complete OpenAI Codex device-code flow.
 
@@ -9215,7 +9167,7 @@ def _codex_full_login_worker(session_id: str) -> None:
                 headers={"Content-Type": "application/json"},
             )
         if resp.status_code != 200:
-            raise RuntimeError(f"deviceauth/usercode returned {resp.status_code}")
+            raise RuntimeError(_codex_device_code_start_error(resp))
         device_data = resp.json()
         user_code = device_data.get("user_code", "")
         device_auth_id = device_data.get("device_auth_id", "")
@@ -9439,7 +9391,17 @@ def _session_latest_descendant(session_id: str, db):
     rows = []
     if conn is not None:
         raw_rows = conn.execute(
-            "SELECT id, parent_session_id, started_at FROM sessions"
+            """
+            WITH RECURSIVE descendants(id, parent_session_id, started_at) AS (
+                SELECT id, parent_session_id, started_at FROM sessions WHERE id = ?
+                UNION
+                SELECT s.id, s.parent_session_id, s.started_at
+                FROM sessions s
+                JOIN descendants d ON s.parent_session_id = d.id
+            )
+            SELECT id, parent_session_id, started_at FROM descendants
+            """,
+            (sid,),
         ).fetchall()
         for row in raw_rows:
             rows.append({
@@ -9448,7 +9410,7 @@ def _session_latest_descendant(session_id: str, db):
                 "started_at": row_get(row, "started_at", 2),
             })
     else:
-        rows = db.list_sessions_rich(limit=10000, offset=0)
+        rows = db.list_sessions_rich(limit=10000, offset=0, compact_rows=True)
 
     children = {}
     for row in rows:
@@ -9602,7 +9564,7 @@ async def get_session_stats(profile: Optional[str] = None):
         messages = db.message_count()
         by_source: Dict[str, int] = {}
         try:
-            for s in db.list_sessions_rich(limit=10000, include_archived=True):
+            for s in db.list_sessions_rich(limit=10000, include_archived=True, compact_rows=True):
                 src = str(s.get("source") or "cli")
                 by_source[src] = by_source.get(src, 0) + 1
         except Exception:
@@ -9673,19 +9635,26 @@ async def get_session_messages(
     session_id: str,
     profile: Optional[str] = None,
     limit: Optional[int] = None,
-    tail: Optional[int] = None,
+    offset: int = 0,
 ):
-    tail_limit = tail if tail is not None else limit
-    if tail_limit is not None and tail_limit < 0:
-        raise HTTPException(status_code=400, detail="limit must be non-negative")
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
         sid = db.resolve_resume_session_id(sid)
-        messages = db.get_messages(sid, tail_limit=tail_limit)
-        return {"session_id": sid, "messages": messages}
+        # Clamp limit to prevent abuse (max 500 per page)
+        _limit = min(limit, 500) if limit is not None else None
+        messages = db.get_messages(sid, limit=_limit, offset=offset)
+        return {
+            "session_id": sid,
+            "messages": messages,
+            "pagination": {
+                "limit": _limit,
+                "offset": offset,
+                "returned": len(messages),
+            },
+        }
     finally:
         db.close()
 
@@ -10169,8 +10138,7 @@ def _find_cron_job_profile(job_id: str) -> Optional[str]:
     return None
 
 
-@app.get("/api/cron/jobs")
-async def list_cron_jobs(profile: str = "all"):
+def _list_cron_jobs_sync(profile: str = "all"):
     requested = (profile or "all").strip()
     if requested.lower() != "all":
         return _call_cron_for_profile(requested, "list_jobs", True)
@@ -10187,8 +10155,22 @@ async def list_cron_jobs(profile: str = "all"):
     return jobs
 
 
-@app.get("/api/cron/jobs/{job_id}")
-async def get_cron_job(job_id: str, profile: Optional[str] = None):
+async def _run_cron_dashboard_io(func, *args, **kwargs):
+    """Run cron dashboard profile/job I/O outside the FastAPI event loop."""
+    if inspect.iscoroutinefunction(func):
+        raise TypeError("_run_cron_dashboard_io only accepts sync callables")
+    result = await run_in_threadpool(func, *args, **kwargs)
+    if inspect.isawaitable(result):
+        raise TypeError("_run_cron_dashboard_io sync callable returned an awaitable")
+    return result
+
+
+@app.get("/api/cron/jobs")
+async def list_cron_jobs(profile: str = "all"):
+    return await _run_cron_dashboard_io(_list_cron_jobs_sync, profile)
+
+
+def _get_cron_job_sync(job_id: str, profile: Optional[str] = None):
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -10198,8 +10180,12 @@ async def get_cron_job(job_id: str, profile: Optional[str] = None):
     return job
 
 
-@app.get("/api/cron/jobs/{job_id}/runs")
-async def list_cron_job_runs(job_id: str, profile: Optional[str] = None, limit: int = 20):
+@app.get("/api/cron/jobs/{job_id}")
+async def get_cron_job(job_id: str, profile: Optional[str] = None):
+    return await _run_cron_dashboard_io(_get_cron_job_sync, job_id, profile)
+
+
+def _list_cron_job_runs_sync(job_id: str, profile: Optional[str] = None, limit: int = 20):
     """Run sessions produced by a cron job, newest first.
 
     Cron runs are stored as ordinary sessions whose id is
@@ -10244,8 +10230,12 @@ async def list_cron_job_runs(job_id: str, profile: Optional[str] = None, limit: 
         db.close()
 
 
-@app.post("/api/cron/jobs")
-async def create_cron_job(body: CronJobCreate, profile: str = "default"):
+@app.get("/api/cron/jobs/{job_id}/runs")
+async def list_cron_job_runs(job_id: str, profile: Optional[str] = None, limit: int = 20):
+    return await _run_cron_dashboard_io(_list_cron_job_runs_sync, job_id, profile, limit)
+
+
+def _create_cron_job_sync(body: CronJobCreate, profile: str = "default"):
     try:
         profile_name, profile_home = _cron_profile_home(profile)
         script = _normalize_dashboard_cron_script(body.script, profile_home)
@@ -10283,6 +10273,11 @@ async def create_cron_job(body: CronJobCreate, profile: str = "default"):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/api/cron/jobs")
+async def create_cron_job(body: CronJobCreate, profile: str = "default"):
+    return await _run_cron_dashboard_io(_create_cron_job_sync, body, profile)
+
+
 @app.get("/api/cron/delivery-targets")
 async def get_cron_delivery_targets():
     """Delivery targets the cron dropdown should offer.
@@ -10311,8 +10306,7 @@ async def get_cron_delivery_targets():
     return {"targets": targets}
 
 
-@app.put("/api/cron/jobs/{job_id}")
-async def update_cron_job(job_id: str, body: CronJobUpdate, profile: Optional[str] = None):
+def _update_cron_job_sync(job_id: str, body: CronJobUpdate, profile: Optional[str] = None):
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -10346,8 +10340,12 @@ async def update_cron_job(job_id: str, body: CronJobUpdate, profile: Optional[st
     return job
 
 
-@app.post("/api/cron/jobs/{job_id}/pause")
-async def pause_cron_job(job_id: str, profile: Optional[str] = None):
+@app.put("/api/cron/jobs/{job_id}")
+async def update_cron_job(job_id: str, body: CronJobUpdate, profile: Optional[str] = None):
+    return await _run_cron_dashboard_io(_update_cron_job_sync, job_id, body, profile)
+
+
+def _pause_cron_job_sync(job_id: str, profile: Optional[str] = None):
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -10357,8 +10355,12 @@ async def pause_cron_job(job_id: str, profile: Optional[str] = None):
     return job
 
 
-@app.post("/api/cron/jobs/{job_id}/resume")
-async def resume_cron_job(job_id: str, profile: Optional[str] = None):
+@app.post("/api/cron/jobs/{job_id}/pause")
+async def pause_cron_job(job_id: str, profile: Optional[str] = None):
+    return await _run_cron_dashboard_io(_pause_cron_job_sync, job_id, profile)
+
+
+def _resume_cron_job_sync(job_id: str, profile: Optional[str] = None):
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -10368,8 +10370,12 @@ async def resume_cron_job(job_id: str, profile: Optional[str] = None):
     return job
 
 
-@app.post("/api/cron/jobs/{job_id}/trigger")
-async def trigger_cron_job(job_id: str, profile: Optional[str] = None):
+@app.post("/api/cron/jobs/{job_id}/resume")
+async def resume_cron_job(job_id: str, profile: Optional[str] = None):
+    return await _run_cron_dashboard_io(_resume_cron_job_sync, job_id, profile)
+
+
+def _trigger_cron_job_sync(job_id: str, profile: Optional[str] = None):
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -10379,8 +10385,12 @@ async def trigger_cron_job(job_id: str, profile: Optional[str] = None):
     return job
 
 
-@app.delete("/api/cron/jobs/{job_id}")
-async def delete_cron_job(job_id: str, profile: Optional[str] = None):
+@app.post("/api/cron/jobs/{job_id}/trigger")
+async def trigger_cron_job(job_id: str, profile: Optional[str] = None):
+    return await _run_cron_dashboard_io(_trigger_cron_job_sync, job_id, profile)
+
+
+def _delete_cron_job_sync(job_id: str, profile: Optional[str] = None):
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -10391,6 +10401,11 @@ async def delete_cron_job(job_id: str, profile: Optional[str] = None):
     if not removed:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"ok": True}
+
+
+@app.delete("/api/cron/jobs/{job_id}")
+async def delete_cron_job(job_id: str, profile: Optional[str] = None):
+    return await _run_cron_dashboard_io(_delete_cron_job_sync, job_id, profile)
 
 
 def _fire_cron_job_for_profile(profile: str, job_id: str) -> bool:
@@ -10466,7 +10481,10 @@ async def cron_fire_webhook(request: Request):
     if not job_id:
         return JSONResponse({"error": "missing job_id"}, status_code=400)
 
-    profile = _find_cron_job_profile(job_id)
+    # _find_cron_job_profile walks every profile and lists its jobs (file
+    # I/O per profile) — run it off the event loop like the other cron
+    # dashboard endpoints.
+    profile = await _run_cron_dashboard_io(_find_cron_job_profile, job_id)
     if not profile:
         # Job is gone (cancelled / completed) — nothing to fire. 200 so NAS
         # does not retry a fire that is intentionally absent.
@@ -10541,7 +10559,11 @@ async def instantiate_blueprint(body: AutomationBlueprintInstantiate, profile: s
         # Blueprint-created jobs deliver to the dashboard's configured target by
         # default; the form's deliver slot overrides via spec["deliver"].
         spec.pop("origin", None)
-        return _call_cron_for_profile(profile, "create_job", **spec)
+        # create_job does per-profile file I/O — keep it off the event loop
+        # like the sibling cron endpoints (partial avoids **spec keys ever
+        # colliding with the wrapper's own parameters).
+        _create = functools.partial(_call_cron_for_profile, profile, "create_job", **spec)
+        return await _run_cron_dashboard_io(_create)
     except HTTPException:
         raise
     except Exception as e:
@@ -14042,138 +14064,6 @@ async def get_models_analytics(days: int = 30, profile: Optional[str] = None):
 
 
 # ---------------------------------------------------------------------------
-# Provider subscription usage (CodexBar-backed)
-# ---------------------------------------------------------------------------
-
-
-def _codexbar_cli_path() -> Optional[str]:
-    configured = os.getenv("CODEXBAR_CLI") or os.getenv("HERMES_CODEXBAR_CLI")
-    candidates = [
-        configured,
-        shutil.which("codexbar"),
-        "/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI",
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        path = Path(candidate).expanduser()
-        if path.exists() and os.access(path, os.X_OK):
-            return str(path)
-    return None
-
-
-def _redact_provider_usage_error(message: str) -> str:
-    text = message or ""
-    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+\-/=]+", r"\1[redacted]", text)
-    text = re.sub(r"(?i)(authorization[\"':=\s]+)[^,}\s]+", r"\1[redacted]", text)
-    text = re.sub(r"(?i)(cookie[\"':=\s]+)[^,}\n]+", r"\1[redacted]", text)
-    return text[:2000]
-
-
-async def _codexbar_usage_payload(provider: str = "all") -> Dict[str, Any]:
-    cli = _codexbar_cli_path()
-    if not cli:
-        return {
-            "ok": False,
-            "source": "codexbar",
-            "provider": provider,
-            "error": "CodexBar CLI not found. Install CodexBar or set HERMES_CODEXBAR_CLI.",
-            "providers": [],
-        }
-
-    allowed = {
-        "codex", "claude", "cursor", "opencode", "opencodego",
-        "alibaba-coding-plan", "factory", "gemini", "antigravity",
-        "copilot", "zai", "minimax", "kimi", "kilo", "kiro",
-        "vertexai", "augment", "jetbrains", "kimik2", "amp", "ollama",
-        "synthetic", "warp", "openrouter", "perplexity", "both", "all",
-        "enabled",
-    }
-    selected = (provider or "all").strip().lower()
-    if selected not in allowed:
-        selected = "all"
-
-    cmd = [cli, "usage", "--format", "json", "--no-color"]
-    if selected != "enabled":
-        cmd.extend(["--provider", selected])
-    if selected == "claude":
-        claude_source = os.getenv("HERMES_CODEXBAR_CLAUDE_SOURCE", "oauth").strip().lower()
-        if claude_source in {"auto", "web", "cli", "oauth"}:
-            cmd.extend(["--source", claude_source])
-
-    started = time.time()
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
-    except asyncio.TimeoutError:
-        with contextlib.suppress(Exception):
-            proc.kill()  # type: ignore[possibly-undefined]
-        return {
-            "ok": False,
-            "source": "codexbar",
-            "provider": selected,
-            "error": "CodexBar usage collection timed out.",
-            "providers": [],
-        }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "source": "codexbar",
-            "provider": selected,
-            "error": _redact_provider_usage_error(str(exc)),
-            "providers": [],
-        }
-
-    text = stdout.decode("utf-8", errors="replace").strip()
-    err_text = stderr.decode("utf-8", errors="replace").strip()
-    try:
-        if not text:
-            raw: Any = []
-        else:
-            start = min([idx for idx in (text.find("["), text.find("{")) if idx >= 0], default=0)
-            raw, _ = json.JSONDecoder().raw_decode(text[start:])
-    except Exception:
-        return {
-            "ok": False,
-            "source": "codexbar",
-            "provider": selected,
-            "error": "CodexBar returned non-JSON output.",
-            "stderr": _redact_provider_usage_error(err_text),
-            "providers": [],
-        }
-
-    if isinstance(raw, dict):
-        providers = [raw]
-    elif isinstance(raw, list):
-        providers = raw
-    else:
-        providers = []
-
-    ok_count = sum(1 for item in providers if isinstance(item, dict) and item.get("usage"))
-    error_count = sum(1 for item in providers if isinstance(item, dict) and item.get("error"))
-    return {
-        "ok": proc.returncode == 0 or ok_count > 0,
-        "source": "codexbar",
-        "provider": selected,
-        "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "durationMs": int((time.time() - started) * 1000),
-        "okCount": ok_count,
-        "errorCount": error_count,
-        "providers": providers,
-        "stderr": _redact_provider_usage_error(err_text) if err_text else "",
-    }
-
-
-@app.get("/api/subscription-usage")
-async def get_subscription_usage(provider: str = "all"):
-    return await _codexbar_usage_payload(provider)
-
-
-# ---------------------------------------------------------------------------
 # /api/pty — PTY-over-WebSocket bridge for the dashboard "Chat" tab.
 #
 # The endpoint spawns the same ``hermes --tui`` binary the CLI uses, behind
@@ -14401,10 +14291,9 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     bound_host = getattr(app.state, "bound_host", None)
     if not bound_host:
         return None
-    allowed_hosts = getattr(app.state, "dashboard_allowed_hosts", frozenset())
 
     host_header = ws.headers.get("host", "")
-    if not _is_accepted_host(host_header, bound_host, allowed_hosts):
+    if not _is_accepted_host(host_header, bound_host):
         return f"host_mismatch host={host_header or '?'} bound={bound_host}"
 
     origin = ws.headers.get("origin", "")
@@ -14421,7 +14310,7 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     if not parsed.netloc:
         return f"origin_mismatch origin={origin} bound={bound_host}"
 
-    if not _is_accepted_host(parsed.netloc, bound_host, allowed_hosts):
+    if not _is_accepted_host(parsed.netloc, bound_host):
         return f"origin_mismatch origin={origin} bound={bound_host}"
     return None
 
@@ -15752,13 +15641,21 @@ def mount_spa(application: FastAPI):
     and the SPA's runtime ``__HERMES_BASE_PATH__`` honour that prefix
     without rebuilding the bundle.
     """
-    if not WEB_DIST.exists():
+    # `hermes serve` is the headless backend: it must NEVER serve the browser
+    # SPA, even if a dist is lying around from a prior `dashboard`/build. Take
+    # the no-frontend path so only the JSON-RPC/WS/API surface is reachable.
+    _headless = os.environ.get("HERMES_SERVE_HEADLESS") == "1"
+    if _headless or not WEB_DIST.exists():
+        _msg = (
+            "Headless backend (hermes serve): web UI disabled — use "
+            "`hermes dashboard` for the browser UI."
+            if _headless
+            else "Frontend not built. Run: cd web && npm run build"
+        )
+
         @application.get("/{full_path:path}")
         async def no_frontend(full_path: str):
-            return JSONResponse(
-                {"error": "Frontend not built. Run: cd web && npm run build"},
-                status_code=404,
-            )
+            return JSONResponse({"error": _msg}, status_code=404)
         return
 
     _index_path = WEB_DIST / "index.html"
@@ -16994,7 +16891,7 @@ def start_server(
     open_browser: bool = True,
     allow_public: bool = False,
     initial_profile: str = "",
-    register_instance=None,
+    headless: bool = False,
 ):
     """Start the web UI server.
 
@@ -17002,6 +16899,10 @@ def start_server(
     URL as ``?profile=<name>`` so the SPA's profile switcher preselects it
     — used when a profile alias (``<profile> dashboard``) routes to the
     machine dashboard.
+
+    ``headless`` is the ``serve`` path: the JSON-RPC/WS backend with no UI
+    build and no SPA mount (mount_spa() honours ``HERMES_SERVE_HEADLESS``), so
+    the banner announces the bind rather than a browser URL.
     """
     import uvicorn
 
@@ -17087,12 +16988,9 @@ def start_server(
             ", ".join(p.name for p in list_providers()),
         )
 
-    # Record the bound host and exact proxy host allowlist so
-    # host_header_middleware can validate incoming Host headers. Defends
-    # against DNS rebinding (GHSA-ppp5-vxwm-4cf7) while still allowing an
-    # explicitly trusted reverse-proxy hostname such as Tailscale Serve.
+    # Record the bound host so host_header_middleware can validate incoming
+    # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
     app.state.bound_host = host
-    app.state.dashboard_allowed_hosts = _configured_dashboard_allowed_hosts()
 
     # ── Start uvicorn with direct Server API ─────────────────────────
     # We use uvicorn.Server directly (not uvicorn.run) so we can split
@@ -17160,13 +17058,18 @@ def start_server(
             actual_port = _read_bound_port(server, fallback=port)
             app.state.bound_port = actual_port
 
-            cleanup_instance = None
-            if register_instance is not None:
-                cleanup_instance = register_instance(actual_port)
-
             _write_dashboard_ready_file(actual_port)
-            print(f"HERMES_DASHBOARD_READY port={actual_port}", flush=True)
-            print(f"  Hermes Web UI → http://{host}:{actual_port}")
+            # Port-discovery sentinel parsed by the desktop spawn. `serve` is a
+            # plain backend, not a dashboard, so it announces a neutral token;
+            # `dashboard` keeps the legacy one. The desktop matches either.
+            ready_token = "HERMES_BACKEND_READY" if headless else "HERMES_DASHBOARD_READY"
+            print(f"{ready_token} port={actual_port}", flush=True)
+            if headless:
+                # No SPA, and the JSON-RPC/WS endpoints are auth-gated — don't
+                # advertise a paste-and-connect URL, just announce the bind.
+                print(f"  Hermes backend listening on {host}:{actual_port}")
+            else:
+                print(f"  Hermes Web UI → http://{host}:{actual_port}")
             _maybe_open_browser(host, actual_port, open_browser, initial_profile)
 
             # Collapse the peer-hangup teardown flood (#50005). When the Desktop
@@ -17211,13 +17114,9 @@ def start_server(
                 _hb_interval, _loop_heartbeat, _hb_loop.time() + _hb_interval
             )
 
-            try:
-                await server.main_loop()
-                if server.started:
-                    await server.shutdown()
-            finally:
-                if cleanup_instance is not None:
-                    cleanup_instance()
+            await server.main_loop()
+            if server.started:
+                await server.shutdown()
 
     # On POSIX, keep the long-standing ``asyncio.run(_serve())`` behavior
     # unchanged — Python's default loop there is already a SelectorEventLoop

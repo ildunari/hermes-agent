@@ -26,7 +26,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
-from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH, parse_reasoning_effort
+from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import FailoverReason
 from agent.gemini_native_adapter import is_native_gemini_base_url
 from agent.model_metadata import is_local_endpoint
@@ -38,60 +38,6 @@ from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_float, env_int
 
 logger = logging.getLogger(__name__)
-
-
-def _count_cache_control_markers(value: Any) -> int:
-    if isinstance(value, dict):
-        return (1 if "cache_control" in value else 0) + sum(
-            _count_cache_control_markers(child) for child in value.values()
-        )
-    if isinstance(value, list):
-        return sum(_count_cache_control_markers(child) for child in value)
-    return 0
-
-
-def _remove_cache_control_markers(value: Any) -> None:
-    if isinstance(value, dict):
-        value.pop("cache_control", None)
-        for child in value.values():
-            _remove_cache_control_markers(child)
-    elif isinstance(value, list):
-        for child in value:
-            _remove_cache_control_markers(child)
-
-
-def _limit_message_cache_markers_for_tool_breakpoint(
-    messages: list[dict[str, Any]],
-    *,
-    max_message_markers: int = 3,
-) -> list[dict[str, Any]]:
-    """Keep Claude cache breakpoints within the four-marker request limit.
-
-    Anthropic allows up to four cache_control breakpoints. When the chat
-    completions path adds a tool-schema breakpoint, messages must use at most
-    three more. Prefer preserving the system breakpoint and the most recent
-    conversation breakpoints, which matches the system_and_3 policy minus one.
-    """
-    if _count_cache_control_markers(messages) <= max_message_markers:
-        return messages
-
-    import copy as _copy
-
-    trimmed = _copy.deepcopy(messages)
-    non_system_indices = [
-        idx for idx, msg in enumerate(trimmed)
-        if isinstance(msg, dict) and msg.get("role") != "system"
-    ]
-    protected = set(non_system_indices[-2:])
-    for idx in non_system_indices:
-        if idx in protected:
-            continue
-        if _count_cache_control_markers(trimmed) <= max_message_markers:
-            break
-        _remove_cache_control_markers(trimmed[idx])
-    return trimmed
-
-
 _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
 
 # When the fallback chain is fully exhausted on a non-rate-limit failure
@@ -719,13 +665,6 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
 def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
-    try:
-        from agent.image_routing import normalize_heic_image_parts_in_messages
-
-        api_messages = normalize_heic_image_parts_in_messages(api_messages)
-    except Exception as exc:
-        logger.warning("HEIC image normalization skipped before API call: %s", exc)
-
     tools_for_api = agent.tools
 
     if agent.api_mode == "anthropic_messages":
@@ -833,27 +772,6 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
 
     # ── chat_completions (default) ─────────────────────────────────────
     _ct = agent._get_transport()
-
-    # OpenAI-wire Anthropic-style cache routes (OpenRouter/Nous/VibeProxy and
-    # similar) accept ``cache_control`` markers on messages. The tool schema is
-    # a large, stable prefix too; if it is left unmarked, Claude/VibeProxy keeps
-    # re-billing the entire tool surface as fresh input even when the system and
-    # conversation prefix hit cache. Native Anthropic transport handles tool
-    # cache_control during OpenAI→Anthropic conversion, so this branch is only
-    # for chat_completions/envelope-layout routes.
-    if (
-        getattr(agent, "_use_prompt_caching", False)
-        and not getattr(agent, "_use_native_cache_layout", False)
-        and tools_for_api
-    ):
-        import copy as _copy
-        tools_for_api = _copy.deepcopy(tools_for_api)
-        if isinstance(tools_for_api, list) and isinstance(tools_for_api[-1], dict):
-            tool_cache_marker = {"type": "ephemeral"}
-            if getattr(agent, "_cache_ttl", "5m") == "1h":
-                tool_cache_marker["ttl"] = "1h"
-            tools_for_api[-1]["cache_control"] = tool_cache_marker
-            api_messages = _limit_message_cache_markers_for_tool_breakpoint(api_messages)
 
     # Provider detection flags
     _is_qwen = agent._is_qwen_portal()
@@ -1406,12 +1324,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     # access for Codex providers.
     try:
         from agent.auxiliary_client import resolve_provider_client
-        from hermes_cli.fallback_config import codex_home_access_token
         # Pass base_url and api_key from fallback config so custom
         # endpoints (e.g. Ollama Cloud) resolve correctly instead of
         # falling through to OpenRouter defaults.
         fb_base_url_hint = (fb.get("base_url") or "").strip() or None
-        fb_api_key_hint = (fb.get("api_key") or "").strip() or codex_home_access_token(fb)
+        fb_api_key_hint = (fb.get("api_key") or "").strip() or None
         if not fb_api_key_hint:
             # key_env and api_key_env are both documented aliases (see
             # _normalize_custom_provider_entry in hermes_cli/config.py).
@@ -1482,7 +1399,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             fb_api_mode = "bedrock_converse"
 
         old_model = agent.model
-        old_reasoning_config = getattr(agent, "reasoning_config", None)
+        old_provider = agent.provider
 
         # Clear the per-config context_length override so the fallback
         # model's actual context window is resolved instead of inheriting
@@ -1492,24 +1409,6 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         agent.provider = fb_provider
         agent.base_url = fb_base_url
         agent.api_mode = fb_api_mode
-        if not hasattr(agent, "_fallback_previous_reasoning_config"):
-            agent._fallback_previous_reasoning_config = old_reasoning_config
-        if "reasoning_effort" in fb:
-            parsed_reasoning = parse_reasoning_effort(fb.get("reasoning_effort"))
-            if parsed_reasoning is not None:
-                agent.reasoning_config = parsed_reasoning
-            else:
-                logger.warning(
-                    "Fallback to %s/%s has unknown reasoning_effort %r; preserving current reasoning config",
-                    fb_provider,
-                    fb_model,
-                    fb.get("reasoning_effort"),
-                )
-        elif hasattr(agent, "_fallback_previous_reasoning_config"):
-            # Avoid leaking a prior fallback entry's reasoning level into the
-            # next fallback provider in the chain when that provider did not
-            # declare its own effort.
-            agent.reasoning_config = agent._fallback_previous_reasoning_config
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True
@@ -1642,23 +1541,19 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # answering, so "what model are you?" doesn't report the primary.
         rewrite_prompt_model_identity(agent, fb_model, fb_provider)
 
-        # Studio customization: surface model auto-switches to the user on
-        # EVERY channel, immediately and unconditionally. A buffered status
-        # (_buffer_status) is suppressed when the turn recovers — fine for a
-        # transparent same-model retry, but a real model *switch* changes
-        # capability/cost, so the user must know even when the fallback
-        # succeeds. _emit_status reaches CLI (_vprint) and gateway channels
-        # (status_callback "lifecycle") — Telegram/Discord/etc. Motivating
-        # case: a Claude/VibeProxy turn that silently answered as gpt-5.5.
-        _reason_txt = ""
-        try:
-            _reason_txt = f", reason: {reason.value}" if reason is not None else ""
-        except Exception:
-            _reason_txt = ""
-        agent._emit_status(
-            f"🔀 Model auto-switched: {old_model} → {fb_model} "
-            f"(provider: {fb_provider}{_reason_txt}). The selected model failed; "
-            f"continuing on the fallback."
+        agent._buffer_status(
+            f"🔄 Primary model failed — switching to fallback: "
+            f"{fb_model} via {fb_provider}"
+        )
+        # The buffered line above is dropped on successful recovery, but a
+        # provider/model switch is a durable state change operators must see
+        # even when the fallback succeeds.  Record a one-shot notice that the
+        # success path surfaces exactly once via _emit_pending_fallback_notice
+        # (see run_agent.py); it is discarded on terminal failure since the
+        # buffered line is flushed instead.  See fallback-observability fix.
+        agent._pending_fallback_notice = (
+            f"🔄 Switched to fallback model: {old_model} via {old_provider} "
+            f"→ {fb_model} via {fb_provider}"
         )
         logger.info(
             "Fallback activated: %s → %s (%s)",

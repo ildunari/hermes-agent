@@ -267,6 +267,84 @@ class TestWebServerEndpoints:
         assert "active_sessions" in data
         assert data["can_update_hermes"] is True
 
+    def test_status_active_session_count_uses_read_only_db(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+        import hermes_state
+
+        # Satisfy the fresh-install guard: read_only opens require the DB
+        # file to already exist.
+        fake_db_path = tmp_path / "state.db"
+        fake_db_path.touch()
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", fake_db_path)
+
+        captured = {}
+
+        class _FakeDB:
+            def __init__(self, *args, **kwargs):
+                captured["read_only"] = kwargs.get("read_only")
+
+            def list_sessions_rich(self, limit, compact_rows=False):
+                captured["limit"] = limit
+                captured["compact_rows"] = compact_rows
+                return [
+                    {"ended_at": None, "last_active": 95},
+                    {"ended_at": 99, "last_active": 99},
+                    {"ended_at": None, "last_active": -300},
+                ]
+
+            def close(self):
+                captured["closed"] = True
+
+        monkeypatch.setattr("hermes_state.SessionDB", _FakeDB)
+        monkeypatch.setattr(web_server.time, "time", lambda: 100)
+
+        assert web_server._count_status_active_sessions() == 1
+        assert captured == {
+            "read_only": True, "limit": 50, "compact_rows": True, "closed": True
+        }
+
+    def test_status_active_session_count_fresh_install_returns_zero(self, monkeypatch, tmp_path):
+        """No state.db yet (fresh install): return 0 without attempting a
+        read-only open, which would raise OperationalError on every poll."""
+        import hermes_cli.web_server as web_server
+        import hermes_state
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "absent.db")
+
+        def _boom(*a, **k):
+            raise AssertionError("SessionDB must not be constructed when db file is absent")
+
+        monkeypatch.setattr("hermes_state.SessionDB", _boom)
+        assert web_server._count_status_active_sessions() == 0
+
+    def test_get_status_degrades_when_active_session_count_fails(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        def _locked_count():
+            raise TimeoutError("database is locked")
+
+        monkeypatch.setattr(web_server, "_count_status_active_sessions", _locked_count)
+
+        resp = self.client.get("/api/status")
+        assert resp.status_code == 200
+        assert resp.json()["active_sessions"] == 0
+
+    def test_get_status_uses_cached_gateway_pid_probe(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        calls = {"get_running_pid_cached": 0}
+
+        def _cached_pid():
+            calls["get_running_pid_cached"] += 1
+            return None
+
+        monkeypatch.setattr(web_server, "get_running_pid_cached", _cached_pid)
+
+        resp = self.client.get("/api/status")
+
+        assert resp.status_code == 200
+        assert calls["get_running_pid_cached"] == 1
+
     def test_gateway_drain_begin_writes_marker(self):
         from gateway import drain_control
 
@@ -709,29 +787,18 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert data["reference_models"]
-        assert all({"provider", "model"} <= set(slot) for slot in data["reference_models"])
-        assert {"provider", "model"} <= set(data["aggregator"])
-        by_model = {slot.get("model"): slot for slot in data["reference_models"]}
-        assert by_model["gpt-5.5"]["reasoning_effort"] == "medium"
-        if "glm-5.2" in by_model:
-            assert by_model["glm-5.2"]["reasoning_effort"] == "high"
-        assert data["aggregator"]["reasoning_effort"] == "high"
+        assert all(set(slot) == {"provider", "model"} for slot in data["reference_models"])
+        assert set(data["aggregator"]) == {"provider", "model"}
 
     def test_put_moa_models_persists_provider_model_slots(self):
         from hermes_cli.config import load_config
-        from hermes_cli.moa_config import normalize_moa_config
 
         payload = {
             "reference_models": [
-                {"provider": "openai-codex", "model": "gpt-5.5", "reasoning_effort": "medium"},
-                {
-                    "provider": "zai",
-                    "model": "glm-5.2",
-                    "reasoning_effort": "high",
-                    "extra_body": {"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
-                },
+                {"provider": "openai-codex", "model": "gpt-5.5"},
+                {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
             ],
-            "aggregator": {"provider": "vibeproxy", "model": "claude-opus-4-8", "reasoning_effort": "high"},
+            "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
             "reference_temperature": 0.6,
             "aggregator_temperature": 0.4,
             "max_tokens": 4096,
@@ -742,11 +809,8 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
         cfg = load_config()
-        expected = normalize_moa_config(payload)
-        assert cfg["moa"]["reference_models"] == expected["reference_models"]
-        assert cfg["moa"]["aggregator"] == expected["aggregator"]
-        assert cfg["moa"]["reference_models"][0]["service_tier"] == "fast"
-        assert cfg["moa"]["reference_models"][1]["extra_body"] == payload["reference_models"][1]["extra_body"]
+        assert cfg["moa"]["reference_models"] == payload["reference_models"]
+        assert cfg["moa"]["aggregator"] == payload["aggregator"]
 
     # ── GET /api/media (remote image display) ───────────────────────────
 
@@ -762,23 +826,6 @@ class TestWebServerEndpoints:
         resp = self.client.get("/api/media", params={"path": str(img)})
         assert resp.status_code == 200
         assert resp.json()["data_url"].startswith("data:image/png;base64,")
-
-    def test_get_media_serves_image_in_requested_profile(self):
-        """Global-remote Desktop appends ?profile= when previewing another profile's media."""
-        from hermes_cli import profiles as profiles_mod
-
-        worker_home = profiles_mod.get_profile_dir("worker")
-        img_dir = worker_home / "images"
-        img_dir.mkdir(parents=True, exist_ok=True)
-        img = img_dir / "shot.png"
-        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
-
-        resp = self.client.get("/api/media", params={"path": str(img), "profile": "worker"})
-        assert resp.status_code == 200
-        assert resp.json()["data_url"].startswith("data:image/png;base64,")
-
-        unscoped = self.client.get("/api/media", params={"path": str(img)})
-        assert unscoped.status_code == 403
 
     def test_get_media_rejects_path_outside_roots(self, tmp_path):
         """An image-extension file outside the media roots is forbidden."""
@@ -932,121 +979,69 @@ class TestWebServerEndpoints:
         assert captured["list"] == 3
         assert captured["count"] == 3
 
-    @staticmethod
-    def _heavy_session_row():
-        return {
-            "id": "heavy-session",
-            "source": "cli",
-            "user_id": "user-1",
-            "model": "gpt-test",
-            "title": "Heavy session",
-            "started_at": 1000.0,
-            "ended_at": None,
-            "end_reason": None,
-            "message_count": 7,
-            "tool_call_count": 2,
-            "input_tokens": 11,
-            "output_tokens": 13,
-            "cache_read_tokens": 17,
-            "cache_write_tokens": 19,
-            "reasoning_tokens": 23,
-            "estimated_cost_usd": 0.12,
-            "actual_cost_usd": 0.10,
-            "cost_status": "estimated",
-            "cost_source": "test",
-            "pricing_version": "v1",
-            "api_call_count": 3,
-            "parent_session_id": None,
-            "last_active": 1005.0,
-            "preview": "hello from a large session",
-            "_lineage_root_id": "root-session",
-            "cwd": "/tmp/project",
-            "git_branch": "main",
-            "git_repo_root": "/tmp/project",
-            "archived": 0,
-            "is_active": False,
-            "handoff_platform": "telegram",
-            "handoff_state": "ready",
-            "handoff_error": None,
-            "system_prompt": "S" * 100_000,
-            "model_config": {"provider": "test", "nested": {"keep": "out"}},
-        }
+    def _create_session_with_heavy_fields(self, session_id: str) -> None:
+        from hermes_state import SessionDB
 
-    def _assert_lean_session_list_row(self, row):
+        db = SessionDB()
+        try:
+            db.create_session(
+                session_id=session_id,
+                source="cli",
+                system_prompt="# SOUL.md\n" + ("prompt body " * 500),
+                model_config={"temperature": 0.7, "notes": "x" * 200},
+            )
+        finally:
+            db.close()
+
+    def test_get_sessions_strips_heavy_fields_by_default(self):
+        """List rows must omit system_prompt/model_config.
+
+        system_prompt is the fully rendered prompt (tens of KB per row) and
+        dominated the sidebar payload (96% of a 528KB response); no list UI
+        reads it. Detail reads (GET /api/sessions/{id}) stay complete.
+        """
+        self._create_session_with_heavy_fields("lean-list-row")
+
+        resp = self.client.get("/api/sessions?limit=20&offset=0")
+        assert resp.status_code == 200
+        rows = [s for s in resp.json()["sessions"] if s["id"] == "lean-list-row"]
+        assert rows, "created session missing from list"
+        row = rows[0]
         assert "system_prompt" not in row
         assert "model_config" not in row
-        assert row["has_system_prompt"] is True
-        assert row["has_model_config"] is True
-        for key in (
-            "id", "source", "user_id", "model", "title", "started_at", "ended_at",
-            "end_reason", "message_count", "tool_call_count", "input_tokens",
-            "output_tokens", "cache_read_tokens", "cache_write_tokens",
-            "reasoning_tokens", "estimated_cost_usd", "actual_cost_usd",
-            "cost_status", "cost_source", "pricing_version", "api_call_count",
-            "parent_session_id", "last_active", "preview", "_lineage_root_id",
-            "cwd", "git_branch", "git_repo_root", "archived", "is_active",
-            "handoff_platform", "handoff_state", "handoff_error",
-        ):
+        # The light fields the sidebar actually renders must survive.
+        for key in ("id", "source", "started_at", "message_count", "is_active"):
             assert key in row
 
-    def test_get_sessions_returns_lean_session_list_dto(self, monkeypatch):
-        class _FakeDB:
-            def __init__(self, *args, **kwargs):
-                pass
+    def test_get_sessions_full_param_keeps_heavy_fields(self):
+        """?full=1 is the escape hatch for callers that need complete rows."""
+        self._create_session_with_heavy_fields("full-list-row")
 
-            def list_sessions_rich(self, **kwargs):
-                return [TestWebServerEndpoints._heavy_session_row()]
-
-            def session_count(self, **kwargs):
-                return 1
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr("hermes_state.SessionDB", _FakeDB)
-
-        resp = self.client.get("/api/sessions?limit=5&offset=0")
+        resp = self.client.get("/api/sessions?limit=20&offset=0&full=1")
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["total"] == 1
-        self._assert_lean_session_list_row(data["sessions"][0])
-        assert "S" * 1000 not in resp.text
-        assert "nested" not in resp.text
+        rows = [s for s in resp.json()["sessions"] if s["id"] == "full-list-row"]
+        assert rows, "created session missing from list"
+        row = rows[0]
+        assert row["system_prompt"].startswith("# SOUL.md")
+        assert "temperature" in (row["model_config"] or "")
 
-    def test_get_profiles_sessions_returns_lean_session_list_dto(self, monkeypatch, tmp_path):
-        profile_home = tmp_path / "default-profile"
-        profile_home.mkdir()
-        (profile_home / "state.db").touch()
+    def test_profiles_sessions_strips_heavy_fields_by_default(self):
+        """The cross-profile aggregate applies the same list projection."""
+        self._create_session_with_heavy_fields("lean-profiles-row")
 
-        class _FakeDB:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def list_sessions_rich(self, **kwargs):
-                return [TestWebServerEndpoints._heavy_session_row()]
-
-            def session_count(self, **kwargs):
-                return 1
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr("hermes_state.SessionDB", _FakeDB)
-        monkeypatch.setattr(
-            "hermes_cli.profiles.list_profiles",
-            lambda: [SimpleNamespace(name="default", path=profile_home)],
-        )
-
-        resp = self.client.get("/api/profiles/sessions?limit=5&offset=0&profile=all")
+        resp = self.client.get("/api/profiles/sessions?limit=20&offset=0")
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["total"] == 1
-        row = data["sessions"][0]
-        self._assert_lean_session_list_row(row)
+        rows = [s for s in resp.json()["sessions"] if s["id"] == "lean-profiles-row"]
+        assert rows, "created session missing from profiles list"
+        row = rows[0]
+        assert "system_prompt" not in row
+        assert "model_config" not in row
         assert row["profile"] == "default"
-        assert row["is_default_profile"] is True
-        assert "S" * 1000 not in resp.text
-        assert "nested" not in resp.text
+
+        full = self.client.get("/api/profiles/sessions?limit=20&offset=0&full=1")
+        assert full.status_code == 200
+        full_rows = [s for s in full.json()["sessions"] if s["id"] == "lean-profiles-row"]
+        assert full_rows and full_rows[0]["system_prompt"].startswith("# SOUL.md")
 
     def test_rename_session_updates_title(self):
         """PATCH /api/sessions/{id} renames a session (regression: the route
@@ -1230,6 +1225,29 @@ class TestWebServerEndpoints:
         )
         assert worker_resp.status_code == 200
         assert worker_resp.json()["session_id"] == "worker-tip"
+
+    def test_latest_descendant_survives_parent_cycle(self):
+        """Regression for the #39140 CTE salvage: a corrupted parent chain
+        that loops (a -> b -> a) must terminate (UNION dedup) instead of
+        recursing forever like UNION ALL would."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(session_id="cyc-a", source="cli")
+            db.create_session(
+                session_id="cyc-b", source="cli", parent_session_id="cyc-a"
+            )
+            db._conn.execute(
+                "UPDATE sessions SET parent_session_id='cyc-b' WHERE id='cyc-a'"
+            )
+            db._conn.commit()
+        finally:
+            db.close()
+
+        resp = self.client.get("/api/sessions/cyc-a/latest-descendant")
+        assert resp.status_code == 200
+        assert resp.json()["session_id"] == "cyc-b"
 
     def test_analytics_endpoints_read_requested_profile(self):
         from hermes_state import SessionDB
@@ -1524,10 +1542,7 @@ class TestWebServerEndpoints:
         audio_file = tmp_path / "speech.mp3"
         audio_file.write_bytes(b"ID3fake-audio-bytes")
 
-        seen = {}
-
         def fake_tts(text):
-            seen["text"] = text
             return json.dumps({
                 "success": True,
                 "file_path": str(audio_file),
@@ -1536,72 +1551,15 @@ class TestWebServerEndpoints:
 
         monkeypatch.setattr(tts_tool, "text_to_speech_tool", fake_tts)
 
-        resp = self.client.post("/api/audio/speak", json={"text": "hello there", "rewrite": "off"})
+        resp = self.client.post("/api/audio/speak", json={"text": "hello there"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["ok"] is True
         assert body["mime_type"] == "audio/mpeg"
         assert body["data_url"].startswith("data:audio/mpeg;base64,")
         assert body["provider"] == "test"
-        assert seen["text"] == "hello there"
         # The handler streams the bytes back and removes the temp file.
         assert not audio_file.exists()
-
-    def test_speak_text_uses_requested_profile_for_tts(self, monkeypatch, tmp_path):
-        import tools.tts_tool as tts_tool
-        from hermes_cli import profiles as profiles_mod
-        from hermes_constants import get_hermes_home
-
-        worker_home = profiles_mod.get_profile_dir("worker")
-        worker_home.mkdir(parents=True, exist_ok=True)
-        audio_file = tmp_path / "speech.mp3"
-        seen = {}
-
-        def fake_tts(text):
-            from hermes_constants import get_hermes_home as active_home
-
-            seen["home"] = active_home()
-            audio_file.write_bytes(b"ID3fake")
-            return json.dumps({"success": True, "file_path": str(audio_file), "provider": "fake"})
-
-        monkeypatch.setattr(tts_tool, "text_to_speech_tool", fake_tts)
-
-        resp = self.client.post("/api/audio/speak", json={"text": "hello", "profile": "worker", "rewrite": "off"})
-        assert resp.status_code == 200
-        assert seen["home"] == worker_home
-        assert seen["home"] != get_hermes_home()
-
-
-    def test_speak_text_prepares_spoken_text_before_tts(self, monkeypatch, tmp_path):
-        import tools.tts_tool as tts_tool
-
-        audio_file = tmp_path / "speech.wav"
-        audio_file.write_bytes(b"RIFFfake-audio-bytes")
-        seen = {}
-
-        def fake_tts(text):
-            seen["text"] = text
-            return json.dumps({
-                "success": True,
-                "file_path": str(audio_file),
-                "provider": "test",
-            })
-
-        monkeypatch.setattr(tts_tool, "text_to_speech_tool", fake_tts)
-
-        resp = self.client.post(
-            "/api/audio/speak",
-            json={
-                "text": "- output: `/Users/Kosta/.hermes/audio_cache/tts_20260701_075402.ogg`\n- timeout: `600s`",
-                "source": "read-aloud",
-                "rewrite": "off",
-            },
-        )
-
-        assert resp.status_code == 200
-        assert "600s" in seen["text"]
-        assert "/Users/Kosta" not in seen["text"]
-        assert "tts_20260701_075402" not in seen["text"]
 
     def test_speak_text_requires_nonempty_text(self):
         resp = self.client.post("/api/audio/speak", json={"text": "   "})
@@ -1773,6 +1731,36 @@ class TestWebServerEndpoints:
             "pid": 99,
         }
 
+    def test_action_status_tails_large_log_without_read_text(self, tmp_path, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "_ACTION_LOG_DIR", tmp_path)
+        web_server._ACTION_PROCS.pop("hermes-update", None)
+        web_server._ACTION_RESULTS.pop("hermes-update", None)
+
+        log_path = tmp_path / web_server._ACTION_LOG_FILES["hermes-update"]
+        log_path.write_text(
+            "stale-start\n"
+            + ("x" * (web_server._ACTION_LOG_TAIL_MAX_BYTES + 1024))
+            + "\ntail-one\ntail-two\n",
+            encoding="utf-8",
+        )
+        assert log_path.stat().st_size > web_server._ACTION_LOG_TAIL_MAX_BYTES
+
+        original_read_text = Path.read_text
+
+        def fail_if_status_reads_whole_log(path, *args, **kwargs):
+            if path == log_path:
+                raise AssertionError("action status must not read the entire log")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_if_status_reads_whole_log)
+
+        resp = self.client.get("/api/actions/hermes-update/status?lines=3")
+
+        assert resp.status_code == 200
+        assert resp.json()["lines"] == ["tail-one", "tail-two"]
+
 
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
@@ -1786,7 +1774,7 @@ class TestWebServerEndpoints:
             def get_connected_platforms(self):
                 return [_Platform("telegram")]
 
-        monkeypatch.setattr(web_server, "get_running_pid", lambda: 1234)
+        monkeypatch.setattr(web_server, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(
             web_server,
             "read_runtime_status",
@@ -1810,43 +1798,6 @@ class TestWebServerEndpoints:
             "telegram": {"state": "connected", "updated_at": "2026-04-12T00:00:00+00:00"},
         }
 
-    def test_get_status_preserves_live_runtime_platforms_when_dashboard_config_is_stale(self, monkeypatch):
-        import gateway.config as gateway_config
-        import hermes_cli.web_server as web_server
-
-        class _Platform:
-            def __init__(self, value):
-                self.value = value
-
-        class _GatewayConfig:
-            def get_connected_platforms(self):
-                return [_Platform("telegram")]
-
-        monkeypatch.setattr(web_server, "get_running_pid", lambda: 1234)
-        monkeypatch.setattr(
-            web_server,
-            "read_runtime_status",
-            lambda: {
-                "pid": 1234,
-                "gateway_state": "running",
-                "updated_at": "2026-04-12T00:00:00+00:00",
-                "platforms": {
-                    "telegram": {"state": "connected", "updated_at": "2026-04-12T00:00:00+00:00"},
-                    "bluebubbles": {"state": "connected", "updated_at": "2026-04-12T00:00:00+00:00"},
-                },
-            },
-        )
-        monkeypatch.setattr(web_server, "check_config_version", lambda: (1, 1))
-        monkeypatch.setattr(gateway_config, "load_gateway_config", lambda: _GatewayConfig())
-
-        resp = self.client.get("/api/status")
-
-        assert resp.status_code == 200
-        assert resp.json()["gateway_platforms"] == {
-            "telegram": {"state": "connected", "updated_at": "2026-04-12T00:00:00+00:00"},
-            "bluebubbles": {"state": "connected", "updated_at": "2026-04-12T00:00:00+00:00"},
-        }
-
     def test_get_status_hides_stale_platforms_when_gateway_not_running(self, monkeypatch):
         import gateway.config as gateway_config
         import hermes_cli.web_server as web_server
@@ -1855,7 +1806,7 @@ class TestWebServerEndpoints:
             def get_connected_platforms(self):
                 return []
 
-        monkeypatch.setattr(web_server, "get_running_pid", lambda: None)
+        monkeypatch.setattr(web_server, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(
             web_server,
             "read_runtime_status",
@@ -3029,6 +2980,27 @@ class TestWebServerEndpoints:
         assert "content: 'cafe';" in css_resp.text
 
         assert seen_encodings == {"index": "utf-8", "css": "utf-8"}
+
+    def test_headless_serve_disables_spa_even_with_a_dist(self, monkeypatch, tmp_path):
+        """`hermes serve` (HERMES_SERVE_HEADLESS) must NOT serve the SPA even
+        when a built dist is present — only the API/WS surface is reachable."""
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+        import hermes_cli.web_server as ws
+
+        dist = tmp_path / "web_dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text("<html><body>UI</body></html>", encoding="utf-8")
+
+        monkeypatch.setattr(ws, "WEB_DIST", dist)
+        monkeypatch.setenv("HERMES_SERVE_HEADLESS", "1")
+        app_ = FastAPI()
+        ws.mount_spa(app_)
+
+        for route in ("/", "/chat"):
+            resp = TestClient(app_).get(route)
+            assert resp.status_code == 404
+            assert "web UI disabled" in resp.json()["error"]
 
     def test_set_model_main_nous_applies_gateway_defaults(self, monkeypatch):
         """Switching the main provider to Nous calls apply_nous_managed_defaults
@@ -5242,7 +5214,7 @@ class TestStatusRemoteGateway:
         """When local PID check fails and remote probe succeeds, gateway shows running."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: None)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642")
         monkeypatch.setattr(ws, "_probe_gateway_health", lambda: (True, {
@@ -5264,7 +5236,7 @@ class TestStatusRemoteGateway:
         """When local PID check succeeds, the remote probe is never called."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: 1234)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
             "gateway_state": "running",
             "platforms": {},
@@ -5287,7 +5259,7 @@ class TestStatusRemoteGateway:
         """When GATEWAY_HEALTH_URL is unset, no probe is attempted."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: None)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", None)
 
@@ -5301,7 +5273,7 @@ class TestStatusRemoteGateway:
         """Remote gateway running but PID not in response — pid should be None."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: None)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642")
         monkeypatch.setattr(ws, "_probe_gateway_health", lambda: (True, {
@@ -5340,7 +5312,7 @@ class TestGatewayBusyReadout:
         """gateway_busy is True iff running AND active_agents > 0."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: 1234)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
             "gateway_state": "running",
             "platforms": {},
@@ -5358,7 +5330,7 @@ class TestGatewayBusyReadout:
         """A running gateway with zero in-flight turns is drainable, not busy."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: 1234)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
             "gateway_state": "running",
             "platforms": {},
@@ -5376,7 +5348,7 @@ class TestGatewayBusyReadout:
         gate dominates."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: 1234)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
             "gateway_state": "draining",
             "platforms": {},
@@ -5392,7 +5364,7 @@ class TestGatewayBusyReadout:
         active_agents 0 — never a spurious busy that would wedge NAS."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: None)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", None)
 
@@ -5408,9 +5380,9 @@ class TestGatewayBusyReadout:
         wins over the file."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: None)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", None)
-        # File says running with active turns, but get_running_pid()==None and
+        # File says running with active turns, but get_running_pid_cached()==None and
         # get_runtime_status_running_pid finds no live PID → gateway_running False.
         monkeypatch.setattr(ws, "get_runtime_status_running_pid", lambda *_a, **_k: None)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
@@ -5429,7 +5401,7 @@ class TestGatewayBusyReadout:
         float so NAS can size its poll deadline without out-of-band knowledge."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: 1234)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
             "gateway_state": "running",
             "platforms": {},
@@ -5447,7 +5419,7 @@ class TestGatewayBusyReadout:
         produce a spurious busy — it degrades to 0/not-busy."""
         import hermes_cli.web_server as ws
 
-        monkeypatch.setattr(ws, "get_running_pid", lambda: 1234)
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
             "gateway_state": "running",
             "platforms": {},

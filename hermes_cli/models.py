@@ -48,7 +48,7 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("google/gemini-3.1-pro-preview",          ""),
     ("google/gemini-3.5-flash",                ""),
     # xAI
-    ("x-ai/grok-4.3",                          ""),
+    ("x-ai/grok-4.5",                          ""),
     # DeepSeek
     ("deepseek/deepseek-v4-pro",               ""),
     ("deepseek/deepseek-v4-flash",             ""),
@@ -101,20 +101,79 @@ def _codex_curated_models() -> list[str]:
     return _add_forward_compat_models(list(DEFAULT_CODEX_MODELS))
 
 
-# Curated xAI chat models for the picker. Keep this subscription-friendly and
-# agentic; the xAI catalog also contains retired 4.2 variants and media models
-# that are noisy in Hermes model selection.
-_XAI_CURATED_MODELS: list[str] = [
+# Static fallback for xAI when the models.dev disk cache is empty (fresh
+# install, offline first run, etc.). Mirrors the xAI-direct model IDs from
+# $HERMES_HOME/models_dev_cache.json as of 2026-04-28. Whenever xAI renames
+# or retires a model, the disk cache picks it up on the next refresh and the
+# fallback here only matters until that refresh lands.
+#
+# Models retired by xAI on May 15, 2026 are excluded — see
+# https://docs.x.ai/developers/migration/may-15-retirement
+# (grok-4, grok-4-0709, grok-4-fast{,-reasoning,-non-reasoning},
+#  grok-4-1-fast{,-reasoning,-non-reasoning}, grok-code-fast-1 → grok-4.3).
+_XAI_STATIC_FALLBACK: list[str] = [
     "grok-build-0.1",
-    "grok-composer-2.5-fast",
-    "grok-4.3",
     "grok-4.5",
+    "grok-4.3",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-0309-non-reasoning",
+    "grok-4.20-multi-agent-0309",
+]
+
+# Callable via xAI OAuth but omitted from models.dev and /v1/models listings.
+_XAI_CURATED_EXTRAS: list[str] = [
+    "grok-4.5",  # GA 2026-07 — kept until the models.dev disk cache refreshes
+    "grok-composer-2.5-fast",
 ]
 
 
+_XAI_TOP_MODEL = "grok-build-0.1"
+
+
+def _xai_promote_top(ids: list[str]) -> list[str]:
+    """Pin the headline xAI model to the top of the curated list."""
+    if _XAI_TOP_MODEL in ids:
+        return [_XAI_TOP_MODEL] + [m for m in ids if m != _XAI_TOP_MODEL]
+    return ids
+
+
+def _xai_merge_curated_extras(ids: list[str]) -> list[str]:
+    """Append Hermes-curated xAI models that are missing from models.dev."""
+    out = list(ids)
+    for extra in _XAI_CURATED_EXTRAS:
+        if extra in out:
+            continue
+        # Keep the headline model pinned; slot extras immediately after it.
+        insert_at = 1 if out and out[0] == _XAI_TOP_MODEL else len(out)
+        out.insert(insert_at, extra)
+    return out
+
+
 def _xai_curated_models() -> list[str]:
-    """Return the curated xAI chat model list used by direct and OAuth pickers."""
-    return list(_XAI_CURATED_MODELS)
+    """Derive the xAI-direct curated list from models.dev disk cache.
+
+    Reads $HERMES_HOME/models_dev_cache.json directly (no network) so this
+    runs at import time without blocking. Falls back to ``_XAI_STATIC_FALLBACK``
+    when the cache is empty or unreadable. Hermes refreshes the cache from
+    https://models.dev/api.json on normal use, so this list self-heals as
+    xAI renames models.
+
+    Mirrors ``_codex_curated_models()``'s role for openai-codex.
+    """
+    try:
+        from agent.models_dev import _load_disk_cache
+        data = _load_disk_cache()
+        xai = data.get("xai") if isinstance(data, dict) else None
+        models = xai.get("models") if isinstance(xai, dict) else None
+        if isinstance(models, dict) and models:
+            ids = [mid for mid in models.keys() if isinstance(mid, str)]
+            if ids:
+                return _xai_merge_curated_extras(_xai_promote_top(sorted(ids)))
+    except Exception:
+        # Any failure (missing file, malformed JSON, import error)
+        # falls through to the static list.
+        pass
+    return _xai_merge_curated_extras(list(_XAI_STATIC_FALLBACK))
 
 
 _PROVIDER_MODELS: dict[str, list[str]] = {
@@ -134,7 +193,6 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "google/gemini-3.1-pro-preview",
         "google/gemini-3.5-flash",
         # xAI
-        "x-ai/grok-4.3",
         "x-ai/grok-4.5",
         # DeepSeek
         "deepseek/deepseek-v4-pro",
@@ -187,12 +245,6 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gpt-4o-mini",
     ],
     "openai-codex": _codex_curated_models(),
-    "vibeproxy": [
-        "claude-fable-5",
-        "claude-opus-4-8",
-        "claude-sonnet-5",
-        "claude-haiku-4-5-20251001",
-    ],
     "xai-oauth": _xai_curated_models(),
     "copilot-acp": [
         "copilot-acp",
@@ -223,7 +275,13 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     ],
     "zai": [
         "glm-5.2",
+        "glm-5.1",
+        "glm-5",
         "glm-5v-turbo",
+        "glm-5-turbo",
+        "glm-4.7",
+        "glm-4.5",
+        "glm-4.5-flash",
     ],
     "xai": _xai_curated_models(),
     "nvidia": [
@@ -299,6 +357,8 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "deepseek": [
         "deepseek-v4-pro",
         "deepseek-v4-flash",
+        "deepseek-chat",
+        "deepseek-reasoner",
     ],
     "xiaomi": [
         "mimo-v2.5-pro",
@@ -975,7 +1035,6 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("novita",         "NovitaAI",                 "NovitaAI (Cloud: Model API, Agent Sandbox, GPU Cloud)"),
     ProviderEntry("lmstudio",       "LM Studio",                "LM Studio (Local desktop app with built-in model server)"),
     ProviderEntry("anthropic",      "Anthropic",                "Anthropic (Claude models via API key or Claude Code)"),
-    ProviderEntry("vibeproxy",      "VibeProxy",                "VibeProxy (local OpenAI-compatible gateway for subscription-backed models)"),
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex (Codex CLI via ChatGPT subscription or API key)"),
     ProviderEntry("openai-api",     "OpenAI API",               "OpenAI API (api.openai.com, API key)"),
     ProviderEntry("alibaba",        "Qwen Cloud",               "Qwen Cloud / DashScope (Qwen + multi-provider)"),
@@ -1144,9 +1203,6 @@ _PROVIDER_ALIASES = {
     "github-copilot": "copilot",
     "github-models": "copilot",
     "github-model": "copilot",
-    "vibe": "vibeproxy",
-    "vibe-proxy": "vibeproxy",
-    "vibe_proxy": "vibeproxy",
     "github-copilot-acp": "copilot-acp",
     "copilot-acp-agent": "copilot-acp",
     "google": "gemini",
@@ -1749,7 +1805,7 @@ def _model_in_provider_catalog(name_lower: str, providers: set[str]) -> bool:
 
 
 _AGGREGATOR_PROVIDERS = frozenset(
-    {"nous", "openrouter", "copilot", "kilocode", "vibeproxy"}
+    {"nous", "openrouter", "copilot", "kilocode"}
 )
 
 # Subscription/OAuth providers whose catalogs RE-EXPOSE other vendors' models
@@ -2169,19 +2225,6 @@ _MODELS_DEV_PREFERRED: frozenset[str] = frozenset({
 })
 
 
-def _merge_model_id_lists(primary: list[str], extras: list[str]) -> list[str]:
-    """Merge model IDs case-insensitively, preserving first-list order/casing."""
-    seen_lower: set[str] = set()
-    merged: list[str] = []
-    for mid in [*primary, *extras]:
-        key = str(mid).lower()
-        if key in seen_lower:
-            continue
-        seen_lower.add(key)
-        merged.append(mid)
-    return merged
-
-
 def _merge_with_models_dev(provider: str, curated: list[str]) -> list[str]:
     """Merge curated list with fresh models.dev entries for a preferred provider.
 
@@ -2201,7 +2244,22 @@ def _merge_with_models_dev(provider: str, curated: list[str]) -> list[str]:
     if not mdev:
         return list(curated)
 
-    return _merge_model_id_lists(mdev, curated)
+    # Case-insensitive dedup while preserving order and curated casing.
+    seen_lower: set[str] = set()
+    merged: list[str] = []
+    for mid in mdev:
+        key = str(mid).lower()
+        if key in seen_lower:
+            continue
+        seen_lower.add(key)
+        merged.append(mid)
+    for mid in curated:
+        key = str(mid).lower()
+        if key in seen_lower:
+            continue
+        seen_lower.add(key)
+        merged.append(mid)
+    return merged
 
 
 def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) -> list[str]:
@@ -2402,7 +2460,6 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
             if api_key:
                 live = _p.fetch_models(api_key=api_key, base_url=base_url or None)
                 if live:
-                    curated_static = list(_PROVIDER_MODELS.get(normalized, []))
                     # Merge static curated list with live API results so
                     # models that the live endpoint omits (stale cache,
                     # partial rollout) still appear in the picker.
@@ -4083,25 +4140,10 @@ def validate_requested_model(
                 "message": None,
             }
         else:
-            # API responded but model is not listed.  Accept exact matches from
-            # Hermes' curated provider catalog before trying typo correction.
-            # Some providers expose plan-gated/hidden models that work for chat
-            # completions but are absent from /models; Z.AI's glm-5v-turbo on
-            # coding-plan accounts is one such case.
-            curated_models = _PROVIDER_MODELS.get(normalized, [])
-            curated_lower = {m.lower(): m for m in curated_models}
-            if requested_for_lookup.lower() in curated_lower:
-                curated_match = curated_lower[requested_for_lookup.lower()]
-                return {
-                    "accepted": True,
-                    "persist": True,
-                    "recognized": True,
-                    "corrected_model": curated_match if curated_match != requested else None,
-                    "message": (
-                        f"Note: `{requested}` was not listed by this provider's /models endpoint, "
-                        "but it is in Hermes' curated provider catalog and may be plan-gated."
-                    ),
-                }
+            # API responded but model is not listed.  Accept anyway —
+            # the user may have access to models not shown in the public
+            # listing (e.g. Z.AI Pro/Max plans can use glm-5 on coding
+            # endpoints even though it's not in /models).  Warn but allow.
 
             # Auto-correct if the top match is very similar (e.g. typo)
             auto = get_close_matches(requested_for_lookup, api_models, n=1, cutoff=0.9)

@@ -111,6 +111,15 @@ _MODEL_CACHE_TTL = 3600
 _endpoint_model_metadata_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _endpoint_model_metadata_cache_time: Dict[str, float] = {}
 _ENDPOINT_MODEL_CACHE_TTL = 300
+# Bounded-lifetime cache: after the first successful probe we remember the
+# server type so subsequent refreshes skip the full waterfall (no more 404
+# spam every 5 minutes on non-matching endpoints like /api/v1/models on vllm).
+# Entries expire after _ENDPOINT_PROBE_TTL_SECONDS so a server swap on the
+# same port (stop Ollama, start LM Studio) is eventually re-detected instead
+# of being pinned to the stale type for the whole process lifetime.
+# Values are (server_type, monotonic_timestamp).
+_ENDPOINT_PROBE_TTL_SECONDS = 3600.0
+_endpoint_probe_path_cache: Dict[str, tuple] = {}
 
 
 def _get_model_metadata_cache_path() -> Path:
@@ -289,13 +298,14 @@ DEFAULT_CONTEXT_LENGTHS = {
     # Premium+); /v1/responses additionally enforces a ~262144 input+output
     # budget, but the usable context (what we track here) is 200k.
     "grok-composer": 200000,    # grok-composer-2.5-fast (Grok Build CLI)
+    "grok-build-latest": 500000,  # alias of grok-4.5 (early access)
     "grok-build": 256000,       # grok-build-0.1
     "grok-code-fast": 256000,   # grok-code-fast-1
     "grok-2-vision": 8192,      # grok-2-vision, -1212, -latest
     "grok-4-fast": 2000000,     # grok-4-fast-(non-)reasoning, also matches -reasoning
     "grok-4.20": 2000000,       # grok-4.20-0309-(non-)reasoning, -multi-agent-0309
+    "grok-4.5": 500000,         # grok-4.5, grok-4.5-latest — 500K context per docs.x.ai
     "grok-4.3": 1000000,        # grok-4.3, grok-4.3-latest — 1M context per docs.x.ai
-    "grok-4.5": 500000,         # grok-4.5 — 500k context per docs.x.ai
     "grok-4": 256000,           # grok-4, grok-4-0709
     "grok-3": 131072,           # grok-3, grok-3-mini, grok-3-fast, grok-3-mini-fast
     "grok-2": 131072,           # grok-2, grok-2-1212, grok-2-latest
@@ -329,14 +339,13 @@ DEFAULT_CONTEXT_LENGTHS = {
     "mimo-v2-omni": 262144,
     "mimo-v2-flash": 262144,
     "zai-org/GLM-5": 202752,
-    "glm-5.2": 1000000,
 }
 
 # xAI Grok models that ACCEPT the `reasoning.effort` parameter on
 # api.x.ai. Verified live against /v1/responses 2026-05-10:
 #
 #   ACCEPTS effort:  grok-3-mini, grok-3-mini-fast, grok-4.20-multi-agent-0309,
-#                    grok-4.3, grok-4.5
+#                    grok-4.3
 #   REJECTS effort:  grok-3, grok-4, grok-4-0709, grok-4-fast-(non-)reasoning,
 #                    grok-4-1-fast-(non-)reasoning, grok-4.20-0309-(non-)reasoning,
 #                    grok-code-fast-1
@@ -349,6 +358,10 @@ _GROK_EFFORT_CAPABLE_PREFIXES = (
     "grok-3-mini",
     "grok-4.20-multi-agent",
     "grok-4.3",
+    # grok-4.5: verified live against /v1/responses 2026-07-08 — accepts
+    # effort low/medium/high (default: high when omitted) but REJECTS
+    # "none" ("This model does not support `reasoning_effort` value `none`"),
+    # unlike grok-4.3. models.dev agrees: effort values [low, medium, high].
     "grok-4.5",
 )
 
@@ -628,66 +641,109 @@ def is_local_endpoint(base_url: str) -> bool:
     return False
 
 
+def _localhost_to_ipv4(url: str) -> str:
+    """Rewrite a ``localhost`` HOST to ``127.0.0.1`` in a probe URL.
+
+    On Windows dual-stack machines, httpx resolves ``localhost`` to ``::1``
+    first and pays a ~2s IPv6 connect timeout before falling back to IPv4
+    when the local server only listens on IPv4 (LM Studio, Ollama defaults).
+    Probing the IPv4 loopback directly skips that penalty.
+
+    Only the URL's own host component is rewritten (anchored at the scheme),
+    so a non-localhost URL whose path or query merely embeds the substring
+    ``http://localhost...`` (e.g. ``?upstream=http://localhost:11434``)
+    passes through untouched.
+    """
+    if not url:
+        return url
+    return re.sub(
+        r"^(https?://)localhost(?=[:/]|$)",
+        r"\g<1>127.0.0.1",
+        url,
+        count=1,
+    )
+
+
 def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
     """Detect which local server is running at base_url by probing known endpoints.
 
     Returns one of: "ollama", "lm-studio", "vllm", "llamacpp", or None.
+
+    The result is cached for the lifetime of the process so that repeated
+    calls (e.g. every 5-minute metadata refresh) never re-run the waterfall
+    and never spray 404s at endpoints the server does not expose.
     """
     import httpx
 
     normalized = _normalize_base_url(base_url)
+
+    # Resolve localhost to IPv4 to avoid 2s IPv6 timeout on Windows dual-stack.
+    # Applied to ``normalized`` before deriving server/LM Studio URLs AND
+    # before the cache lookup, so localhost and 127.0.0.1 share a cache entry.
+    normalized = _localhost_to_ipv4(normalized)
+
     server_url = normalized
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
-    lmstudio_url = _lmstudio_server_root(base_url)
+    lmstudio_url = _lmstudio_server_root(normalized)
+
+    cached = _endpoint_probe_path_cache.get(server_url)
+    if cached is not None and (time.monotonic() - cached[1]) < _ENDPOINT_PROBE_TTL_SECONDS:
+        return cached[0]
 
     headers = _auth_headers(api_key)
 
+    result: Optional[str] = None
     try:
         with httpx.Client(timeout=2.0, headers=headers) as client:
             # LM Studio exposes /api/v1/models — check first (most specific)
             try:
                 r = client.get(f"{lmstudio_url}/api/v1/models")
                 if r.status_code == 200:
-                    return "lm-studio"
+                    result = "lm-studio"
             except Exception:
                 pass
-            # Ollama exposes /api/tags and responds with {"models": [...]}
-            # LM Studio returns {"error": "Unexpected endpoint"} with status 200
-            # on this path, so we must verify the response contains "models".
-            try:
-                r = client.get(f"{server_url}/api/tags")
-                if r.status_code == 200:
-                    try:
+            if result is None:
+                # Ollama exposes /api/tags and responds with {"models": [...]}
+                # LM Studio returns {"error": "Unexpected endpoint"} with status 200
+                # on this path, so we must verify the response contains "models".
+                try:
+                    r = client.get(f"{server_url}/api/tags")
+                    if r.status_code == 200:
+                        try:
+                            data = r.json()
+                            if "models" in data:
+                                result = "ollama"
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            if result is None:
+                # llama.cpp exposes /v1/props (older builds used /props without the /v1 prefix)
+                try:
+                    r = client.get(f"{server_url}/v1/props")
+                    if r.status_code != 200:
+                        r = client.get(f"{server_url}/props")  # fallback for older builds
+                    if r.status_code == 200 and "default_generation_settings" in r.text:
+                        result = "llamacpp"
+                except Exception:
+                    pass
+            if result is None:
+                # vLLM: /version
+                try:
+                    r = client.get(f"{server_url}/version")
+                    if r.status_code == 200:
                         data = r.json()
-                        if "models" in data:
-                            return "ollama"
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            # llama.cpp exposes /v1/props (older builds used /props without the /v1 prefix)
-            try:
-                r = client.get(f"{server_url}/v1/props")
-                if r.status_code != 200:
-                    r = client.get(f"{server_url}/props")  # fallback for older builds
-                if r.status_code == 200 and "default_generation_settings" in r.text:
-                    return "llamacpp"
-            except Exception:
-                pass
-            # vLLM: /version
-            try:
-                r = client.get(f"{server_url}/version")
-                if r.status_code == 200:
-                    data = r.json()
-                    if "version" in data:
-                        return "vllm"
-            except Exception:
-                pass
+                        if "version" in data:
+                            result = "vllm"
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    return None
+    if result is not None:
+        _endpoint_probe_path_cache[server_url] = (result, time.monotonic())
+    return result
 
 
 def _iter_nested_dicts(value: Any):
@@ -791,7 +847,10 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
                 return _model_metadata_cache
 
     try:
-        response = requests.get(OPENROUTER_MODELS_URL, timeout=10, verify=_resolve_requests_verify())
+        # Tuple (connect, read) — flat timeout=10 means urllib3 can block 10s per
+        # retry stage through proxies that 403 CONNECT, ballooning to minutes
+        # (#46620). 5s connect / 10s read fails fast on unreachable hosts.
+        response = requests.get(OPENROUTER_MODELS_URL, timeout=(5, 10), verify=_resolve_requests_verify())
         response.raise_for_status()
         data = response.json()
 
@@ -869,7 +928,7 @@ def fetch_endpoint_model_metadata(
                 response = requests.get(
                     server_url.rstrip("/") + "/api/v1/models",
                     headers=headers,
-                    timeout=10,
+                    timeout=(5, 10),
                     verify=_resolve_requests_verify(),
                 )
                 response.raise_for_status()
@@ -917,7 +976,7 @@ def fetch_endpoint_model_metadata(
     for candidate in candidates:
         url = candidate.rstrip("/") + "/models"
         try:
-            response = requests.get(url, headers=headers, timeout=10, verify=_resolve_requests_verify())
+            response = requests.get(url, headers=headers, timeout=(5, 10), verify=_resolve_requests_verify())
             response.raise_for_status()
             payload = response.json()
             cache: Dict[str, Dict[str, Any]] = {}
@@ -1018,13 +1077,23 @@ def _load_context_cache() -> Dict[str, int]:
         return {}
 
 
+def _context_cache_key(model: str, base_url: str) -> str:
+    """Canonical ``model@base_url`` key for the persistent context cache.
+
+    Trailing slashes are stripped so ``http://host/v1`` and
+    ``http://host/v1/`` share one entry instead of creating duplicates
+    that can go stale independently.
+    """
+    return f"{model}@{(base_url or '').rstrip('/')}"
+
+
 def save_context_length(model: str, base_url: str, length: int) -> None:
     """Persist a discovered context length for a model+provider combo.
 
     Cache key is ``model@base_url`` so the same model name served from
     different providers can have different limits.
     """
-    key = f"{model}@{base_url}"
+    key = _context_cache_key(model, base_url)
     cache = _load_context_cache()
     if cache.get(key) == length:
         return  # already stored
@@ -1041,18 +1110,43 @@ def save_context_length(model: str, base_url: str, length: int) -> None:
 
 def get_cached_context_length(model: str, base_url: str) -> Optional[int]:
     """Look up a previously discovered context length for model+provider."""
-    key = f"{model}@{base_url}"
+    key = _context_cache_key(model, base_url)
     cache = _load_context_cache()
-    return cache.get(key)
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    # Legacy rows written before key normalization may carry a trailing
+    # slash — honor them rather than re-probing. Checked regardless of the
+    # caller's slash form: the row's shape and the caller's shape can differ
+    # in either direction (old slashed row + new normalized config, or the
+    # reverse), so probe the literal form and the slashed canonical form.
+    for legacy_key in (f"{model}@{base_url}", f"{key}/"):
+        if legacy_key != key:
+            hit = cache.get(legacy_key)
+            if hit is not None:
+                return hit
+    return None
 
 
 def _invalidate_cached_context_length(model: str, base_url: str) -> None:
     """Drop a stale cache entry so it gets re-resolved on the next lookup."""
-    key = f"{model}@{base_url}"
+    key = _context_cache_key(model, base_url)
     cache = _load_context_cache()
-    if key not in cache:
+    # Invalidation must also drop the in-memory TTL probe entries for this
+    # pair — otherwise the next resolution inside the TTL window reuses the
+    # very value we just declared stale and re-persists it.
+    bare = _strip_provider_prefix(model)
+    stripped = (base_url or "").rstrip("/")
+    _LOCAL_CTX_PROBE_CACHE.pop((bare, stripped), None)
+    _LOCAL_CTX_PROBE_CACHE.pop(("ollama_show", bare, stripped), None)
+    # Clear every key shape for this pair: canonical, the caller's literal
+    # form, and the slashed legacy form — same set get_cached_context_length
+    # consults, so a lookup can never resurrect a row invalidation missed.
+    stale_keys = {key, f"{model}@{base_url}", f"{key}/"}
+    if not any(k in cache for k in stale_keys):
         return
-    del cache[key]
+    for k in stale_keys:
+        cache.pop(k, None)
     path = _get_context_cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1339,7 +1433,7 @@ def query_ollama_num_ctx(model: str, base_url: str, api_key: str = "") -> Option
     import httpx
 
     bare_model = _strip_provider_prefix(model)
-    server_url = base_url.rstrip("/")
+    server_url = _localhost_to_ipv4(base_url.rstrip("/"))
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
 
@@ -1400,7 +1494,7 @@ def query_ollama_supports_vision(model: str, base_url: str, api_key: str = "") -
     except Exception:
         return None
 
-    server_url = base_url.rstrip("/")
+    server_url = _localhost_to_ipv4(base_url.rstrip("/"))
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
 
@@ -1439,6 +1533,12 @@ def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Opti
     hosting behind a reverse proxy, etc.  For non-Ollama servers the POST
     returns 404/405 quickly; the function handles errors gracefully.
 
+    Results are cached in ``_LOCAL_CTX_PROBE_CACHE`` (same 30s TTL,
+    positive-only — see ``_query_local_context_length``) so back-to-back
+    resolutions during one startup issue a single POST instead of one per
+    call site. Failures are never memoized: a server that isn't up yet must
+    be re-probed once it comes up.
+
     For hosted servers the GGUF ``model_info.*.context_length`` is the
     authoritative source: the user can't set their own ``num_ctx``, and the
     OpenAI-compat ``/v1/models`` endpoint correctly omits ``context_length``
@@ -1450,9 +1550,28 @@ def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Opti
     The order is flipped vs ``query_ollama_num_ctx()`` because local users
     control ``num_ctx`` themselves; hosted users can't.
     """
+    import time as _time
+
+    # Namespaced cache key: shares the TTL store with
+    # _query_local_context_length but never collides with its (model, url)
+    # keys — the two probes can return different values for the same pair.
+    cache_key = ("ollama_show", _strip_provider_prefix(model), base_url.rstrip("/"))
+    now = _time.monotonic()
+    cached = _LOCAL_CTX_PROBE_CACHE.get(cache_key)
+    if cached is not None and (now - cached[1]) < _LOCAL_CTX_PROBE_TTL_SECONDS:
+        return cached[0]
+
+    result = _query_ollama_api_show_uncached(model, base_url, api_key=api_key)
+    if result:  # positive-only — never memoize a failed probe
+        _LOCAL_CTX_PROBE_CACHE[cache_key] = (result, now)
+    return result
+
+
+def _query_ollama_api_show_uncached(model: str, base_url: str, api_key: str = "") -> Optional[int]:
+    """Uncached body of ``_query_ollama_api_show`` — one POST to ``/api/show``."""
     import httpx
 
-    server_url = base_url.rstrip("/")
+    server_url = _localhost_to_ipv4(base_url.rstrip("/"))
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
 
@@ -1571,10 +1690,10 @@ def _query_local_context_length_uncached(model: str, base_url: str, api_key: str
     model = _strip_provider_prefix(model)
 
     # Strip /v1 suffix to get the server root
-    server_url = base_url.rstrip("/")
+    server_url = _localhost_to_ipv4(base_url.rstrip("/"))
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
-    lmstudio_url = _lmstudio_server_root(base_url)
+    lmstudio_url = _localhost_to_ipv4(_lmstudio_server_root(base_url))
 
     headers = _auth_headers(api_key)
 
@@ -1684,7 +1803,7 @@ def _query_anthropic_context_length(model: str, base_url: str, api_key: str) -> 
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
         }
-        resp = requests.get(url, headers=headers, timeout=10, verify=_resolve_requests_verify())
+        resp = requests.get(url, headers=headers, timeout=(5, 10), verify=_resolve_requests_verify())
         if resp.status_code != 200:
             return None
         data = resp.json()
@@ -1751,7 +1870,7 @@ def _fetch_codex_oauth_context_lengths(access_token: str) -> Dict[str, int]:
         resp = requests.get(
             "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0",
             headers={"Authorization": f"Bearer {access_token}"},
-            timeout=10,
+            timeout=(5, 10),
             verify=_resolve_requests_verify(),
         )
         if resp.status_code != 200:
@@ -1812,31 +1931,6 @@ def _resolve_codex_oauth_context_length(
             return ctx
 
     return None
-
-
-def _model_name_matches_context_override(model: str, configured_model: str | None) -> bool:
-    """Return True when a top-level model.context_length belongs to model.
-
-    Profile-level ``model.context_length`` describes the configured default
-    model. Session-scoped /model switches must not inherit that number, because
-    it can silently mask the switched model's real window (for example a GPT
-    profile's 300K default masking DeepSeek V4's 1M window after /clear).
-    """
-    if not model or not configured_model:
-        return False
-    left = _strip_provider_prefix(str(model)).strip().lower()
-    right = _strip_provider_prefix(str(configured_model)).strip().lower()
-    if not left or not right:
-        return False
-    return left == right or left.rsplit("/", 1)[-1] == right.rsplit("/", 1)[-1]
-
-
-def _is_deepseek_v4_family(model: str) -> bool:
-    model_lower = _strip_provider_prefix(str(model or "")).lower()
-    return any(
-        slug in model_lower
-        for slug in ("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner")
-    )
 
 
 def _resolve_nous_context_length(
@@ -1920,7 +2014,6 @@ def get_model_context_length(
     config_context_length: int | None = None,
     provider: str = "",
     custom_providers: list | None = None,
-    config_model: str | None = None,
 ) -> int:
     """Get the context length for a model.
 
@@ -1946,6 +2039,9 @@ def get_model_context_length(
     7. Local server query (before hardcoded defaults for local endpoints)
     8. Hardcoded defaults (broad family patterns, longest-key-first)
     9. Default fallback (256K)"""
+    # 0. Explicit config override — user knows best
+    if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
+        return config_context_length
 
     # 0a. MoA virtual provider — ``model`` is a preset name, not a real model,
     # and ``base_url`` is the local virtual endpoint, so every probe below would
@@ -1991,13 +2087,6 @@ def get_model_context_length(
                 return cp_ctx
         except Exception:
             pass  # fall through to probing
-
-    # 0b. Explicit top-level config override (model.context_length). Only apply
-    # it to the profile's configured default model when the caller supplies
-    # config_model. Runtime /model overrides should resolve their own window.
-    if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
-        if config_model is None or _model_name_matches_context_override(model, config_model):
-            return config_context_length
 
     # Normalise provider-prefixed model names (e.g. "local:model-name" →
     # "model-name") so cache lookups and server queries use the bare ID that
@@ -2072,13 +2161,6 @@ def get_model_context_length(
                     model, base_url,
                 )
                 # Fall through; step 5b reconciles and overwrites if portal responds.
-            elif _is_deepseek_v4_family(model) and cached < 1_000_000:
-                logger.info(
-                    "Dropping stale DeepSeek V4 cache entry %s@%s -> %s; "
-                    "re-resolving with 1M V4 defaults",
-                    model, base_url, f"{cached:,}",
-                )
-                _invalidate_cached_context_length(model, base_url)
             else:
                 if is_local_endpoint(base_url):
                     return _reconcile_local_cached_context_length(
@@ -2472,5 +2554,82 @@ def estimate_request_tokens_rough(
     if messages:
         total += estimate_messages_tokens_rough(messages)
     if tools:
-        total += (len(str(tools)) + 3) // 4
+        total += _estimate_tools_tokens_rough(tools)
     return total
+
+
+# NOTE: tool schemas can be large. Avoid repeated `str(tools)` conversions,
+# which are CPU-heavy and can stall GUI event loops under GIL pressure.
+#
+# Keyed by ``id(tools)``. A long-lived gateway/desktop backend builds many
+# transient tool lists over its lifetime, so the cache is bounded and evicts
+# oldest-first (insertion-ordered dict) once it exceeds the cap. The cap is
+# generous relative to how rarely toolsets are rebuilt within a process.
+_TOOLS_TOKENS_CACHE: dict[int, Tuple[int, str, str, int]] = {}
+_TOOLS_TOKENS_CACHE_MAX = 256
+
+
+def _tool_name_for_cache(tool: Any) -> str:
+    if not isinstance(tool, dict):
+        return ""
+    fn = tool.get("function")
+    if isinstance(fn, dict):
+        name = fn.get("name")
+        if isinstance(name, str):
+            return name
+    name = tool.get("name")
+    return name if isinstance(name, str) else ""
+
+
+def _estimate_tools_tokens_rough(tools: List[Dict[str, Any]]) -> int:
+    if not tools:
+        return 0
+
+    # Cache by list identity. Tools are rebuilt rarely (toolset changes),
+    # but token estimates are requested frequently (preflight, compaction).
+    key = id(tools)
+    n = len(tools)
+    first = _tool_name_for_cache(tools[0]) if n else ""
+    last = _tool_name_for_cache(tools[-1]) if n else ""
+
+    cached = _TOOLS_TOKENS_CACHE.get(key)
+    if cached is not None:
+        cached_n, cached_first, cached_last, cached_tokens = cached
+        if cached_n == n and cached_first == first and cached_last == last:
+            return cached_tokens
+
+    # Fast, stable rough estimate: sum lengths of the major schema fields.
+    # This avoids the pathological `str(tools)` path while still scaling with
+    # schema size (descriptions + parameters dominate).
+    total_chars = 0
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function")
+        if isinstance(fn, dict):
+            name = fn.get("name") or ""
+            desc = fn.get("description") or ""
+            params = fn.get("parameters") or {}
+        else:
+            name = tool.get("name") or ""
+            desc = tool.get("description") or ""
+            params = tool.get("parameters") or {}
+
+        if isinstance(name, str):
+            total_chars += len(name)
+        if isinstance(desc, str):
+            total_chars += len(desc)
+        # Parameters can be nested; JSON is closer to over-the-wire size than repr().
+        try:
+            total_chars += len(json.dumps(params, ensure_ascii=False, separators=(",", ":")))
+        except Exception:
+            total_chars += len(str(params))
+
+    tokens = (total_chars + 3) // 4
+    # Bound the cache: drop the oldest entry when the cap is exceeded so a
+    # long-running process can't accumulate an unbounded number of stale
+    # ``id(tools)`` entries (id values are recycled after GC anyway).
+    if len(_TOOLS_TOKENS_CACHE) >= _TOOLS_TOKENS_CACHE_MAX:
+        _TOOLS_TOKENS_CACHE.pop(next(iter(_TOOLS_TOKENS_CACHE)), None)
+    _TOOLS_TOKENS_CACHE[key] = (n, first, last, tokens)
+    return tokens

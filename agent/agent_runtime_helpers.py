@@ -25,9 +25,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import platform
 import re
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -42,97 +40,6 @@ from agent.error_classifier import FailoverReason
 from utils import base_url_host_matches, base_url_hostname, env_var_enabled, atomic_json_write
 
 logger = logging.getLogger(__name__)
-
-
-def _credential_rotation_label(entry: Any) -> str:
-    """Return a safe user-facing label for a pooled credential."""
-    for attr in ("label", "id"):
-        value = getattr(entry, attr, None)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return "backup account"
-
-
-def _config_bool(value: Any) -> Optional[bool]:
-    """Return a bool for common config shapes, or None when unset/unknown."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    return None
-
-
-def _credential_rotation_notifications_enabled(agent: Any) -> bool:
-    """Whether desktop notifications should fire for account-pool rotation."""
-    config: Optional[dict] = None
-    try:
-        from hermes_cli.config import load_config
-
-        loaded = load_config()
-        if isinstance(loaded, dict):
-            config = loaded
-    except Exception:
-        logger.debug("credential rotation notification config read failed", exc_info=True)
-
-    if config is None:
-        maybe_config = getattr(agent, "config", None)
-        if isinstance(maybe_config, dict):
-            config = maybe_config
-
-    if isinstance(config, dict):
-        notifications = config.get("notifications")
-        if isinstance(notifications, dict):
-            parsed = _config_bool(notifications.get("credential_pool_rotation"))
-            if parsed is not None:
-                return parsed
-        credential_pool = config.get("credential_pool")
-        if isinstance(credential_pool, dict):
-            parsed = _config_bool(credential_pool.get("notify_on_rotation"))
-            if parsed is not None:
-                return parsed
-    return False
-
-
-def _send_macos_notification(title: str, body: str) -> None:
-    """Best-effort macOS Notification Center alert. Never blocks the agent loop."""
-    if platform.system() != "Darwin":
-        return
-    try:
-        subprocess.Popen(
-            [
-                "osascript",
-                "-e",
-                (
-                    'display notification '
-                    f'{json.dumps(body)} '
-                    'with title '
-                    f'{json.dumps(title)}'
-                ),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        logger.debug("credential rotation desktop notification failed", exc_info=True)
-
-
-def _notify_credential_rotation(agent: Any, next_entry: Any, *, reason: str) -> None:
-    """Tell the active session/user that Hermes switched provider credentials."""
-    label = _credential_rotation_label(next_entry)
-    message = f"Switched OpenAI/Codex provider account to {label} for this session ({reason})."
-    try:
-        emit_status = getattr(agent, "_emit_status", None)
-        if callable(emit_status):
-            emit_status(message)
-    except Exception:
-        logger.debug("credential rotation status notification failed", exc_info=True)
-
-    if _credential_rotation_notifications_enabled(agent):
-        _send_macos_notification("Hermes account fallback", message)
 
 
 # Max consecutive successful credential-pool token refreshes of the SAME entry
@@ -896,7 +803,6 @@ def recover_with_credential_pool(
                 getattr(next_entry, "id", "?"),
             )
             agent._swap_credential(next_entry)
-            _notify_credential_rotation(agent, next_entry, reason="billing or usage limit")
             return True, False
         return False, has_retried_429
 
@@ -921,7 +827,6 @@ def recover_with_credential_pool(
                     getattr(next_entry, "id", "?"),
                 )
                 agent._swap_credential(next_entry)
-                _notify_credential_rotation(agent, next_entry, reason="rate limit")
                 return True, False
             return False, True
 
@@ -946,7 +851,6 @@ def recover_with_credential_pool(
                 getattr(next_entry, "id", "?"),
             )
             agent._swap_credential(next_entry)
-            _notify_credential_rotation(agent, next_entry, reason="rate limit")
             return True, False
         return False, True
 
@@ -1047,7 +951,6 @@ def recover_with_credential_pool(
                 getattr(next_entry, "id", "?"),
             )
             agent._swap_credential(next_entry)
-            _notify_credential_rotation(agent, next_entry, reason="auth refresh failed")
             return True, False
 
     return False, has_retried_429
@@ -1105,16 +1008,7 @@ def try_recover_primary_transport(
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
 
-        if agent.provider == "moa":
-            from agent.moa_loop import MoAClient
-
-            agent.client = MoAClient(agent.model or "default")
-            agent._anthropic_client = None
-            agent._client_kwargs = {}
-            agent.api_key = "moa-virtual-provider"
-            agent.base_url = "moa://local"
-            agent.api_mode = "chat_completions"
-        elif agent.api_mode == "anthropic_messages":
+        if agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
             agent._anthropic_api_key = rt["anthropic_api_key"]
             agent._anthropic_base_url = rt["anthropic_base_url"]
@@ -1286,15 +1180,7 @@ def restore_primary_runtime(agent) -> bool:
         )
 
         # ── Rebuild client for the primary provider ──
-        if agent.provider == "moa":
-            # MoA is a virtual chat-completions provider.  It never has real
-            # OpenAI client kwargs; restoring it after a fallback must recreate
-            # the facade, not call OpenAI() with an empty api_key.
-            from agent.moa_loop import MoAClient
-
-            agent.client = MoAClient(agent.model or "default")
-            agent._anthropic_client = None
-        elif agent.api_mode == "anthropic_messages":
+        if agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
             agent._anthropic_api_key = rt["anthropic_api_key"]
             agent._anthropic_base_url = rt["anthropic_base_url"]
@@ -1333,87 +1219,61 @@ def restore_primary_runtime(agent) -> bool:
         # keep the snapshot key (the existing behavior).  Fixes #25205.
         pool = getattr(agent, "_credential_pool", None)
         if pool is not None and pool.has_available():
-            pool_provider = str(getattr(pool, "provider", "") or "").strip().lower()
-            primary_provider = str(rt.get("provider") or "").strip().lower()
-            pool_matches_primary = pool_provider == primary_provider
-            from agent.credential_pool import CUSTOM_POOL_PREFIX
-            if (
-                primary_provider == "custom"
-                and pool_provider.startswith(CUSTOM_POOL_PREFIX)
-            ):
-                pool_matches_primary = False
-                try:
-                    from agent.credential_pool import get_custom_provider_pool_key
-                    primary_base_url = str(rt.get("base_url") or "").strip()
-                    primary_key = (
-                        get_custom_provider_pool_key(primary_base_url) or ""
-                    ).strip().lower()
-                    pool_matches_primary = bool(primary_key) and primary_key == pool_provider
-                except Exception:
-                    pool_matches_primary = False
-            if not pool_matches_primary:
-                logger.info(
-                    "Restore skipped credential pool for provider %s: primary provider is %s",
-                    pool_provider or "?",
-                    primary_provider or "?",
-                )
-            else:
-                entry = pool.select()
-                if entry is not None:
-                    entry_provider = str(getattr(entry, "provider", "") or "").strip().lower()
-                    entry_matches_primary = entry_provider == primary_provider
-                    # Custom endpoints all carry the generic ``custom`` provider on
-                    # the agent while the pool entry is keyed ``custom:<name>`` (see
-                    # CUSTOM_POOL_PREFIX). Resolve the primary's base_url to its
-                    # ``custom:<name>`` key via the canonical helper and compare
-                    # against the entry's key — this mirrors the sibling guard in
-                    # ``recover_with_credential_pool`` (see above) and correctly
-                    # disambiguates multiple custom providers that share one gateway
-                    # base_url. Fixes #56885.
-                    if (
-                        primary_provider == "custom"
-                        and entry_provider.startswith(CUSTOM_POOL_PREFIX)
-                    ):
+            entry = pool.select()
+            if entry is not None:
+                entry_provider = str(getattr(entry, "provider", "") or "").strip().lower()
+                primary_provider = str(rt.get("provider") or "").strip().lower()
+                entry_matches_primary = entry_provider == primary_provider
+                # Custom endpoints all carry the generic ``custom`` provider on
+                # the agent while the pool entry is keyed ``custom:<name>`` (see
+                # CUSTOM_POOL_PREFIX). Resolve the primary's base_url to its
+                # ``custom:<name>`` key via the canonical helper and compare
+                # against the entry's key — this mirrors the sibling guard in
+                # ``recover_with_credential_pool`` (see above) and correctly
+                # disambiguates multiple custom providers that share one gateway
+                # base_url. Fixes #56885.
+                from agent.credential_pool import CUSTOM_POOL_PREFIX
+                if (
+                    primary_provider == "custom"
+                    and entry_provider.startswith(CUSTOM_POOL_PREFIX)
+                ):
+                    entry_matches_primary = False
+                    try:
+                        from agent.credential_pool import get_custom_provider_pool_key
+                        primary_base_url = str(rt.get("base_url") or "").strip()
+                        primary_key = (
+                            get_custom_provider_pool_key(primary_base_url) or ""
+                        ).strip().lower()
+                        entry_matches_primary = bool(primary_key) and primary_key == entry_provider
+                    except Exception:
                         entry_matches_primary = False
-                        try:
-                            from agent.credential_pool import get_custom_provider_pool_key
-                            primary_base_url = str(rt.get("base_url") or "").strip()
-                            primary_key = (
-                                get_custom_provider_pool_key(primary_base_url) or ""
-                            ).strip().lower()
-                            entry_matches_primary = bool(primary_key) and primary_key == entry_provider
-                        except Exception:
-                            entry_matches_primary = False
 
-                    entry_key = (
-                        getattr(entry, "runtime_api_key", None)
-                        or getattr(entry, "access_token", "")
+                entry_key = (
+                    getattr(entry, "runtime_api_key", None)
+                    or getattr(entry, "access_token", "")
+                )
+                if entry_key and entry_matches_primary:
+                    # ``_swap_credential`` rebuilds the OpenAI/Anthropic client,
+                    # reapplies base-url-scoped headers, and carries the
+                    # accumulated base_url / OAuth-detection fixes (#33163).
+                    agent._swap_credential(entry)
+                    logger.info(
+                        "Restore re-selected pool entry %s (%s)",
+                        getattr(entry, "id", "?"),
+                        getattr(entry, "label", "?"),
                     )
-                    if entry_key and entry_matches_primary:
-                        # ``_swap_credential`` rebuilds the OpenAI/Anthropic client,
-                        # reapplies base-url-scoped headers, and carries the
-                        # accumulated base_url / OAuth-detection fixes (#33163).
-                        agent._swap_credential(entry)
-                        logger.info(
-                            "Restore re-selected pool entry %s (%s)",
-                            getattr(entry, "id", "?"),
-                            getattr(entry, "label", "?"),
-                        )
-                    elif entry_key:
-                        logger.info(
-                            "Restore skipped pool entry %s (%s): provider %s does not match primary provider %s",
-                            getattr(entry, "id", "?"),
-                            getattr(entry, "label", "?"),
-                            entry_provider or "?",
-                            primary_provider or "?",
-                        )
+                elif entry_key:
+                    logger.info(
+                        "Restore skipped pool entry %s (%s): provider %s does not match primary provider %s",
+                        getattr(entry, "id", "?"),
+                        getattr(entry, "label", "?"),
+                        entry_provider or "?",
+                        primary_provider or "?",
+                    )
 
         # ── Reset fallback chain for the new turn ──
         agent._fallback_activated = False
         agent._fallback_index = 0
-        if hasattr(agent, "_fallback_previous_reasoning_config"):
-            agent.reasoning_config = agent._fallback_previous_reasoning_config
-            delattr(agent, "_fallback_previous_reasoning_config")
 
         # Reset the stale-call circuit breaker (#58962): the streak measured
         # the FALLBACK provider we're leaving; the restored primary deserves
@@ -1704,9 +1564,16 @@ def anthropic_prompt_cache_policy(
     model_lower = eff_model.lower()
     provider_lower = eff_provider.lower()
     is_claude = "claude" in model_lower
-    is_vibeproxy_claude_family = is_claude or any(
-        alias in model_lower
-        for alias in ("opus", "sonnet", "haiku", "mythos", "fable")
+    # Kimi / Moonshot family via OpenRouter: same cache_control wire format
+    # as Claude on OpenRouter (envelope layout).  Without this branch
+    # moonshotai/kimi-k2.6 falls through to (False, False), serving ~1%
+    # cache hits on 64K-token prompts and re-billing the full prompt on
+    # every turn.  Observed within-turn progression with cache enabled:
+    # 1% → 67% → 84% → 97% (#25970).  Reuses the canonical family matcher
+    # (covers bare k1./k2./k25 release slugs the substring check missed).
+    from agent.anthropic_adapter import _model_name_is_kimi_family
+    is_kimi = (
+        _model_name_is_kimi_family(eff_model) or "moonshot" in model_lower
     )
     is_openrouter = base_url_host_matches(eff_base_url, "openrouter.ai")
     # Nous Portal proxies to OpenRouter behind the scenes — identical
@@ -1721,17 +1588,7 @@ def anthropic_prompt_cache_policy(
 
     if is_native_anthropic:
         return True, True
-    if (is_openrouter or is_nous_portal) and is_claude:
-        return True, False
-    # VibeProxy exposes Claude subscription/OAuth models through an
-    # OpenAI-compatible chat-completions surface. It translates
-    # Anthropic-style cache_control markers on the OpenAI-wire message
-    # envelope/content parts, matching the OpenRouter/Nous layout rather
-    # than the native Anthropic Messages ``system`` parameter layout.
-    # Without this opt-in, Hermes sends no explicit cache breakpoints to
-    # VibeProxy Claude routes, so long stable prefixes are billed as fresh
-    # input far more often than direct Claude Code sessions.
-    if provider_lower == "vibeproxy" and is_vibeproxy_claude_family:
+    if (is_openrouter or is_nous_portal) and (is_claude or is_kimi):
         return True, False
     # Nous Portal Qwen (e.g. qwen3.6-plus) takes the same envelope-layout
     # cache_control path as Portal Claude. Portal proxies to OpenRouter
@@ -1913,9 +1770,6 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
 
     old_model = agent.model
     old_provider = agent.provider
-    old_primary_provider = str(
-        (getattr(agent, "_primary_runtime", {}) or {}).get("provider") or old_provider or ""
-    ).strip().lower()
 
     # ── Snapshot all fields the swap+rebuild can mutate ──
     # If the rebuild raises (bad API key, network error, build_anthropic_client
@@ -2015,9 +1869,8 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             agent.api_mode = "chat_completions"
             agent.api_key = api_key or "moa-virtual-provider"
             agent.base_url = "moa://local"
-            agent.client = MoAClient(agent.model or "default")
-            agent._anthropic_client = None
             agent._client_kwargs = {}
+            agent.client = MoAClient(agent.model or "default")
         elif api_mode == "anthropic_messages":
             from agent.anthropic_adapter import (
                 build_anthropic_client,
@@ -2201,19 +2054,13 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
     # primary silently re-activates the provider the user just rejected,
     # which is exactly what was reported during TUI v2 blitz testing
     # ("switched to anthropic, tui keeps trying openrouter").
+    old_norm = (old_provider or "").strip().lower()
     new_norm = (new_provider or "").strip().lower()
     fallback_chain = list(getattr(agent, "_fallback_chain", []) or [])
-    # ``old_provider`` may be a turn-scoped fallback, not the user's previous
-    # primary. Example: Opus/vibeproxy failed to GPT, then the user switched
-    # back to Opus; pruning ``old_provider`` would delete the configured GPT
-    # fallback and leave only later entries such as DeepSeek. Use the saved
-    # primary runtime to identify the provider the user is actually replacing.
-    rejected_old_primary = old_primary_provider if old_primary_provider != new_norm else ""
-    providers_to_prune = {p for p in (rejected_old_primary, new_norm) if p}
-    if providers_to_prune:
+    if old_norm and new_norm and old_norm != new_norm:
         fallback_chain = [
             entry for entry in fallback_chain
-            if (entry.get("provider") or "").strip().lower() not in providers_to_prune
+            if (entry.get("provider") or "").strip().lower() not in {old_norm, new_norm}
         ]
     agent._fallback_chain = fallback_chain
     agent._fallback_model = fallback_chain[0] if fallback_chain else None
@@ -2340,112 +2187,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             pass
         return result
 
-    if function_name in {"tool_search", "tool_describe", "tool_call"}:
-        def _execute(next_args: dict) -> Any:
-            """Bridge Tool Search to post-build memory-provider tools.
-
-            External memory providers (mem0/honcho/etc.) are appended to
-            ``agent.tools`` after ``model_tools.get_tool_definitions()`` assembles
-            the registry-derived surface. The global Tool Search dispatcher only
-            sees the registry snapshot, so a mem0-first cron job could call
-            ``tool_search('mem0')`` and get a false "not found" result even
-            though ``mem0_search`` / ``mem0_conclude`` were direct model tools.
-            Keep this agent-local so random unknown tools do not become globally
-            deferrable.
-            """
-            try:
-                from tools import tool_search as _ts
-                memory_manager = getattr(agent, "_memory_manager", None)
-                get_schemas = getattr(memory_manager, "get_all_tool_schemas", None) if memory_manager else None
-                raw_schemas = get_schemas() if callable(get_schemas) else []
-                mem_schemas = list(raw_schemas) if isinstance(raw_schemas, (list, tuple)) else []
-                mem_defs = [
-                    {"type": "function", "function": schema}
-                    for schema in mem_schemas
-                    if isinstance(schema, dict) and schema.get("name")
-                ]
-
-                if function_name == _ts.TOOL_SEARCH_NAME:
-                    base_raw = _ra().handle_function_call(
-                        function_name, next_args, effective_task_id,
-                        tool_call_id=tool_call_id,
-                        session_id=agent.session_id or "",
-                        turn_id=getattr(agent, "_current_turn_id", "") or "",
-                        api_request_id=getattr(agent, "_current_api_request_id", "") or "",
-                        enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-                        skip_pre_tool_call_hook=True,
-                        skip_tool_request_middleware=True,
-                        enabled_toolsets=getattr(agent, "enabled_toolsets", None),
-                        disabled_toolsets=getattr(agent, "disabled_toolsets", None),
-                        tool_request_middleware_trace=list(_tool_middleware_trace),
-                    )
-                    try:
-                        payload = json.loads(base_raw) if isinstance(base_raw, str) else {}
-                    except Exception:
-                        payload = {}
-                    query = str(next_args.get("query") or "").strip()
-                    raw_limit = next_args.get("limit")
-                    try:
-                        limit = int(raw_limit) if raw_limit is not None else 5
-                    except Exception:
-                        limit = 5
-                    limit = max(1, min(20, limit))
-                    mem_catalog = _ts.build_catalog(mem_defs)
-                    mem_hits = _ts.search_catalog(mem_catalog, query, limit=limit)
-                    existing = {m.get("name") for m in payload.get("matches", []) if isinstance(m, dict)}
-                    matches = list(payload.get("matches", []) or [])
-                    for hit in mem_hits:
-                        if hit.name in existing:
-                            continue
-                        matches.append(_ts._format_search_hit(hit))
-                        existing.add(hit.name)
-                    payload["query"] = query
-                    payload["total_available"] = int(payload.get("total_available") or 0) + len(mem_catalog)
-                    payload["matches"] = matches[:limit]
-                    return _finish_agent_tool(json.dumps(payload, ensure_ascii=False), next_args)
-
-                name = str(next_args.get("name") or "").strip()
-                mem_schema_by_name = {
-                    schema.get("name"): schema
-                    for schema in mem_schemas
-                    if isinstance(schema, dict) and schema.get("name")
-                }
-
-                if function_name == _ts.TOOL_DESCRIBE_NAME and name in mem_schema_by_name:
-                    schema = mem_schema_by_name[name]
-                    return _finish_agent_tool(json.dumps({
-                        "name": name,
-                        "description": schema.get("description", ""),
-                        "parameters": schema.get("parameters", {}),
-                    }, ensure_ascii=False), next_args)
-
-                if function_name == _ts.TOOL_CALL_NAME and name in mem_schema_by_name and memory_manager:
-                    raw_args = next_args.get("arguments") or {}
-                    if isinstance(raw_args, str):
-                        raw_args = json.loads(raw_args)
-                    if not isinstance(raw_args, dict):
-                        raw_args = {}
-                    return _finish_agent_tool(memory_manager.handle_tool_call(name, raw_args), raw_args)
-            except Exception:
-                logger.debug("agent-local Tool Search memory-provider bridge skipped", exc_info=True)
-
-            return _finish_agent_tool(
-                _ra().handle_function_call(
-                    function_name, next_args, effective_task_id,
-                    tool_call_id=tool_call_id,
-                    session_id=agent.session_id or "",
-                    turn_id=getattr(agent, "_current_turn_id", "") or "",
-                    api_request_id=getattr(agent, "_current_api_request_id", "") or "",
-                    enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-                    skip_pre_tool_call_hook=True,
-                    skip_tool_request_middleware=True,
-                    enabled_toolsets=getattr(agent, "enabled_toolsets", None),
-                    disabled_toolsets=getattr(agent, "disabled_toolsets", None),
-                    tool_request_middleware_trace=list(_tool_middleware_trace),
-                ),
-                next_args,
-            )
-    elif function_name == "todo":
+    if function_name == "todo":
         def _execute(next_args: dict) -> Any:
             from tools.todo_tool import todo_tool as _todo_tool
             return _finish_agent_tool(
