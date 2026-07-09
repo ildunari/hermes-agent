@@ -450,7 +450,15 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
-        return host_only in _LOOPBACK_HOST_VALUES
+        if host_only in _LOOPBACK_HOST_VALUES:
+            return True
+        # Kosta's MacBook Desktop reaches the loopback-bound dashboard through
+        # Tailscale Serve (https://macstudio.tailf7342a.ts.net:9119).  The
+        # request is still delivered to the local loopback listener by the
+        # trusted local Tailscale daemon, but the Host header is the tailnet
+        # name rather than 127.0.0.1.  Keep DNS-rebinding protection for random
+        # hosts while accepting the known local tailnet aliases.
+        return host_only in {"macstudio", "macstudio.tailf7342a.ts.net", "100.69.228.58"}
 
     # Explicit non-loopback bind: require exact host match
     return host_only == bound_lc
@@ -474,6 +482,7 @@ async def host_header_middleware(request: Request, call_next):
     if bound_host:
         host_header = request.headers.get("host", "")
         if not _is_accepted_host(host_header, bound_host):
+            _log.warning("rejecting dashboard Host header %r for bound host %r", host_header, bound_host)
             return JSONResponse(
                 status_code=400,
                 content={
@@ -16892,6 +16901,7 @@ def start_server(
     allow_public: bool = False,
     initial_profile: str = "",
     headless: bool = False,
+    register_instance=None,
 ):
     """Start the web UI server.
 
@@ -17059,6 +17069,8 @@ def start_server(
             app.state.bound_port = actual_port
 
             _write_dashboard_ready_file(actual_port)
+            if register_instance is not None:
+                register_instance(actual_port)
             # Port-discovery sentinel parsed by the desktop spawn. `serve` is a
             # plain backend, not a dashboard, so it announces a neutral token;
             # `dashboard` keeps the legacy one. The desktop matches either.
