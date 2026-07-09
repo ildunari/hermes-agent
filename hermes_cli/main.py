@@ -229,9 +229,9 @@ def _read_openai_version_fast() -> str | None:
 def _print_fast_version_info() -> None:
     from hermes_cli import __release_date__, __version__
 
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     print(f"Hermes Agent v{__version__} ({__release_date__})")
-    print(f"Project: {project_root}")
+    print(f"Install directory: {PROJECT_ROOT}")
+
     print(f"Python: {sys.version.split()[0]}")
 
     openai_version = _read_openai_version_fast()
@@ -4329,10 +4329,12 @@ def cmd_import(args):
 
 
 def _print_version_info(*, check_updates: bool = True) -> None:
+    from hermes_cli.config import detect_install_method
     from hermes_cli.banner import format_banner_version_label
 
     print(format_banner_version_label())
-    print(f"Project: {PROJECT_ROOT}")
+    print(f"Install directory: {PROJECT_ROOT}")
+    print(f"Install method: {detect_install_method(PROJECT_ROOT)}")
 
     # Show Python version
     print(f"Python: {sys.version.split()[0]}")
@@ -8371,8 +8373,14 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
     on a PyPI install we surface a one-line notice instead of silently
     dropping the flag.
     """
-    from hermes_cli.config import detect_install_method
+    from hermes_cli.config import (
+        detect_install_method,
+        format_unsupported_install_warning,
+        is_unsupported_install_method,
+    )
     method = detect_install_method(PROJECT_ROOT)
+    if is_unsupported_install_method(method):
+        print(f"⚠ {format_unsupported_install_warning(method)}")
     if method == "docker":
         # Docker can't ``git fetch`` from within the container.  Surface the
         # same long-form ``docker pull`` guidance ``hermes update`` (apply
@@ -9255,9 +9263,20 @@ def cmd_update(args):
     from hermes_cli.config import (
         detect_install_method,
         format_docker_update_message,
+        format_unsupported_install_warning,
         is_managed,
+        is_unsupported_install_method,
         managed_error,
     )
+
+    # Deprecation notice for pip/Homebrew installs — printed before the
+    # managed-mode early-return below so Homebrew users (who are blocked from
+    # applying the update here) still see it. Warn, don't block: the update
+    # itself still proceeds (except Homebrew, which is managed-mode blocked
+    # for an unrelated reason — brew owns its own upgrade path).
+    _install_method_for_warning = detect_install_method(PROJECT_ROOT)
+    if is_unsupported_install_method(_install_method_for_warning):
+        print(f"⚠ {format_unsupported_install_warning(_install_method_for_warning)}")
 
     if is_managed():
         managed_error("update Hermes Agent")
@@ -12061,6 +12080,23 @@ def cmd_dashboard(args):
             print("  Or drop --skip-build to build automatically.")
             sys.exit(1)
         print(f"→ Skipping web UI build (--skip-build); using dist at {_dist_root}")
+    else:
+        # HERMES_WEB_DIST is set without --skip-build: the build is skipped
+        # (the env var points at a caller-managed dist), so validate it the
+        # same way the --skip-build branch does — otherwise the server starts
+        # and serves 404s with no obvious cause (same failure mode as #23817,
+        # via the env-var path).
+        _dist_root = Path(os.environ["HERMES_WEB_DIST"]).expanduser()
+        if not (_dist_root / "index.html").exists():
+            print(f"✗ HERMES_WEB_DIST is set but no web dist found at: {_dist_root}")
+            print("  Pre-build first:  npm install --workspace web && npm run build -w web")
+            print("  Or unset HERMES_WEB_DIST to build and use the default web UI dist.")
+            sys.exit(1)
+        # Write the expanded path back: web_server reads HERMES_WEB_DIST raw
+        # at import (no expanduser), so a validated "~/dist" would otherwise
+        # pass here and still 404 there.
+        os.environ["HERMES_WEB_DIST"] = str(_dist_root)
+        print(f"→ Using web dist from HERMES_WEB_DIST: {_dist_root}")
 
     # Discover and load plugins so any DashboardAuthProvider plugin
     # (e.g. plugins/dashboard_auth/nous) registers BEFORE start_server's
