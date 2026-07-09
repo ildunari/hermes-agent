@@ -45,12 +45,7 @@ describe('backend action helpers are profile-scoped', () => {
     void checkHermesUpdate()
     void getActionStatus('gateway-restart')
     void transcribeAudio('data:audio/webm;base64,AAAA', 'audio/webm')
-<<<<<<< HEAD
-    void speakText('hello')
-||||||| daedf4f62
-=======
     void speakText('hello', { source: 'read-aloud' })
->>>>>>> refs/remotes/studio/local-studio-slim
     void getElevenLabsVoices()
 
     for (const call of api.mock.calls) {

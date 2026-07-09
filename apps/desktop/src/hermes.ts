@@ -1018,13 +1018,7 @@ export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<Aud
   })
 }
 
-<<<<<<< HEAD
-export type SpeechSource = "read-aloud" | "voice-conversation"
-||||||| daedf4f62
-export function speakText(text: string): Promise<AudioSpeakResponse> {
-=======
 export type SpeechSource = 'read-aloud' | 'voice-conversation'
->>>>>>> refs/remotes/studio/local-studio-slim
 
 export interface SpeakTextOptions {
   rewrite?: 'auto' | 'off' | 'on'
