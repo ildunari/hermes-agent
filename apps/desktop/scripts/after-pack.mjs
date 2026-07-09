@@ -14,7 +14,8 @@ import { stampExeIdentity } from './set-exe-identity.mjs'
 
 const HERMES_DEVELOPER_ID_SIGNING_IDENTITY = '3A22F53A48A189F4A8766CACE00192860CC37F8F'
 const HERMES_DEVELOPER_ID_KEYCHAIN_ITEM = 'Hermes Developer ID Signing Keychain'
-const HERMES_LOCAL_SIGNING_IDENTITY = 'Hermes Desktop Local Signing'
+const HERMES_OP_SHIM = path.join(os.homedir(), '.local', 'bin', 'op')
+const SIGNING_COMMAND_TIMEOUT_MS = 20_000
 
 let didTryUnlockSigningKeychains = false
 
@@ -24,29 +25,42 @@ function unlockHermesSigningKeychains() {
 
   const keychains = [
     path.join(os.homedir(), 'Library', 'Keychains', 'hermes-developer-id-signing.keychain-db'),
-    path.join(os.homedir(), 'Library', 'Keychains', 'hermes-desktop-signing.keychain-db'),
   ].filter(fs.existsSync)
-  if (keychains.length === 0) return
+  if (keychains.length === 0) {
+    throw new Error('Hermes signing keychain is missing; refusing interactive codesign fallback')
+  }
 
+  const opCommand = fs.existsSync(HERMES_OP_SHIM) ? HERMES_OP_SHIM : 'op'
   const op = spawnSync(
-    'op',
+    opCommand,
     ['item', 'get', HERMES_DEVELOPER_ID_KEYCHAIN_ITEM, '--vault', 'CLI', '--reveal', '--fields', 'password'],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', timeout: SIGNING_COMMAND_TIMEOUT_MS },
   )
-  if (op.status !== 0) return
+  if (op.error || op.status !== 0) {
+    throw new Error('Unable to read the Hermes signing-keychain password non-interactively')
+  }
   const password = op.stdout.trim()
-  if (!password) return
+  if (!password) throw new Error('Hermes signing-keychain password is empty')
 
   for (const keychain of keychains) {
-    spawnSync('/usr/bin/security', ['unlock-keychain', '-p', password, keychain], { stdio: 'ignore' })
+    const unlock = spawnSync('/usr/bin/security', ['unlock-keychain', '-p', password, keychain], {
+      stdio: 'ignore',
+      timeout: SIGNING_COMMAND_TIMEOUT_MS,
+    })
+    if (unlock.error || unlock.status !== 0) {
+      throw new Error(`Unable to unlock Hermes signing keychain: ${keychain}`)
+    }
     // Grant non-interactive access to Apple signing tools. Without this ACL,
     // codesign can still raise a Keychain approval dialog despite a successful
     // CLI unlock, which breaks unattended smart updates.
-    spawnSync(
+    const partitionList = spawnSync(
       '/usr/bin/security',
       ['set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', password, keychain],
-      { stdio: 'ignore' },
+      { stdio: 'ignore', timeout: SIGNING_COMMAND_TIMEOUT_MS },
     )
+    if (partitionList.error || partitionList.status !== 0) {
+      throw new Error(`Unable to configure unattended codesign access: ${keychain}`)
+    }
   }
 }
 
@@ -60,7 +74,7 @@ function canCodesignWithIdentity(identity) {
     const result = spawnSync(
       '/usr/bin/codesign',
       ['--force', '--sign', identity, '--timestamp=none', probe],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', timeout: SIGNING_COMMAND_TIMEOUT_MS },
     )
     return result.status === 0
   } finally {
@@ -69,20 +83,24 @@ function canCodesignWithIdentity(identity) {
 }
 
 function preferredMacSigningIdentity() {
-  if (process.env.CSC_NAME || process.env.CSC_LINK) return null
   unlockHermesSigningKeychains()
   if (canCodesignWithIdentity(HERMES_DEVELOPER_ID_SIGNING_IDENTITY)) {
     return HERMES_DEVELOPER_ID_SIGNING_IDENTITY
-  }
-  if (canCodesignWithIdentity(HERMES_LOCAL_SIGNING_IDENTITY)) {
-    return HERMES_LOCAL_SIGNING_IDENTITY
   }
   return null
 }
 
 function localSignMacApp(context) {
+  // Explicit release signing remains electron-builder's responsibility.
+  if (process.env.CSC_NAME || process.env.CSC_LINK) return
+
   const signingIdentity = preferredMacSigningIdentity()
-  if (!signingIdentity) return
+  if (!signingIdentity) {
+    throw new Error(
+      `Hermes Developer ID signing identity ${HERMES_DEVELOPER_ID_SIGNING_IDENTITY} is unavailable; ` +
+        'refusing to produce an ad-hoc local build',
+    )
+  }
 
   const productName = context.packager?.appInfo?.productFilename || 'Hermes'
   const appPath = path.join(context.appOutDir, `${productName}.app`)

@@ -29,6 +29,17 @@ CHECKS = (
     Check("gateway/run.py", ("_handle_detached_surface_restart_command", "__compact__", "compact_tool_counts", "_update_compact_tool_progress"), "gateway restart and compact HUD integration"),
     Check("hermes_cli/restart_surfaces.py", ("_resolve_loaded_service", "restarted_services", "_wait_for_scope_health"), "launchd domain dedupe and readiness polling"),
     Check("apps/desktop/package.json", ('"afterPack"', '"entitlements"'), "Desktop lifecycle hook declarations"),
+    Check(
+        "apps/desktop/scripts/after-pack.mjs",
+        (
+            "3A22F53A48A189F4A8766CACE00192860CC37F8F",
+            "HERMES_OP_SHIM",
+            "set-key-partition-list",
+            "apple-tool:,apple:,codesign:",
+            "refusing to produce an ad-hoc local build",
+        ),
+        "unattended Developer ID signing",
+    ),
 )
 
 
