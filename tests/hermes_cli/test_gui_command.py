@@ -1056,3 +1056,32 @@ def test_desktop_launch_options_survives_config_error():
         flags, gpu = cli_main._desktop_launch_options()
     assert flags == []
     assert gpu == "auto"
+
+
+def test_macos_relaunch_fixup_preserves_developer_id_signature(tmp_path, monkeypatch):
+    app = tmp_path / "release" / "mac-arm64" / "Hermes.app"
+    executable = app / "Contents" / "MacOS" / "Hermes"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("binary", encoding="utf-8")
+    monkeypatch.setattr(cli_main.sys, "platform", "darwin")
+
+    signature = subprocess.CompletedProcess(
+        ["codesign"],
+        0,
+        stdout="",
+        stderr=(
+            "Authority=Developer ID Application: Kosta Milovanovic (SV9Z2RG2A6)\n"
+            "TeamIdentifier=SV9Z2RG2A6\n"
+        ),
+    )
+    with patch("hermes_cli.main._desktop_packaged_executable", return_value=executable), \
+         patch("hermes_cli.main.shutil.which", return_value="/usr/bin/codesign"), \
+         patch("hermes_cli.main.subprocess.run", return_value=signature) as mock_run:
+        cli_main._desktop_macos_relaunchable_fixup(tmp_path)
+
+    mock_run.assert_called_once_with(
+        ["/usr/bin/codesign", "-dv", "--verbose=4", str(app)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
