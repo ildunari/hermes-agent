@@ -9127,11 +9127,11 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5027, str(e))
 
 
-# Byte-upload attach caps. 25 MB matches Anthropic's per-image limit; 50 MB / 25
-# pages bounds a single PDF drop so it can't blow the context budget.
-_ATTACH_BYTES_MAX_BYTES = 25 * 1024 * 1024
-_PDF_ATTACH_MAX_BYTES = 50 * 1024 * 1024
-_PDF_ATTACH_MAX_PAGES = 25
+# Byte-upload attach caps. Raised for high-resolution image/PDF workflows; provider
+# payload limits may still force model-side resizing/compression downstream.
+_ATTACH_BYTES_MAX_BYTES = 100 * 1024 * 1024
+_PDF_ATTACH_MAX_BYTES = 150 * 1024 * 1024
+_PDF_ATTACH_MAX_PAGES = 50
 
 # Leading magic bytes → file extension, for filename-less uploads.
 _IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
