@@ -1710,6 +1710,70 @@ os.environ["HERMES_QUIET"] = "1"
 # Enable interactive exec approval for dangerous commands on messaging platforms
 os.environ["HERMES_EXEC_ASK"] = "1"
 
+
+def _render_compact_tool_progress(tool_counts: "OrderedDict[str, int]", layout: str = "multi_line") -> str:
+    """Backward-compatible gateway wrapper for compact progress rendering."""
+    from agent.display import render_compact_tool_progress
+
+    return render_compact_tool_progress(tool_counts, layout)
+
+
+def _render_compact_progress_with_todo_card(
+    tool_counts: "OrderedDict[str, int]",
+    layout: str = "multi_line",
+    todo_args: dict | None = None,
+) -> str:
+    """Render compact progress, replacing the generic todo bucket with task details."""
+    from agent.display import render_compact_progress_summary, render_todo_checklist_progress
+
+    todos = todo_args.get("todos") if isinstance(todo_args, dict) else None
+    if not isinstance(todos, list) or not todos:
+        return render_compact_progress_summary(tool_counts, layout)
+    non_task_counts = OrderedDict((k, v) for k, v in tool_counts.items() if k != "tasks")
+    todo_card = render_todo_checklist_progress(todo_args)
+    if not non_task_counts:
+        return todo_card
+    separator = " · " if layout == "single_line" else "\n"
+    return f"{render_compact_progress_summary(non_task_counts, layout)}{separator}{todo_card}"
+
+
+def _update_compact_tool_progress(
+    tool_counts: "OrderedDict[str, int]",
+    tool_name: str | None,
+    args: dict | None = None,
+    layout: str = "multi_line",
+    todo_args: dict | None = None,
+) -> str:
+    """Increment the compact HUD bucket for a tool call and render the summary."""
+    from agent.display import group_compact_progress_tool
+
+    bucket = group_compact_progress_tool(tool_name, args)
+    tool_counts[bucket] = tool_counts.get(bucket, 0) + 1
+    if bucket == "tasks" and isinstance(args, dict) and isinstance(args.get("todos"), list):
+        todo_args = args
+    return _render_compact_progress_with_todo_card(tool_counts, layout, todo_args)
+
+
+def _tool_progress_cycle_modes() -> list[str]:
+    """Ordered /verbose cycle modes for CLI/gateway cycling.
+
+    The underlying ``tool_progress`` setting still supports ``new`` when set
+    explicitly in config, but `/verbose` should cycle through the long-standing
+    user-facing modes shared by Telegram, Discord, and the terminal CLI.
+    """
+    return ["off", "all", "compact", "verbose"]
+
+
+def _tool_progress_descriptions() -> dict[str, str]:
+    """Human-readable descriptions for tool-progress modes."""
+    return {
+        "off": "⚙️ Tool progress: **OFF** — no tool activity shown.",
+        "all": "⚙️ Tool progress: **ALL** — every tool call shown (preview length: `display.tool_preview_length`, default 40).",
+        "compact": "⚙️ Tool progress: **COMPACT** — one live HUD with per-tool counts, no raw args.",
+        "verbose": "⚙️ Tool progress: **VERBOSE** — every tool call with full arguments.",
+    }
+
+
 # Set terminal working directory for messaging platforms.
 # config.yaml terminal.cwd is the canonical source (bridged to TERMINAL_CWD
 # by the config bridge above).  Placeholder values are resolved per-backend —
@@ -17136,6 +17200,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             except Exception as _ack_err:
                 logger.debug("voice ack schedule failed: %s", _ack_err)
+        compact_tool_counts = OrderedDict()  # Grouped compact HUD counters
+        compact_todo_args: list[dict | None] = [None]
 
         # Auto-cleanup of temporary progress bubbles (Telegram + any adapter
         # that implements ``delete_message``). When enabled via
@@ -17241,6 +17307,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return
             except Exception:
                 pass
+
+            # Compact mode: keep a single grouped ×N HUD instead of raw tool names.
+            if progress_mode == "compact":
+                layout = str(
+                    resolve_display_setting(
+                        user_config,
+                        platform_key,
+                        "compact_progress_layout",
+                        "multi_line",
+                    )
+                    or "multi_line"
+                )
+                summary = _update_compact_tool_progress(
+                    compact_tool_counts,
+                    tool_name,
+                    args,
+                    layout,
+                    compact_todo_args[0],
+                )
+                if tool_name == "todo" and isinstance(args, dict) and isinstance(args.get("todos"), list):
+                    compact_todo_args[0] = args
+                progress_queue.put(("__compact__", summary))
+                return
 
             # "new" mode: only report when tool changes
             if progress_mode == "new" and tool_name == last_tool[0]:
@@ -17628,6 +17717,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if progress_lines:
                             progress_lines[-1] = f"{base_msg} (×{count + 1})"
                         msg = progress_lines[-1] if progress_lines else base_msg
+                    elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__compact__":
+                        # Compact HUD replaces the whole progress body with grouped ×N counts.
+                        msg = str(raw[1] if len(raw) > 1 else "")
+                        progress_lines = [msg]
                     elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
                         # Content bubble just landed on the platform — close off
                         # the current tool-progress bubble so the next tool
