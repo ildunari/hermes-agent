@@ -33,8 +33,10 @@ def test_gateway_scope_plan_includes_profile_gateway_domains():
     assert "user/503/ai.hermes.gateway-browser-agent" in plan
     assert "user/503/ai.hermes.gateway-design" in plan
     assert "user/503/ai.hermes.gateway-bookie" in plan
+    assert "user/503/ai.hermes.gateway-scientist" in plan
     assert "gui/503/ai.hermes.gateway-design" in plan
     assert "gui/503/ai.hermes.gateway-bookie" in plan
+    assert "gui/503/ai.hermes.gateway-scientist" in plan
     assert "user/503/ai.hermes.webui" in plan
     assert "system/com.kosta.hermes-dashboard-system" in plan
     assert "system/com.kosta.hermes-dashboard-proxy-system" in plan
@@ -49,6 +51,7 @@ def test_full_hermes_scope_includes_known_surfaces():
     assert "ai.hermes.gateway-gpt" in labels
     assert "ai.hermes.gateway-design" in labels
     assert "ai.hermes.gateway-bookie" in labels
+    assert "ai.hermes.gateway-scientist" in labels
     assert "ai.hermes.webui" in labels
     assert "ai.hermes.desktop-remote-dashboard" in labels
     assert "ai.hermes.dashboard-host-rewrite-proxy" in labels
