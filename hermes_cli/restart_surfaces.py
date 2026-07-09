@@ -624,9 +624,14 @@ def enqueue_detached_restart(
             close_fds=True,
         )
     notify_note = " I'll send a follow-up here when it finishes." if (notify_origin or notify_tty or completion_marker) else ""
+    drain_note = (
+        "active gateway tasks and live WebUI chat turns"
+        if normalized == "hermes"
+        else "active gateway tasks"
+    )
     return (
         f"Queued detached Hermes {normalized} restart. "
-        f"It will wait for active gateway tasks to finish before restarting."
+        f"It will wait for {drain_note} to finish before restarting."
         f"{notify_note} Log: {LOG_PATH}"
     )
 
