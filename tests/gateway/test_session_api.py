@@ -101,6 +101,7 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
             return {"final_response": "ok"}
 
     def fake_create_agent(**kwargs):
+        observed["reasoning_override"] = kwargs.get("reasoning_override")
         return FakeAgent(kwargs["session_id"])
 
     monkeypatch.setattr(adapter, "_create_agent", fake_create_agent)
@@ -110,6 +111,7 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
         conversation_history=[],
         session_id="request-session",
         gateway_session_key="request-key",
+        reasoning_override={"enabled": True, "effort": "high"},
     )
 
     assert result["session_id"] == "request-session"
@@ -120,7 +122,34 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
         "context_platform": "api_server",
         "context_session_key": "request-key",
         "child_session_id": "request-session",
+        "reasoning_override": {"enabled": True, "effort": "high"},
     }
+
+
+def test_api_server_model_routes_preserve_reasoning_effort(adapter):
+    routes = adapter._parse_model_routes(
+        {
+            "sonnet-high": {
+                "provider": "vibeproxy",
+                "model": "claude-sonnet-5",
+                "reasoning_effort": "high",
+            },
+            "sonnet-low": {
+                "provider": "vibeproxy",
+                "model": "claude-sonnet-5",
+                "reasoning": {"enabled": True, "effort": "low"},
+            },
+        }
+    )
+
+    assert routes["sonnet-high"]["reasoning_effort"] == "high"
+    assert adapter._reasoning_override_for_request({}, routes["sonnet-high"]) == {
+        "enabled": True,
+        "effort": "high",
+    }
+    assert adapter._reasoning_override_for_request(
+        {"reasoning": {"effort": "xhigh"}}, routes["sonnet-low"]
+    ) == {"enabled": True, "effort": "xhigh"}
 
 
 @pytest.mark.asyncio

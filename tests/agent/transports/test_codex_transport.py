@@ -650,6 +650,16 @@ class TestCodexBuildKwargs:
         )
         assert kw.get("reasoning") == {"effort": "low"}
 
+    def test_xai_grok_4_5_keeps_reasoning_effort(self, transport):
+        """grok-4.5 accepts the effort dial on xAI's Responses API."""
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="grok-4.5", messages=messages, tools=[],
+            is_xai_responses=True,
+            reasoning_config={"effort": "medium"},
+        )
+        assert kw.get("reasoning") == {"effort": "medium"}
+
     def test_xai_grok_code_fast_omits_reasoning_effort(self, transport):
         """grok-code-fast-1 rejects reasoning.effort."""
         messages = [{"role": "user", "content": "Hi"}]

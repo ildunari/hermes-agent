@@ -108,6 +108,7 @@ _XAI_CURATED_MODELS: list[str] = [
     "grok-build-0.1",
     "grok-composer-2.5-fast",
     "grok-4.3",
+    "grok-4.5",
 ]
 
 
@@ -134,6 +135,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "google/gemini-3.5-flash",
         # xAI
         "x-ai/grok-4.3",
+        "x-ai/grok-4.5",
         # DeepSeek
         "deepseek/deepseek-v4-pro",
         "deepseek/deepseek-v4-flash",

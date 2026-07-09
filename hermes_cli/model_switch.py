@@ -1870,6 +1870,14 @@ def list_authenticated_providers(
             # DeepSeek's live /models endpoint can lag first-class V-series IDs;
             # keep Hermes' curated direct list visible in pickers.
             model_ids = list(curated.get("deepseek", []) or model_ids)
+        if hermes_id == "xai-oauth":
+            # SuperGrok OAuth's /models surface can lag xAI's published API
+            # slugs; merge Hermes' curated subscription-friendly list so new
+            # chat models appear without waiting for the OAuth catalog to catch up.
+            seen = {m.lower() for m in model_ids}
+            model_ids = list(model_ids) + [
+                m for m in curated.get("xai-oauth", []) if m.lower() not in seen
+            ]
         if not model_ids:
             model_ids = curated.get(hermes_id, [])
             if hermes_id in _MODELS_DEV_PREFERRED:

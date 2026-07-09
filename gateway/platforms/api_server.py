@@ -1360,7 +1360,16 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
             return {}
 
-        allowed_keys = ("model", "provider", "api_key", "base_url")
+        allowed_keys = (
+            "model",
+            "provider",
+            "api_key",
+            "base_url",
+            "reasoning",
+            "reasoning_effort",
+            "default_reasoning",
+            "default_reasoning_effort",
+        )
         routes: Dict[str, Dict[str, Any]] = {}
         for alias, cfg in raw.items():
             alias_str = str(alias).strip()
@@ -1369,11 +1378,17 @@ class APIServerAdapter(BasePlatformAdapter):
                     "api_server model_routes: dropping invalid route entry %r", alias_str or alias
                 )
                 continue
-            route = {
-                key: str(cfg[key]).strip()
-                for key in allowed_keys
-                if cfg.get(key) is not None and str(cfg[key]).strip()
-            }
+            route: Dict[str, Any] = {}
+            for key in allowed_keys:
+                if cfg.get(key) is None:
+                    continue
+                value = cfg[key]
+                if key in {"reasoning", "default_reasoning"} and isinstance(value, dict):
+                    route[key] = dict(value)
+                    continue
+                value_str = str(value).strip()
+                if value_str:
+                    route[key] = value_str
             if not route.get("model"):
                 logger.warning(
                     "api_server model_routes: route %r has no 'model'; dropping", alias_str
@@ -1381,6 +1396,44 @@ class APIServerAdapter(BasePlatformAdapter):
                 continue
             routes[alias_str] = route
         return routes
+
+    @staticmethod
+    def _parse_reasoning_override(raw: Any) -> Optional[Dict[str, Any]]:
+        """Normalize a request/model-route reasoning override, if present."""
+        from hermes_constants import parse_reasoning_effort
+
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            if raw.get("enabled") is False:
+                return {"enabled": False}
+            effort = raw.get("effort") or raw.get("reasoning_effort")
+            parsed = parse_reasoning_effort(effort)
+            if parsed is not None:
+                return parsed
+            if raw.get("enabled") is True:
+                return {"enabled": True, "effort": "medium"}
+            return None
+        return parse_reasoning_effort(raw)
+
+    def _reasoning_override_for_request(
+        self,
+        body: Dict[str, Any],
+        route: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve per-request reasoning override from body, then model route."""
+        for key in ("reasoning", "reasoning_effort", "default_reasoning", "default_reasoning_effort"):
+            if key in body:
+                parsed = self._parse_reasoning_override(body.get(key))
+                if parsed is not None:
+                    return parsed
+        if route:
+            for key in ("reasoning", "reasoning_effort", "default_reasoning", "default_reasoning_effort"):
+                if key in route:
+                    parsed = self._parse_reasoning_override(route.get(key))
+                    if parsed is not None:
+                        return parsed
+        return None
 
     def _resolve_route(self, model_alias: Any) -> Optional[Dict[str, Any]]:
         """Return the model_routes entry for *model_alias*, or None."""
@@ -1418,8 +1471,9 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
-model_override: Optional[Dict[str, Any]] = None,
+        model_override: Optional[Dict[str, Any]] = None,
         route: Optional[Dict[str, Any]] = None,
+        reasoning_override: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1452,7 +1506,7 @@ model_override: Optional[Dict[str, Any]] = None,
         from hermes_cli.tools_config import _get_platform_tools
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
-        reasoning_config = GatewayRunner._load_reasoning_config()
+        reasoning_config = reasoning_override or GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
 
 # When the primary provider's auth fails (expired token / 429 quota
@@ -2573,6 +2627,7 @@ model_override: Optional[Dict[str, Any]] = None,
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
+        reasoning_override = self._reasoning_override_for_request(body)
         history = self._conversation_history_for_session(session_id)
         result, usage = await self._run_agent(
             user_message=user_message,
@@ -2580,6 +2635,7 @@ model_override: Optional[Dict[str, Any]] = None,
             ephemeral_system_prompt=system_prompt,
             session_id=session_id,
             gateway_session_key=gateway_session_key,
+            reasoning_override=reasoning_override,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
@@ -2629,6 +2685,7 @@ model_override: Optional[Dict[str, Any]] = None,
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
+        reasoning_override = self._reasoning_override_for_request(body)
 
         loop = asyncio.get_running_loop()
         queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
@@ -2683,6 +2740,7 @@ model_override: Optional[Dict[str, Any]] = None,
                     stream_delta_callback=_delta,
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
+                    reasoning_override=reasoning_override,
                 )
                 final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -2898,6 +2956,7 @@ model_override: Optional[Dict[str, Any]] = None,
         # configured model_routes alias, this request's agent is created
         # with that route's model/provider instead of the global default.
         route = self._resolve_route(model_name)
+        reasoning_override = self._reasoning_override_for_request(body, route)
 
         if stream:
             import queue as _q
@@ -2987,6 +3046,7 @@ model_override: Optional[Dict[str, Any]] = None,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
                 route=route,
+                reasoning_override=reasoning_override,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -3009,6 +3069,7 @@ model_override: Optional[Dict[str, Any]] = None,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
                 route=route,
+                reasoning_override=reasoning_override,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -4042,6 +4103,7 @@ model_override: Optional[Dict[str, Any]] = None,
 
         # Per-client model routing for /v1/responses (see model_routes).
         route = self._resolve_route(body.get("model"))
+        reasoning_override = self._reasoning_override_for_request(body, route)
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
         if stream:
@@ -4097,6 +4159,7 @@ model_override: Optional[Dict[str, Any]] = None,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
                 route=route,
+                reasoning_override=reasoning_override,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -4131,6 +4194,7 @@ model_override: Optional[Dict[str, Any]] = None,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
                 route=route,
+                reasoning_override=reasoning_override,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -4762,6 +4826,7 @@ model_override: Optional[Dict[str, Any]] = None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         route: Optional[Dict[str, Any]] = None,
+        reasoning_override: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -4798,6 +4863,7 @@ model_override: Optional[Dict[str, Any]] = None,
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
                     route=route,
+                    reasoning_override=reasoning_override,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent

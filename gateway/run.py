@@ -443,11 +443,16 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
 
     Local/CLI sessions keep the raw diagnostic stream. Messaging gateway
     surfaces should not receive transient auxiliary/compression chatter.
+    BlueBubbles/iMessage has no editable status HUD, so lifecycle updates would
+    otherwise become permanent chat bubbles in the user's conversation history.
     """
     text = str(message or "").strip()
     if not text:
         return None
     platform_key = _gateway_platform_value(platform)
+    event_key = str(event_type or "").strip().lower()
+    if platform_key == "bluebubbles" and event_key == "lifecycle":
+        return None
     if platform_key in {"telegram", "bluebubbles"}:
         text = _redact_gateway_user_facing_secrets(text)
         if _TELEGRAM_NOISY_STATUS_RE.search(text):

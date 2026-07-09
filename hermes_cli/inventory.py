@@ -362,13 +362,25 @@ def _filter_visible_models(rows: list[dict], visible: dict[str, tuple[str, ...]]
 def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list[dict]:
     """Keep only rows backed by explicit user configuration.
 
-    ``list_authenticated_providers`` intentionally discovers ambient / auto-
-    seeded credentials (for example GitHub CLI -> Copilot). Desktop chat model
+    ``list_authenticated_providers`` intentionally discovers ambient / auto-seeded
+    credentials (for example GitHub CLI -> Copilot). Desktop chat model
     pickers want the narrower subset the user explicitly configured for Hermes.
+
+    A provider declared under ``providers:`` is explicit even when its slug also
+    has a built-in discovery path. VibeProxy is the important example: the local
+    proxy can be auto-detected as reachable, but Kosta's curated Claude/Fable
+    allowlist lives in ``providers.vibeproxy`` and must survive explicit-only
+    filtering. MoA is also explicit when the profile has configured presets; it
+    is a virtual provider, but those presets are user-defined model choices.
     """
     from hermes_cli.auth import is_provider_explicitly_configured
 
     current_slug = str(ctx.current_provider or "").strip().lower()
+    configured_slugs = {
+        str(slug or "").strip().lower()
+        for slug in (ctx.user_providers or {}).keys()
+        if str(slug or "").strip()
+    }
     kept: list[dict] = []
     for row in rows:
         slug = str(row.get("slug", "")).strip().lower()
@@ -380,10 +392,12 @@ def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list
         if current_slug and slug == current_slug:
             kept.append(row)
             continue
+        if slug in configured_slugs:
+            kept.append(row)
+            continue
         if slug == "moa":
-            # MoA is a virtual routing mode, not an independently configured
-            # provider. Hide it from explicit-only pickers unless it is the
-            # current provider (handled above).
+            if row.get("models"):
+                kept.append(row)
             continue
         if is_provider_explicitly_configured(slug):
             kept.append(row)

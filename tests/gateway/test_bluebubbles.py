@@ -26,6 +26,32 @@ def _make_adapter(monkeypatch, **extra):
     return BlueBubblesAdapter(cfg)
 
 
+class TestBlueBubblesStatusFiltering:
+    def test_lifecycle_statuses_are_not_sent_as_imessage_bubbles(self):
+        from gateway.run import _prepare_gateway_status_message
+
+        leaked = (
+            "🔀 Model auto-switched: claude-opus-4-8 → gpt-5.5 "
+            "(provider: openai-codex, reason: timeout). The selected model failed; "
+            "continuing on the fallback."
+        )
+
+        assert _prepare_gateway_status_message(
+            Platform.BLUEBUBBLES,
+            "lifecycle",
+            leaked,
+        ) is None
+
+    def test_non_lifecycle_warnings_still_reach_bluebubbles(self):
+        from gateway.run import _prepare_gateway_status_message
+
+        assert _prepare_gateway_status_message(
+            Platform.BLUEBUBBLES,
+            "warn",
+            "Memory flush failed; check logs.",
+        ) == "Memory flush failed; check logs."
+
+
 class TestBlueBubblesConfigLoading:
     def test_apply_env_overrides_bluebubbles(self, monkeypatch):
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")

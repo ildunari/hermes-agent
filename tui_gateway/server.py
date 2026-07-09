@@ -9457,11 +9457,11 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5027, str(e))
 
 
-# Byte-upload attach caps. 25 MB matches Anthropic's per-image limit; 50 MB / 25
-# pages bounds a single PDF drop so it can't blow the context budget.
-_ATTACH_BYTES_MAX_BYTES = 25 * 1024 * 1024
-_PDF_ATTACH_MAX_BYTES = 50 * 1024 * 1024
-_PDF_ATTACH_MAX_PAGES = 25
+# Byte-upload attach caps. Raised for high-resolution image/PDF workflows; provider
+# payload limits may still force model-side resizing/compression downstream.
+_ATTACH_BYTES_MAX_BYTES = 100 * 1024 * 1024
+_PDF_ATTACH_MAX_BYTES = 150 * 1024 * 1024
+_PDF_ATTACH_MAX_PAGES = 50
 
 # Leading magic bytes → file extension, for filename-less uploads.
 _IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
@@ -11692,10 +11692,16 @@ def _(rid, params: dict) -> dict:
         try:
             from agent.skill_commands import scan_skill_commands
 
+            skill_pairs: list[list[str]] = []
             for k, info in sorted(scan_skill_commands().items()):
                 d = str(info.get("description", "Skill"))
-                all_pairs.append([k, d[:120] + ("…" if len(d) > 120 else "")])
+                pair = [k, d[:120] + ("…" if len(d) > 120 else "")]
+                all_pairs.append(pair)
+                skill_pairs.append(pair)
                 skill_count += 1
+            if skill_pairs:
+                cat_map["Skills"] = skill_pairs
+                cat_order.append("Skills")
         except Exception as e:
             warning = f"skill discovery unavailable: {e}"
 

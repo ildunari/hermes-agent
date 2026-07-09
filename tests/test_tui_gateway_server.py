@@ -4431,6 +4431,34 @@ def test_commands_catalog_includes_tui_mouse_command():
     assert "/mouse" in tui_pairs
 
 
+def test_commands_catalog_categories_include_skill_commands(monkeypatch):
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(
+        "agent.skill_commands.scan_skill_commands",
+        lambda: {
+            "/search": {
+                "name": "Exa",
+                "description": "Neural web search via the Exa API backend.",
+            }
+        },
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "commands.catalog", "params": {}}
+    )
+    assert resp is not None
+    assert resp["result"] is not None
+    result = resp["result"]
+
+    pairs = dict(result["pairs"])
+    skills_cat = next(c for c in result["categories"] if c["name"] == "Skills")
+    skill_pairs = dict(skills_cat["pairs"])
+
+    assert pairs["/search"] == "Neural web search via the Exa API backend."
+    assert skill_pairs["/search"] == "Neural web search via the Exa API backend."
+    assert result["skill_count"] == 1
+
+
 def test_commands_catalog_filters_gateway_only_commands_and_keeps_status_visible():
     resp = server.handle_request(
         {"id": "1", "method": "commands.catalog", "params": {}}
