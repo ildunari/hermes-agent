@@ -211,6 +211,41 @@ class TestFallbackChainAdvancement:
             assert agent._try_activate_fallback() is True
             assert agent.api_mode == "anthropic_messages"
 
+    def test_fallback_entry_reasoning_effort_overrides_primary(self):
+        fbs = [
+            {
+                "provider": "zai",
+                "model": "glm-5.2",
+                "base_url": "https://api.z.ai/api/coding/paas/v4",
+                "reasoning_effort": "high",
+            }
+        ]
+        agent = _make_agent(fallback_model=fbs)
+        agent.reasoning_config = {"enabled": True, "effort": "medium"}
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(_mock_client(base_url="https://api.z.ai/api/coding/paas/v4"), "glm-5.2"),
+        ):
+            assert agent._try_activate_fallback() is True
+            assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+            assert agent._fallback_previous_reasoning_config == {"enabled": True, "effort": "medium"}
+
+    def test_fallback_entry_without_reasoning_does_not_inherit_prior_fallback(self):
+        fbs = [
+            {"provider": "zai", "model": "glm-5.2", "reasoning_effort": "high"},
+            {"provider": "deepseek", "model": "deepseek-v4-pro"},
+        ]
+        agent = _make_agent(fallback_model=fbs)
+        agent.reasoning_config = {"enabled": True, "effort": "medium"}
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(_mock_client(), "resolved"),
+        ):
+            assert agent._try_activate_fallback() is True
+            assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+            assert agent._try_activate_fallback() is True
+            assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+
 
 # ── Pool-rotation vs fallback gating (#11314) ────────────────────────────
 

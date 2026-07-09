@@ -4,6 +4,7 @@ import json
 import pytest
 from types import SimpleNamespace
 
+from agent.action_stall import build_action_stall_continuation
 from agent.transports import get_transport
 from agent.transports.types import NormalizedResponse
 
@@ -164,6 +165,136 @@ class TestCodexBuildKwargs:
         assert eb.get("prompt_cache_key") == "caller-override"
         assert eb.get("other_field") == 42
 
+    def test_xai_grok_action_stall_continuation_forces_required_tool_choice(self, transport):
+        messages = [
+            {"role": "user", "content": "Inspect the repo."},
+            {"role": "assistant", "content": "I'll inspect the repo now."},
+            {"role": "user", "content": build_action_stall_continuation()},
+        ]
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "terminal",
+                "description": "Run a command",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+            },
+        }]
+
+        kw = transport.build_kwargs(
+            model="grok-4.3",
+            messages=messages,
+            tools=tools,
+            is_xai_responses=True,
+        )
+
+        assert kw["tool_choice"] == "required"
+
+    def test_non_grok_action_stall_continuation_stays_auto(self, transport):
+        messages = [
+            {"role": "user", "content": "Inspect the repo."},
+            {"role": "assistant", "content": "I'll inspect the repo now."},
+            {"role": "user", "content": build_action_stall_continuation()},
+        ]
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "terminal",
+                "description": "Run a command",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+            },
+        }]
+
+        kw = transport.build_kwargs(
+            model="gpt-5.5",
+            messages=messages,
+            tools=tools,
+            is_xai_responses=False,
+        )
+
+        assert kw["tool_choice"] == "auto"
+
+    def test_grok_named_responses_model_forces_required_even_without_xai_flag(self, transport):
+        messages = [
+            {"role": "user", "content": "Inspect the repo."},
+            {"role": "assistant", "content": "I'll inspect the repo now."},
+            {"role": "user", "content": build_action_stall_continuation()},
+        ]
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "terminal",
+                "description": "Run a command",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+            },
+        }]
+
+        kw = transport.build_kwargs(
+            model="x-ai/grok-4.3",
+            messages=messages,
+            tools=tools,
+            is_xai_responses=False,
+        )
+
+        assert kw["tool_choice"] == "required"
+
+    def test_xai_action_stall_does_not_force_after_tool_evidence(self, transport):
+        messages = [
+            {"role": "user", "content": "Run date."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "name": "terminal", "content": "ok"},
+            {"role": "user", "content": build_action_stall_continuation()},
+        ]
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "terminal",
+                "description": "Run a command",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+            },
+        }]
+
+        kw = transport.build_kwargs(
+            model="grok-4.3",
+            messages=messages,
+            tools=tools,
+            is_xai_responses=True,
+        )
+
+        assert kw["tool_choice"] == "auto"
+
+    def test_request_override_still_wins_over_action_stall_tool_choice(self, transport):
+        messages = [
+            {"role": "user", "content": "Inspect the repo."},
+            {"role": "assistant", "content": "I'll inspect the repo now."},
+            {"role": "user", "content": build_action_stall_continuation()},
+        ]
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "terminal",
+                "description": "Run a command",
+                "parameters": {"type": "object", "properties": {"command": {"type": "string"}}},
+            },
+        }]
+
+        kw = transport.build_kwargs(
+            model="grok-4.3",
+            messages=messages,
+            tools=tools,
+            is_xai_responses=True,
+            request_overrides={"tool_choice": "auto"},
+        )
+
+        assert kw["tool_choice"] == "auto"
+
     def test_max_tokens(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
@@ -195,8 +326,13 @@ class TestCodexBuildKwargs:
         )
 
         headers = kw.get("extra_headers", {})
+        # For ChatGPT/Codex, keep the raw session_id header for transcript
+        # identity, but route x-client-request-id to the same content-addressed
+        # value as prompt_cache_key so repeated stable prefixes get cache
+        # affinity across resumed turns and recurring jobs.
         assert headers.get("session_id") == "conv-codex-1"
-        assert headers.get("x-client-request-id") == "conv-codex-1"
+        assert headers.get("x-client-request-id") == kw["prompt_cache_key"]
+        assert headers.get("x-client-request-id") != "conv-codex-1"
 
     def test_codex_backend_no_headers_without_session_id(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
@@ -224,8 +360,30 @@ class TestCodexBuildKwargs:
 
         headers = kw.get("extra_headers", {})
         assert headers.get("x-test") == "1"
+        # For ChatGPT/Codex, keep the raw session_id header for transcript
+        # identity, but route x-client-request-id to the same content-addressed
+        # value as prompt_cache_key so repeated stable prefixes get cache
+        # affinity across resumed turns and recurring jobs.
         assert headers.get("session_id") == "conv-codex-1"
-        assert headers.get("x-client-request-id") == "conv-codex-1"
+        assert headers.get("x-client-request-id") == kw["prompt_cache_key"]
+        assert headers.get("x-client-request-id") != "conv-codex-1"
+
+    def test_codex_backend_x_client_request_id_follows_prompt_cache_override(self, transport):
+        messages = [{"role": "user", "content": "Hi"}]
+
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            session_id="conv-codex-1",
+            is_codex_backend=True,
+            request_overrides={"prompt_cache_key": "manual-cache-key"},
+        )
+
+        headers = kw.get("extra_headers", {})
+        assert kw["prompt_cache_key"] == "manual-cache-key"
+        assert headers.get("session_id") == "conv-codex-1"
+        assert headers.get("x-client-request-id") == "manual-cache-key"
 
     def test_non_codex_responses_preserves_caller_extra_headers(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
@@ -491,6 +649,16 @@ class TestCodexBuildKwargs:
             reasoning_config={"effort": "low"},
         )
         assert kw.get("reasoning") == {"effort": "low"}
+
+    def test_xai_grok_4_5_keeps_reasoning_effort(self, transport):
+        """grok-4.5 accepts the effort dial on xAI's Responses API."""
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="grok-4.5", messages=messages, tools=[],
+            is_xai_responses=True,
+            reasoning_config={"effort": "medium"},
+        )
+        assert kw.get("reasoning") == {"effort": "medium"}
 
     def test_xai_grok_code_fast_omits_reasoning_effort(self, transport):
         """grok-code-fast-1 rejects reasoning.effort."""

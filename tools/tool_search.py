@@ -68,6 +68,9 @@ class ToolSearchConfig:
     threshold_pct: float  # 0..100 — only used when enabled == "auto"
     search_default_limit: int
     max_search_limit: int
+    directory_in_prompt: bool
+    directory_max_entries: int
+    directory_description_chars: int
 
     @classmethod
     def from_raw(cls, raw: Any) -> "ToolSearchConfig":
@@ -79,15 +82,19 @@ class ToolSearchConfig:
         defaults rather than raising, so a typo in user config does not
         break the agent.
         """
+        defaults = {
+            "search_default_limit": 5,
+            "max_search_limit": 20,
+            "directory_in_prompt": True,
+            "directory_max_entries": 80,
+            "directory_description_chars": 180,
+        }
         if raw is True:
-            return cls(enabled="auto", threshold_pct=10.0,
-                       search_default_limit=5, max_search_limit=20)
+            return cls(enabled="auto", threshold_pct=10.0, **defaults)
         if raw is False:
-            return cls(enabled="off", threshold_pct=10.0,
-                       search_default_limit=5, max_search_limit=20)
+            return cls(enabled="off", threshold_pct=10.0, **defaults)
         if not isinstance(raw, dict):
-            return cls(enabled="auto", threshold_pct=10.0,
-                       search_default_limit=5, max_search_limit=20)
+            return cls(enabled="auto", threshold_pct=10.0, **defaults)
 
         enabled_raw = str(raw.get("enabled", "auto")).strip().lower()
         if enabled_raw in ("true", "1", "yes"):
@@ -105,12 +112,18 @@ class ToolSearchConfig:
         max_search_limit = max(1, min(50, _safe_int(raw.get("max_search_limit"), 20)))
         search_default_limit = max(1, min(max_search_limit,
                                           _safe_int(raw.get("search_default_limit"), 5)))
+        directory_in_prompt = _safe_bool(raw.get("directory_in_prompt"), True)
+        directory_max_entries = max(1, min(200, _safe_int(raw.get("directory_max_entries"), 80)))
+        directory_description_chars = max(40, min(500, _safe_int(raw.get("directory_description_chars"), 180)))
 
         return cls(
             enabled=enabled,
             threshold_pct=threshold_pct,
             search_default_limit=search_default_limit,
             max_search_limit=max_search_limit,
+            directory_in_prompt=directory_in_prompt,
+            directory_max_entries=directory_max_entries,
+            directory_description_chars=directory_description_chars,
         )
 
 
@@ -119,6 +132,19 @@ def _safe_int(value: Any, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _safe_bool(value: Any, fallback: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return fallback
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "on", "always"}:
+        return True
+    if text in {"false", "0", "no", "off", "never"}:
+        return False
+    return fallback
 
 
 def _safe_float(value: Any, fallback: float) -> float:
@@ -147,6 +173,17 @@ def load_config() -> ToolSearchConfig:
 # ---------------------------------------------------------------------------
 
 
+# Back-compat wrapper names that may be hidden/advanced in compact surfaces but
+# must never be deferred when a profile explicitly exposes them. They are direct
+# user-action tools, not discoverable plugin/MCP catalog entries.
+_ALWAYS_VISIBLE_TOOL_NAMES = frozenset({
+    "read_file",
+    "write_file",
+    "patch",
+    "search_files",
+})
+
+
 def _core_tool_names() -> frozenset[str]:
     """Return the set of tool names that must NEVER be deferred.
 
@@ -169,6 +206,8 @@ def is_deferrable_tool_name(name: str) -> bool:
     against accidental shadowing).
     """
     if name in BRIDGE_TOOL_NAMES:
+        return False
+    if name in _ALWAYS_VISIBLE_TOOL_NAMES:
         return False
     if name in _core_tool_names():
         return False
@@ -602,6 +641,60 @@ def _format_search_hit(entry: CatalogEntry) -> Dict[str, Any]:
     }
 
 
+def _compact_description(text: str, *, max_chars: int) -> str:
+    """Return a one-line summary safe for prompt injection."""
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
+        return "No description provided by the tool."
+    # Prefer the first sentence when it is informative; many MCP schemas carry
+    # long markdown docs that are too noisy for the startup directory.
+    first_sentence = re.split(r"(?<=[.!?])\s+", cleaned, maxsplit=1)[0]
+    if 24 <= len(first_sentence) <= max_chars:
+        cleaned = first_sentence
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max(0, max_chars - 1)].rstrip() + "…"
+
+
+def format_deferred_tool_directory(
+    current_tool_defs: List[Dict[str, Any]],
+    *,
+    config: Optional[ToolSearchConfig] = None,
+) -> str:
+    """Render a compact prompt appendix for currently deferred tools.
+
+    This intentionally uses the same classification/catalog path as the bridge
+    tools. Callers pass the raw pre-assembly tool definitions for the active
+    session's enabled/disabled toolsets, so the directory is automatically
+    scoped per profile/platform/session and drops removed tools on the next
+    prompt build.
+    """
+    if config is None:
+        config = load_config()
+    if config.enabled == "off" or not config.directory_in_prompt:
+        return ""
+
+    _, deferrable = classify_tools(current_tool_defs or [])
+    catalog = build_catalog(deferrable)
+    if not catalog:
+        return ""
+
+    catalog.sort(key=lambda e: (e.source, e.source_name, e.name))
+    shown = catalog[: config.directory_max_entries]
+    lines = [
+        "# Deferred tool directory",
+        "The tools below are available through `tool_search`, `tool_describe`, and `tool_call`; they are not listed as direct tool calls to save context. Search when you need one, then describe it if the arguments are not obvious.",
+    ]
+    for entry in shown:
+        source = entry.source_name or entry.source
+        desc = _compact_description(entry.description, max_chars=config.directory_description_chars)
+        lines.append(f"- {entry.name} [{source}] — {desc}")
+    remaining = len(catalog) - len(shown)
+    if remaining > 0:
+        lines.append(f"- … {remaining} more deferred tools available; use `tool_search` for the specific capability.")
+    return "\n".join(lines)
+
+
 def dispatch_tool_search(args: Dict[str, Any],
                          *,
                          current_tool_defs: List[Dict[str, Any]],
@@ -728,6 +821,7 @@ __all__ = [
     "bridge_tool_schemas",
     "assemble_tool_defs",
     "is_bridge_tool",
+    "format_deferred_tool_directory",
     "dispatch_tool_search",
     "dispatch_tool_describe",
     "resolve_underlying_call",

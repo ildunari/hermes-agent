@@ -16,6 +16,9 @@ Lifecycle (called by MemoryManager, wired in run_agent.py):
   initialize()          — connect, create resources, warm up
   system_prompt_block()  — static text for the system prompt
   prefetch(query)        — background recall before each turn
+  recall_now(query)      — synchronous recall for due/triggered turns
+  discard_prefetch()     — clear cached recall without backend work
+  configure_recall_policy(config) — optional recall-policy hints
   sync_turn(user, asst)  — async write after each turn
   get_tool_schemas()     — tool schemas to expose to the model
   handle_tool_call()     — dispatch a tool call
@@ -105,12 +108,55 @@ class MemoryProvider(ABC):
         """
         return ""
 
+    def recall_now(self, query: str, *, session_id: str = "") -> str:
+        """Synchronously recall context for a due/triggered current turn.
+
+        Providers may override with a direct bounded search. The default falls
+        back to ``prefetch`` so synchronous providers keep working without new
+        code; cached-background providers should override when same-turn recall
+        matters.
+        """
+        return self.prefetch(query, session_id=session_id)
+
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Queue a background recall for the NEXT turn.
 
         Called after each turn completes. The result will be consumed
         by prefetch() on the next turn. Default is no-op — providers
         that do background prefetching should override this.
+        """
+
+    def discard_prefetch(self, *, session_id: str = "") -> None:
+        """Discard a queued prefetch result without doing live recall.
+
+        MemoryManager calls this when policy decides the current turn should not
+        inject memory but a cached provider result might otherwise go stale.
+        Providers with cached prefetch state can override this. The default is a
+        best-effort clear for the common ``_prefetch_lock``/``_prefetch_result``
+        shape and otherwise a no-op; it must never call the backend.
+        """
+        lock = getattr(self, "_prefetch_lock", None)
+        if lock is not None:
+            try:
+                with lock:
+                    if hasattr(self, "_prefetch_result"):
+                        setattr(self, "_prefetch_result", "")
+                    if hasattr(self, "_prefetch_result_fired_at"):
+                        setattr(self, "_prefetch_result_fired_at", -999)
+                return
+            except Exception:
+                return
+        if hasattr(self, "_prefetch_result"):
+            try:
+                setattr(self, "_prefetch_result", "")
+            except Exception:
+                return
+
+    def configure_recall_policy(self, config: Dict[str, Any]) -> None:
+        """Receive recall-policy hints such as max prefetch result count.
+
+        Providers may ignore this. It is deliberately not part of the model tool
+        schema; it only tunes provider-side recall behavior.
         """
 
     def sync_turn(

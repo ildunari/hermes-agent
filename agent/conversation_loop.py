@@ -79,6 +79,69 @@ logger = logging.getLogger(__name__)
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
 
 
+def _estimate_compression_payload_tokens(
+    agent: Any,
+    messages: List[Dict[str, Any]],
+    system_prompt: Optional[str],
+) -> Optional[int]:
+    """Estimate the durable conversation payload compression can affect.
+
+    API-call-only additions such as prefill messages, ephemeral system prompts,
+    memory prefetch, and plugin user context are intentionally excluded because
+    compression does not change them. Including those in only one side of the
+    comparison can make a no-op compression look like progress.
+    """
+    try:
+        return estimate_request_tokens_rough(
+            messages,
+            system_prompt=system_prompt or "",
+            tools=getattr(agent, "tools", None) or None,
+        )
+    except Exception:
+        try:
+            return estimate_messages_tokens_rough(messages)
+        except Exception:
+            return None
+
+
+def _compression_progress(
+    agent: Any,
+    before_messages: List[Dict[str, Any]],
+    after_messages: List[Dict[str, Any]],
+    *,
+    before_tokens: Optional[int],
+    after_system_prompt: Optional[str],
+) -> tuple[bool, Optional[int]]:
+    """Return whether compression made retry-worthy progress.
+
+    Compression can shrink large tool/message contents while preserving the
+    same number of OpenAI messages.  The retry loop used to treat
+    ``len(after_messages) >= len(before_messages)`` as no progress, which
+    incorrectly exhausted sessions where only the payload size changed.
+    """
+    if len(after_messages) < len(before_messages):
+        return True, None
+
+    if not before_tokens or before_tokens <= 0:
+        return False, None
+
+    try:
+        after_tokens = _estimate_compression_payload_tokens(
+            agent, after_messages, after_system_prompt
+        )
+        if after_tokens is None:
+            return False, None
+    except Exception:
+        return False, None
+
+    tokens_saved = before_tokens - after_tokens
+    # Require a meaningful drop so tiny estimator jitter does not cause an
+    # endless retry loop.  Real compactions are usually much larger; the live
+    # repro was ~250k -> ~169k tokens with the same message count.
+    min_saved = max(1024, int(before_tokens * 0.05))
+    return tokens_saved >= min_saved, after_tokens
+
+
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
     """Extract a provider-reported image dimension ceiling, if present."""
     parts = []
@@ -600,7 +663,10 @@ def run_conversation(
     current_turn_user_idx = _ctx.current_turn_user_idx
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
+    _plugin_system_context = _ctx.plugin_system_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
+
+    # Main conversation loop
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
@@ -834,10 +900,10 @@ def run_conversation(
         # External recall context is injected into the user message, not the system
         # prompt, so the stable cache prefix remains unchanged.
         #
-        # NOTE: Plugin context from pre_llm_call hooks is injected into the
-        # user message (see injection block above), NOT the system prompt.
-        # This is intentional — system prompt modifications break the prompt
-        # cache prefix.  The system prompt is reserved for Hermes internals.
+        # NOTE: Legacy plugin ``context`` from pre_llm_call hooks is injected
+        # into the user message (see injection block above). Newer
+        # ``system_context`` is layered here for internal instructions that
+        # must not be visible as user-authored text.
         #
         # Hermes invariant: the system prompt is built ONCE per session
         # (cached on ``_cached_system_prompt``) and replayed verbatim on
@@ -847,6 +913,13 @@ def run_conversation(
         effective_system = active_system_prompt or ""
         if agent.ephemeral_system_prompt:
             effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+        # Hook-provided ``system_context`` is also API-call-time only. Unlike
+        # legacy pre_llm_call ``context``, it stays out of the user message so
+        # profile instruction capsules cannot be quoted back as if Kosta wrote
+        # them. It is appended after the stable cached prompt because hook
+        # output can vary by turn.
+        if _plugin_system_context:
+            effective_system = (effective_system + "\n\n" + _plugin_system_context).strip()
         if effective_system:
             api_messages = [{"role": "system", "content": effective_system}] + api_messages
 
@@ -1557,7 +1630,7 @@ def run_conversation(
                             "completed": False,
                             "api_calls": api_call_count,
                             "error": _final_response,
-                            "failed": True  # Mark as failure for filtering
+                            "failed": True,  # Mark as failure for filtering
                         }
                     
                     # Backoff before retry — jittered exponential: 5s base, 120s cap
@@ -3366,8 +3439,11 @@ def run_conversation(
                         }
                     agent._buffer_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
 
+                    original_messages = messages
                     original_len = len(messages)
-                    original_tokens = estimate_messages_tokens_rough(messages)
+                    original_tokens = _estimate_compression_payload_tokens(
+                        agent, original_messages, active_system_prompt
+                    ) or approx_tokens
                     messages, active_system_prompt = agent._compress_context(
                         messages, system_message, approx_tokens=approx_tokens,
                         task_id=effective_task_id,
@@ -3376,18 +3452,24 @@ def run_conversation(
                         agent, messages
                     )
 
-                    # Re-estimate tokens after compression.  Same-message-count
-                    # compression (tool-result pruning, in-place summarization)
-                    # can materially reduce request size without reducing the
-                    # message array.  (#39550)
-                    new_tokens = estimate_messages_tokens_rough(messages)
-                    approx_tokens = new_tokens  # update for downstream logging
+                    made_progress, compressed_tokens = _compression_progress(
+                        agent,
+                        original_messages,
+                        messages,
+                        before_tokens=original_tokens,
+                        after_system_prompt=active_system_prompt,
+                    )
+                    if compressed_tokens is not None:
+                        approx_tokens = compressed_tokens
 
-                    if len(messages) < original_len or (new_tokens > 0 and new_tokens < original_tokens * 0.95):
-                        if len(messages) < original_len:
-                            agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                    if made_progress:
+                        if compressed_tokens is not None and len(messages) >= original_len:
+                            agent._buffer_status(
+                                f"🗜️ Compressed context ~{original_tokens:,} → "
+                                f"~{compressed_tokens:,} tokens, retrying..."
+                            )
                         else:
-                            agent._buffer_status(f"🗜️ Compressed ~{original_tokens:,} → ~{new_tokens:,} tokens, retrying...")
+                            agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
                         time.sleep(2)  # Brief pause between compression retries
                         _retry.restart_with_compressed_messages = True
                         break
@@ -3589,8 +3671,11 @@ def run_conversation(
                         }
                     agent._buffer_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
 
+                    original_messages = messages
                     original_len = len(messages)
-                    original_tokens = estimate_messages_tokens_rough(messages)
+                    original_tokens = _estimate_compression_payload_tokens(
+                        agent, original_messages, active_system_prompt
+                    ) or approx_tokens
                     messages, active_system_prompt = agent._compress_context(
                         messages, system_message, approx_tokens=approx_tokens,
                         task_id=effective_task_id,
@@ -3598,19 +3683,25 @@ def run_conversation(
                     conversation_history = conversation_history_after_compression(
                         agent, messages
                     )
+                    made_progress, compressed_tokens = _compression_progress(
+                        agent,
+                        original_messages,
+                        messages,
+                        before_tokens=original_tokens,
+                        after_system_prompt=active_system_prompt,
+                    )
 
-                    # Re-estimate tokens after compression.  Same-message-count
-                    # compression (tool-result pruning, in-place summarization)
-                    # can materially reduce request size without reducing the
-                    # message array.  (#39550)
-                    new_tokens = estimate_messages_tokens_rough(messages)
-                    approx_tokens = new_tokens  # update for downstream logging
+                    if compressed_tokens is not None:
+                        approx_tokens = compressed_tokens
 
-                    if len(messages) < original_len or (new_tokens > 0 and new_tokens < original_tokens * 0.95) or (new_ctx and new_ctx < old_ctx):
-                        if len(messages) < original_len:
+                    if made_progress or (new_ctx and new_ctx < old_ctx):
+                        if compressed_tokens is not None and len(messages) >= original_len:
+                            agent._buffer_status(
+                                f"🗜️ Compressed context ~{original_tokens:,} → "
+                                f"~{compressed_tokens:,} tokens, retrying..."
+                            )
+                        elif len(messages) < original_len:
                             agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
-                        elif new_tokens > 0 and new_tokens < original_tokens * 0.95:
-                            agent._buffer_status(f"🗜️ Compressed ~{original_tokens:,} → ~{new_tokens:,} tokens, retrying...")
                         time.sleep(2)  # Brief pause between compression retries
                         _retry.restart_with_compressed_messages = True
                         break
@@ -5090,12 +5181,11 @@ def run_conversation(
                     messages.append(interim_msg)
                     agent._emit_interim_assistant_message(interim_msg)
 
+                    from agent.action_stall import build_action_stall_continuation
+
                     continue_msg = {
                         "role": "user",
-                        "content": (
-                            "[System: Continue now. Execute the required tool calls and only "
-                            "send your final answer after completing the task.]"
-                        ),
+                        "content": build_action_stall_continuation(),
                     }
                     messages.append(continue_msg)
                     agent._session_messages = messages

@@ -40,7 +40,9 @@ import logging
 logger = logging.getLogger(__name__)
 import os
 import re
+import shlex
 import sys
+
 import tempfile
 import time
 import threading
@@ -111,6 +113,7 @@ def _session_source_for_agent(platform: Optional[str]) -> str:
 from agent.process_bootstrap import (
     OpenAI,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.OpenAI")
     _SafeWriter,  # noqa: F401  # re-exported for tests that `from run_agent import _SafeWriter`
+    _get_proxy_from_env,  # noqa: F401  # re-exported for tests that `from run_agent import _get_proxy_from_env`
     _get_proxy_for_base_url,
 )
 from agent.iteration_budget import IterationBudget
@@ -152,9 +155,11 @@ from agent.model_metadata import (
     estimate_request_tokens_rough,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.estimate_request_tokens_rough")
     is_local_endpoint,
 )
-from agent.usage_pricing import normalize_usage
+from agent.usage_pricing import estimate_usage_cost, normalize_usage
 # Re-exported for tests that monkeypatch these symbols on run_agent.
 from agent.context_compressor import ContextCompressor  # noqa: F401
+from agent.subdirectory_hints import SubdirectoryHintTracker  # noqa: F401
+from agent.prompt_caching import apply_anthropic_cache_control  # noqa: F401
 from agent.retry_utils import jittered_backoff  # noqa: F401
 from agent.prompt_builder import (  # noqa: F401  # re-exported via _ra() / mock.patch("run_agent.<name>") / from run_agent import <name>
     DEFAULT_AGENT_IDENTITY,
@@ -163,8 +168,14 @@ from agent.prompt_builder import (  # noqa: F401  # re-exported via _ra() / mock
     build_environment_hints,
     build_nous_subscription_prompt,
     load_soul_md,
+    load_shared_user_md,
+    load_local_context,
+    TOOL_USE_ENFORCEMENT_GUIDANCE,
+    TOOL_USE_ENFORCEMENT_MODELS,
+    GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+    OPENAI_MODEL_EXECUTION_GUIDANCE,
 )
-from agent.process_bootstrap import _get_proxy_from_env  # noqa: F401
+
 from agent.message_sanitization import (  # noqa: F401
     _SURROGATE_RE,
     _sanitize_surrogates,
@@ -3650,14 +3661,18 @@ class AIAgent:
         """Check if an interrupt has been requested."""
         return self._interrupt_requested
 
-
-
-
-
-
-
-
-
+    def _resolve_task_cwd(self, task_id: Optional[str] = None) -> Optional[str]:
+        """Resolve the effective working directory for this agent or task."""
+        resolved_task_id = task_id or self.session_id
+        try:
+            from tools.terminal_tool import get_task_env_override
+            override = get_task_env_override(resolved_task_id, "cwd")
+            if override:
+                return str(override)
+        except Exception:
+            pass
+        env_cwd = os.getenv("TERMINAL_CWD")
+        return env_cwd or None
 
     def _build_system_prompt_parts(self, system_message: str = None) -> Dict[str, str]:
         """Forwarder — see ``agent.system_prompt.build_system_prompt_parts``."""
@@ -5353,6 +5368,17 @@ class AIAgent:
             opts = self._lmstudio_reasoning_options_cached()
             # "off-only" (or absent) means no real reasoning capability.
             return any(opt and opt != "off" for opt in opts)
+        model = (getattr(self, "model", "") or "").lower()
+        if (self.provider or "").strip().lower() == "vibeproxy" and (
+            "claude" in model
+            or any(alias in model for alias in ("opus", "sonnet", "haiku", "mythos", "fable"))
+        ):
+            return True
+        if (
+            base_url_host_matches(self._base_url_lower, "100.93.10.54")
+            and model == "qwen36-ablit-atomic"
+        ):
+            return True
         if "openrouter" not in self._base_url_lower:
             return False
         if "api.mistral.ai" in self._base_url_lower:
@@ -5451,8 +5477,375 @@ class AIAgent:
 
         return {"effort": requested_effort}
 
+    def _textual_tool_compat_enabled(self) -> bool:
+        """True for Qwopus-style endpoints that may emit tool calls as text.
+
+        The GamingPC Qwopus proxy currently speaks OpenAI chat but does not
+        return native ``message.tool_calls``. It often emits a bare JSON object
+        like ``{"name":"terminal","arguments":{...}}`` instead. Keep this
+        compatibility shim tightly scoped so normal final answers are not
+        reinterpreted as tools on providers with proper tool-calling support.
+        """
+        provider = (self.provider or "").strip().lower()
+        model = (self.model or "").strip().lower()
+        base = (self.base_url or "").strip().lower()
+        return (
+            "qwopus" in model
+            or provider in {"custom:rtx", "rtx"}
+            or "100.93.10.54:8010" in base
+        )
+
+    def _normalize_textual_tool_name(self, raw_name: Any) -> Optional[str]:
+        if not isinstance(raw_name, str):
+            return None
+        valid_names = set(getattr(self, "valid_tool_names", None) or set())
+        for tool in getattr(self, "tools", None) or []:
+            if isinstance(tool, dict):
+                fn = tool.get("function") or {}
+                name = fn.get("name") if isinstance(fn, dict) else None
+                if isinstance(name, str) and name:
+                    valid_names.add(name)
+        candidates = []
+        name = raw_name.strip()
+        if name:
+            candidates.append(name)
+            candidates.append(name.replace("-", "_"))
+            # Qwopus often copies OpenAI/Codex examples and emits pseudo
+            # shell-tool names. Hermes' actual shell tool is `terminal`.
+            if name.lower() in {"bash", "shell", "sh", "terminal_run", "run_terminal", "print"}:
+                candidates.append("terminal")
+        for candidate in candidates:
+            if candidate in valid_names:
+                return candidate
+        return None
+
+    @staticmethod
+    def _json_string_for_tool_arguments(raw_args: Any) -> str:
+        if raw_args is None:
+            return "{}"
+        if isinstance(raw_args, str):
+            stripped = raw_args.strip()
+            if not stripped:
+                return "{}"
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                return json.dumps({"input": stripped}, ensure_ascii=False)
+            return json.dumps(parsed, ensure_ascii=False)
+        return json.dumps(raw_args, ensure_ascii=False)
+
+    @staticmethod
+    def _coerce_textual_tool_scalar(value: Any) -> Any:
+        """Coerce simple textual XML/function-call arg values to JSON scalars."""
+        if not isinstance(value, str):
+            return value
+        val = value.strip()
+        if not val:
+            return ""
+        low = val.lower()
+        if low == "true":
+            return True
+        if low == "false":
+            return False
+        if low in {"null", "none"}:
+            return None
+        try:
+            if re.fullmatch(r"[-+]?\d+", val):
+                return int(val)
+            if re.fullmatch(r"[-+]?(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?", val):
+                return float(val)
+        except Exception:
+            pass
+        return val
+
+    @staticmethod
+    def _parse_textual_tool_xml_args(arg_text: str, body: str) -> dict[str, Any]:
+        """Parse narrow XML-ish textual tool arguments from Qwopus output."""
+        args: dict[str, Any] = {}
+        for key, value in re.findall(
+            r"([A-Za-z_][\w-]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s]+)",
+            arg_text or "",
+        ):
+            val = value.strip()
+            if (val.startswith("'") and val.endswith("'")) or (val.startswith('\"') and val.endswith('\"')):
+                val = val[1:-1]
+            args[key] = AIAgent._coerce_textual_tool_scalar(val)
+
+        body = (body or "").strip()
+        if not body:
+            return args
+
+        # Common Qwopus shape:
+        # <tool_call><session_search><query>gaming pc</query><limit>1</limit></session_search></tool_call>
+        nested = re.findall(
+            r"<([A-Za-z_][\w-]*)\s*>(.*?)</\1>",
+            body,
+            flags=re.DOTALL,
+        )
+        if nested:
+            for key, value in nested:
+                if "<" in value or ">" in value:
+                    continue
+                args[key] = AIAgent._coerce_textual_tool_scalar(value)
+            if args:
+                return args
+
+        # If the body itself is JSON, use it as the argument object. Otherwise
+        # keep a plain body under input rather than inventing per-tool semantics.
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            if body:
+                args.setdefault("input", body)
+        else:
+            if isinstance(parsed, dict):
+                args.update(parsed)
+            else:
+                args.setdefault("input", parsed)
+        return args
+
+    def _parse_textual_tool_call_expression(self, text: str) -> tuple[Optional[str], Any]:
+        """Parse ``tool_name(query='x', limit=1)`` inside <tool_code> blocks."""
+        import ast
+
+        def _args_from_call(tool_name: str, call: ast.Call) -> dict[str, Any]:
+            args: dict[str, Any] = {}
+            positional = [ast.literal_eval(arg) for arg in call.args]
+            if tool_name == "session_search" and positional:
+                args["query"] = positional[0]
+                if len(positional) > 1:
+                    args["limit"] = positional[1]
+                if len(positional) > 2:
+                    args["args"] = positional[2:]
+            elif positional:
+                args["args"] = positional
+            for kw in call.keywords:
+                if kw.arg is None:
+                    continue
+                args[kw.arg] = ast.literal_eval(kw.value)
+            return args
+
+        stripped = text.strip()
+        bracketed = re.fullmatch(r"\[\s*([A-Za-z_][\w-]*\s*\(.*\))\s*\]", stripped, flags=re.DOTALL)
+        if bracketed:
+            stripped = bracketed.group(1).strip()
+        wrapper = re.fullmatch(
+            r"<tool_code\s*>(.*?)</tool_code>",
+            stripped,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if wrapper:
+            stripped = wrapper.group(1).strip()
+
+        try:
+            expr = ast.parse(stripped, mode="eval")
+        except SyntaxError:
+            expr = None
+        if expr is not None:
+            call = expr.body
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
+                tool_name = self._normalize_textual_tool_name(call.func.id)
+                if tool_name:
+                    return tool_name, _args_from_call(tool_name, call)
+            return None, None
+
+        try:
+            module = ast.parse(stripped, mode="exec")
+        except SyntaxError:
+            return None, None
+        # Walk in source order and keep the last valid call. Qwopus often emits
+        # helper function definitions before the actual call; the final call is
+        # the one intended as the tool invocation.
+        found: tuple[Optional[str], Any] = (None, None)
+        for node in ast.walk(module):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            tool_name = self._normalize_textual_tool_name(node.func.id)
+            if tool_name:
+                found = (tool_name, _args_from_call(tool_name, node))
+        return found
+
+    def _parse_textual_tool_call(self, content: str):
+        """Parse a single pure textual tool call into an OpenAI-like object.
+
+        Supported shapes are deliberately narrow and scoped to Qwopus/RTX:
+        - ``{\"name\":\"terminal\",\"arguments\":{\"command\":\"...\"}}``
+        - ``{\"tool\":\"terminal\",\"args\":{...}}``
+        - ``<terminal command='echo ok'></terminal>``
+        - ``<tool_call><session_search><query>gaming pc</query></session_search></tool_call>``
+        - ``<tool_code>session_search(query='gaming pc', limit=1)</tool_code>``
+        """
+        if not self._textual_tool_compat_enabled() or not isinstance(content, str):
+            return None
+        text = content.strip()
+        if not text or len(text) > 12000:
+            return None
+        fenced_language = ""
+        fence = re.fullmatch(
+            r"```(json|bash|sh|shell)?\s*\n((?:(?!```).)*)\n?```",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if fence:
+            fenced_language = (fence.group(1) or "").strip().lower()
+            text = fence.group(2).strip()
+        else:
+            # Same intent as the JSON-suffix compatibility below, but for
+            # fenced JSON blocks. Accept only the final fenced block so examples
+            # with explanatory text after the block remain normal assistant text.
+            # Do not accept prefaced shell fences: prose before shell code is too
+            # often documentation, and accidentally executing it is worse than
+            # asking Qwopus to retry with a real tool call.
+            final_fence = re.search(
+                r"```(json)\s*\n((?:(?!```).)*)\n?```\s*$",
+                text,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            if final_fence and "```" not in text[:final_fence.start()]:
+                fenced_language = (final_fence.group(1) or "").strip().lower()
+                text = final_fence.group(2).strip()
+
+        tool_name = None
+        tool_args: Any = None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+            # RTX Qwopus sometimes adds a short natural-language preface before
+            # the single intended JSON tool-call envelope, e.g.:
+            # "I'll load the skill.\n{"name":"skill_view",...}".  Accept
+            # only a JSON object/array that consumes the whole suffix so prose
+            # answers with incidental JSON are not reinterpreted as tools.
+            decoder = json.JSONDecoder()
+            for match in re.finditer(r"(?m)^[ \t]*(?=[{\[])", text):
+                if "```" in text[:match.start()]:
+                    continue
+                try:
+                    candidate, end = decoder.raw_decode(text[match.end():])
+                except json.JSONDecodeError:
+                    continue
+                if text[match.end() + end:].strip():
+                    continue
+                parsed = candidate
+                break
+        if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
+            parsed = parsed[0]
+        if isinstance(parsed, dict):
+            tool_name = self._normalize_textual_tool_name(
+                parsed.get("name") or parsed.get("tool") or parsed.get("function")
+            )
+            tool_args = (
+                parsed.get("arguments")
+                if "arguments" in parsed
+                else parsed.get("args", parsed.get("parameters"))
+            )
+            if tool_name is None and len(parsed) == 1:
+                raw_key = next(iter(parsed))
+                keyed_tool = self._normalize_textual_tool_name(raw_key)
+                if keyed_tool:
+                    tool_name = keyed_tool
+                    tool_args = parsed.get(raw_key)
+        else:
+            # Qwopus sometimes writes prose plus a JSON-ish object keyed by the
+            # tool name instead of a pure JSON tool-call envelope, e.g.:
+            # "I'll run it\n{\"session_search\": {\"query\": \"x\"}}".
+            for valid_name in sorted(self.valid_tool_names, key=len, reverse=True):
+                keyed = re.search(
+                    rf'"{re.escape(valid_name)}"\s*:\s*(\{{[^{{}}]*(?:\{{[^{{}}]*\}}[^{{}}]*)*\}})',
+                    text,
+                    flags=re.DOTALL,
+                )
+                if keyed:
+                    try:
+                        tool_args = json.loads(keyed.group(1))
+                    except json.JSONDecodeError:
+                        continue
+                    tool_name = valid_name
+                    break
+
+            if not tool_name:
+                shell_fence = re.fullmatch(
+                    r"```(?:bash|sh|shell)\s*\n(.*?)\n?```",
+                    text,
+                    flags=re.DOTALL | re.IGNORECASE,
+                )
+                if shell_fence and "terminal" in self.valid_tool_names:
+                    command = shell_fence.group(1).strip()
+                    if command:
+                        tool_name = "terminal"
+                        tool_args = {"command": command}
+                elif fenced_language in {"bash", "sh", "shell"} and "terminal" in self.valid_tool_names:
+                    command = text.strip()
+                    if command:
+                        tool_name = "terminal"
+                        tool_args = {"command": command}
+
+            if not tool_name:
+                tool_name, tool_args = self._parse_textual_tool_call_expression(text)
+
+            match = None if tool_name else re.fullmatch(
+                r"<([A-Za-z_][\w-]*)\s*([^>]*)>(.*?)</\1>",
+                text,
+                flags=re.DOTALL,
+            )
+            if match:
+                raw_tag = match.group(1)
+                inner = match.group(3) or ""
+                if raw_tag.lower() in {"tool_call", "tool_calls", "function_call"}:
+                    inner_match = re.fullmatch(
+                        r"\s*<([A-Za-z_][\w-]*)\s*([^>]*)>(.*?)</\1>\s*",
+                        inner,
+                        flags=re.DOTALL,
+                    )
+                    if inner_match:
+                        tool_name = self._normalize_textual_tool_name(inner_match.group(1))
+                        tool_args = self._parse_textual_tool_xml_args(
+                            inner_match.group(2) or "",
+                            inner_match.group(3) or "",
+                        )
+                else:
+                    tool_name = self._normalize_textual_tool_name(raw_tag)
+                    tool_args = self._parse_textual_tool_xml_args(
+                        match.group(2) or "",
+                        inner,
+                    )
+
+        if not tool_name:
+            return None
+        if tool_name == "terminal" and isinstance(tool_args, dict):
+            if "cmd" in tool_args and "command" not in tool_args:
+                tool_args["command"] = tool_args.pop("cmd")
+            if "text" in tool_args and "command" not in tool_args:
+                tool_args["command"] = f"printf '%s\\n' {shlex.quote(str(tool_args.pop('text')))}"
+            if "timeout_seconds" in tool_args and "timeout" not in tool_args:
+                tool_args["timeout"] = tool_args.pop("timeout_seconds")
+        arg_json = self._json_string_for_tool_arguments(tool_args)
+        call_id = self._deterministic_call_id(tool_name, arg_json, 0)
+        return SimpleNamespace(
+            id=call_id,
+            call_id=call_id,
+            type="function",
+            function=SimpleNamespace(name=tool_name, arguments=arg_json),
+        )
+
+    def _promote_textual_tool_call_if_needed(self, assistant_message) -> bool:
+        if getattr(assistant_message, "tool_calls", None):
+            return False
+        parsed = self._parse_textual_tool_call(getattr(assistant_message, "content", "") or "")
+        if parsed is None:
+            return False
+        assistant_message.tool_calls = [parsed]
+        assistant_message.content = ""
+        logging.info(
+            "%sPromoted textual Qwopus tool call to structured tool_call: %s",
+            self.log_prefix,
+            parsed.function.name,
+        )
+        return True
+
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
         """Forwarder — see ``agent.chat_completion_helpers.build_assistant_message``."""
+        self._promote_textual_tool_call_if_needed(assistant_message)
         from agent.chat_completion_helpers import build_assistant_message
         return build_assistant_message(self, assistant_message, finish_reason)
 
@@ -5691,25 +6084,24 @@ class AIAgent:
             _strip_model_hidden_task_fields,
             delegate_task as _delegate_task,
         )
-        # Delegations from the top-level MODEL always run in the background —
-        # the model does not get to choose. delegate_task returns immediately
-        # with a handle (one per task) and each subagent's result re-enters the
-        # conversation as a new message when it finishes. This applies to BOTH
-        # a single task and a fan-out batch (each task becomes its own
-        # independent background subagent). The one exception:
-        #   - A delegation from an ORCHESTRATOR SUBAGENT (depth > 0) stays
-        #     synchronous: the orchestrator needs its workers' results within
-        #     its own turn to compose a summary, and a subagent doesn't own the
-        #     gateway session the async result would route back to.
-        # The schema-level `background` param is intentionally ignored here.
+        # Default model-facing delegations are synchronous: a batch still runs
+        # children in parallel, but the parent waits for the consolidated tool
+        # result before answering.  Background mode remains available only when
+        # the model explicitly requests `background=true` for fire-and-forget
+        # work.  A delegation from an orchestrator subagent (depth > 0) is
+        # forced synchronous because the child does not own the gateway/session
+        # route that would receive a detached async completion.
         _is_subagent = getattr(self, "_delegate_depth", 0) > 0
+        requested_background = (
+            function_args.get("background") if not _is_subagent else False
+        )
         return _delegate_task(
             goal=function_args.get("goal"),
             context=function_args.get("context"),
             tasks=_strip_model_hidden_task_fields(function_args.get("tasks")),
             max_iterations=function_args.get("max_iterations"),
             role=function_args.get("role"),
-            background=(not _is_subagent),
+            background=requested_background,
             parent_agent=self,
         )
 
@@ -5809,7 +6201,11 @@ class AIAgent:
             str: Final assistant response
         """
         result = self.run_conversation(message, stream_callback=stream_callback)
-        return result["final_response"]
+        if "final_response" in result:
+            return result["final_response"]
+        if result.get("error"):
+            return str(result["error"])
+        return ""
 
     def _run_codex_app_server_turn(
         self,

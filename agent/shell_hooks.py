@@ -575,7 +575,10 @@ def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
     block directive.
 
     For ``pre_llm_call``, ``{"context": "..."}`` is passed through
-    unchanged to match the existing plugin-hook contract.
+    unchanged to match the existing plugin-hook contract. Hooks may also
+    return ``{"system_context": "..."}`` for internal instructions that
+    should be layered into the ephemeral system prompt instead of appended
+    to the user message where models can quote it back.
 
     Anything else returns ``None``.
     """
@@ -613,11 +616,17 @@ def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
                 return {"action": "continue", "message": message.strip()}
         return None
 
+    result: Dict[str, str] = {}
+
+    system_context = data.get("system_context")
+    if isinstance(system_context, str) and system_context.strip():
+        result["system_context"] = system_context
+
     context = data.get("context")
     if isinstance(context, str) and context.strip():
-        return {"context": context}
+        result["context"] = context
 
-    return None
+    return result or None
 
 
 # ---------------------------------------------------------------------------

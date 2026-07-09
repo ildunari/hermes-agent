@@ -205,6 +205,19 @@ class TestProviderModelIds:
         ):
             assert provider_model_ids("stepfun") == ["step-3.5-flash", "step-3-agent-lite"]
 
+    def test_zai_appends_curated_hidden_models_to_live_catalog(self):
+        """Z.AI /models can omit plan-gated models that direct calls allow."""
+        fake_profile = MagicMock()
+        fake_profile.auth_type = "api_key"
+        fake_profile.base_url = "https://api.z.ai/api/paas/v4"
+        fake_profile.fallback_models = ()
+        fake_profile.fetch_models.return_value = ["glm-5", "glm-5-turbo", "glm-5.1", "glm-4.5-air"]
+        with patch("providers.get_provider_profile", return_value=fake_profile), \
+             patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={"api_key": "zai-key", "base_url": fake_profile.base_url}):
+            ids = provider_model_ids("zai")
+        assert ids[:4] == ["glm-5.2", "glm-5.1", "glm-5", "glm-5v-turbo"]
+        assert "glm-4.5-air" in ids
+
     def test_copilot_prefers_live_catalog(self):
         with patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={"api_key": "gh-token"}), \
              patch("hermes_cli.models._fetch_github_models", return_value=["gpt-5.4", "claude-sonnet-4.6"]):

@@ -3924,6 +3924,16 @@ def generate_launchd_plist() -> str:
         ]
     )
     prog_args_xml = "\n        ".join(prog_args)
+    supervised_child_xml = ""
+    if not profile_arg:
+        # The default/root gateway service must not follow ~/.hermes/active_profile.
+        # launchd already supervises this child with a fixed identity; setting the
+        # same sentinel used by container-supervised children keeps a sticky active
+        # named profile from redirecting ai.hermes.gateway into that profile.
+        supervised_child_xml = (
+            "        <key>HERMES_S6_SUPERVISED_CHILD</key>\n"
+            "        <string>1</string>\n"
+        )
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -3948,7 +3958,7 @@ def generate_launchd_plist() -> str:
         <string>{venv_dir}</string>
         <key>HERMES_HOME</key>
         <string>{hermes_home}</string>
-    </dict>
+{supervised_child_xml}    </dict>
 
     <key>LimitLoadToSessionType</key>
     <array>

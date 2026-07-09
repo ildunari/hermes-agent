@@ -851,7 +851,89 @@ def skills_list(category: str = None, task_id: str = None) -> str:
         return tool_error(str(e), success=False)
 
 
-# ── Plugin skill serving ──────────────────────────────────────────────────
+def skill(
+    action: str,
+    name: Any = None,
+    category: Any = None,
+    file_path: Any = None,
+    confirm: bool = False,
+    manage_action: Any = None,
+    content: Any = None,
+    file_content: Any = None,
+    old_string: Any = None,
+    new_string: Any = None,
+    replace_all: bool = False,
+    absorbed_into: Any = None,
+    task_id: Any = None,
+) -> str:
+    """Single model-visible skills tool."""
+    action = (action or "").strip()
+
+    # Be forgiving for the common model slip where it supplies a skill name (and
+    # optionally a support-file path) but omits the required action. That shape
+    # is unambiguously a read, while management still requires the explicit
+    # action='manage' + confirm=true guard below. If mutation-adjacent arguments
+    # are present, force an explicit action instead of quietly treating the call
+    # as a view.
+    mutation_args_present = any(
+        value not in (None, False, "")
+        for value in (
+            confirm,
+            manage_action,
+            content,
+            file_content,
+            old_string,
+            new_string,
+            replace_all,
+            absorbed_into,
+        )
+    )
+    if not action and name and not mutation_args_present:
+        action = "view"
+
+    if action == "list":
+        return skills_list(category=category, task_id=task_id)
+
+    if action == "view":
+        if not name:
+            return tool_error("name is required for action='view'.", success=False)
+        return _skill_view_with_bump(
+            {"name": name, "file_path": file_path},
+            task_id=task_id,
+        )
+
+    if action == "manage":
+        if not confirm:
+            return tool_error(
+                "skill(action='manage') can modify skills. Re-run with confirm=true after verifying the intended change.",
+                success=False,
+            )
+        if not manage_action:
+            return tool_error("manage_action is required for action='manage'.", success=False)
+        if not name:
+            return tool_error("name is required for action='manage'.", success=False)
+        from tools.skill_manager_tool import skill_manage
+
+        return skill_manage(
+            action=manage_action,
+            name=name,
+            content=content,
+            category=category,
+            file_path=file_path,
+            file_content=file_content,
+            old_string=old_string,
+            new_string=new_string,
+            replace_all=replace_all,
+            absorbed_into=absorbed_into,
+        )
+
+    if not action:
+        return tool_error("Missing required action. Use action='list', action='view', or action='manage'.", success=False)
+
+    return tool_error("Unknown action. Use one of: list, view, manage.", success=False)
+
+
+
 
 
 def _serve_plugin_skill(
@@ -1750,9 +1832,98 @@ def _skill_view_with_bump(args, **kw):
     return result
 
 
+SKILL_SCHEMA = {
+    "name": "skill",
+    "description": (
+        "List, view, or explicitly manage Hermes skills. Skills are procedural "
+        "memory for reusable workflows. Use action='list' to discover skills, "
+        "action='view' to load SKILL.md or a linked file, and action='manage' "
+        "only for intentional skill mutations. Manage requires confirm=true."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["list", "view", "manage"],
+                "description": "Skills operation to perform.",
+            },
+            "name": {
+                "type": "string",
+                "description": "Skill name for view/manage. For plugin skills, use 'plugin:skill'.",
+            },
+            "category": {
+                "type": "string",
+                "description": "For list: optional category filter. For manage_action='create': optional category.",
+            },
+            "file_path": {
+                "type": "string",
+                "description": "For view: linked file path. For manage patch/write_file/remove_file: target support file path.",
+            },
+            "confirm": {
+                "type": "boolean",
+                "description": "Required true for action='manage' because it can modify or delete skill files.",
+            },
+            "manage_action": {
+                "type": "string",
+                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"],
+                "description": "Specific mutation to perform when action='manage'.",
+            },
+            "content": {
+                "type": "string",
+                "description": "Full SKILL.md content for manage_action='create' or 'edit'.",
+            },
+            "old_string": {
+                "type": "string",
+                "description": "Text to find for manage_action='patch'. Must be unique unless replace_all=true.",
+            },
+            "new_string": {
+                "type": "string",
+                "description": "Replacement text for manage_action='patch'. Can be empty to delete.",
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "For manage_action='patch': replace all occurrences instead of requiring a unique match.",
+            },
+            "file_content": {
+                "type": "string",
+                "description": "Content for manage_action='write_file'.",
+            },
+            "absorbed_into": {
+                "type": "string",
+                "description": "For manage_action='delete': umbrella skill that absorbed this one, or empty string for pruning.",
+            },
+        },
+    },
+}
+
+registry.register(
+    name="skill",
+    toolset="skills",
+    schema=SKILL_SCHEMA,
+    handler=lambda args, **kw: skill(
+        action=args.get("action", ""),
+        name=args.get("name"),
+        category=args.get("category"),
+        file_path=args.get("file_path"),
+        confirm=args.get("confirm", False),
+        manage_action=args.get("manage_action"),
+        content=args.get("content"),
+        file_content=args.get("file_content"),
+        old_string=args.get("old_string"),
+        new_string=args.get("new_string"),
+        replace_all=args.get("replace_all", False),
+        absorbed_into=args.get("absorbed_into"),
+        task_id=kw.get("task_id"),
+    ),
+    check_fn=check_skills_requirements,
+    emoji="📚",
+)
+
+
 registry.register(
     name="skill_view",
-    toolset="skills",
+    toolset="skills_legacy",
     schema=SKILL_VIEW_SCHEMA,
     handler=_skill_view_with_bump,
     check_fn=check_skills_requirements,

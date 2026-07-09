@@ -57,6 +57,8 @@ import type {
   ToolsetModelsResponse
 } from '@/types/hermes'
 
+import { WEBUI_HIDDEN_SESSION_SOURCE_IDS } from './lib/session-source'
+
 // Desktop startup fires a burst of read-only data calls (config, profiles,
 // model info/options, cron) the moment the backend passes readiness. On a
 // profile-heavy or remote install these can each take tens of seconds — e.g.
@@ -201,12 +203,17 @@ export async function listSessions(
   limit = 40,
   minMessages = 0,
   archived: 'exclude' | 'include' | 'only' = 'exclude',
-  order: 'created' | 'recent' = 'recent'
+  order: 'created' | 'recent' = 'recent',
+  filter: SessionSourceFilter = {}
 ): Promise<PaginatedSessions> {
+  const sourceParam = filter.source ? `&source=${encodeURIComponent(filter.source)}` : ''
+  const excludeSources = filter.excludeSources ?? (filter.source ? [] : WEBUI_HIDDEN_SESSION_SOURCE_IDS)
+  const excludeParam = excludeSources.length ? `&exclude_sources=${encodeURIComponent(excludeSources.join(','))}` : ''
+
   const result = await window.hermesDesktop.api<PaginatedSessions>({
     path:
       `/api/sessions?limit=${limit}&offset=0&min_messages=${Math.max(0, minMessages)}` +
-      `&archived=${archived}&order=${order}`,
+      `&archived=${archived}&order=${order}${sourceParam}${excludeParam}`,
     timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
   })
 
@@ -230,6 +237,8 @@ export interface SessionSourceFilter {
   excludeSources?: string[]
 }
 
+export const WEBUI_VISIBLE_SESSION_SOURCE_IDS = ['api_server', 'cli', 'codex', 'desktop', 'gateway', 'local', 'tui'] as const
+
 export async function listAllProfileSessions(
   limit = 40,
   minMessages = 0,
@@ -240,8 +249,9 @@ export async function listAllProfileSessions(
 ): Promise<PaginatedSessions> {
   const sourceParam = filter.source ? `&source=${encodeURIComponent(filter.source)}` : ''
 
-  const excludeParam = filter.excludeSources?.length
-    ? `&exclude_sources=${encodeURIComponent(filter.excludeSources.join(','))}`
+  const excludeSources = filter.excludeSources ?? (filter.source ? [] : WEBUI_HIDDEN_SESSION_SOURCE_IDS)
+  const excludeParam = excludeSources.length
+    ? `&exclude_sources=${encodeURIComponent(excludeSources.join(','))}`
     : ''
 
   const result = await window.hermesDesktop.api<PaginatedSessions>({
@@ -1008,7 +1018,13 @@ export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<Aud
   })
 }
 
+<<<<<<< HEAD
 export type SpeechSource = "read-aloud" | "voice-conversation"
+||||||| daedf4f62
+export function speakText(text: string): Promise<AudioSpeakResponse> {
+=======
+export type SpeechSource = 'read-aloud' | 'voice-conversation'
+>>>>>>> refs/remotes/studio/local-studio-slim
 
 export interface SpeakTextOptions {
   rewrite?: 'auto' | 'off' | 'on'

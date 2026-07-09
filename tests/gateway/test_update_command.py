@@ -100,7 +100,7 @@ class TestHandleUpdateCommand:
             (fake_root / "gateway").mkdir(parents=True)
             (fake_root / "gateway" / "slash_commands.py").touch()
 
-            with patch("gateway.slash_commands.__file__", fake_file):
+            with patch("gateway.run.__file__", fake_file), patch("gateway.slash_commands.__file__", fake_file):
                 result = await runner._handle_update_command(event)
 
         assert "Not a git repository" in result
@@ -194,6 +194,28 @@ class TestHandleUpdateCommand:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_update_command_can_be_disabled_by_gateway_config(self, tmp_path):
+        """Config can disable the blunt gateway /update path."""
+        runner = _make_runner()
+        event = _make_event(platform=Platform.TELEGRAM, chat_id="99999")
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "gateway:\n  update_command: smart_only\n",
+            encoding="utf-8",
+        )
+
+        with patch("gateway.run._hermes_home", hermes_home), \
+             patch("subprocess.Popen") as mock_popen:
+            result = await runner._handle_update_command(event)
+
+        assert "Built-in /update is disabled" in result
+        assert "/update_smart" in result
+        mock_popen.assert_not_called()
+        assert not (hermes_home / ".update_pending.json").exists()
+        assert not (hermes_home / ".update_history.jsonl").exists()
+
+    @pytest.mark.asyncio
     async def test_writes_pending_marker(self, tmp_path):
         """Writes .update_pending.json with correct platform and chat info."""
         runner = _make_runner()
@@ -224,6 +246,16 @@ class TestHandleUpdateCommand:
         assert data["message_id"] == "m-update"
         assert "timestamp" in data
         assert not (hermes_home / ".update_exit_code").exists()
+
+        history_path = hermes_home / ".update_history.jsonl"
+        assert history_path.exists()
+        history = json.loads(history_path.read_text().strip())
+        assert history["command"] == "/update"
+        assert history["platform"] == "telegram"
+        assert history["chat_id"] == "99999"
+        assert history["message_id"] == "m-update"
+        assert history["hermes_cmd"] == ["/usr/bin/hermes"]
+        assert history["gateway_pid"] > 0
 
     @pytest.mark.asyncio
     async def test_writes_pending_marker_with_thread_id(self, tmp_path):
@@ -447,7 +479,7 @@ class TestUpdateCommandPlatformGate:
         event = _make_event(platform=Platform.DISCORD)
         monkeypatch.setenv("HERMES_MANAGED", "")
 
-        with patch("subprocess.Popen"):
+        with patch("subprocess.Popen") as mock_popen:
             result = await runner._handle_update_command(event)
 
         # The gate must NOT have rejected us — anything other than the
@@ -455,6 +487,7 @@ class TestUpdateCommandPlatformGate:
         # Later steps may legitimately return success ("Starting Hermes
         # update…") or fail for environment reasons.
         assert "only available from messaging platforms" not in result
+        assert mock_popen.call_count <= 1
 
     @pytest.mark.asyncio
     async def test_allows_mattermost_via_registry_fallback(self, monkeypatch):
@@ -476,10 +509,11 @@ class TestUpdateCommandPlatformGate:
         event = _make_event(platform=Platform.MATTERMOST)
         monkeypatch.setenv("HERMES_MANAGED", "")
 
-        with patch("subprocess.Popen"):
+        with patch("subprocess.Popen") as mock_popen:
             result = await runner._handle_update_command(event)
 
         assert "only available from messaging platforms" not in result
+        assert mock_popen.call_count <= 1
 
     @pytest.mark.asyncio
     async def test_allows_homeassistant_via_registry_fallback(self, monkeypatch):
@@ -502,10 +536,11 @@ class TestUpdateCommandPlatformGate:
         event = _make_event(platform=Platform.HOMEASSISTANT)
         monkeypatch.setenv("HERMES_MANAGED", "")
 
-        with patch("subprocess.Popen"):
+        with patch("subprocess.Popen") as mock_popen:
             result = await runner._handle_update_command(event)
 
         assert "only available from messaging platforms" not in result
+        assert mock_popen.call_count <= 1
 
     @pytest.mark.asyncio
     async def test_allows_builtin_platform_in_allowlist(self, monkeypatch):
@@ -520,10 +555,11 @@ class TestUpdateCommandPlatformGate:
         event = _make_event(platform=Platform.TELEGRAM)
         monkeypatch.setenv("HERMES_MANAGED", "")
 
-        with patch("subprocess.Popen"):
+        with patch("subprocess.Popen") as mock_popen:
             result = await runner._handle_update_command(event)
 
         assert "only available from messaging platforms" not in result
+        assert mock_popen.call_count <= 1
 
 
 # ---------------------------------------------------------------------------
@@ -922,10 +958,7 @@ class TestUpdateInHelp:
         assert "/update" in result
 
     def test_update_is_known_command(self):
-        """The /update command is in the help text (proxy for _known_commands)."""
-        # _known_commands is local to _handle_message, so we verify by
-        # checking the help output includes it.
-        from gateway.run import GatewayRunner
-        import inspect
-        source = inspect.getsource(GatewayRunner._handle_message)
-        assert '"update"' in source
+        """The /update command is registered as a known gateway command."""
+        from hermes_cli.commands import is_gateway_known_command
+
+        assert is_gateway_known_command("update")

@@ -428,11 +428,13 @@ def test_delegate_task_background_batch_runs_as_one_unit(monkeypatch):
     assert _drain_one() is None
 
 
-def test_model_dispatch_forces_background():
-    """The MODEL-facing dispatch path forces background=True for any top-level
-    delegation (single task OR batch), and keeps it off for an orchestrator
-    subagent (depth > 0). Direct delegate_task() callers are unaffected (they
-    keep the synchronous default)."""
+def test_model_dispatch_defaults_sync_background_opt_in():
+    """The MODEL-facing registry fallback defaults to synchronous delegation.
+
+    Top-level callers may opt into detached background delivery with
+    background=true; orchestrator subagents are always synchronous because they
+    need their workers' results inside the same turn.
+    """
     import tools.delegate_tool as dt
     from unittest.mock import MagicMock
 
@@ -441,23 +443,26 @@ def test_model_dispatch_forces_background():
     sub = MagicMock()
     sub._delegate_depth = 1
 
-    # Registry-fallback helper: top-level always background, regardless of
-    # single vs batch; subagent never.
-    assert dt._model_background_value({"goal": "x"}, top) is True
+    assert dt._model_background_value({"goal": "x"}, top) is False
     assert dt._model_background_value(
         {"tasks": [{"goal": "a"}, {"goal": "b"}]}, top
-    ) is True
-    assert dt._model_background_value({"tasks": [{"goal": "a"}]}, top) is True
-    assert dt._model_background_value({"goal": "x"}, sub) is False
+    ) is False
+    assert dt._model_background_value({"goal": "x", "background": True}, top) is True
     assert dt._model_background_value(
-        {"tasks": [{"goal": "a"}, {"goal": "b"}]}, sub
+        {"tasks": [{"goal": "a"}, {"goal": "b"}], "background": True}, top
+    ) is True
+    assert dt._model_background_value({"goal": "x", "background": True}, sub) is False
+    assert dt._model_background_value(
+        {"tasks": [{"goal": "a"}, {"goal": "b"}], "background": True}, sub
     ) is False
 
 
-def test_run_agent_dispatch_forces_background():
-    """run_agent._dispatch_delegate_task — the live model path — forces
-    background on for any top-level delegation (single OR batch) and off for a
-    subagent."""
+def test_run_agent_dispatch_defaults_sync_background_opt_in():
+    """run_agent._dispatch_delegate_task defaults top-level delegations to sync.
+
+    Explicit background=true is respected for top-level calls and forced off for
+    orchestrator subagents.
+    """
     from unittest.mock import patch
     import run_agent
 
@@ -473,16 +478,19 @@ def test_run_agent_dispatch_forces_background():
     with patch("tools.delegate_tool.delegate_task", _fake_delegate):
         agent = _FakeAgent()
         run_agent.AIAgent._dispatch_delegate_task(agent, {"goal": "x"})
-        assert captured["background"] is True
+        assert captured["background"] is None
 
         run_agent.AIAgent._dispatch_delegate_task(
             agent, {"tasks": [{"goal": "a"}, {"goal": "b"}]}
         )
+        assert captured["background"] is None
+
+        run_agent.AIAgent._dispatch_delegate_task(agent, {"goal": "x", "background": True})
         assert captured["background"] is True
 
         sub = _FakeAgent()
         sub._delegate_depth = 1
-        run_agent.AIAgent._dispatch_delegate_task(sub, {"goal": "x"})
+        run_agent.AIAgent._dispatch_delegate_task(sub, {"goal": "x", "background": True})
         assert captured["background"] is False
 
 

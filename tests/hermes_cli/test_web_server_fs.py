@@ -12,12 +12,21 @@ from starlette.testclient import TestClient
 @pytest.fixture
 def client(monkeypatch):
     previous_auth_required = getattr(web_server.app.state, "auth_required", None)
+    previous_bound_host = getattr(web_server.app.state, "bound_host", None)
+    previous_bound_port = getattr(web_server.app.state, "bound_port", None)
+    previous_allowed_hosts = getattr(web_server.app.state, "dashboard_allowed_hosts", None)
     web_server.app.state.auth_required = False
-    test_client = TestClient(web_server.app)
+    web_server.app.state.bound_host = "127.0.0.1"
+    web_server.app.state.bound_port = 9119
+    web_server.app.state.dashboard_allowed_hosts = frozenset()
+    test_client = TestClient(web_server.app, base_url="http://127.0.0.1:9119")
     test_client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
     try:
         yield test_client
     finally:
+        web_server.app.state.bound_host = previous_bound_host
+        web_server.app.state.bound_port = previous_bound_port
+        web_server.app.state.dashboard_allowed_hosts = previous_allowed_hosts
         if previous_auth_required is None:
             try:
                 delattr(web_server.app.state, "auth_required")
@@ -63,6 +72,22 @@ def test_fs_list_missing_path_returns_structured_error(client, tmp_path):
 
     assert response.status_code == 200
     assert response.json() == {"entries": [], "error": "ENOENT"}
+
+
+def test_fs_list_caps_huge_directories(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(web_server, "_FS_LIST_MAX_ENTRIES", 2)
+    root = tmp_path / "project"
+    root.mkdir()
+    for name in ["c.txt", "b.txt", "a.txt"]:
+        (root / name).write_text(name)
+
+    response = client.get("/api/fs/list", params={"path": str(root)})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["truncated"] is True
+    assert len(payload["entries"]) == 2
+    assert {entry["name"] for entry in payload["entries"]}.issubset({"a.txt", "b.txt", "c.txt"})
 
 
 def test_fs_read_text_matches_preview_shape_and_truncates(client, tmp_path, monkeypatch):

@@ -4,13 +4,59 @@ import contextlib
 import json
 import logging
 import os
+from datetime import datetime
 from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt, _resolve_cron_enabled_toolsets, _merge_mcp_into_per_job_toolsets
+from cron.scheduler import (
+    SILENT_MARKER,
+    _build_job_prompt,
+    _cron_session_title,
+    _deliver_result,
+    _merge_mcp_into_per_job_toolsets,
+    _resolve_cron_enabled_toolsets,
+    _resolve_delivery_target,
+    _resolve_origin,
+    _send_media_via_adapter,
+    run_job,
+)
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
+
+
+class TestCronSessionTitle:
+    def test_uses_plain_job_name_when_readable(self):
+        title = _cron_session_title(
+            {"id": "morning", "name": "Morning digest", "prompt": "summarize my inbox"},
+            run_time=datetime(2026, 7, 4, 9, 5),
+        )
+        assert title == "Morning digest · Jul 04 09:05"
+
+    def test_internal_job_name_falls_back_to_prompt(self):
+        title = _cron_session_title(
+            {
+                "id": "tools",
+                "name": "Dynamic Tool Summary Automation",
+                "prompt": "Summarize new tool changes for Kosta in plain English",
+            },
+            run_time=datetime(2026, 7, 4, 9, 5),
+        )
+        assert title == "new tool changes for Kosta in plain English · Jul 04 09:05"
+        assert "Dynamic" not in title
+        assert "Automation" not in title
+
+    def test_strips_important_hint_from_prompt_fallback(self):
+        title = _cron_session_title(
+            {
+                "id": "memory-injection",
+                "name": "Hermes Pre-Prompt Memory Injection",
+                "prompt": "[IMPORTANT: cron context injected] Check whether memory context is understandable",
+            },
+            run_time=datetime(2026, 7, 4, 9, 5),
+        )
+        assert title == "memory context is understandable · Jul 04 09:05"
+        assert "IMPORTANT" not in title
 
 
 class TestPerJobToolsetMcpMerge:
@@ -545,6 +591,23 @@ class TestRoutingIntents:
 
         monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-111")
         monkeypatch.setenv("DISCORD_HOME_CHANNEL", "-222")
+        for var in (
+            "SLACK_HOME_CHANNEL",
+            "SIGNAL_HOME_CHANNEL",
+            "MATTERMOST_HOME_CHANNEL",
+            "SMS_HOME_CHANNEL",
+            "EMAIL_HOME_ADDRESS",
+            "DINGTALK_HOME_CHANNEL",
+            "FEISHU_HOME_CHANNEL",
+            "WECOM_HOME_CHANNEL",
+            "WEIXIN_HOME_CHANNEL",
+            "BLUEBUBBLES_HOME_CHANNEL",
+            "QQBOT_HOME_CHANNEL",
+            "QQ_HOME_CHANNEL",
+            "WHATSAPP_HOME_CHANNEL",
+            "WHATSAPP_CLOUD_HOME_CHANNEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
 
         for token in ("ALL", "All", "all"):
             targets = _resolve_delivery_targets({"deliver": token, "origin": None})
@@ -1252,15 +1315,15 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["enabled_toolsets"] == ["web", "terminal", "file"]
 
-    def test_run_job_disabled_toolsets_layer_user_config_on_baseline(self, tmp_path):
+    def test_run_job_disabled_toolsets_layer_user_config(self, tmp_path):
         """agent.disabled_toolsets must be honoured in cron — issue #25752.
 
         The bug: per-job enabled_toolsets was returned verbatim, letting an
         LLM-supplied cronjob() call re-enable tools the operator had globally
-        disabled. The fix: ALWAYS include agent.disabled_toolsets in the
-        disabled_toolsets passed to AIAgent, on top of the cron baseline
-        (cronjob/messaging/clarify). AIAgent's disabled_toolsets takes
-        precedence over enabled_toolsets, so this stops the bypass.
+        disabled. The fix: include agent.disabled_toolsets in the disabled_toolsets
+        passed to AIAgent, on top of the non-interactive cron baseline
+        (cronjob/messaging/clarify). AIAgent's disabled_toolsets takes precedence
+        over enabled_toolsets, so this stops the bypass.
         """
         (tmp_path / "config.yaml").write_text(
             "agent:\n"
@@ -1833,6 +1896,7 @@ class TestRunJobConfigEnvVarExpansion:
     def test_model_env_ref_in_config_yaml_is_expanded(self, tmp_path, monkeypatch):
         """${VAR} in config.yaml model: is expanded using env after .env is loaded."""
         (tmp_path / "config.yaml").write_text("model: ${_HERMES_TEST_CRON_MODEL}\n")
+        monkeypatch.delenv("HERMES_MODEL", raising=False)
         monkeypatch.setenv("_HERMES_TEST_CRON_MODEL", "gpt-4o-mini-cron-test")
 
         job = {"id": "env-job", "name": "env test", "prompt": "hi"}
@@ -1958,6 +2022,7 @@ class TestRunJobConfigEnvVarExpansion:
     def test_unexpanded_ref_passthrough_when_var_unset(self, tmp_path, monkeypatch):
         """When the env var is not set, the literal ${VAR} is kept verbatim (not crashed)."""
         (tmp_path / "config.yaml").write_text("model: ${_HERMES_TEST_CRON_UNSET_VAR}\n")
+        monkeypatch.delenv("HERMES_MODEL", raising=False)
         monkeypatch.delenv("_HERMES_TEST_CRON_UNSET_VAR", raising=False)
 
         job = {"id": "unset-job", "name": "unset var test", "prompt": "hi"}

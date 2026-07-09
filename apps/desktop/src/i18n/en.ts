@@ -1673,6 +1673,7 @@ export const en: Translations = {
     urlHintPre: 'Include the full URL, e.g. ',
     attach: 'Attach',
     queued: count => `${count} Queued`,
+    draftPendingNotice: 'Draft only — press Send to queue it after the current run.',
     attachmentOnly: 'Attachment-only turn',
     emptyTurn: 'Empty turn',
     attachments: count => `${count} attachment${count === 1 ? '' : 's'}`,

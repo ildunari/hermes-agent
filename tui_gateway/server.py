@@ -11692,10 +11692,16 @@ def _(rid, params: dict) -> dict:
         try:
             from agent.skill_commands import scan_skill_commands
 
+            skill_pairs: list[list[str]] = []
             for k, info in sorted(scan_skill_commands().items()):
                 d = str(info.get("description", "Skill"))
-                all_pairs.append([k, d[:120] + ("…" if len(d) > 120 else "")])
+                pair = [k, d[:120] + ("…" if len(d) > 120 else "")]
+                all_pairs.append(pair)
+                skill_pairs.append(pair)
                 skill_count += 1
+            if skill_pairs:
+                cat_map["Skills"] = skill_pairs
+                cat_order.append("Skills")
         except Exception as e:
             warning = f"skill discovery unavailable: {e}"
 

@@ -9,7 +9,7 @@ Usage:
     python -m hermes_cli.main web --port 8080
 """
 
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 
 import asyncio
 import atexit
@@ -44,7 +44,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
@@ -412,49 +412,113 @@ def should_require_auth(host: str, allow_public: bool = False) -> bool:
     return host not in _LOOPBACK_HOST_VALUES
 
 
-def _is_accepted_host(host_header: str, bound_host: str) -> bool:
+def _host_only(value: str) -> str:
+    """Return a normalized host name from a Host header or config value."""
+    if not value:
+        return ""
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    # Operators sometimes paste the full public URL into host allowlists.
+    # Accept that shape, but store only the hostname so path/scheme changes
+    # don't affect the DNS-rebinding gate.
+    if "://" in raw:
+        try:
+            raw = urllib.parse.urlsplit(raw).hostname or ""
+        except Exception:
+            raw = ""
+    if not raw:
+        return ""
+    if raw.startswith("["):
+        close = raw.find("]")
+        if close != -1:
+            host_only = raw[1:close]
+        else:
+            host_only = raw.strip("[]")
+    elif raw.count(":") > 1:
+        # Bare IPv6 literal. Treat the whole value as the host; host:port
+        # IPv6 must use bracket notation per RFC 3986.
+        host_only = raw
+    else:
+        host_only = raw.rsplit(":", 1)[0] if ":" in raw else raw
+    return host_only.strip().lower().rstrip(".")
+
+
+def _configured_dashboard_allowed_hosts() -> frozenset[str]:
+    """Exact extra hostnames the dashboard may accept for reverse proxies.
+
+    This is intentionally an exact allowlist, not a wildcard/suffix matcher.
+    It lets a trusted local proxy such as Tailscale Serve present
+    ``macstudio.tailnet.ts.net`` to a loopback-bound dashboard without
+    disabling the DNS-rebinding Host-header protection for arbitrary names.
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+    dashboard = cfg.get("dashboard") if isinstance(cfg, dict) else {}
+    if not isinstance(dashboard, dict):
+        return frozenset()
+    raw_hosts = dashboard.get("allowed_hosts") or []
+    if isinstance(raw_hosts, str):
+        parsed_hosts = None
+        try:
+            parsed_hosts = yaml.safe_load(raw_hosts)
+        except Exception:
+            parsed_hosts = None
+        raw_hosts = parsed_hosts if isinstance(parsed_hosts, list) else [raw_hosts]
+    hosts: set[str] = set()
+    if isinstance(raw_hosts, (list, tuple, set)):
+        for item in raw_hosts:
+            host = _host_only(str(item))
+            if host and host not in {"*", "."}:
+                hosts.add(host)
+    public_url = dashboard.get("public_url")
+    if isinstance(public_url, str):
+        host = _host_only(public_url)
+        if host:
+            hosts.add(host)
+    return frozenset(hosts)
+
+
+def _is_accepted_host(
+    host_header: str,
+    bound_host: str,
+    allowed_hosts: Iterable[str] | None = None,
+) -> bool:
     """True if the Host header targets the interface we bound to.
 
     Accepts:
     - Exact bound host (with or without port suffix)
     - Loopback aliases when bound to loopback
+    - Exact configured reverse-proxy aliases
     - Any host when bound to 0.0.0.0 (explicit opt-in to non-loopback,
       no protection possible at this layer)
     """
     if not host_header:
         return False
-    # Strip port suffix. IPv6 addresses use bracket notation:
-    #   [::1]         — no port
-    #   [::1]:9119    — with port
-    # Plain hosts/v4:
-    #   localhost:9119
-    #   127.0.0.1:9119
-    h = host_header.strip()
-    if h.startswith("["):
-        # IPv6 bracketed — port (if any) follows "]:"
-        close = h.find("]")
-        if close != -1:
-            host_only = h[1:close]  # strip brackets
-        else:
-            host_only = h.strip("[]")
-    else:
-        host_only = h.rsplit(":", 1)[0] if ":" in h else h
-    host_only = host_only.lower()
+    host_only = _host_only(host_header)
+    if not host_only:
+        return False
+    configured_allowed = {_host_only(str(h)) for h in (allowed_hosts or [])}
+    configured_allowed.discard("")
+    if host_only in configured_allowed:
+        return True
 
     # 0.0.0.0 bind means operator explicitly opted into all-interfaces
     # (requires --insecure per web_server.start_server). No Host-layer
     # defence can protect that mode; rely on operator network controls.
-    if bound_host in {"0.0.0.0", "::"}:
+    bound_lc = _host_only(bound_host)
+    if bound_lc in {"0.0.0.0", "::"}:
         return True
 
-    # Loopback bind: accept the loopback names
-    bound_lc = bound_host.lower()
+    # Loopback bind: accept only loopback names unless config explicitly
+    # allowlists a trusted reverse-proxy Host value.
     if bound_lc in _LOOPBACK_HOST_VALUES:
         return host_only in _LOOPBACK_HOST_VALUES
 
     # Explicit non-loopback bind: require exact host match
     return host_only == bound_lc
-
 
 @app.middleware("http")
 async def host_header_middleware(request: Request, call_next):
@@ -473,7 +537,8 @@ async def host_header_middleware(request: Request, call_next):
     bound_host = getattr(app.state, "bound_host", None)
     if bound_host:
         host_header = request.headers.get("host", "")
-        if not _is_accepted_host(host_header, bound_host):
+        allowed_hosts = getattr(app.state, "dashboard_allowed_hosts", frozenset())
+        if not _is_accepted_host(host_header, bound_host, allowed_hosts):
             return JSONResponse(
                 status_code=400,
                 content={
@@ -14109,6 +14174,141 @@ async def get_models_analytics(days: int = 30, profile: Optional[str] = None):
 
 
 # ---------------------------------------------------------------------------
+# Provider subscription usage (CodexBar-backed)
+# ---------------------------------------------------------------------------
+
+
+def _codexbar_cli_path() -> Optional[str]:
+    configured = os.getenv("CODEXBAR_CLI") or os.getenv("HERMES_CODEXBAR_CLI")
+    candidates = [
+        configured,
+        shutil.which("codexbar"),
+        "/Applications/Coding/CodexBar.app/Contents/Helpers/CodexBarCLI",
+        "/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if path.exists() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def _redact_provider_usage_error(message: str) -> str:
+    text = message or ""
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+\-/=]+", r"\1[redacted]", text)
+    text = re.sub(r"(?i)(authorization[\"':=\s]+)[^,}\s]+", r"\1[redacted]", text)
+    text = re.sub(r"(?i)(cookie[\"':=\s]+)[^,}\n]+", r"\1[redacted]", text)
+    return text[:2000]
+
+
+async def _codexbar_usage_payload(provider: str = "all") -> Dict[str, Any]:
+    cli = _codexbar_cli_path()
+    if not cli:
+        return {
+            "ok": False,
+            "source": "codexbar",
+            "provider": provider,
+            "error": "CodexBar CLI not found. Install CodexBar or set HERMES_CODEXBAR_CLI.",
+            "providers": [],
+        }
+
+    allowed = {
+        "codex", "claude", "cursor", "opencode", "opencodego",
+        "alibaba-coding-plan", "factory", "gemini", "antigravity",
+        "copilot", "zai", "minimax", "kimi", "kilo", "kiro",
+        "vertexai", "augment", "jetbrains", "kimik2", "amp", "ollama",
+        "synthetic", "warp", "openrouter", "perplexity", "both", "all",
+        "enabled",
+    }
+    selected = (provider or "all").strip().lower()
+    if selected not in allowed:
+        selected = "all"
+
+    cmd = [cli, "usage", "--format", "json", "--no-color"]
+    if selected != "enabled":
+        cmd.extend(["--provider", selected])
+    if selected == "claude":
+        claude_source = os.getenv("HERMES_CODEXBAR_CLAUDE_SOURCE", "oauth").strip().lower()
+        if claude_source in {"auto", "web", "cli", "oauth"}:
+            cmd.extend(["--source", claude_source])
+
+    started = time.time()
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+    except asyncio.TimeoutError:
+        if proc is not None:
+            with suppress(Exception):
+                proc.kill()
+        return {
+            "ok": False,
+            "source": "codexbar",
+            "provider": selected,
+            "error": "CodexBar usage collection timed out.",
+            "providers": [],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "source": "codexbar",
+            "provider": selected,
+            "error": _redact_provider_usage_error(str(exc)),
+            "providers": [],
+        }
+
+    text = stdout.decode("utf-8", errors="replace").strip()
+    err_text = stderr.decode("utf-8", errors="replace").strip()
+    try:
+        if not text:
+            raw: Any = []
+        else:
+            start_idx = min([idx for idx in (text.find("["), text.find("{")) if idx >= 0], default=0)
+            raw, _ = json.JSONDecoder().raw_decode(text[start_idx:])
+    except Exception:
+        return {
+            "ok": False,
+            "source": "codexbar",
+            "provider": selected,
+            "error": "CodexBar returned non-JSON output.",
+            "stderr": _redact_provider_usage_error(err_text),
+            "providers": [],
+        }
+
+    if isinstance(raw, dict):
+        providers = [raw]
+    elif isinstance(raw, list):
+        providers = raw
+    else:
+        providers = []
+
+    ok_count = sum(1 for item in providers if isinstance(item, dict) and item.get("usage"))
+    error_count = sum(1 for item in providers if isinstance(item, dict) and item.get("error"))
+    return {
+        "ok": (proc.returncode == 0 if proc is not None else False) or ok_count > 0,
+        "source": "codexbar",
+        "provider": selected,
+        "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "durationMs": int((time.time() - started) * 1000),
+        "okCount": ok_count,
+        "errorCount": error_count,
+        "providers": providers,
+        "stderr": _redact_provider_usage_error(err_text) if err_text else "",
+    }
+
+
+@app.get("/api/subscription-usage")
+async def get_subscription_usage(provider: str = "all"):
+    return await _codexbar_usage_payload(provider)
+
+
+# ---------------------------------------------------------------------------
 # /api/pty — PTY-over-WebSocket bridge for the dashboard "Chat" tab.
 #
 # The endpoint spawns the same ``hermes --tui`` binary the CLI uses, behind
@@ -14337,8 +14537,9 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     if not bound_host:
         return None
 
+    allowed_hosts = getattr(app.state, "dashboard_allowed_hosts", frozenset())
     host_header = ws.headers.get("host", "")
-    if not _is_accepted_host(host_header, bound_host):
+    if not _is_accepted_host(host_header, bound_host, allowed_hosts):
         return f"host_mismatch host={host_header or '?'} bound={bound_host}"
 
     origin = ws.headers.get("origin", "")
@@ -14355,7 +14556,7 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     if not parsed.netloc:
         return f"origin_mismatch origin={origin} bound={bound_host}"
 
-    if not _is_accepted_host(parsed.netloc, bound_host):
+    if not _is_accepted_host(parsed.netloc, bound_host, allowed_hosts):
         return f"origin_mismatch origin={origin} bound={bound_host}"
     return None
 
@@ -16937,6 +17138,7 @@ def start_server(
     allow_public: bool = False,
     initial_profile: str = "",
     headless: bool = False,
+    register_instance=None,
 ):
     """Start the web UI server.
 
@@ -17033,9 +17235,12 @@ def start_server(
             ", ".join(p.name for p in list_providers()),
         )
 
-    # Record the bound host so host_header_middleware can validate incoming
-    # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
+    # Record the bound host and exact proxy host allowlist so
+    # host_header_middleware can validate incoming Host headers. Defends
+    # against DNS rebinding (GHSA-ppp5-vxwm-4cf7) while still allowing an
+    # explicitly trusted reverse-proxy hostname such as Tailscale Serve.
     app.state.bound_host = host
+    app.state.dashboard_allowed_hosts = _configured_dashboard_allowed_hosts()
 
     # ── Start uvicorn with direct Server API ─────────────────────────
     # We use uvicorn.Server directly (not uvicorn.run) so we can split
@@ -17104,6 +17309,8 @@ def start_server(
             app.state.bound_port = actual_port
 
             _write_dashboard_ready_file(actual_port)
+            if register_instance is not None:
+                register_instance(actual_port)
             # Port-discovery sentinel parsed by the desktop spawn. `serve` is a
             # plain backend, not a dashboard, so it announces a neutral token;
             # `dashboard` keeps the legacy one. The desktop matches either.

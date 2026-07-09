@@ -1598,6 +1598,7 @@ export const zhHant = defineLocale({
     urlHintPre: '請輸入完整 URL，例如 ',
     attach: '附加',
     queued: count => `${count} 個排隊中`,
+    draftPendingNotice: '仍是草稿——按傳送可在目前執行後排隊。',
     attachmentOnly: '僅附件回合',
     emptyTurn: '空回合',
     attachments: count => `${count} 個附件`,

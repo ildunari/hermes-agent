@@ -66,12 +66,19 @@ def _add_server_runtime_args(parser) -> None:
         default="",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help=(
+            "Before starting, stop stale duplicate auto-port dashboard/serve "
+            "backends for the same profile and mode"
+        ),
+    )
     # Lifecycle flags — mutually exclusive with each other and with the
     # start-a-server flags above (if both are passed, --stop / --status win
-    # because they exit before the server is started).  The server has no
-    # service manager and no PID file, so these scan the process table for
-    # `hermes dashboard` / `hermes serve` cmdlines and SIGTERM them directly —
-    # the same path `hermes update` uses to clean up stale servers.
+    # because they exit before the server is started).  The server registers
+    # PID files when it binds; these flags use that registry first and fall
+    # back to the process-table scan used by `hermes update`.
     parser.add_argument(
         "--stop",
         action="store_true",

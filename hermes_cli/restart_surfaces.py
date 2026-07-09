@@ -10,9 +10,11 @@ import argparse
 import asyncio
 import json
 import os
+import pwd
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,6 +23,10 @@ from typing import Any, Iterable
 
 
 LOG_PATH = Path.home() / ".hermes" / "logs" / "restart-surfaces.log"
+LAUNCHCTL_BIN = "/bin/launchctl"
+SUDO_BIN = "/usr/bin/sudo"
+VISUDO_BIN = "/usr/sbin/visudo"
+SUDOERS_DROPIN = Path("/private/etc/sudoers.d/hermes-restart-surfaces")
 
 
 @dataclass(frozen=True)
@@ -45,10 +51,12 @@ GATEWAY_TARGETS: tuple[RestartTarget, ...] = (
     RestartTarget("user/{uid}", "ai.hermes.gateway-coding", required=False, description="coding profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-email-assistant", required=False, description="email-assistant profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-browser-agent", required=False, description="browser-agent profile gateway"),
+    RestartTarget("user/{uid}", "ai.hermes.gateway-design", required=False, description="design profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-bookie", required=False, description="bookie profile gateway"),
     # Some profile LaunchAgents with LimitLoadToSessionType Aqua/Background load
     # into the gui domain instead of user. Keep both optional targets so a full
     # restart touches whichever domain launchd actually chose.
+    RestartTarget("gui/{uid}", "ai.hermes.gateway-design", required=False, description="design profile gateway"),
     RestartTarget("gui/{uid}", "ai.hermes.gateway-bookie", required=False, description="bookie profile gateway"),
     # The WebUI/dashboard LaunchAgent owns the local dashboard backend on 9119.
     # It must move with /restart-gateways after smart updates; otherwise the
@@ -92,6 +100,7 @@ GATEWAY_STATUS_PATHS: dict[str, Path] = {
     "ai.hermes.gateway-coding": Path.home() / ".hermes" / "profiles" / "coding" / "gateway_state.json",
     "ai.hermes.gateway-email-assistant": Path.home() / ".hermes" / "profiles" / "email-assistant" / "gateway_state.json",
     "ai.hermes.gateway-browser-agent": Path.home() / ".hermes" / "profiles" / "browser-agent" / "gateway_state.json",
+    "ai.hermes.gateway-design": Path.home() / ".hermes" / "profiles" / "design" / "gateway_state.json",
     "ai.hermes.gateway-bookie": Path.home() / ".hermes" / "profiles" / "bookie" / "gateway_state.json",
 }
 # A queued restart should behave like a staged operation: if another Hermes
@@ -100,6 +109,15 @@ GATEWAY_STATUS_PATHS: dict[str, Path] = {
 # hiding a failed restart forever while covering normal long agent runs.
 DEFAULT_SAFE_WAIT_TIMEOUT = 24 * 60 * 60
 DEFAULT_SAFE_WAIT_INTERVAL = 2.0
+
+# WebUI busy probe: the WebUI (ai.hermes.webui) hosts live chat turns whose
+# worker state dies with the process. /health reports `active_runs` (worker
+# runs independent of SSE attachment), so a restart that includes the WebUI
+# target must wait until no runs are in flight — same contract as the
+# gateway active_agents drain check.
+WEBUI_BUSY_LABELS = frozenset({"ai.hermes.webui"})
+WEBUI_HEALTH_URL = "http://127.0.0.1:8787/health"
+WEBUI_HEALTH_TIMEOUT = 3.0
 
 
 class RestartError(RuntimeError):
@@ -135,6 +153,12 @@ def targets_for_scope(scope: str) -> tuple[RestartTarget, ...]:
     return _unique_targets(targets)
 
 
+def system_restart_targets() -> tuple[RestartTarget, ...]:
+    """Return unique system LaunchDaemons the restart helper may sudo-kick."""
+
+    return tuple(target for target in _unique_targets(FULL_HERMES_TARGETS) if target.domain_template == "system")
+
+
 def describe_plan(scope: str, *, uid: int | None = None) -> str:
     """Return a human-readable dry-run plan without changing runtime state."""
 
@@ -163,6 +187,55 @@ def describe_plan(scope: str, *, uid: int | None = None) -> str:
     return "\n".join(lines)
 
 
+def _default_sudoers_user() -> str:
+    return os.environ.get("SUDO_USER") or os.environ.get("USER") or pwd.getpwuid(os.getuid()).pw_name
+
+
+def system_restart_sudoers_content(username: str | None = None) -> str:
+    """Return the narrow sudoers drop-in for unattended system-service restarts."""
+
+    user = username or _default_sudoers_user()
+    if not user or any(ch.isspace() or ch in {":", ",", "=", "\\"} for ch in user):
+        raise RestartError(f"Unsafe sudoers username: {user!r}")
+    commands = ", ".join(
+        f"{LAUNCHCTL_BIN} kickstart -k {target.service_name(os.getuid())}"
+        for target in system_restart_targets()
+    )
+    return (
+        "# Managed by Hermes Agent. Allows unattended restarts only for the\n"
+        "# Hermes-owned system LaunchDaemons used by /restart-gateways and /restart-hermes.\n"
+        f"Cmnd_Alias HERMES_RESTART_SURFACES = {commands}\n"
+        f"{user} ALL=(root) NOPASSWD: HERMES_RESTART_SURFACES\n"
+    )
+
+
+def install_system_restart_sudoers(username: str | None = None, *, dry_run: bool = False) -> str:
+    """Install the sudoers drop-in that lets detached restarts touch system daemons."""
+
+    content = system_restart_sudoers_content(username)
+    if dry_run:
+        return content
+    tmp_dir = Path(tempfile.mkdtemp(prefix="hermes-sudoers-"))
+    tmp_path = tmp_dir / SUDOERS_DROPIN.name
+    tmp_path.write_text(content, encoding="utf-8")
+    check = _run([VISUDO_BIN, "-cf", str(tmp_path)], timeout=15)
+    if check.returncode != 0:
+        raise RestartError(f"sudoers validation failed for {tmp_path}: {check.stderr}")
+    install = _run(
+        [SUDO_BIN, "-n", "install", "-o", "root", "-g", "wheel", "-m", "0440", str(tmp_path), str(SUDOERS_DROPIN)],
+        timeout=30,
+    )
+    if install.returncode != 0:
+        raise RestartError(
+            "sudoers drop-in validated but could not be installed non-interactively. "
+            f"Run once from a local shell: sudo install -o root -g wheel -m 0440 {tmp_path} {SUDOERS_DROPIN}"
+        )
+    verify = _run([SUDO_BIN, "-n", VISUDO_BIN, "-cf", str(SUDOERS_DROPIN)], timeout=15)
+    if verify.returncode != 0:
+        raise RestartError(f"installed sudoers drop-in failed validation: {verify.stderr}")
+    return f"Installed {SUDOERS_DROPIN} for user {username or _default_sudoers_user()}"
+
+
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -176,12 +249,19 @@ def _append_log(message: str) -> None:
 def _run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     printable = " ".join(shlex.quote(part) for part in cmd)
     _append_log(f"$ {printable}")
-    proc = subprocess.run(
-        cmd,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        timeout_msg = f"timed out after {timeout}s"
+        stderr = f"{stderr}\n{timeout_msg}".strip()
+        proc = subprocess.CompletedProcess(cmd, 124, stdout, stderr)
     stdout = (proc.stdout or "").strip()
     stderr = (proc.stderr or "").strip()
     if stdout:
@@ -193,17 +273,53 @@ def _run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[st
 
 
 def _launchctl_print(service: str) -> subprocess.CompletedProcess[str]:
-    return _run(["launchctl", "print", service], timeout=15)
+    return _run([LAUNCHCTL_BIN, "print", service], timeout=15)
 
 
 def _kickstart(service: str) -> subprocess.CompletedProcess[str]:
-    proc = _run(["launchctl", "kickstart", "-k", service], timeout=30)
+    proc = _run([LAUNCHCTL_BIN, "kickstart", "-k", service], timeout=30)
     if proc.returncode == 0 or not service.startswith("system/"):
         return proc
-    # Some system LaunchDaemons require root. If passwordless sudo is available,
-    # use it; otherwise log the failure and continue for best-effort targets.
-    sudo = _run(["sudo", "-n", "launchctl", "kickstart", "-k", service], timeout=30)
-    return sudo if sudo.returncode == 0 else proc
+    return _kickstart_with_sudo(service, proc)
+
+
+def _kickstart_with_sudo(
+    service: str,
+    original: subprocess.CompletedProcess[str],
+    *,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess[str]:
+    """Retry a system launchd kickstart through non-interactive sudo.
+
+    Touch ID / sudo policy prompts can hang even with ``sudo -n`` on some macOS
+    setups. _run() converts that into a normal return-code failure so the
+    detached helper can still notify the session and write completion markers.
+    """
+
+    sudo = _run([SUDO_BIN, "-n", LAUNCHCTL_BIN, "kickstart", "-k", service], timeout=timeout)
+    return sudo if sudo.returncode == 0 else original
+
+
+def _kickstart_optional(target: RestartTarget, service: str) -> subprocess.CompletedProcess[str]:
+    """Kickstart a best-effort target, using sudo only for system services.
+
+    Optional system LaunchDaemons are included in the plan for visibility. They
+    are root-owned on macOS, so ``launchctl kickstart -k system/...`` usually
+    needs sudo even though user/gui LaunchAgents do not. Retry through
+    non-interactive ``sudo -n`` when needed, but keep the target best-effort: a
+    missing cached sudo credential must not fail the whole Hermes restart.
+    """
+
+    proc = _run([LAUNCHCTL_BIN, "kickstart", "-k", service], timeout=30)
+    if proc.returncode != 0 and service.startswith("system/"):
+        sudo_proc = _kickstart_with_sudo(service, proc)
+        if sudo_proc.returncode == 0:
+            return sudo_proc
+        _append_log(
+            f"{service} optional system target not restarted; sudo was required "
+            f"but unavailable non-interactively ({target.description or target.label})"
+        )
+    return proc
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -234,6 +350,35 @@ def _pid_is_alive(pid: Any) -> bool:
 
 def _gateway_status_path_for_target(target: RestartTarget) -> Path | None:
     return GATEWAY_STATUS_PATHS.get(target.label)
+
+
+def _webui_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
+    """Report the WebUI as busy while it has live chat worker runs.
+
+    Only consulted when the restart set actually includes a WebUI target.
+    A dead/unreachable WebUI is NOT busy (restart should proceed and revive
+    it); only a healthy server reporting active_runs > 0 blocks.
+    """
+    if not any(target.label in WEBUI_BUSY_LABELS for target in targets):
+        return []
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(WEBUI_HEALTH_URL, timeout=WEBUI_HEALTH_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:
+        return []
+    try:
+        active_runs = int(payload.get("active_runs") or 0)
+    except (TypeError, ValueError):
+        active_runs = 0
+    if active_runs > 0:
+        oldest = payload.get("oldest_run_age_seconds")
+        detail = f"ai.hermes.webui: active_runs={active_runs}"
+        if oldest is not None:
+            detail += f", oldest_run_age_seconds={oldest}"
+        return [detail]
+    return []
 
 
 def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
@@ -271,7 +416,7 @@ def _wait_for_safe_restart(
     deadline = time.monotonic() + max(0.0, timeout)
     last_busy: list[str] = []
     while True:
-        last_busy = _gateway_busy_details(targets)
+        last_busy = _gateway_busy_details(targets) + _webui_busy_details(targets)
         if not last_busy:
             _append_log("safe restart check passed")
             return True, []
@@ -348,6 +493,85 @@ def _write_completion_marker(marker_path: str | None, scope: str, exit_code: int
         _append_log(f"completion marker failed: {exc}")
 
 
+def _alternate_launchd_service(service: str) -> str | None:
+    """Return the user/gui twin for profile LaunchAgents, if applicable."""
+    if service.startswith("user/"):
+        rest = service[len("user/"):]
+        uid, _, label = rest.partition("/")
+        if uid and label:
+            return f"gui/{uid}/{label}"
+    if service.startswith("gui/"):
+        rest = service[len("gui/"):]
+        uid, _, label = rest.partition("/")
+        if uid and label:
+            return f"user/{uid}/{label}"
+    return None
+
+
+def _resolve_loaded_service(service: str) -> tuple[str, subprocess.CompletedProcess[str]]:
+    """Resolve a launchd service, trying the user/gui twin when needed."""
+    result = _launchctl_print(service)
+    if result.returncode == 0:
+        return service, result
+    alternate = _alternate_launchd_service(service)
+    if alternate:
+        alt_result = _launchctl_print(alternate)
+        if alt_result.returncode == 0:
+            _append_log(f"{service} not loaded; using loaded alternate {alternate}")
+            return alternate, alt_result
+    return service, result
+
+
+def _verify_listen_port(port: int) -> str | None:
+    result = _run(["bash", "-lc", f"lsof -nP -iTCP:{port} -sTCP:LISTEN >/dev/null"], timeout=10)
+    if result.returncode != 0:
+        return f"port {port} is not listening"
+    return None
+
+
+def _verify_http_url(url: str, expected: tuple[int, ...] = (200, 401)) -> str | None:
+    quoted = shlex.quote(url)
+    tests = " || ".join(f'[ "$code" = "{int(code)}" ]' for code in expected)
+    script = (
+        f"code=$(curl -sk --max-time 5 -o /dev/null -w '%{{http_code}}' {quoted} || true); "
+        f"if {tests}; then exit 0; fi; echo $code; exit 1"
+    )
+    result = _run(["bash", "-lc", script], timeout=8)
+    if result.returncode != 0:
+        observed = (result.stdout or result.stderr or "?").strip()
+        return f"HTTP probe {url} returned {observed or 'non-2xx'}"
+    return None
+
+
+def _verify_scope_health(scope: str) -> list[str]:
+    failures: list[str] = []
+    ports = VERIFY_PORTS.get(scope, ())
+    if not ports:
+        return failures
+    for port in ports:  # listener smoke
+        failure = _verify_listen_port(port)
+        if failure:
+            failures.append(failure)
+    if scope == "hermes":
+        probes = (
+            "http://127.0.0.1:8787/health",
+            "http://127.0.0.1:9119/",
+            "http://127.0.0.1:9120/",
+            "https://macstudio.tailf7342a.ts.net:9119/",
+        )
+    else:
+        probes = (
+            "http://127.0.0.1:9119/",
+            "http://127.0.0.1:9120/",
+            "https://macstudio.tailf7342a.ts.net:9119/",
+        )
+    for url in probes:
+        failure = _verify_http_url(url)
+        if failure:
+            failures.append(failure)
+    return failures
+
+
 def restart_scope(
     scope: str,
     *,
@@ -390,15 +614,15 @@ def restart_scope(
         return 1
 
     for target in targets:
-        service = target.service_name(uid)
-        before = _launchctl_print(service)
+        requested_service = target.service_name(uid)
+        service, before = _resolve_loaded_service(requested_service)
         if before.returncode != 0:
-            msg = f"{service} is not loaded"
+            msg = f"{requested_service} is not loaded"
             _append_log(msg)
             if target.required:
                 failures.append(msg)
             continue
-        kicked = _kickstart(service)
+        kicked = _kickstart(service) if target.required else _kickstart_optional(target, service)
         if kicked.returncode != 0:
             msg = f"{service} restart failed"
             _append_log(msg)
@@ -413,8 +637,10 @@ def restart_scope(
             if target.required:
                 failures.append(msg)
 
-    for port in VERIFY_PORTS.get(normalized, ()):
-        _run(["bash", "-lc", f"lsof -nP -iTCP:{port} -sTCP:LISTEN >/dev/null"], timeout=10)
+    health_failures = _verify_scope_health(normalized)
+    for failure in health_failures:
+        _append_log(f"restart verification failed: {failure}")
+    failures.extend(health_failures)
 
     if failures:
         _append_log("restart completed with required failures: " + "; ".join(failures))
@@ -479,9 +705,14 @@ def enqueue_detached_restart(
             close_fds=True,
         )
     notify_note = " I'll send a follow-up here when it finishes." if (notify_origin or notify_tty or completion_marker) else ""
+    drain_note = (
+        "active gateway tasks and live WebUI chat turns"
+        if normalized == "hermes"
+        else "active gateway tasks"
+    )
     return (
         f"Queued detached Hermes {normalized} restart. "
-        f"It will wait for active gateway tasks to finish before restarting."
+        f"It will wait for {drain_note} to finish before restarting."
         f"{notify_note} Log: {LOG_PATH}"
     )
 
@@ -497,9 +728,43 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--completion-marker", default=None)
     parser.add_argument("--safe-wait-timeout", type=float, default=DEFAULT_SAFE_WAIT_TIMEOUT)
     parser.add_argument("--safe-wait-interval", type=float, default=DEFAULT_SAFE_WAIT_INTERVAL)
+    parser.add_argument(
+        "--install-system-restart-sudoers",
+        action="store_true",
+        help="install the narrow sudoers drop-in needed for unattended system LaunchDaemon restarts",
+    )
+    parser.add_argument("--sudoers-user", default=None, help="user to grant in the generated sudoers drop-in")
+    parser.add_argument(
+        "--enqueue-detached",
+        action="store_true",
+        help=(
+            "spawn the restart helper in a detached process and return immediately; "
+            "use this when restarting the WebUI or gateway that owns the current session"
+        ),
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.install_system_restart_sudoers:
+        print(install_system_restart_sudoers(args.sudoers_user, dry_run=args.dry_run))
+        return 0
     if args.describe:
         print(describe_plan(args.scope))
+        return 0
+    if args.enqueue_detached:
+        notify_origin = None
+        if args.notify_origin_json:
+            notify_origin = json.loads(args.notify_origin_json)
+        print(
+            enqueue_detached_restart(
+                args.scope,
+                delay=args.delay,
+                dry_run=args.dry_run,
+                notify_origin=notify_origin,
+                notify_tty=args.notify_tty,
+                completion_marker=args.completion_marker,
+                safe_wait_timeout=args.safe_wait_timeout,
+                safe_wait_interval=args.safe_wait_interval,
+            )
+        )
         return 0
     try:
         return restart_scope(
@@ -515,8 +780,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     except Exception as exc:
         _append_log(f"restart helper crashed: {exc}")
         message = _completion_message(args.scope, 1)
+        _notify_origin(args.notify_origin_json, message)
+        _notify_tty(args.notify_tty, message)
         _write_completion_marker(args.completion_marker, args.scope, 1, message)
-        raise
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover

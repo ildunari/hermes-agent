@@ -102,6 +102,9 @@ class _FakeAgent:
     def _persist_session(self, *_a, **_k):
         self._persist_calls += 1
 
+    def _compress_context(self, messages, system_message, approx_tokens=None, task_id=None):
+        return messages[-1:], self._cached_system_prompt
+
 
 def _make_agent_with_cooldown(db_path, session_id, *, cooldown_until=None):
     agent = _FakeAgent()
@@ -222,25 +225,81 @@ def test_no_review_when_memory_disabled():
     assert ctx.should_review_memory is False
 
 
-def test_ensure_db_session_runs_after_system_prompt_restore():
-    """Regression for #45499.
-
-    On a fresh API/gateway agent (``_cached_system_prompt is None``) the DB
-    session row must be created AFTER the system prompt is restored/built, so
-    the persisted snapshot is written non-NULL. If ``_ensure_db_session()``
-    ran first it would insert ``system_prompt=NULL`` and trip the misleading
-    "stored system prompt is null; rebuilding" warning plus a first-turn
-    prefix cache miss.
-    """
+def test_pre_llm_system_context_is_preserved_and_legacy_context_deduped():
     agent = _FakeAgent()
-    agent._cached_system_prompt = None  # fresh agent, no cached prompt yet
+    with patch(
+        "hermes_cli.plugins.invoke_hook",
+        return_value=[{"system_context": "FULL_PROFILE_RULES", "context": "legacy fallback"}],
+    ) as invoke_hook:
+        ctx = _build(agent)
+
+    invoke_hook.assert_called_once()
+    assert ctx.plugin_system_context == "FULL_PROFILE_RULES"
+    assert ctx.plugin_user_context == ""
+
+
+def test_pre_llm_legacy_context_still_flows_to_user_message_lane():
+    agent = _FakeAgent()
+    with patch(
+        "hermes_cli.plugins.invoke_hook",
+        return_value=[{"context": "legacy fallback"}],
+    ):
+        ctx = _build(agent)
+
+    assert ctx.plugin_system_context == ""
+    assert ctx.plugin_user_context == "legacy fallback"
+
+
+def test_preflight_compression_sets_explicit_compaction_flag_for_hook():
+    agent = _FakeAgent()
+    agent.compression_enabled = True
+    agent.context_compressor = types.SimpleNamespace(
+        protect_first_n=0,
+        protect_last_n=0,
+        threshold_tokens=1000,
+        context_length=4000,
+        last_prompt_tokens=0,
+        last_real_prompt_tokens=0,
+        should_defer_preflight_to_real_usage=lambda _tokens: False,
+        should_compress=lambda tokens: tokens > 1000,
+    )
+    history = [
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "reply"},
+    ]
+
+    with (
+        patch("agent.turn_context.estimate_request_tokens_rough", side_effect=[2000, 2000, 100]),
+        patch("hermes_cli.plugins.invoke_hook", return_value=[]) as invoke_hook,
+    ):
+        _build(agent, conversation_history=history)
+
+    invoke_hook.assert_called_once()
+    assert invoke_hook.call_args.kwargs["compaction_applied"] is True
+
+
+def test_run_conversation_consumes_turn_context_system_lane_without_second_pre_llm_hook():
+    import inspect
+    from agent.conversation_loop import run_conversation
+
+    src = inspect.getsource(run_conversation)
+    assert "_plugin_system_context = _ctx.plugin_system_context" in src
+    assert "if _plugin_system_context:" in src
+    assert "effective_system = (effective_system + \"\\n\\n\" + _plugin_system_context).strip()" in src
+    assert '"pre_llm_call",' not in src
+    assert "_pre_results = _invoke_hook" not in src
+
+
+def test_ensure_db_session_runs_after_system_prompt_restore():
+    """Regression for #45499."""
+    agent = _FakeAgent()
+    agent._cached_system_prompt = None
 
     def _restore(_agent, _system_message, _history):
         _agent._cached_system_prompt = "REBUILT-SYSTEM"
 
     _build(agent, restore_or_build_system_prompt=_restore)
 
-    # The prompt was populated before the DB row was created.
     assert agent._ensure_db_prompt_at_call == "REBUILT-SYSTEM"
     assert agent._cached_system_prompt == "REBUILT-SYSTEM"
 
@@ -363,4 +422,3 @@ def test_expired_cooldown_allows_preflight(tmp_path):
     assert isinstance(ctx, TurnContext)
     agent._emit_status.assert_called_once()
     agent._compress_context.assert_called()
-

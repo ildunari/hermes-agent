@@ -30,6 +30,11 @@ import {
   Archive,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import {
+  isAsyncDelegationAgentInput,
+  isBackgroundProcessAgentInput,
+  isInternalAgentInput,
+} from "@/lib/internal-agent-input";
 import { shouldRefreshSessions } from "@/lib/session-refresh";
 import type {
   SessionInfo,
@@ -201,6 +206,35 @@ function splitCompactionContent(content: string): CompactionSplit | null {
   };
 }
 
+function visibleSessionPreview(preview: string | null | undefined): string {
+  const text = preview?.trim() ?? "";
+  return text && !isInternalAgentInput(text) ? text : "";
+}
+
+function BackgroundProcessNotice({ content }: { content: string }) {
+  const body = content.replace(/^\[IMPORTANT:\s*/, "").replace(/\]$/, "");
+  const newline = body.indexOf("\n");
+  const headline = (newline === -1 ? body : body.slice(0, newline)).trim();
+  const detail = newline === -1 ? "" : body.slice(newline + 1).trim();
+
+  return (
+    <div className="self-center rounded-md bg-muted/40 px-2 py-1 text-xs leading-relaxed text-muted-foreground">
+      <div className="flex items-center gap-1.5">
+        <Terminal className="h-3 w-3 opacity-70" />
+        <span className="whitespace-pre-wrap">{headline}</span>
+      </div>
+      {detail && (
+        <details className="mt-1 pl-4 text-muted-foreground/80">
+          <summary className="cursor-pointer select-none">output</summary>
+          <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-[11px] leading-relaxed">
+            {detail}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
 
 function MessageBubble({
   msg,
@@ -256,6 +290,15 @@ function MessageBubble({
     typeof msg.content === "string"
       ? splitCompactionContent(msg.content)
       : null;
+
+  if (msg.role === "user" && typeof msg.content === "string") {
+    if (isAsyncDelegationAgentInput(msg.content)) {
+      return null;
+    }
+    if (isBackgroundProcessAgentInput(msg.content)) {
+      return <BackgroundProcessNotice content={msg.content} />;
+    }
+  }
 
   if (compactionSplit && compactionSplit.remainder) {
     return (
@@ -411,6 +454,7 @@ function SessionRow({
     : null) ?? { icon: Globe, color: "text-muted-foreground" };
   const SourceIcon = sourceInfo.icon;
   const hasTitle = session.title && session.title !== "Untitled";
+  const preview = visibleSessionPreview(session.preview);
 
   const submitRename = async () => {
     const value = renameValue.trim();
@@ -592,8 +636,8 @@ function SessionRow({
                   >
                     {hasTitle
                       ? session.title
-                      : session.preview
-                        ? session.preview.slice(0, 60)
+                      : preview
+                        ? preview.slice(0, 60)
                         : t.sessions.untitledSession}
                   </span>
                 )}
@@ -1671,14 +1715,20 @@ export default function SessionsPage() {
               </CardHeader>
 
               <CardContent className="grid min-w-0 gap-3">
-                {recentSessions.map((s) => (
-                  <div
-                    key={s.id}
-                    className="flex min-w-0 max-w-full flex-col gap-2 border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
-                  >
+                {recentSessions.map((s) => {
+                  const title = s.title?.trim();
+                  const preview = visibleSessionPreview(s.preview);
+                  const label = title && title !== "Untitled" ? title : preview || t.common.untitled;
+                  const showPreview = Boolean(preview && preview !== label);
+
+                  return (
+                    <div
+                      key={s.id}
+                      className="flex min-w-0 max-w-full flex-col gap-2 border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
+                    >
                     <div className="flex min-w-0 flex-1 flex-col gap-1">
                       <span className="font-mondwest normal-case min-w-0 truncate text-sm font-medium">
-                        {s.title ?? t.common.untitled}
+                        {label}
                       </span>
 
                       <span className="min-w-0 break-words text-xs text-muted-foreground">
@@ -1689,9 +1739,9 @@ export default function SessionsPage() {
                         {timeAgo(s.last_active)}
                       </span>
 
-                      {s.preview && (
+                      {showPreview && (
                         <p className="font-mondwest normal-case min-w-0 max-w-full text-xs leading-snug text-text-tertiary [overflow-wrap:anywhere]">
-                          {s.preview}
+                          {preview}
                         </p>
                       )}
                     </div>
@@ -1703,8 +1753,9 @@ export default function SessionsPage() {
                       <Database className="mr-1 h-3 w-3" />
                       {s.source ?? "local"}
                     </Badge>
-                  </div>
-                ))}
+                    </div>
+                  )
+                })}
               </CardContent>
             </Card>
           )}

@@ -27,6 +27,19 @@ import subprocess
 from hermes_cli.config import clear_model_endpoint_credentials
 
 
+def _filter_visible_models_for_provider(provider_id: str, models: list[str]) -> list[str]:
+    """Apply display allowlists to classic ``hermes model`` sub-pickers."""
+    if not models:
+        return models
+    try:
+        from hermes_cli.model_switch import filter_visible_model_rows, load_visible_model_policy
+
+        row = {"slug": provider_id, "models": list(models), "total_models": len(models)}
+        return list(filter_visible_model_rows([row], load_visible_model_policy())[0].get("models") or [])
+    except Exception:
+        return models
+
+
 def _prune_replaced_custom_model_config_credentials(
     base_url: str,
     *,
@@ -78,6 +91,7 @@ def _prune_replaced_custom_model_config_credentials(
                 write_credential_pool(pool_key, retained, removed_ids=removed_ids)
     except Exception:
         return
+
 
 
 def _prompt_auth_credentials_choice(title: str) -> str:
@@ -666,7 +680,10 @@ def _model_flow_xai_oauth(_config, current_model="", *, args=None):
     except Exception:
         pass
 
-    models = list(_PROVIDER_MODELS.get("xai-oauth") or _PROVIDER_MODELS.get("xai") or [])
+    models = _filter_visible_models_for_provider(
+        "xai-oauth",
+        list(_PROVIDER_MODELS.get("xai-oauth") or _PROVIDER_MODELS.get("xai") or []),
+    )
     selected = _prompt_model_selection(models, current_model=current_model or (models[0] if models else "grok-build-0.1"))
     if selected:
         _save_model_choice(selected)
@@ -2790,6 +2807,8 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         ]
         current_model = normalize_opencode_model_id(provider_id, current_model)
         model_list = list(dict.fromkeys(mid for mid in model_list if mid))
+
+    model_list = _filter_visible_models_for_provider(provider_id, list(model_list or []))
 
     if model_list:
         selected = _prompt_model_selection(

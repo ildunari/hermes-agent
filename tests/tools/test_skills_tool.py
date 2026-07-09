@@ -16,7 +16,9 @@ from tools.skills_tool import (
     _find_all_skills,
     skill_matches_platform,
     skills_list,
+    skill,
     skill_view,
+    SKILL_SCHEMA,
     MAX_DESCRIPTION_LENGTH,
 )
 
@@ -372,6 +374,60 @@ class TestSkillView:
         assert result["success"] is True
         assert result["name"] == "my-skill"
         assert "Step 1" in result["content"]
+
+    def test_unified_skill_defaults_missing_action_with_name_to_view(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "my-skill")
+            raw = skill(action="", name="my-skill")
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["name"] == "my-skill"
+
+    def test_unified_skill_schema_does_not_require_action(self):
+        assert "action" not in SKILL_SCHEMA["parameters"].get("required", [])
+
+    def test_unified_skill_registry_handler_accepts_omitted_action(self, tmp_path):
+        entry = skills_tool_module.registry.get_entry("skill")
+        assert entry is not None
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "my-skill")
+            raw = entry.handler({"name": "my-skill"})
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["name"] == "my-skill"
+
+    def test_unified_skill_defaults_missing_action_with_file_path_to_view(self, tmp_path):
+        skill_dir = _make_skill(tmp_path, "my-skill")
+        scripts_dir = skill_dir / "scripts"
+        scripts_dir.mkdir()
+        (scripts_dir / "helper.py").write_text("print('ok')\n")
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            raw = skill(action="", name="my-skill", file_path="scripts/helper.py")
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert "print('ok')" in result["content"]
+
+    def test_unified_skill_missing_action_without_name_has_specific_error(self):
+        result = json.loads(skill(action=""))
+        assert result["success"] is False
+        assert "Missing required action" in result["error"]
+
+    def test_unified_skill_missing_action_with_mutation_fields_requires_explicit_action(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "my-skill")
+            raw = skill(action="", name="my-skill", confirm=True, old_string="a", new_string="b")
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "Missing required action" in result["error"]
+
+    def test_unified_skill_missing_action_with_content_requires_explicit_action(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "my-skill")
+            raw = skill(action="", name="my-skill", content="# Replacement")
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "Missing required action" in result["error"]
 
     def test_view_skill_by_frontmatter_name_when_dir_differs(self, tmp_path):
         # The on-disk directory ("alias-dir") differs from the skill's

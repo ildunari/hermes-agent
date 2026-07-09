@@ -172,11 +172,47 @@ class ReadResult:
         return {k: v for k, v in self.__dict__.items() if v is not None and v != []}
 
 
+def _line_count(text: str) -> int:
+    """Count logical lines like diffstat does, including a final unterminated line."""
+    if not text:
+        return 0
+    return len(text.splitlines())
+
+
+def compute_edit_line_stats(pre_content: Optional[str], post_content: str) -> Dict[str, int]:
+    """Return added/deleted line counts for a full-file edit."""
+    import difflib
+
+    if pre_content is None:
+        return {"lines_added": _line_count(post_content), "lines_deleted": 0}
+    added = deleted = 0
+    for line in difflib.ndiff(pre_content.splitlines(), post_content.splitlines()):
+        if line.startswith("+ "):
+            added += 1
+        elif line.startswith("- "):
+            deleted += 1
+    return {"lines_added": added, "lines_deleted": deleted}
+
+
+def compute_unified_diff_line_stats(diff: str) -> Dict[str, int]:
+    """Return added/deleted line counts from a unified diff string."""
+    added = deleted = 0
+    for line in (diff or "").splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            deleted += 1
+    return {"lines_added": added, "lines_deleted": deleted}
+
+
 @dataclass
 class WriteResult:
     """Result from writing a file."""
     bytes_written: int = 0
     dirs_created: bool = False
+    edit_stats: Optional[Dict[str, int]] = None
     lint: Optional[Dict[str, Any]] = None
     # Semantic diagnostics from the LSP layer, when applicable.  Kept in
     # its own field (not folded into ``lint``) so the model and any
@@ -200,13 +236,14 @@ class PatchResult:
     files_modified: List[str] = field(default_factory=list)
     files_created: List[str] = field(default_factory=list)
     files_deleted: List[str] = field(default_factory=list)
+    edit_stats: Optional[Dict[str, int]] = None
     lint: Optional[Dict[str, Any]] = None
     # See :class:`WriteResult.lsp_diagnostics`.
     lsp_diagnostics: Optional[str] = None
     error: Optional[str] = None
     
     def to_dict(self) -> dict:
-        result = {"success": self.success}
+        result: Dict[str, Any] = {"success": self.success}
         if self.diff:
             result["diff"] = self.diff
         if self.files_modified:
@@ -215,6 +252,8 @@ class PatchResult:
             result["files_created"] = self.files_created
         if self.files_deleted:
             result["files_deleted"] = self.files_deleted
+        if self.edit_stats:
+            result["edit_stats"] = self.edit_stats
         if self.lint:
             result["lint"] = self.lint
         if self.lsp_diagnostics:
@@ -1412,32 +1451,16 @@ class ShellFileOperations(FileOperations):
                     )
                 )
 
-        # Capture pre-write content.  Two consumers want it:
-        #
-        #   1. The lint-delta layer (for in-process linters like ast.parse
-        #      and json.loads) needs the previous content to compute the
-        #      set of NEW lint errors introduced by this write.
-        #   2. The LSP layer needs pre/post content to build a line-shift
-        #      map — pre-existing diagnostics below the edit point shift
-        #      when lines are added/removed, and the shift map remaps
-        #      baseline diagnostics into post-edit coordinates so the
-        #      strict (range-aware) delta key matches.
-        #
-        # The set of extensions we capture pre_content for is therefore
-        # the UNION of in-process lint coverage and LSP coverage.  For
-        # extensions outside both sets (binaries, opaque formats),
-        # skipping the read keeps the hot path fast.
+        # Capture pre-write content. Three consumers want it: lint deltas,
+        # LSP line-shift maps, and user-facing +lines/-lines edit stats.
         pre_content: Optional[str] = None
-        want_pre = ext in LINTERS_INPROC or self._lsp_handles_extension(ext)
-        if want_pre:
-            # Best-effort read; failure (file missing, permission) leaves
-            # pre_content as None which makes both downstream consumers
-            # degrade gracefully (lint reports all errors; LSP skips the
-            # shift map).
-            read_cmd = f"cat {self._escape_shell_arg(path)} 2>/dev/null"
-            read_result = self._exec(read_cmd)
-            if read_result.exit_code == 0 and read_result.stdout:
-                pre_content = read_result.stdout
+        # Best-effort pre-read supports lint/LSP deltas and user-facing edit stats.
+        # The agent already provides the full post-write content, so this is the
+        # only extra input needed to compute +lines/-lines for whole-file writes.
+        read_cmd = f"cat {self._escape_shell_arg(path)} 2>/dev/null"
+        read_result = self._exec(read_cmd)
+        if read_result.exit_code == 0:
+            pre_content = read_result.stdout
 
         # ── Line-ending preservation (Roo Code pattern) ──────────────
         # If the file existed with CRLF endings and the agent's content
@@ -1528,6 +1551,7 @@ class ShellFileOperations(FileOperations):
         return WriteResult(
             bytes_written=bytes_written,
             dirs_created=dirs_created,
+            edit_stats=compute_edit_line_stats(pre_content, content),
             lint=lint_result.to_dict() if lint_result else None,
             lsp_diagnostics=lsp_diagnostics,
         )
@@ -1649,6 +1673,7 @@ class ShellFileOperations(FileOperations):
             success=True,
             diff=diff,
             files_modified=[path],
+            edit_stats=compute_unified_diff_line_stats(diff),
             lint=lint_result.to_dict() if lint_result else None,
             # Propagate the LSP diagnostics already captured by the
             # internal ``write_file`` call.  Its baseline was the

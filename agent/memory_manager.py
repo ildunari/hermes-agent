@@ -30,10 +30,13 @@ import logging
 import re
 import inspect
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
+from agent.memory_recall_policy import MemoryRecallConfig, MemoryRecallPolicy, RecallDecision
 from agent.skill_commands import extract_user_instruction_from_skill_message
 from tools.registry import tool_error
 
@@ -44,6 +47,37 @@ logger = logging.getLogger(__name__)
 # teardown indefinitely — the worker threads are daemon, so anything still
 # running past this window dies with the interpreter.
 _SYNC_DRAIN_TIMEOUT_S = 5.0
+
+
+def _estimate_recall_result_count(text: str) -> int:
+    """Best-effort count of recalled memory items without logging contents."""
+    if not text:
+        return 0
+    count = 0
+    for line in str(text).splitlines():
+        if line.strip().startswith("- "):
+            count += 1
+    return count or 1
+
+
+def _safe_recall_reason(reason: str) -> str:
+    """Keep recall audit reasons useful without logging matched sensitive terms."""
+    reason = str(reason or "")[:120]
+    if reason.startswith("trigger:"):
+        return "trigger"
+    return reason
+
+
+def _safe_error_label(error: Any) -> str:
+    """Classify provider errors without persisting exception messages."""
+    if not error:
+        return ""
+    if isinstance(error, BaseException):
+        return type(error).__name__
+    text = str(error)
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_")[:80] or "error"
 
 
 def normalize_tool_schema(schema: Any) -> Optional[Dict[str, Any]]:
@@ -357,10 +391,17 @@ class MemoryManager:
     provider is allowed.  Failures in one provider never block the other.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, recall_policy_config: Optional[Dict[str, Any]] = None) -> None:
         self._providers: List[MemoryProvider] = []
         self._tool_to_provider: Dict[str, MemoryProvider] = {}
         self._has_external: bool = False  # True once a non-builtin provider is added
+        self._recall_policy = MemoryRecallPolicy(
+            MemoryRecallConfig.from_mapping(recall_policy_config or {})
+        )
+        self._agent_context: str = "primary"
+        self._session_id: str = ""
+        self._recall_log_path: Optional[Path] = None
+        self._recall_log_lock = threading.Lock()
         # Background executor for end-of-turn sync/prefetch. Lazily created on
         # first use so the common builtin-only path spawns no extra threads.
         # A single worker serializes a provider's writes (turn N must land
@@ -368,6 +409,53 @@ class MemoryManager:
         # _submit_background() and the sync_all/queue_prefetch_all rationale.
         self._sync_executor: Optional[ThreadPoolExecutor] = None
         self._sync_executor_lock = threading.Lock()
+
+    def _write_recall_event(
+        self,
+        event: str,
+        *,
+        session_id: str = "",
+        turn_number: Optional[int] = None,
+        reason: str = "",
+        provider_count: Optional[int] = None,
+        result_count: int = 0,
+        result_chars: int = 0,
+        injected: Optional[bool] = None,
+        error: Any = "",
+    ) -> None:
+        """Persist tiny recall metadata for audits, never recalled contents."""
+        path = self._recall_log_path
+        if path is None or not self._recall_policy.config.log_events:
+            return
+        payload: Dict[str, Any] = {
+            "ts": time.time(),
+            "session_id": session_id or self._session_id,
+            "turn": turn_number if turn_number is not None else self._recall_policy.turn_number,
+            "event": event,
+            "reason": _safe_recall_reason(reason),
+            "agent_context": self._agent_context,
+            "provider_count": provider_count if provider_count is not None else len(self._providers),
+            "result_count": int(result_count or 0),
+            "result_chars": int(result_chars or 0),
+        }
+        if injected is not None:
+            payload["injected"] = bool(injected)
+        if error:
+            payload["error"] = _safe_error_label(error)
+        try:
+            with self._recall_log_lock:
+                if path.exists() and path.stat().st_size > 5_000_000:
+                    rotated = path.with_suffix(path.suffix + ".1")
+                    try:
+                        rotated.unlink(missing_ok=True)
+                    except TypeError:  # pragma: no cover - Python < 3.8 compatibility
+                        if rotated.exists():
+                            rotated.unlink()
+                    path.replace(rotated)
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.debug("Failed to write memory recall event: %s", exc)
 
     # -- Registration --------------------------------------------------------
 
@@ -396,6 +484,12 @@ class MemoryManager:
             self._has_external = True
 
         self._providers.append(provider)
+        try:
+            provider.configure_recall_policy({
+                "max_prefetch_results": self._recall_policy.config.max_prefetch_results,
+            })
+        except Exception as e:
+            logger.debug("Memory provider '%s' recall policy config ignored: %s", provider.name, e)
 
         # Core tool names are reserved — a memory provider must never register
         # a tool that shadows a built-in (e.g. ``clarify``, ``delegate_task``).
@@ -493,26 +587,91 @@ class MemoryManager:
         return extract_user_instruction_from_skill_message(text)
 
     def prefetch_all(self, query: str, *, session_id: str = "") -> str:
-        """Collect prefetch context from all providers.
+        """Collect prefetched context from providers for the current turn.
 
-        Returns merged context text labeled by provider. Empty providers
-        are skipped. Failures in one provider don't block others.
+        The recall policy decides whether non-empty context should be injected
+        or merely drained. Draining matters: if a queued result is left sitting
+        through a skipped/trivial turn, it can become stale and surface later in
+        the wrong topic.
         """
+        providers = list(self._providers)
+        if not providers:
+            return ""
+
         clean_query = self._strip_skill_scaffolding(query)
         if not clean_query:
             return ""
-        parts = []
-        for provider in self._providers:
-            try:
-                result = provider.prefetch(clean_query, session_id=session_id)
-                if result and result.strip():
-                    parts.append(result)
-            except Exception as e:
-                logger.debug(
-                    "Memory provider '%s' prefetch failed (non-fatal): %s",
-                    provider.name, e,
-                )
-        return "\n\n".join(parts)
+
+        decision = getattr(self._recall_policy, "_pending_start_decision", None)
+        should_inject = True if decision is None else bool(decision.should_recall)
+        recall_query = decision.query if decision and decision.query else clean_query
+
+        # Triggered/first-turn/cadence recall should happen on this turn, not
+        # only after the next completed exchange. Non-recall turns must not call
+        # prefetch(), because some providers do live backend work there.
+        immediate_parts: List[str] = []
+        if decision and decision.should_recall and decision.immediate:
+            immediate_parts = self._recall_now_all(recall_query, session_id=session_id, providers=providers)
+        if not should_inject:
+            self._discard_prefetch_all(session_id=session_id, providers=providers)
+            self._recall_policy.note_prefetch_result(
+                "",
+                injected=False,
+                reason=(decision.reason if decision else "not_due"),
+            )
+            self._write_recall_event(
+                "skipped_injection",
+                session_id=session_id,
+                reason=(decision.reason if decision else "not_due"),
+                provider_count=len(providers),
+                injected=False,
+            )
+            return ""
+
+        parts = list(immediate_parts)
+        if not (decision and decision.immediate):
+            for provider in providers:
+                try:
+                    result = provider.prefetch(recall_query, session_id=session_id)
+                    if result and result.strip():
+                        parts.append(result)
+                except Exception as e:
+                    self._recall_policy.note_error(f"prefetch:{provider.name}")
+                    self._write_recall_event(
+                        "error",
+                        session_id=session_id,
+                        reason=f"prefetch:{provider.name}",
+                        provider_count=len(providers),
+                        error=e,
+                    )
+                    logger.debug(
+                        "Memory provider '%s' prefetch failed (non-fatal): %s",
+                        provider.name, e,
+                    )
+        elif decision and decision.immediate:
+            # Drop any older cached result after every current-turn recall
+            # attempt, even if the immediate search returns empty/errors. An
+            # older background result must never survive into a later turn.
+            self._discard_prefetch_all(session_id=session_id, providers=providers)
+        merged = "\n\n".join(parts)
+        injected = bool(merged and should_inject)
+        self._recall_policy.note_prefetch_result(
+            merged,
+            injected=injected,
+            reason=(decision.reason if decision else "unmanaged"),
+        )
+        self._write_recall_event(
+            "injected" if injected else "empty",
+            session_id=session_id,
+            reason=(decision.reason if decision else "unmanaged"),
+            provider_count=len(providers),
+            result_count=_estimate_recall_result_count(merged),
+            result_chars=len(merged or ""),
+            injected=injected,
+        )
+        if not should_inject:
+            return ""
+        return merged
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn.
@@ -524,22 +683,116 @@ class MemoryManager:
         providers = list(self._providers)
         if not providers:
             return
-
+        if self._recall_policy.turn_number <= 0:
+            decision = RecallDecision(True, "legacy_unmanaged", query or "", immediate=False)
+        else:
+            decision = self._recall_policy.on_turn_complete(query)
+        if self._agent_context in {"cron", "flush"}:
+            decision = RecallDecision(False, "agent_context_quiet", trivial=decision.trivial)
+        start_decision = getattr(self._recall_policy, "_pending_start_decision", None)
+        if (
+            start_decision
+            and start_decision.should_recall
+            and start_decision.immediate
+            and self._recall_policy.last_injected_turn == self._recall_policy.turn_number
+        ):
+            decision = RecallDecision(False, "current_turn_already_recalled", trivial=decision.trivial)
+        if not decision.should_recall:
+            self._recall_policy.note_queued(decision, provider_count=len(providers))
+            self._write_recall_event(
+                "skipped_queue",
+                session_id=session_id,
+                reason=decision.reason,
+                provider_count=len(providers),
+                injected=False,
+            )
+            return
         clean_query = self._strip_skill_scaffolding(query)
         if not clean_query:
             return
+        recall_query = (self._strip_skill_scaffolding(decision.query) if decision.query else None) or clean_query
+        self._recall_policy.note_queued(decision, provider_count=len(providers))
+        self._write_recall_event(
+            "queued",
+            session_id=session_id,
+            reason=decision.reason,
+            provider_count=len(providers),
+        )
 
         def _run() -> None:
-            for provider in providers:
-                try:
-                    provider.queue_prefetch(clean_query, session_id=session_id)
-                except Exception as e:
-                    logger.debug(
-                        "Memory provider '%s' queue_prefetch failed (non-fatal): %s",
-                        provider.name, e,
-                    )
+            self._queue_prefetch_inline(recall_query, session_id=session_id, providers=providers)
 
         self._submit_background(_run)
+
+    def _queue_prefetch_inline(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        providers: Optional[List[MemoryProvider]] = None,
+    ) -> None:
+        """Queue provider prefetch synchronously in the current worker/thread."""
+        for provider in list(providers or self._providers):
+            try:
+                provider.queue_prefetch(query, session_id=session_id)
+            except Exception as e:
+                self._recall_policy.note_error(f"queue:{provider.name}")
+                self._write_recall_event(
+                    "error",
+                    session_id=session_id,
+                    reason=f"queue:{provider.name}",
+                    provider_count=len(providers or self._providers),
+                    error=e,
+                )
+                logger.debug(
+                    "Memory provider '%s' queue_prefetch failed (non-fatal): %s",
+                    provider.name, e,
+                )
+
+    def _recall_now_all(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        providers: Optional[List[MemoryProvider]] = None,
+    ) -> List[str]:
+        """Run synchronous recall for an immediate due/triggered turn."""
+        parts: List[str] = []
+        for provider in list(providers or self._providers):
+            try:
+                result = provider.recall_now(query, session_id=session_id)
+                if result and result.strip():
+                    parts.append(result)
+            except Exception as e:
+                self._recall_policy.note_error(f"recall_now:{provider.name}")
+                self._write_recall_event(
+                    "error",
+                    session_id=session_id,
+                    reason=f"recall_now:{provider.name}",
+                    provider_count=len(providers or self._providers),
+                    error=e,
+                )
+                logger.debug(
+                    "Memory provider '%s' recall_now failed (non-fatal): %s",
+                    provider.name, e,
+                )
+        return parts
+
+    def _discard_prefetch_all(
+        self,
+        *,
+        session_id: str = "",
+        providers: Optional[List[MemoryProvider]] = None,
+    ) -> None:
+        """Discard cached provider recall without calling live prefetch."""
+        for provider in list(providers or self._providers):
+            try:
+                provider.discard_prefetch(session_id=session_id)
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' discard_prefetch failed (non-fatal): %s",
+                    provider.name, e,
+                )
 
     # -- Sync ----------------------------------------------------------------
 
@@ -758,10 +1011,16 @@ class MemoryManager:
     # -- Lifecycle hooks -----------------------------------------------------
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
-        """Notify all providers of a new turn.
+        """Notify all providers of a new turn and update recall policy.
 
         kwargs may include: remaining_tokens, model, platform, tool_count.
         """
+        try:
+            self._recall_policy.on_turn_start(turn_number, message)
+        except Exception as e:
+            self._recall_policy.note_error("policy_turn_start")
+            self._write_recall_event("error", reason="policy_turn_start", error=e)
+            logger.debug("Memory recall policy on_turn_start failed: %s", e)
         for provider in self._providers:
             try:
                 provider.on_turn_start(turn_number, message, **kwargs)
@@ -858,6 +1117,8 @@ class MemoryManager:
         """
         if not new_session_id:
             return
+        self._recall_policy.reset()
+        self._session_id = str(new_session_id)
         # Only forward ``rewound`` when it's actually set. Passing it
         # unconditionally would inject ``rewound=False`` into every
         # provider's **kwargs for the common /resume, /branch, /new, and
@@ -1115,6 +1376,14 @@ class MemoryManager:
         except Exception as e:  # pragma: no cover
             logger.debug("Memory sync executor drain wait failed: %s", e)
 
+    def recall_stats(self) -> Dict[str, Any]:
+        """Return manager-observed rolling recall stats for diagnostics/tests."""
+        stats = self._recall_policy.stats()
+        stats["provider_count"] = len(self._providers)
+        stats["agent_context"] = self._agent_context
+        stats["recall_log_path"] = str(self._recall_log_path) if self._recall_log_path else ""
+        return stats
+
     def initialize_all(self, session_id: str, **kwargs) -> None:
         """Initialize all providers.
 
@@ -1125,6 +1394,13 @@ class MemoryManager:
         if "hermes_home" not in kwargs:
             from hermes_constants import get_hermes_home
             kwargs["hermes_home"] = str(get_hermes_home())
+        self._agent_context = str(kwargs.get("agent_context") or kwargs.get("platform") or "primary")
+        self._session_id = str(session_id or "")
+        try:
+            self._recall_log_path = Path(str(kwargs["hermes_home"])) / "logs" / "memory-recall-events.jsonl"
+            self._recall_log_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            self._recall_log_path = None
         for provider in self._providers:
             try:
                 provider.initialize(session_id=session_id, **kwargs)

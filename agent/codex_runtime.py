@@ -814,6 +814,81 @@ def _consume_codex_event_stream(
     return final
 
 
+def _run_codex_high_level_stream_compat(agent, api_kwargs: dict, active_client: Any, on_first_delta=None):
+    """Compatibility path for mocks/providers exposing only responses.stream()."""
+    has_tool_calls = False
+    first_delta_fired = False
+    collected_output_items: list = []
+    agent._codex_streamed_text_parts = []
+    with active_client.responses.stream(**api_kwargs) as stream:
+        try:
+            for event in stream:
+                agent._codex_stream_last_event_ts = time.time()
+                agent._touch_activity("receiving stream response")
+                if agent._interrupt_requested:
+                    break
+                event_type = getattr(event, "type", "")
+                if "output_text.delta" in event_type or event_type == "response.output_text.delta":
+                    delta_text = getattr(event, "delta", "")
+                    if delta_text:
+                        agent._codex_streamed_text_parts.append(delta_text)
+                    if delta_text and not has_tool_calls:
+                        if not first_delta_fired:
+                            first_delta_fired = True
+                            if on_first_delta:
+                                try:
+                                    on_first_delta()
+                                except Exception:
+                                    pass
+                        agent._fire_stream_delta(delta_text)
+                elif "function_call" in event_type:
+                    has_tool_calls = True
+                elif "reasoning" in event_type and "delta" in event_type:
+                    reasoning_text = getattr(event, "delta", "")
+                    if reasoning_text:
+                        agent._fire_reasoning_delta(reasoning_text)
+                elif event_type == "response.output_item.done":
+                    done_item = getattr(event, "item", None)
+                    if done_item is not None:
+                        collected_output_items.append(done_item)
+                elif event_type in {"response.incomplete", "response.failed"}:
+                    resp_obj = getattr(event, "response", None)
+                    status = getattr(resp_obj, "status", None) if resp_obj else None
+                    incomplete_details = getattr(resp_obj, "incomplete_details", None) if resp_obj else None
+                    logger.warning(
+                        "Codex Responses stream received terminal event %s "
+                        "(status=%s, incomplete_details=%s, streamed_chars=%d). %s",
+                        event_type, status, incomplete_details,
+                        sum(len(p) for p in agent._codex_streamed_text_parts),
+                        agent._client_log_context(),
+                    )
+            final_response = stream.get_final_response()
+        except TypeError as exc:
+            if "'NoneType' object is not iterable" not in str(exc):
+                raise
+            final_response = SimpleNamespace(output=[], usage=None)
+            logger.warning(
+                "Codex stream: recovered from SDK terminal output=null "
+                "parse failure using %d output items and %d text deltas. %s",
+                len(collected_output_items),
+                len(agent._codex_streamed_text_parts),
+                agent._client_log_context(),
+            )
+    _out = getattr(final_response, "output", None)
+    if isinstance(_out, list) and not _out:
+        if collected_output_items:
+            final_response.output = list(collected_output_items)
+        elif agent._codex_streamed_text_parts and not has_tool_calls:
+            assembled = "".join(agent._codex_streamed_text_parts)
+            final_response.output = [SimpleNamespace(
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text=assembled)],
+            )]
+    return final_response
+
+
 def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta=None):
     """Execute one streaming Responses API request and return the final response.
 
@@ -853,7 +928,15 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         stream_kwargs["stream"] = True
 
         try:
-            event_stream = active_client.responses.create(**stream_kwargs)
+            create_fn = getattr(active_client.responses, "create", None)
+            if not callable(create_fn):
+                return _run_codex_high_level_stream_compat(
+                    agent,
+                    api_kwargs,
+                    active_client,
+                    on_first_delta=on_first_delta,
+                )
+            event_stream = create_fn(**stream_kwargs)
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
             if attempt < max_stream_retries:
                 logger.debug(

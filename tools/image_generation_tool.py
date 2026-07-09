@@ -1271,9 +1271,145 @@ def _read_configured_image_provider():
     return None
 
 
+def _read_configured_image_fallback() -> tuple[Optional[str], Optional[str]]:
+    """Return ``(provider, model)`` from image_gen fallback config.
+
+    Supported shapes:
+
+    ```yaml
+    image_gen:
+      fallback_provider: gemini
+      fallback_model: gemini-3.1-flash-image
+    ```
+
+    or:
+
+    ```yaml
+    image_gen:
+      fallback:
+        provider: gemini
+        model: gemini-3.1-flash-image
+    ```
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        section = cfg.get("image_gen") if isinstance(cfg, dict) else None
+        if not isinstance(section, dict):
+            return None, None
+
+        raw_nested = section.get("fallback")
+        nested: Dict[str, Any] = raw_nested if isinstance(raw_nested, dict) else {}
+        provider = section.get("fallback_provider") or nested.get("provider")
+        model = section.get("fallback_model") or nested.get("model")
+
+        provider_value = provider.strip() if isinstance(provider, str) and provider.strip() else None
+        model_value = model.strip() if isinstance(model, str) and model.strip() else None
+        return provider_value, model_value
+    except Exception as exc:
+        logger.debug("Could not read image_gen fallback config: %s", exc)
+    return None, None
+
+
+def _plugin_provider_kwargs(
+    *,
+    prompt: str,
+    aspect_ratio: str,
+    model: Optional[str] = None,
+    image_url: Optional[str] = None,
+    reference_image_urls: Optional[list] = None,
+) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
+    if model:
+        kwargs["model"] = model
+    if isinstance(image_url, str) and image_url.strip():
+        kwargs["image_url"] = image_url.strip()
+    norm_refs = None
+    if reference_image_urls is not None:
+        from agent.image_gen_provider import normalize_reference_images
+
+        norm_refs = normalize_reference_images(reference_image_urls)
+    if norm_refs:
+        kwargs["reference_image_urls"] = norm_refs
+    return kwargs
+
+
+def _call_plugin_provider(
+    provider: Any,
+    *,
+    prompt: str,
+    aspect_ratio: str,
+    model: Optional[str] = None,
+    image_url: Optional[str] = None,
+    reference_image_urls: Optional[list] = None,
+) -> Dict[str, Any]:
+    kwargs = _plugin_provider_kwargs(
+        prompt=prompt,
+        aspect_ratio=aspect_ratio,
+        model=model,
+        image_url=image_url,
+        reference_image_urls=reference_image_urls,
+    )
+    try:
+        result = provider.generate(**kwargs)
+    except TypeError as exc:
+        # A provider whose generate() signature predates image_url support
+        # (third-party plugin not yet updated) — retry without the new kwargs
+        # so text-to-image keeps working, but surface a clear note when the
+        # user actually asked for an edit.
+        if "image_url" in kwargs or "reference_image_urls" in kwargs:
+            logger.warning(
+                "image_gen provider '%s' rejected image-to-image kwargs "
+                "(signature too narrow): %s",
+                getattr(provider, "name", "?"), exc,
+            )
+            return {
+                "success": False,
+                "image": None,
+                "error": (
+                    f"Provider '{getattr(provider, 'name', '?')}' does not "
+                    f"support image-to-image / editing (its generate() "
+                    f"signature is out of date with the image_generate schema). "
+                    f"Omit image_url for text-to-image, or pick a backend that "
+                    f"supports editing via `hermes tools` → Image Generation."
+                ),
+                "error_type": "modality_unsupported",
+            }
+        logger.warning(
+            "Image gen provider '%s' raised TypeError: %s",
+            getattr(provider, "name", "?"), exc,
+        )
+        return {
+            "success": False,
+            "image": None,
+            "error": f"Provider '{getattr(provider, 'name', '?')}' error: {exc}",
+            "error_type": "provider_exception",
+        }
+    except Exception as exc:
+        logger.warning(
+            "Image gen provider '%s' raised: %s",
+            getattr(provider, "name", "?"), exc,
+        )
+        return {
+            "success": False,
+            "image": None,
+            "error": f"Provider '{getattr(provider, 'name', '?')}' error: {exc}",
+            "error_type": "provider_exception",
+        }
+    if not isinstance(result, dict):
+        return {
+            "success": False,
+            "image": None,
+            "error": "Provider returned a non-dict result",
+            "error_type": "provider_contract",
+        }
+    return result
+
+
 def _dispatch_to_plugin_provider(
     prompt: str,
     aspect_ratio: str,
+    *,
     image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None,
 ):
@@ -1333,71 +1469,47 @@ def _dispatch_to_plugin_provider(
             "error_type": "provider_not_registered",
         })
 
-    kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
-    try:
-        if configured_model:
-            kwargs["model"] = configured_model
-        if isinstance(image_url, str) and image_url.strip():
-            kwargs["image_url"] = image_url.strip()
-        norm_refs = None
-        if reference_image_urls is not None:
-            from agent.image_gen_provider import normalize_reference_images
+    result = _call_plugin_provider(
+        provider,
+        prompt=prompt,
+        aspect_ratio=aspect_ratio,
+        model=configured_model,
+        image_url=image_url,
+        reference_image_urls=reference_image_urls,
+    )
 
-            norm_refs = normalize_reference_images(reference_image_urls)
-        if norm_refs:
-            kwargs["reference_image_urls"] = norm_refs
-        result = provider.generate(**kwargs)
-    except TypeError as exc:
-        # A provider whose generate() signature predates image_url support
-        # (third-party plugin not yet updated) — retry without the new kwargs
-        # so text-to-image keeps working, but surface a clear note when the
-        # user actually asked for an edit.
-        if "image_url" in kwargs or "reference_image_urls" in kwargs:
-            logger.warning(
-                "image_gen provider '%s' rejected image-to-image kwargs "
-                "(signature too narrow): %s",
-                getattr(provider, "name", "?"), exc,
-            )
-            return json.dumps({
-                "success": False,
-                "image": None,
-                "error": (
-                    f"Provider '{getattr(provider, 'name', '?')}' does not "
-                    f"support image-to-image / editing (its generate() "
-                    f"signature is out of date with the image_generate schema). "
-                    f"Omit image_url for text-to-image, or pick a backend that "
-                    f"supports editing via `hermes tools` → Image Generation."
-                ),
-                "error_type": "modality_unsupported",
-            })
-        logger.warning(
-            "Image gen provider '%s' raised TypeError: %s",
-            getattr(provider, "name", "?"), exc,
-        )
-        return json.dumps({
-            "success": False,
-            "image": None,
-            "error": f"Provider '{getattr(provider, 'name', '?')}' error: {exc}",
-            "error_type": "provider_exception",
-        })
-    except Exception as exc:
-        logger.warning(
-            "Image gen provider '%s' raised: %s",
-            getattr(provider, "name", "?"), exc,
-        )
-        return json.dumps({
-            "success": False,
-            "image": None,
-            "error": f"Provider '{getattr(provider, 'name', '?')}' error: {exc}",
-            "error_type": "provider_exception",
-        })
-    if not isinstance(result, dict):
-        return json.dumps({
-            "success": False,
-            "image": None,
-            "error": "Provider returned a non-dict result",
-            "error_type": "provider_contract",
-        })
+    if result.get("success") is not True:
+        fallback_provider_name, fallback_model = _read_configured_image_fallback()
+        if fallback_provider_name and fallback_provider_name != configured:
+            fallback_provider = get_provider(fallback_provider_name)
+            if fallback_provider is None:
+                try:
+                    _ensure_plugins_discovered(force=True)
+                    fallback_provider = get_provider(fallback_provider_name)
+                except Exception as exc:
+                    logger.debug("image_gen fallback force-refresh skipped: %s", exc)
+            if fallback_provider is not None:
+                primary_error = result.get("error")
+                fallback_result = _call_plugin_provider(
+                    fallback_provider,
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    model=fallback_model,
+                    image_url=image_url,
+                    reference_image_urls=reference_image_urls,
+                )
+                if fallback_result.get("success") is True:
+                    fallback_result.setdefault("fallback", True)
+                    fallback_result.setdefault("primary_provider", configured)
+                    if configured_model:
+                        fallback_result.setdefault("primary_model", configured_model)
+                    if primary_error:
+                        fallback_result.setdefault("primary_error", primary_error)
+                    return json.dumps(fallback_result)
+                fallback_result.setdefault("primary_error", primary_error)
+                fallback_result.setdefault("fallback_provider", fallback_provider_name)
+                return json.dumps(fallback_result)
+
     return json.dumps(result)
 
 
@@ -1517,15 +1629,21 @@ def _handle_image_generate(args, **kw):
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
     image_url = args.get("image_url")
     reference_image_urls = args.get("reference_image_urls")
+    if isinstance(reference_image_urls, str):
+        reference_image_urls = [reference_image_urls]
+    if not isinstance(reference_image_urls, list):
+        reference_image_urls = None
     task_id = kw.get("task_id")
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path). When ``image_gen.provider == "krea"`` this
     # already reaches the Krea plugin's managed gateway path.
     dispatched = _dispatch_to_plugin_provider(
-        prompt, aspect_ratio,
-        image_url=image_url,
-        reference_image_urls=reference_image_urls,
+        prompt,
+        aspect_ratio,
+        image_url=image_url if isinstance(image_url, str) else None,
+        reference_image_urls=[x for x in reference_image_urls if isinstance(x, str) and x.strip()]
+        if reference_image_urls else None,
     )
     if dispatched is not None:
         return _postprocess_image_generate_result(dispatched, task_id=task_id)

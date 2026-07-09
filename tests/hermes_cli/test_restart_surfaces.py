@@ -1,6 +1,10 @@
 import json
+import subprocess
+
+import pytest
 
 from hermes_cli.restart_surfaces import (
+    RestartTarget,
     describe_plan,
     enqueue_detached_restart,
     normalize_scope,
@@ -9,14 +13,27 @@ from hermes_cli.restart_surfaces import (
 )
 
 
-def test_gateway_scope_plan_includes_user_domain_and_bookie_gui_domain():
+@pytest.fixture(autouse=True)
+def _no_live_webui_probe(monkeypatch):
+    """Point the WebUI busy probe at a dead port so tests never touch a real
+    server (a live WebUI with active runs would make restart_scope wait)."""
+    monkeypatch.setattr(
+        "hermes_cli.restart_surfaces.WEBUI_HEALTH_URL",
+        "http://127.0.0.1:1/health",
+    )
+    monkeypatch.setattr("hermes_cli.restart_surfaces.WEBUI_HEALTH_TIMEOUT", 0.05)
+
+
+def test_gateway_scope_plan_includes_profile_gateway_domains():
     plan = describe_plan("gateways", uid=503)
     assert "user/503/ai.hermes.gateway" in plan
     assert "user/503/ai.hermes.gateway-gpt" in plan
     assert "user/503/ai.hermes.gateway-coding" in plan
     assert "user/503/ai.hermes.gateway-email-assistant" in plan
     assert "user/503/ai.hermes.gateway-browser-agent" in plan
+    assert "user/503/ai.hermes.gateway-design" in plan
     assert "user/503/ai.hermes.gateway-bookie" in plan
+    assert "gui/503/ai.hermes.gateway-design" in plan
     assert "gui/503/ai.hermes.gateway-bookie" in plan
     assert "user/503/ai.hermes.webui" in plan
     assert "system/com.kosta.hermes-dashboard-system" in plan
@@ -30,6 +47,7 @@ def test_full_hermes_scope_includes_known_surfaces():
     labels = {target.label for target in targets_for_scope("hermes")}
     assert "ai.hermes.gateway" in labels
     assert "ai.hermes.gateway-gpt" in labels
+    assert "ai.hermes.gateway-design" in labels
     assert "ai.hermes.gateway-bookie" in labels
     assert "ai.hermes.webui" in labels
     assert "ai.hermes.desktop-remote-dashboard" in labels
@@ -50,6 +68,70 @@ def test_restart_scope_targets_are_unique():
     for scope in ("gateways", "hermes"):
         keys = [(target.domain_template, target.label) for target in targets_for_scope(scope)]
         assert len(keys) == len(set(keys))
+
+
+def test_restart_scope_resolves_required_gateway_gui_alternate(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway", required=True)
+    calls = []
+
+    def fake_run(cmd, *, timeout=30):
+        calls.append(cmd)
+
+        class Proc:
+            stdout = ""
+            stderr = ""
+            returncode = 0
+
+        joined = "/".join(cmd)
+        if cmd[:2] == ["/bin/launchctl", "print"] and "user/" in joined:
+            Proc.returncode = 1
+        elif cmd[:2] == ["/bin/launchctl", "print"] and "gui/" in joined:
+            Proc.returncode = 0
+        elif cmd[:3] == ["/bin/launchctl", "kickstart", "-k"]:
+            assert cmd[-1].startswith("gui/")
+            Proc.returncode = 0
+        return Proc()
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (target,))
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": ()})
+    monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_webui_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    assert restart_surfaces.restart_scope("hermes", delay=0) == 0
+    assert any("gui/" in "/".join(cmd) for cmd in calls)
+
+
+def test_restart_scope_fails_when_verify_port_missing(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway", required=True)
+
+    def fake_run(cmd, *, timeout=30):
+        class Proc:
+            stdout = ""
+            stderr = ""
+            returncode = 0
+
+        if cmd[:2] == ["bash", "-lc"] and "lsof" in cmd[-1]:
+            Proc.returncode = 1
+            Proc.stdout = ""
+        return Proc()
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (target,))
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": (9119,)})
+    monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_webui_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    assert restart_surfaces.restart_scope("hermes", delay=0) == 1
+    assert "port 9119 is not listening" in (tmp_path / "restart.log").read_text()
 
 
 def test_describe_plan_names_canonical_command_and_scope_summary():
@@ -84,6 +166,28 @@ def test_restart_scope_dry_run_does_not_call_launchctl(monkeypatch, tmp_path):
 def test_scope_aliases():
     assert normalize_scope("restart-gateways") == "gateways"
     assert normalize_scope("all") == "hermes"
+
+
+def test_system_restart_sudoers_content_is_narrow():
+    from hermes_cli import restart_surfaces
+
+    content = restart_surfaces.system_restart_sudoers_content("Kosta")
+
+    assert "Kosta ALL=(root) NOPASSWD: HERMES_RESTART_SURFACES" in content
+    assert "/bin/launchctl kickstart -k system/com.kosta.hermes-dashboard-system" in content
+    assert "/bin/launchctl kickstart -k system/com.kosta.hermes-workspace-proxy-system" in content
+    assert "ALL" not in content.split("Cmnd_Alias HERMES_RESTART_SURFACES = ", 1)[1].split("\n", 1)[0]
+    assert "bootout" not in content
+    assert "unload" not in content
+
+
+def test_cli_can_print_system_restart_sudoers_dry_run(capsys):
+    from hermes_cli.restart_surfaces import main
+
+    assert main(["--install-system-restart-sudoers", "--dry-run", "--sudoers-user", "Kosta"]) == 0
+    output = capsys.readouterr().out
+    assert "Cmnd_Alias HERMES_RESTART_SURFACES" in output
+    assert "Kosta ALL=(root) NOPASSWD" in output
 
 
 def test_enqueue_restart_can_request_webui_completion_marker(monkeypatch, tmp_path):
@@ -124,6 +228,35 @@ def test_enqueue_restart_can_request_origin_completion_notification(monkeypatch,
     cmd = launched["cmd"]
     notify_index = cmd.index("--notify-origin-json") + 1
     assert json.loads(cmd[notify_index]) == origin
+
+
+def test_cli_enqueue_detached_uses_safe_launcher(monkeypatch, capsys, tmp_path):
+    launched = {}
+
+    def fake_enqueue(scope, **kwargs):
+        launched["scope"] = scope
+        launched["kwargs"] = kwargs
+        return "queued"
+
+    monkeypatch.setattr("hermes_cli.restart_surfaces.enqueue_detached_restart", fake_enqueue)
+    from hermes_cli.restart_surfaces import main
+
+    marker = tmp_path / "restart.json"
+    assert main([
+        "--scope", "hermes",
+        "--delay", "0",
+        "--completion-marker", str(marker),
+        "--safe-wait-timeout", "12",
+        "--safe-wait-interval", "0.5",
+        "--enqueue-detached",
+    ]) == 0
+
+    assert capsys.readouterr().out.strip() == "queued"
+    assert launched["scope"] == "hermes"
+    assert launched["kwargs"]["delay"] == 0
+    assert launched["kwargs"]["completion_marker"] == str(marker)
+    assert launched["kwargs"]["safe_wait_timeout"] == 12
+    assert launched["kwargs"]["safe_wait_interval"] == 0.5
 
 
 def test_enqueue_restart_can_stage_until_sessions_drain(monkeypatch, tmp_path):
@@ -171,12 +304,13 @@ def test_restart_scope_waits_for_active_gateway_tasks_before_launchctl(monkeypat
 
     monkeypatch.setattr("hermes_cli.restart_surfaces.LOG_PATH", tmp_path / "restart.log")
     monkeypatch.setattr("hermes_cli.restart_surfaces._gateway_busy_details", fake_busy)
+    monkeypatch.setattr("hermes_cli.restart_surfaces._webui_busy_details", lambda _targets: [])
     monkeypatch.setattr("hermes_cli.restart_surfaces._run", fake_run)
     monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
 
     assert restart_scope("gateways", delay=0, safe_wait_timeout=10, safe_wait_interval=0.1) == 0
     assert calls
-    assert calls[0][:2] == ["launchctl", "print"]
+    assert calls[0][:2] == ["/bin/launchctl", "print"]
 
 
 def test_restart_scope_times_out_before_launchctl_when_gateway_stays_busy(monkeypatch, tmp_path):
@@ -208,6 +342,104 @@ def test_restart_scope_times_out_before_launchctl_when_gateway_stays_busy(monkey
     ) == 1
     assert calls == []
     assert "finished with errors" in notifications[0][1]
+
+
+def test_run_converts_subprocess_timeout_to_failed_process(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+
+    def fake_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(["/usr/bin/sudo", "-n", "/bin/launchctl"], timeout=3)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    proc = restart_surfaces._run(["/usr/bin/sudo", "-n", "/bin/launchctl"], timeout=3)
+
+    assert proc.returncode == 124
+    assert "timed out after 3s" in proc.stderr
+    assert "exit=124" in (tmp_path / "restart.log").read_text()
+
+
+def test_optional_system_targets_try_noninteractive_sudo_without_modifying_plists(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    calls = []
+
+    def fake_run(cmd, *, timeout=30):
+        calls.append(cmd)
+
+        class Proc:
+            returncode = 0 if cmd[:2] == ["/bin/launchctl", "print"] else 1
+            stdout = ""
+            stderr = "operation not permitted"
+
+        return Proc()
+
+    optional_system = RestartTarget(
+        "system",
+        "com.kosta.hermes-workspace-system",
+        required=False,
+        description="workspace backend",
+    )
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (optional_system,))
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": ()})
+    monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    assert restart_surfaces.restart_scope("hermes", delay=0) == 0
+
+    assert ["/bin/launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
+    assert ["/usr/bin/sudo", "-n", "/bin/launchctl", "kickstart", "-k", "system/com.kosta.hermes-workspace-system"] in calls
+    flattened = "\n".join(" ".join(cmd) for cmd in calls)
+    assert "bootout" not in flattened
+    assert "unload" not in flattened
+    assert "remove" not in flattened
+    assert "sudo was required but unavailable non-interactively" in (tmp_path / "restart.log").read_text()
+
+
+def test_required_system_target_uses_sudo_fallback_and_reports_timeout(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    calls = []
+
+    def fake_run(cmd, *, timeout=30):
+        calls.append(cmd)
+
+        class Proc:
+            stdout = ""
+            stderr = ""
+
+        proc = Proc()
+        if cmd[:2] == ["/bin/launchctl", "print"]:
+            proc.returncode = 0
+        elif cmd == ["/bin/launchctl", "kickstart", "-k", "system/com.kosta.required"]:
+            proc.returncode = 1
+            proc.stderr = "operation not permitted"
+        elif cmd == ["/usr/bin/sudo", "-n", "/bin/launchctl", "kickstart", "-k", "system/com.kosta.required"]:
+            proc.returncode = 124
+            proc.stderr = "timed out after 30s"
+        else:
+            proc.returncode = 0
+        return proc
+
+    required_system = RestartTarget("system", "com.kosta.required", required=True)
+    marker = tmp_path / "status.json"
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (required_system,))
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": ()})
+    monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    assert restart_surfaces.restart_scope("hermes", delay=0, completion_marker=str(marker)) == 1
+
+    assert ["/usr/bin/sudo", "-n", "/bin/launchctl", "kickstart", "-k", "system/com.kosta.required"] in calls
+    payload = json.loads(marker.read_text())
+    assert payload["exit_code"] == 1
+    assert "finished with errors" in payload["message"]
 
 
 def test_gateway_busy_details_ignores_stale_dead_status(monkeypatch, tmp_path):
@@ -288,25 +520,128 @@ def test_restart_scope_writes_completion_marker(monkeypatch, tmp_path):
     assert "Hermes gateways restart finished" in payload["message"]
 
 
-def test_main_writes_completion_marker_when_restart_scope_crashes(monkeypatch, tmp_path):
+def test_main_reports_completion_when_restart_scope_crashes(monkeypatch, tmp_path):
     from hermes_cli import restart_surfaces
 
     marker = tmp_path / "status.json"
+    notifications = []
     monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(restart_surfaces, "restart_scope", boom)
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_notify_origin",
+        lambda origin, message: notifications.append(("origin", origin, message)),
+    )
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_notify_tty",
+        lambda tty, message: notifications.append(("tty", tty, message)),
+    )
 
-    try:
-        restart_surfaces.main(["--scope", "gateways", "--completion-marker", str(marker)])
-    except RuntimeError:
-        pass
-    else:  # pragma: no cover - should not happen
-        raise AssertionError("main should propagate restart_scope errors")
+    assert restart_surfaces.main([
+        "--scope", "gateways",
+        "--completion-marker", str(marker),
+        "--notify-origin-json", '{"platform":"telegram","chat_id":"123"}',
+        "--notify-tty", "/dev/ttys001",
+    ]) == 1
 
     payload = json.loads(marker.read_text())
     assert payload["status"] == "complete"
     assert payload["exit_code"] == 1
     assert "finished with errors" in payload["message"]
+    assert notifications[0] == ("origin", '{"platform":"telegram","chat_id":"123"}', payload["message"])
+    assert notifications[1] == ("tty", "/dev/ttys001", payload["message"])
+
+
+def _webui_target():
+    return RestartTarget("user/{uid}", "ai.hermes.webui", description="Hermes WebUI/dashboard")
+
+
+def test_webui_busy_details_skipped_when_no_webui_target(monkeypatch):
+    from hermes_cli import restart_surfaces
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("health probe must not run without a WebUI target")
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    gateway_only = [RestartTarget("user/{uid}", "ai.hermes.gateway")]
+    assert restart_surfaces._webui_busy_details(gateway_only) == []
+
+
+def test_webui_busy_details_reports_active_runs(monkeypatch):
+    import io
+    from hermes_cli import restart_surfaces
+
+    class FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    payload = json.dumps({"active_runs": 2, "oldest_run_age_seconds": 41.5}).encode()
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda url, timeout=None: FakeResponse(payload),
+    )
+    busy = restart_surfaces._webui_busy_details([_webui_target()])
+    assert busy == ["ai.hermes.webui: active_runs=2, oldest_run_age_seconds=41.5"]
+
+
+def test_webui_busy_details_idle_and_unreachable_are_not_busy(monkeypatch):
+    import io
+    from hermes_cli import restart_surfaces
+
+    class FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    idle = json.dumps({"active_runs": 0}).encode()
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda url, timeout=None: FakeResponse(idle),
+    )
+    assert restart_surfaces._webui_busy_details([_webui_target()]) == []
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", refuse)
+    assert restart_surfaces._webui_busy_details([_webui_target()]) == []
+
+
+def test_restart_scope_waits_for_webui_active_runs_before_launchctl(monkeypatch, tmp_path):
+    calls = []
+    webui_busy_sequence = [
+        ["ai.hermes.webui: active_runs=1"],
+        [],
+    ]
+
+    def fake_run(cmd, *, timeout=30):
+        calls.append(cmd)
+
+        class Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr("hermes_cli.restart_surfaces.LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr("hermes_cli.restart_surfaces._gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(
+        "hermes_cli.restart_surfaces._webui_busy_details",
+        lambda _targets: webui_busy_sequence.pop(0),
+    )
+    monkeypatch.setattr("hermes_cli.restart_surfaces._run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    assert restart_scope("hermes", delay=0, safe_wait_timeout=10, safe_wait_interval=0.1) == 0
+    assert calls

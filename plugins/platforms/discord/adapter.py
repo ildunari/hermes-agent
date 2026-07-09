@@ -4176,9 +4176,13 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_update(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/update", "Update initiated~")
 
-        @tree.command(name="restart", description="Gracefully restart the Hermes gateway")
-        async def slash_restart(interaction: discord.Interaction):
-            await self._run_simple_slash(interaction, "/restart", "Restart requested~")
+        @tree.command(name="restart-gateways", description="Queue a detached restart of Hermes gateways")
+        async def slash_restart_gateways(interaction: discord.Interaction):
+            await self._run_simple_slash(interaction, "/restart-gateways", "Gateway restart queued~")
+
+        @tree.command(name="restart-hermes", description="Queue a detached restart of all Hermes surfaces")
+        async def slash_restart_hermes(interaction: discord.Interaction):
+            await self._run_simple_slash(interaction, "/restart-hermes", "Hermes restart queued~")
 
         @tree.command(name="approve", description="Approve a pending dangerous command")
         @discord.app_commands.describe(scope="Optional: 'all', 'session', 'always', 'all session', 'all always'")
@@ -4270,6 +4274,8 @@ class DiscordAdapter(BasePlatformAdapter):
 
             for cmd_def in COMMAND_REGISTRY:
                 if not _is_gateway_available(cmd_def, config_overrides):
+                    continue
+                if not cmd_def.advertise_in_gateway:
                     continue
                 # Discord command names: lowercase, hyphens OK, max 32 chars.
                 discord_name = cmd_def.name.lower()[:32]

@@ -882,6 +882,215 @@ class TestInit:
             )
             assert a._use_prompt_caching is False
 
+    def test_prompt_caching_vibeproxy_claude(self):
+        """Claude models routed through VibeProxy should use OpenAI-wire cache markers."""
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                provider="vibeproxy",
+                model="claude-sonnet-5",
+                base_url="http://127.0.0.1:8485/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            assert a._use_prompt_caching is True
+            assert a._use_native_cache_layout is False
+
+    def test_prompt_caching_vibeproxy_claude_family_aliases(self):
+        """VibeProxy Claude-family aliases should stay cacheable if model names omit 'claude'."""
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            for model in ("opus-4-8", "sonnet-5", "haiku-4-5", "mythos", "fable"):
+                a = AIAgent(
+                    api_key="test-key-1234567890",
+                    provider="vibeproxy",
+                    model=model,
+                    base_url="http://127.0.0.1:8485/v1",
+                    quiet_mode=True,
+                    skip_context_files=True,
+                    skip_memory=True,
+                )
+                assert a._use_prompt_caching is True, model
+                assert a._use_native_cache_layout is False, model
+
+    def test_prompt_caching_claude_family_aliases_are_vibeproxy_scoped(self):
+        """Claude-family aliases should not enable caching for arbitrary localhost proxies."""
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                provider="custom",
+                model="opus-4-8",
+                base_url="http://localhost:8080/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            assert a._use_prompt_caching is False
+            assert a._supports_reasoning_extra_body() is False
+
+    def test_vibeproxy_claude_family_supports_reasoning_extra_body(self):
+        """VibeProxy Claude-family aliases should send nested reasoning effort."""
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            for model in ("claude-fable-5", "opus-4-8", "sonnet-5", "haiku-4-5", "mythos", "fable"):
+                a = AIAgent(
+                    api_key="test-key-1234567890",
+                    provider="vibeproxy",
+                    model=model,
+                    base_url="http://127.0.0.1:8485/v1",
+                    reasoning_config={"enabled": True, "effort": "xhigh"},
+                    quiet_mode=True,
+                    skip_context_files=True,
+                    skip_memory=True,
+                )
+                assert a._supports_reasoning_extra_body() is True, model
+                kwargs = a._build_api_kwargs([{"role": "user", "content": "hi"}])
+                assert kwargs["extra_body"]["reasoning"] == {"enabled": True, "effort": "xhigh"}, model
+
+    def test_prompt_caching_vibeproxy_claude_marks_tool_schema_without_mutating_agent_tools(self):
+        """VibeProxy Claude cache markers include the stable tool schema prefix."""
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "sample_tool",
+                "description": "stable schema",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                provider="vibeproxy",
+                model="claude-sonnet-5",
+                base_url="http://127.0.0.1:8485/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            a.tools = [tool]
+
+            kwargs = a._build_api_kwargs([
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "stable user"},
+            ])
+
+            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+            assert "cache_control" not in tool
+            assert "cache_control" not in a.tools[-1]
+
+    def test_prompt_caching_vibeproxy_tool_schema_uses_configured_1h_ttl(self):
+        """The tool-schema cache breakpoint should match prompt_caching.cache_ttl."""
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "sample_tool",
+                "description": "stable schema",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("hermes_cli.config.load_config", return_value={"prompt_caching": {"cache_ttl": "1h"}}),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                provider="vibeproxy",
+                model="claude-sonnet-5",
+                base_url="http://127.0.0.1:8485/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            a.tools = [tool]
+
+            kwargs = a._build_api_kwargs([
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "stable user"},
+            ])
+
+            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+    def test_prompt_caching_vibeproxy_tool_schema_keeps_total_breakpoints_at_four(self):
+        """Adding a tool breakpoint should trim messages to Claude's four-breakpoint cap."""
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "sample_tool",
+                "description": "stable schema",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                provider="vibeproxy",
+                model="claude-sonnet-5",
+                base_url="http://127.0.0.1:8485/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            a.tools = [tool]
+            messages = [
+                {"role": "system", "content": [{"type": "text", "text": "system", "cache_control": {"type": "ephemeral"}}]},
+                {"role": "user", "content": [{"type": "text", "text": "old user", "cache_control": {"type": "ephemeral"}}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "old assistant", "cache_control": {"type": "ephemeral"}}]},
+                {"role": "user", "content": [{"type": "text", "text": "new user", "cache_control": {"type": "ephemeral"}}]},
+            ]
+
+            kwargs = a._build_api_kwargs(messages)
+            request_json = json.dumps(kwargs)
+
+            assert request_json.count('"cache_control"') == 4
+            assert "cache_control" not in json.dumps(kwargs["messages"][1])
+            assert "cache_control" in json.dumps(kwargs["messages"][0])
+            assert "cache_control" in json.dumps(kwargs["messages"][2])
+            assert "cache_control" in json.dumps(kwargs["messages"][3])
+            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+
+    def test_prompt_caching_vibeproxy_non_claude_stays_disabled(self):
+        """The VibeProxy opt-in is Claude-scoped, not a blanket localhost cache policy."""
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                provider="vibeproxy",
+                model="gpt-5.5",
+                base_url="http://127.0.0.1:8485/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            assert a._use_prompt_caching is False
+
     def test_prompt_caching_non_openrouter(self):
         """Custom base_url (not OpenRouter) should disable prompt caching."""
         with (
@@ -1255,6 +1464,86 @@ class TestBuildSystemPrompt:
         prompt = agent._build_system_prompt(system_message="Custom instruction")
         assert "Custom instruction" in prompt
 
+
+    def test_includes_shared_user_profile_when_available(self, agent, monkeypatch):
+        monkeypatch.setattr(run_agent, "load_shared_user_md", lambda: "# Shared User Profile\n\n- Prefers short answers")
+        prompt = agent._build_system_prompt()
+        assert "# Shared User Profile" in prompt
+        assert "Prefers short answers" in prompt
+
+    def test_includes_local_context_when_available(self, agent, monkeypatch):
+        monkeypatch.setattr(run_agent, "load_local_context", lambda: "# Local Machine Context\n\n- Machine: test-studio")
+        prompt = agent._build_system_prompt()
+        assert "# Local Machine Context" in prompt
+        assert "Machine: test-studio" in prompt
+
+    def test_includes_deferred_tool_directory_when_tool_search_loaded(self):
+        visible_defs = _make_tool_defs("tool_search", "tool_describe", "tool_call", "terminal")
+        raw_defs = _make_tool_defs("mcp_prompt_xapi_read", "terminal")
+        calls = []
+
+        def _fake_get_tool_definitions(*args, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("skip_tool_search_assembly"):
+                return raw_defs
+            return visible_defs
+
+        with (
+            patch("run_agent.get_tool_definitions", side_effect=_fake_get_tool_definitions),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "tools.tool_search.format_deferred_tool_directory",
+                return_value="# Deferred tool directory\n- mcp_prompt_xapi_read [mcp-xapi] — Read X API posts.",
+            ) as fmt,
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                enabled_toolsets=["x_search", "xapi"],
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "# Deferred tool directory" in prompt
+        assert "mcp_prompt_xapi_read [mcp-xapi]" in prompt
+        fmt.assert_called_once_with(raw_defs)
+        assert any(c.get("skip_tool_search_assembly") for c in calls)
+        scoped_call = [c for c in calls if c.get("skip_tool_search_assembly")][0]
+        assert scoped_call["enabled_toolsets"] == ["x_search", "xapi"]
+
+    def test_uses_task_cwd_override_for_context_files(self, monkeypatch):
+        recorded = {}
+
+        def _fake_context_prompt(cwd=None, skip_soul=False, **kwargs):
+            recorded["cwd"] = cwd
+            recorded["skip_soul"] = skip_soul
+            return ""
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("run_agent.build_context_files_prompt", side_effect=_fake_context_prompt),
+            patch("run_agent.load_soul_md", return_value=None),
+        ):
+            agent = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=False,
+                skip_memory=True,
+                session_id="sess-cwd",
+            )
+            monkeypatch.setattr(agent, "_resolve_task_cwd", lambda task_id=None: "/tmp/project-cwd")
+            agent._build_system_prompt()
+
+        assert recorded["cwd"] == "/tmp/project-cwd"
+        assert recorded["skip_soul"] is False
+
+
     def test_memory_guidance_when_memory_tool_loaded(self, agent_with_memory_tool):
         from agent.prompt_builder import MEMORY_GUIDANCE
 
@@ -1300,12 +1589,10 @@ class TestBuildSystemPrompt:
         assert "NOUS SUBSCRIPTION BLOCK" in prompt
 
     def test_skills_prompt_derives_available_toolsets_from_loaded_tools(self):
-        tools = _make_tool_defs("web_search", "skills_list", "skill_view", "skill_manage")
+        tools = _make_tool_defs("web_search", "skill")
         toolset_map = {
             "web_search": "web",
-            "skills_list": "skills",
-            "skill_view": "skills",
-            "skill_manage": "skills",
+            "skill": "skills",
         }
 
         with (
@@ -2061,6 +2348,415 @@ class TestBuildAssistantMessage:
         result = agent._build_assistant_message(msg, "tool_calls")
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["function"]["name"] == "web_search"
+
+    def test_qwopus_promotes_bare_json_tool_call(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"web_search"}
+        msg = _mock_assistant_msg(
+            content='{"name":"web_search","arguments":{"query":"Hermes /new"}}',
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["content"] == ""
+        assert result["tool_calls"][0]["function"]["name"] == "web_search"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "query": "Hermes /new"
+        }
+
+    def test_qwopus_promotes_prefaced_json_tool_call(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"skill_view"}
+        msg = _mock_assistant_msg(
+            content=(
+                "I'll load the bird skill and pull recent X posts.\n\n"
+                '{"name":"skill_view","arguments":{"name":"bird"}}'
+            ),
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["content"] == ""
+        assert result["tool_calls"][0]["function"]["name"] == "skill_view"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "name": "bird"
+        }
+
+    def test_qwopus_does_not_promote_json_with_trailing_prose(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"web_search"}
+        msg = _mock_assistant_msg(
+            content=(
+                'Here is an example:\n{"name":"web_search","arguments":{"query":"x"}}\n'
+                "That is only documentation."
+            ),
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is False
+        assert msg.tool_calls is None
+
+    def test_textual_tool_compat_is_scoped_to_qwopus(self, agent):
+        agent.provider = "openrouter"
+        agent.model = "anthropic/claude-sonnet-4.6"
+        agent.valid_tool_names = {"web_search"}
+        msg = _mock_assistant_msg(
+            content='{"name":"web_search","arguments":{"query":"should stay text"}}',
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is False
+        assert msg.tool_calls is None
+
+    def test_qwopus_promotes_terminal_shell_fence(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"terminal"}
+        msg = _mock_assistant_msg(
+            content="```bash\necho QWOPUS_TOOL_OK\n```",
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["tool_calls"][0]["function"]["name"] == "terminal"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "command": "echo QWOPUS_TOOL_OK"
+        }
+
+    def test_qwopus_promotes_bash_alias_json_tool_call(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"terminal"}
+        msg = _mock_assistant_msg(
+            content='{"name":"bash","arguments":{"command":"echo QWOPUS_TOOL_OK"}}',
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["tool_calls"][0]["function"]["name"] == "terminal"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "command": "echo QWOPUS_TOOL_OK"
+        }
+
+    def test_qwopus_promotes_print_alias_json_tool_call(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"terminal"}
+        msg = _mock_assistant_msg(
+            content='{"name":"print","arguments":{"text":"QWOPUS_TOOL_OK"}}',
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["tool_calls"][0]["function"]["name"] == "terminal"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "command": "printf '%s\\n' QWOPUS_TOOL_OK"
+        }
+
+    def test_qwopus_promotes_terminal_run_alias_json_tool_call(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"terminal"}
+        msg = _mock_assistant_msg(
+            content=(
+                '{"name":"terminal_run","arguments":{'
+                '"command":"echo QWOPUS_TOOL_OK",'
+                '"workdir":"/Users/Kosta/.hermes/hermes-agent",'
+                '"timeout_seconds":10,'
+                '"output_mode":"string"}}'
+            ),
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["tool_calls"][0]["function"]["name"] == "terminal"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "command": "echo QWOPUS_TOOL_OK",
+            "workdir": "/Users/Kosta/.hermes/hermes-agent",
+            "timeout": 10,
+            "output_mode": "string",
+        }
+
+    def test_qwopus_promotes_single_item_json_array_tool_call(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"terminal"}
+        msg = _mock_assistant_msg(
+            content='```json\n[{"name":"bash","arguments":{"command":"printf DIRECT_TOOL_OK"}}]\n```',
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["tool_calls"][0]["function"]["name"] == "terminal"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "command": "printf DIRECT_TOOL_OK"
+        }
+
+    def test_qwopus_promotes_wrapped_xml_tool_call(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"session_search"}
+        msg = _mock_assistant_msg(
+            content=(
+                "<tool_call><session_search>\n"
+                "<query>gaming pc</query>\n"
+                "<limit>1</limit>\n"
+                "</session_search></tool_call>"
+            ),
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["tool_calls"][0]["function"]["name"] == "session_search"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "query": "gaming pc",
+            "limit": 1,
+        }
+
+    def test_qwopus_promotes_tool_code_function_call(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"session_search"}
+        msg = _mock_assistant_msg(
+            content="<tool_code>session_search(query='gaming pc', limit=1)</tool_code>",
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["tool_calls"][0]["function"]["name"] == "session_search"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "query": "gaming pc",
+            "limit": 1,
+        }
+
+    def test_qwopus_promotes_tool_code_python_assignment_call(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"session_search"}
+        msg = _mock_assistant_msg(
+            content=(
+                "<tool_code>\n"
+                "def session_search(query: str, limit: int = 1):\n"
+                "    return []\n\n"
+                "result = session_search('gaming pc', limit=1)\n"
+                "</tool_code>"
+            ),
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["tool_calls"][0]["function"]["name"] == "session_search"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "query": "gaming pc",
+            "limit": 1,
+        }
+
+    def test_qwopus_promotes_bracketed_function_call(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"session_search"}
+        msg = _mock_assistant_msg(
+            content='[session_search(query="gaming pc", limit=1)]',
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["tool_calls"][0]["function"]["name"] == "session_search"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "query": "gaming pc",
+            "limit": 1,
+        }
+
+    def test_qwopus_promotes_keyed_json_tool_call_with_preamble(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"session_search"}
+        msg = _mock_assistant_msg(
+            content=(
+                "I'll run the session search now.\n\n"
+                '{"session_search": {"query": "gaming pc", "limit": 1}}'
+            ),
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["tool_calls"][0]["function"]["name"] == "session_search"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {
+            "query": "gaming pc",
+            "limit": 1,
+        }
+
+    @pytest.mark.parametrize(
+        ("content", "expected_tool", "expected_args"),
+        [
+            (
+                "I'll do the search now.\n\n"
+                '{"name":"session_search","arguments":{"query":"qwopus", "limit":2}}',
+                "session_search",
+                {"query": "qwopus", "limit": 2},
+            ),
+            (
+                "Using the skill tool:\n"
+                "```json\n"
+                '{"name":"skill_view","arguments":{"name":"bird"}}\n'
+                "```",
+                "skill_view",
+                {"name": "bird"},
+            ),
+            (
+                "Tool call follows.\n"
+                '```json\n[{"name":"bash","arguments":{"command":"printf DIRECT_TOOL_OK"}}]\n```',
+                "terminal",
+                {"command": "printf DIRECT_TOOL_OK"},
+            ),
+            (
+                "I'll search memory.\n\n"
+                '{"session_search": {"query": "gaming pc", "limit": 1}}',
+                "session_search",
+                {"query": "gaming pc", "limit": 1},
+            ),
+        ],
+    )
+    def test_qwopus_promotes_single_call_suffix_variants(
+        self, agent, content, expected_tool, expected_args
+    ):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"session_search", "skill_view", "terminal"}
+        msg = _mock_assistant_msg(content=content, tool_calls=None)
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is True
+        result = agent._build_assistant_message(msg, "stop")
+
+        assert result["content"] == ""
+        assert result["tool_calls"][0]["function"]["name"] == expected_tool
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == expected_args
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            # Looks tool-ish, but the tool name is not in the active schema.
+            '{"name":"not_a_real_tool","arguments":{"query":"x"}}',
+            # Multiple calls are ambiguous and should not be collapsed into one.
+            '[{"name":"web_search","arguments":{"query":"x"}}, {"name":"web_search","arguments":{"query":"y"}}]',
+            # JSON block is documentation/example because prose follows it.
+            'Example:\n```json\n{"name":"web_search","arguments":{"query":"x"}}\n```\nDo not run that.',
+            # JSON object is documentation/example because prose follows it.
+            'Example:\n{"name":"web_search","arguments":{"query":"x"}}\nDo not run that.',
+            # Fenced shell is documentation/example because prose follows it.
+            'Example:\n```bash\necho unsafe\n```\nThat was just an example.',
+            # Fenced shell with prose before it is also documentation-shaped;
+            # only a pure shell fence is promoted to terminal.
+            'Running the terminal smoke:\n```bash\nprintf QWOPUS_TOOL_OK\n```',
+            # Multiple fences are documentation-shaped, not a single intended call.
+            'Example one:\n```bash\necho first\n```\nExample two:\n```bash\necho second\n```',
+            # Multiple or mixed fences ending in JSON are still documentation-shaped.
+            'Example one:\n```json\n{"name":"web_search","arguments":{"query":"a"}}\n```\nExample two:\n```json\n{"name":"web_search","arguments":{"query":"b"}}\n```',
+            'Example shell:\n```bash\necho first\n```\nExample JSON:\n```json\n{"name":"web_search","arguments":{"query":"b"}}\n```',
+            # Valid tool appears inside ordinary prose, not as the single intended call.
+            'You could call {"name":"web_search","arguments":{"query":"x"}} if needed.',
+        ],
+    )
+    def test_qwopus_does_not_promote_ambiguous_or_documentation_shapes(self, agent, content):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"web_search", "terminal"}
+        msg = _mock_assistant_msg(content=content, tool_calls=None)
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is False
+        assert msg.tool_calls is None
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "I'll do the search now.\n\n"
+            '{"name":"web_search","arguments":{"query":"should stay text"}}',
+            "Using the skill tool:\n```json\n"
+            '{"name":"skill_view","arguments":{"name":"bird"}}\n```',
+            "Running shell:\n```bash\necho QWOPUS_TOOL_OK\n```",
+        ],
+    )
+    def test_prefaced_textual_tool_compat_still_scoped_to_qwopus(self, agent, content):
+        agent.provider = "openrouter"
+        agent.model = "anthropic/claude-sonnet-4.6"
+        agent.base_url = ""
+        agent.valid_tool_names = {"web_search", "skill_view", "terminal"}
+        msg = _mock_assistant_msg(content=content, tool_calls=None)
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is False
+        assert msg.tool_calls is None
+
+    def test_qwopus_keeps_existing_structured_tool_calls_authoritative(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"web_search", "skill_view"}
+        existing = _mock_tool_call(name="web_search", arguments='{"query":"native"}', call_id="c1")
+        msg = _mock_assistant_msg(
+            content='{"name":"skill_view","arguments":{"name":"bird"}}',
+            tool_calls=[existing],
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is False
+        result = agent._build_assistant_message(msg, "tool_calls")
+
+        assert result["tool_calls"][0]["function"]["name"] == "web_search"
+        assert json.loads(result["tool_calls"][0]["function"]["arguments"]) == {"query": "native"}
+
+    def test_qwopus_rejects_overlong_textual_tool_payload(self, agent):
+        agent.provider = "custom:RTX"
+        agent.model = "qwopus-gpu"
+        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.valid_tool_names = {"web_search"}
+        msg = _mock_assistant_msg(
+            content=("x" * 12001) + '\n{"name":"web_search","arguments":{"query":"x"}}',
+            tool_calls=None,
+        )
+
+        assert agent._promote_textual_tool_call_if_needed(msg) is False
+        assert msg.tool_calls is None
 
     def test_with_reasoning_details(self, agent):
         details = [{"type": "reasoning.summary", "text": "step1", "signature": "sig1"}]
@@ -4141,6 +4837,50 @@ class TestRunConversation:
             result = agent.run_conversation("hello")
         assert result["interrupted"] is True
 
+    def test_invalid_api_response_returns_final_response_for_chat_contract(self, agent):
+        """Invalid upstream responses should fail cleanly without breaking chat()."""
+        self._setup_agent(agent)
+        agent.max_retries = 0
+        invalid_resp = SimpleNamespace(choices=[], model="test/model", usage=None)
+
+        with (
+            patch.object(agent, "_interruptible_api_call", return_value=invalid_resp),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_try_activate_fallback", return_value=False),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["final_response"] == result["error"]
+        assert "Invalid API response" in result["final_response"]
+
+    def test_chat_invalid_api_response_does_not_keyerror(self, agent):
+        self._setup_agent(agent)
+        agent.max_retries = 0
+        invalid_resp = SimpleNamespace(choices=[], model="test/model", usage=None)
+
+        with (
+            patch.object(agent, "_interruptible_api_call", return_value=invalid_resp),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_try_activate_fallback", return_value=False),
+        ):
+            response = agent.chat("hello")
+
+        assert "Invalid API response" in response
+
+    def test_chat_missing_final_response_returns_error_string(self, agent):
+        with patch.object(
+            agent,
+            "run_conversation",
+            return_value={"error": "synthetic provider failure", "completed": False},
+        ):
+            assert agent.chat("hello") == "synthetic provider failure"
+
     def test_invalid_tool_name_retry(self, agent):
         """Model hallucinates an invalid tool name, agent retries and succeeds."""
         self._setup_agent(agent)
@@ -5620,6 +6360,38 @@ class TestCredentialPoolRecovery:
         assert recovered is True
         assert retry_same is False
         agent._swap_credential.assert_called_once_with(next_entry)
+
+    def test_recover_with_pool_rotation_notifies_status_and_macos_when_enabled(self, agent):
+        next_entry = SimpleNamespace(label="photongaming")
+
+        class _Pool:
+            def mark_exhausted_and_rotate(self, *, status_code, error_context=None):
+                return next_entry
+
+        agent._credential_pool = _Pool()
+        agent._swap_credential = MagicMock()
+        agent._emit_status = MagicMock()
+
+        with (
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={"notifications": {"credential_pool_rotation": True}},
+            ),
+            patch("agent.agent_runtime_helpers.platform.system", return_value="Darwin"),
+            patch("agent.agent_runtime_helpers.subprocess.Popen") as popen,
+        ):
+            recovered, retry_same = agent._recover_with_credential_pool(
+                status_code=402,
+                has_retried_429=False,
+            )
+
+        assert recovered is True
+        assert retry_same is False
+        agent._swap_credential.assert_called_once_with(next_entry)
+        agent._emit_status.assert_called_once()
+        assert "photongaming" in agent._emit_status.call_args.args[0]
+        assert "this session" in agent._emit_status.call_args.args[0]
+        popen.assert_called_once()
 
     def test_recover_with_pool_rotates_on_billing_reason_even_with_http_400(self, agent):
         next_entry = SimpleNamespace(label="secondary")

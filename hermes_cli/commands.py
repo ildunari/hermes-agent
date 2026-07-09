@@ -55,6 +55,7 @@ class CommandDef:
     cli_only: bool = False             # only available in CLI
     gateway_only: bool = False         # only available in gateway/messaging
     gateway_config_gate: str | None = None  # config dotpath; when truthy, overrides cli_only for gateway
+    advertise_in_gateway: bool = True       # show in messaging menus/help when gateway-available
 
 
 # ---------------------------------------------------------------------------
@@ -69,8 +70,18 @@ COMMAND_REGISTRY: list[CommandDef] = [
                aliases=("reset",), args_hint="[name]"),
     CommandDef("topic", "Enable or inspect Telegram DM topic sessions", "Session",
                gateway_only=True, args_hint="[off|help|session-id]"),
-    CommandDef("clear", "Clear screen and start a new session", "Session",
-               cli_only=True),
+    CommandDef("newthread", "Create a new Telegram topic with a fresh session", "Session",
+               gateway_only=True, aliases=("new_thread",), args_hint="[name]"),
+    CommandDef("cwd", "Show or set the working directory for this chat/thread", "Session",
+               gateway_only=True, args_hint="[path|clear]"),
+    CommandDef("threads", "List known Telegram topic/session/cwd bindings", "Session",
+               gateway_only=True),
+    CommandDef("thread", "Manage this Telegram topic/session cwd binding", "Session",
+               gateway_only=True, args_hint="[new <cwd> [name]|bind <cwd>|rename <name>|close]",
+               subcommands=("new", "bind", "rename", "close")),
+    CommandDef("repo", "Show likely repos or bind this chat/thread to a repo", "Session",
+               gateway_only=True, args_hint="[name]"),
+    CommandDef("clear", "Start a fresh session while preserving current model/config", "Session"),
     CommandDef("redraw", "Force a full UI repaint (recovers from terminal drift)", "Session",
                cli_only=True),
     CommandDef("history", "Show conversation history", "Session",
@@ -101,6 +112,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, args_hint="[all] [reason]"),
     CommandDef("background", "Run a prompt in the background", "Session",
                aliases=("bg", "btw"), args_hint="<prompt>"),
+    CommandDef("bgnotify", "Toggle background process output notifications", "Session",
+               gateway_only=True, aliases=("background-notify", "procnotify"),
+               args_hint="[off|result|error|all|status]"),
     CommandDef("agents", "Show active agents and running tasks", "Session",
                aliases=("tasks",)),
     CommandDef("journey", "Open the learning journey timeline",
@@ -126,25 +140,36 @@ COMMAND_REGISTRY: list[CommandDef] = [
                args_hint="[name]"),
 
     # Configuration
-    CommandDef("sessions", "Browse and resume previous sessions", "Session"),
+    CommandDef("sessions", "Browse and resume previous sessions", "Session",
+               cli_only=True),
 
     # Configuration
     CommandDef("config", "Show current configuration", "Configuration",
                cli_only=True),
     CommandDef("model", "Switch model (persists by default)", "Configuration",
-               args_hint="[model] [--provider name] [--global|--session] [--refresh]"),
+               aliases=("provider",), args_hint="[model] [--provider name] [--global|--session] [--refresh]"),
+    CommandDef("codex", "Use Codex app-server for the next Hermes turn",
+               "Configuration", gateway_only=True, args_hint="[auto|status]"),
+    CommandDef("claude", "Launch the Claude Code helper lane",
+               "Configuration", gateway_only=True, args_hint="[task]"),
+    CommandDef("cc", "Launch the Claude Code helper lane",
+               "Configuration", gateway_only=True, args_hint="[task]"),
+    CommandDef("antigravity", "Launch the Google Antigravity / AGY helper lane",
+               "Configuration", gateway_only=True, args_hint="[task]"),
     CommandDef("codex-runtime", "Toggle codex app-server runtime for OpenAI/Codex models",
                "Configuration", aliases=("codex_runtime",),
                args_hint="[auto|codex_app_server]"),
 
     CommandDef("personality", "Set a predefined personality", "Configuration",
                args_hint="[name]"),
+    CommandDef("personality_session", "Set a predefined personality for this chat/thread session only", "Configuration",
+               aliases=("personality-session",), args_hint="[name|none]"),
     CommandDef("statusbar", "Toggle the context/model status bar", "Configuration",
                cli_only=True, aliases=("sb",)),
     CommandDef("timestamps", "Toggle [HH:MM] timestamps on messages and /history", "Configuration",
                cli_only=True, args_hint="[on|off|status]",
                subcommands=("on", "off", "status"), aliases=("ts",)),
-    CommandDef("verbose", "Cycle tool progress display: off -> new -> all -> verbose -> log",
+    CommandDef("verbose", "Cycle tool progress display: off -> new -> all -> compact -> verbose -> log",
                "Configuration", cli_only=True,
                gateway_config_gate="display.tool_progress_command"),
     CommandDef("footer", "Toggle gateway runtime-metadata footer on final replies",
@@ -165,6 +190,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("kaomoji", "emoji", "unicode", "ascii")),
     CommandDef("voice", "Toggle voice mode", "Configuration",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
+    CommandDef("tts", "Generate a voice message from text", "Media",
+               gateway_only=True, args_hint="<prompt>"),
     CommandDef("busy", "Control what Enter does while Hermes is working", "Configuration",
                cli_only=True, args_hint="[queue|steer|interrupt|status]",
                subcommands=("queue", "steer", "interrupt", "status")),
@@ -200,7 +227,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("blueprint", "Set up an automation from a blueprint template",
                "Tools & Skills", aliases=("bp",), args_hint="[name] [slot=value ...]"),
     CommandDef("curator", "Background skill maintenance (status, run, pin, archive, list-archived)",
-               "Tools & Skills", args_hint="[subcommand]",
+               "Tools & Skills", args_hint="[subcommand]", cli_only=True,
                subcommands=("status", "run", "pause", "resume", "pin", "unpin", "restore", "list-archived")),
     CommandDef("kanban", "Multi-profile collaboration board (tasks, links, comments)",
                "Tools & Skills", args_hint="[subcommand]",
@@ -226,8 +253,16 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("commands", "Browse all commands and skills (paginated)", "Info",
                gateway_only=True, args_hint="[page]"),
     CommandDef("help", "Show available commands", "Info"),
-    CommandDef("restart", "Gracefully restart the gateway after draining active runs", "Session",
-               gateway_only=True),
+    CommandDef("restart", "Gracefully restart only this gateway after draining active runs", "Session",
+               gateway_only=True, advertise_in_gateway=False),
+    CommandDef("restart-gateways", "Queue one detached restart of the canonical Hermes gateway set", "Session",
+               aliases=("restart_gateways",), args_hint="[--dry-run]"),
+    CommandDef("restart-hermes", "Queue one detached restart of gateways plus local Hermes surfaces", "Session",
+               aliases=("restart_hermes",), args_hint="[--dry-run]"),
+    CommandDef("update-smart", "Run the Mac Studio branch-first Hermes smart update workflow", "Session",
+               aliases=("update_smart",), args_hint="[instructions]"),
+    CommandDef("update-desktop", "Run the Desktop-only smart update workflow for Studio and MacBook", "Session",
+               aliases=("update_desktop",), args_hint="[instructions]"),
     CommandDef("usage", "Show token usage and rate limits for the current session", "Info"),
     CommandDef("credits", "Show Nous credit balance and top up", "Info"),
     CommandDef("billing", "Manage Nous terminal billing — buy credits, auto-reload, limits", "Info",
@@ -463,13 +498,16 @@ def gateway_help_lines() -> list[str]:
     overrides = _resolve_config_gates()
     lines: list[str] = []
     for cmd in COMMAND_REGISTRY:
-        if not _is_gateway_available(cmd, overrides):
+        if not _is_gateway_available(cmd, overrides) or not cmd.advertise_in_gateway:
             continue
         args = f" {cmd.args_hint}" if cmd.args_hint else ""
         alias_parts: list[str] = []
         for a in cmd.aliases:
-            # Skip internal aliases like reload_mcp (underscore variant)
+            # Skip internal aliases like reload_mcp (underscore variant), and
+            # keep long-form bgnotify aliases out of the compact help line.
             if a.replace("-", "_") == cmd.name.replace("-", "_") and a != cmd.name:
+                continue
+            if cmd.name == "bgnotify" and a == "background-notify":
                 continue
             alias_parts.append(f"`/{a}`")
         alias_note = f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
@@ -526,11 +564,12 @@ def telegram_bot_commands() -> list[tuple[str, str]]:
     overrides = _resolve_config_gates()
     result: list[tuple[str, str]] = []
     for cmd in COMMAND_REGISTRY:
-        if not _is_gateway_available(cmd, overrides):
+        if not _is_gateway_available(cmd, overrides) or not cmd.advertise_in_gateway:
             continue
         # Built-in arg-taking commands are included — their handlers show
         # usage text when invoked without arguments, and hiding them from
         # the menu hurts discoverability (issue #24312).
+
         tg_name = _sanitize_telegram_name(cmd.name)
         if tg_name:
             result.append((tg_name, cmd.description))
@@ -562,7 +601,10 @@ _TELEGRAM_MENU_PRIORITY = (
     "model",
     # Maintenance / diagnostics — the ones that prompted this priority list.
     "debug",
-    "restart",
+    "restart-gateways",
+    "restart-hermes",
+    "update-smart",
+    "update-desktop",
     "update",
     "verbose",
     "commands",
@@ -834,6 +876,7 @@ def _collect_gateway_skill_entries(
         pass
 
     skill_triples: list[tuple[str, str, str]] = []
+    skill_cmds: dict[str, dict[str, Any]] = {}
     try:
         from agent.skill_commands import get_skill_commands
         from tools.skills_tool import SKILLS_DIR
@@ -874,9 +917,16 @@ def _collect_gateway_skill_entries(
     except Exception:
         pass
 
+    priority_by_key = {
+        k: int(skill_cmds.get(k, {}).get("command_priority", 0) or 0)
+        for _, _, k in skill_triples
+    }
     # Clamp names; cmd_key is passed through as extra payload so it survives
     # any clamp-induced renames.
     skill_triples = _clamp_command_names(skill_triples, reserved_names)
+    # Higher-priority skills stay visible when Telegram/Discord hit the
+    # command cap; ties keep the normal alphabetical order.
+    skill_triples.sort(key=lambda item: (-priority_by_key.get(item[2], 0), item[0]))
 
     # Skills fill remaining slots — only tier that gets trimmed
     remaining = max(0, max_slots - len(all_entries))
@@ -1004,14 +1054,12 @@ def discord_skill_commands_by_category(
         pass
 
     # Collect raw skill data --------------------------------------------------
-    categories: dict[str, list[tuple[str, str, str]]] = {}
-    uncategorized: list[tuple[str, str, str]] = []
-    # Map clamped-32-char-name → what it came from, so we can emit an
-    # actionable warning on collision. Reserved (gateway-builtin) command
-    # names are marked with a sentinel so the warning distinguishes
-    # "skill collided with a reserved command" from "two skills collided
-    # on the 32-char clamp" — the latter is the rename-worthy case.
+    categories: dict[str, list[tuple[str, str, str, int]]] = {}
+    uncategorized: list[tuple[str, str, str, int]] = []
+    # Map clamped-32-char-name → what it came from, so collision warnings can
+    # identify whether a skill collided with a reserved command or another skill.
     _names_used: dict[str, str] = dict.fromkeys(reserved_names, "<reserved>")
+
     hidden = 0
 
     try:
@@ -1079,7 +1127,7 @@ def discord_skill_commands_by_category(
                 # distinct 32-char prefix.
                 prior = _names_used[discord_name]
                 if prior == "<reserved>":
-                    logger.warning(
+                    logger.debug(
                         "Discord /skill: %r (from %r) collides on its 32-char "
                         "clamp with a reserved gateway command name %r — the "
                         "skill will not appear in the /skill autocomplete. "
@@ -1088,7 +1136,7 @@ def discord_skill_commands_by_category(
                         discord_name, cmd_key, discord_name,
                     )
                 else:
-                    logger.warning(
+                    logger.debug(
                         "Discord /skill: %r and %r both clamp to %r on "
                         "Discord's 32-char command-name limit — only %r "
                         "will appear in the /skill autocomplete. Rename "
@@ -1103,6 +1151,10 @@ def discord_skill_commands_by_category(
             desc = info.get("description", "")
             if len(desc) > 100:
                 desc = desc[:97] + "..."
+            try:
+                priority = int(info.get("command_priority", 0) or 0)
+            except (TypeError, ValueError):
+                priority = 0
 
             # Determine category from the relative path within the matched
             # scan root. e.g. creative/ascii-art/SKILL.md → ("creative", ...)
@@ -1110,13 +1162,24 @@ def discord_skill_commands_by_category(
             parts = rel.parts
             if len(parts) >= 2:
                 cat = parts[0]
-                categories.setdefault(cat, []).append((discord_name, desc, cmd_key))
+                categories.setdefault(cat, []).append((discord_name, desc, cmd_key, priority))
+            elif len(parts) == 1 and "__" in parts[0]:
+                cat = parts[0].split("__", 1)[0]
+                categories.setdefault(cat, []).append((discord_name, desc, cmd_key, priority))
             else:
-                uncategorized.append((discord_name, desc, cmd_key))
+                uncategorized.append((discord_name, desc, cmd_key, priority))
     except Exception:
         pass
 
-    return categories, uncategorized, hidden
+    trimmed_categories: dict[str, list[tuple[str, str, str]]] = {}
+    for cat, entries in categories.items():
+        trimmed_categories[cat] = [
+            (n, d, k)
+            for n, d, k, _priority in sorted(entries, key=lambda entry: (-entry[3], entry[0]))
+        ]
+
+    uncategorized = sorted(uncategorized, key=lambda entry: (-entry[3], entry[0]))
+    return trimmed_categories, [(n, d, k) for n, d, k, _priority in uncategorized], hidden
 
 
 # ---------------------------------------------------------------------------
@@ -1137,17 +1200,12 @@ _SLACK_RESERVED_COMMANDS = frozenset({
     "topic", "mute", "pro", "shortcuts",
 })
 
+_TELEGRAM_ONLY_GATEWAY_COMMANDS = frozenset({"newthread", "threads", "thread", "repo", "codex", "cc", "antigravity", "usage", "debug", "restart-hermes", "restart_hermes"})
+
 # High-value aliases that must survive Slack's 50-slash cap even when the
-# registry fills up. Without this, adding a new canonical command silently
-# clamps off low-priority aliases (they're added in the second pass), so a
-# long-standing native slash like /btw could disappear just because an
-# unrelated command landed. These claim their slots right after /hermes,
-# ahead of both canonical names and the rest of the aliases. Anything not
-# listed here still degrades gracefully (reachable via /hermes <command>).
-# Keep this list TIGHT: every pinned alias takes a slot a canonical command
-# would otherwise get, and the Telegram-parity test fails when a canonical
-# gets clamped ("reset" was unpinned for exactly that — /new keeps its
-# native slot, the alias spelling stays reachable via /hermes reset).
+# registry fills up. Keep this list TIGHT: every pinned alias takes a slot a
+# canonical command would otherwise get, and the Telegram-parity test fails when
+# a canonical gets clamped.
 _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 
 # Canonical commands intentionally NOT given a native Slack slash slot. Slack
@@ -1163,7 +1221,9 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - moa: high-cost slash mode, available through /hermes moa to avoid
 #     displacing existing native Slack slash commands at the 50-command cap.
 #   - debug: the log/report upload surface; reached via /hermes debug on Slack.
-_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "moa", "debug"})
+#   - insights/platform/update/update-smart/update-desktop/version: lower-frequency ops surfaces;
+#     routed via /hermes to keep Slack under its native slash-command cap.
+_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "moa", "debug", "insights", "platform", "update", "update-smart", "update_smart", "update-desktop", "update_desktop", "version"})
 
 
 def _sanitize_slack_name(raw: str) -> str:
@@ -1222,14 +1282,13 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
         entries.append((slack_name, desc[:140], hint[:100]))
         seen.add(slack_name)
 
-    # Priority pass: pin high-value aliases (e.g. /btw, /bg, /reset) ahead of
-    # everything except /hermes, so a new canonical command can never silently
-    # clamp them off the 50-slash cap. Each alias borrows its parent command's
-    # description and hint.
+    # Priority pass: pin high-value aliases (e.g. /btw, /bg) ahead of everything
+    # except /hermes, while preserving the local Telegram-only exclusion for
+    # commands that do not make sense as native Slack slash commands.
     _alias_to_cmd = {
         alias: cmd
         for cmd in COMMAND_REGISTRY
-        if _is_gateway_available(cmd, overrides)
+        if cmd.name not in _TELEGRAM_ONLY_GATEWAY_COMMANDS and _is_gateway_available(cmd, overrides)
         for alias in cmd.aliases
     }
     for alias in _SLACK_PRIORITY_ALIASES:
@@ -1239,12 +1298,16 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
 
     # First pass: canonical names (so they win slots if we hit the cap).
     for cmd in COMMAND_REGISTRY:
+        if cmd.name in _TELEGRAM_ONLY_GATEWAY_COMMANDS:
+            continue
         if not _is_gateway_available(cmd, overrides):
             continue
         _add(cmd.name, cmd.description, cmd.args_hint or "")
 
-    # Second pass: aliases.
+    # Second pass: remaining aliases.
     for cmd in COMMAND_REGISTRY:
+        if cmd.name in _TELEGRAM_ONLY_GATEWAY_COMMANDS:
+            continue
         if not _is_gateway_available(cmd, overrides):
             continue
         for alias in cmd.aliases:
@@ -1298,6 +1361,8 @@ def slack_subcommand_map() -> dict[str, str]:
     overrides = _resolve_config_gates()
     mapping: dict[str, str] = {}
     for cmd in COMMAND_REGISTRY:
+        if cmd.name in _TELEGRAM_ONLY_GATEWAY_COMMANDS:
+            continue
         if not _is_gateway_available(cmd, overrides):
             continue
         mapping[cmd.name] = f"/{cmd.name}"

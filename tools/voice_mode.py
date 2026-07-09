@@ -280,6 +280,11 @@ SAMPLE_WIDTH = 2  # bytes per sample (int16)
 # Silence detection defaults
 SILENCE_RMS_THRESHOLD = 200  # RMS below this = silence (int16 range 0-32767)
 SILENCE_DURATION_SECONDS = 3.0  # Seconds of continuous silence before auto-stop
+MIN_SPEECH_CONFIRM_SECONDS = 0.45  # Require sustained speech before accepting it
+MAX_SPEECH_DIP_SECONDS = 0.25  # Tolerate brief dips during real speech
+ADAPTIVE_THRESHOLD_MARGIN = 160  # Speech must clear ambient floor by at least this much
+ADAPTIVE_THRESHOLD_MULTIPLIER = 2.2  # Speech must also beat ambient floor by this ratio
+NOISE_FLOOR_SMOOTHING = 0.92  # EMA smoothing factor for ambient floor tracking
 
 # Temp directory for voice recordings
 _TEMP_DIR = os.path.join(tempfile.gettempdir(), "hermes_voice")
@@ -488,8 +493,8 @@ class AudioRecorder:
         self._has_spoken = False
         self._speech_start: float = 0.0  # When speech attempt began
         self._dip_start: float = 0.0  # When current below-threshold dip began
-        self._min_speech_duration: float = 0.3  # Seconds of speech needed to confirm
-        self._max_dip_tolerance: float = 0.3  # Max dip duration before resetting speech
+        self._min_speech_duration: float = MIN_SPEECH_CONFIRM_SECONDS
+        self._max_dip_tolerance: float = MAX_SPEECH_DIP_SECONDS
         self._silence_start: float = 0.0
         self._resume_start: float = 0.0  # Tracks sustained speech after silence starts
         self._resume_dip_start: float = 0.0  # Dip tolerance tracker for resume detection
@@ -497,10 +502,36 @@ class AudioRecorder:
         self._silence_threshold: int = SILENCE_RMS_THRESHOLD
         self._silence_duration: float = SILENCE_DURATION_SECONDS
         self._max_wait: float = 15.0  # Max seconds to wait for speech before auto-stop
+        self._adaptive_threshold_margin: int = ADAPTIVE_THRESHOLD_MARGIN
+        self._adaptive_threshold_multiplier: float = ADAPTIVE_THRESHOLD_MULTIPLIER
+        self._noise_floor_smoothing: float = NOISE_FLOOR_SMOOTHING
+        self._noise_floor_rms: float = float(SILENCE_RMS_THRESHOLD)
         # Peak RMS seen during recording (for speech presence check in stop())
         self._peak_rms: int = 0
         # Live audio level (read by UI for visual feedback)
         self._current_rms: int = 0
+
+    def _effective_speech_threshold(self) -> int:
+        """Return the current threshold after accounting for ambient noise."""
+        adaptive_floor = max(
+            int(self._noise_floor_rms + self._adaptive_threshold_margin),
+            int(self._noise_floor_rms * self._adaptive_threshold_multiplier),
+        )
+        return max(int(self._silence_threshold), adaptive_floor)
+
+    def _update_noise_floor(self, rms: int, threshold: Optional[int] = None) -> None:
+        """Track a smoothed ambient floor from clearly non-speech chunks."""
+        threshold = int(threshold if threshold is not None else self._effective_speech_threshold())
+        if rms <= 0:
+            return
+        # Ignore loud chunks that are already speech candidates.
+        if rms >= threshold:
+            return
+        alpha = min(max(float(self._noise_floor_smoothing), 0.0), 0.999)
+        if self._noise_floor_rms <= 0:
+            self._noise_floor_rms = float(rms)
+        else:
+            self._noise_floor_rms = (self._noise_floor_rms * alpha) + (float(rms) * (1.0 - alpha))
 
     # -- public properties ---------------------------------------------------
 
@@ -553,7 +584,9 @@ class AudioRecorder:
                 now = time.monotonic()
                 elapsed = now - self._start_time
 
-                if rms > self._silence_threshold:
+                speech_threshold = self._effective_speech_threshold()
+
+                if rms > speech_threshold:
                     # Audio is above threshold -- this is speech (or noise).
                     self._dip_start = 0.0  # Reset dip tracker
                     if self._speech_start == 0.0:
@@ -582,6 +615,7 @@ class AudioRecorder:
                     # Below threshold after speech confirmed.
                     # Use dip tolerance before resetting resume tracker —
                     # natural speech has brief dips below threshold.
+                    self._update_noise_floor(rms, speech_threshold)
                     if self._resume_start > 0:
                         if self._resume_dip_start == 0.0:
                             self._resume_dip_start = now
@@ -592,6 +626,7 @@ class AudioRecorder:
                 elif self._speech_start > 0:
                     # We were in a speech attempt but RMS dipped.
                     # Tolerate brief dips (micro-pauses between syllables).
+                    self._update_noise_floor(rms, speech_threshold)
                     if self._dip_start == 0.0:
                         self._dip_start = now
                     elif now - self._dip_start >= self._max_dip_tolerance:
@@ -601,11 +636,14 @@ class AudioRecorder:
                         self._speech_start = 0.0
                         self._dip_start = 0.0
 
+                else:
+                    self._update_noise_floor(rms, speech_threshold)
+
                 # Fire silence callback when:
                 # 1. User spoke then went silent for silence_duration, OR
                 # 2. No speech detected at all for max_wait seconds
                 should_fire = False
-                if self._has_spoken and rms <= self._silence_threshold:
+                if self._has_spoken and rms <= speech_threshold:
                     # User was speaking and now is silent
                     if self._silence_start == 0.0:
                         self._silence_start = now
@@ -689,6 +727,7 @@ class AudioRecorder:
             self._resume_dip_start = 0.0
             self._peak_rms = 0
             self._current_rms = 0
+            self._noise_floor_rms = float(self._silence_threshold)
             self._on_silence_stop = on_silence_stop
 
         # Ensure the persistent stream is alive (no-op after first call).
@@ -758,9 +797,10 @@ class AudioRecorder:
 
             # Skip silent recordings using peak RMS (not overall average, which
             # gets diluted by silence at the end of the recording).
-            if self._peak_rms < SILENCE_RMS_THRESHOLD:
-                logger.info("Recording too quiet (peak RMS=%d < %d), discarding",
-                            self._peak_rms, SILENCE_RMS_THRESHOLD)
+            min_peak = self._effective_speech_threshold()
+            if self._peak_rms < min_peak:
+                logger.info("Recording too quiet/noisy-only (peak RMS=%d < effective threshold %d), discarding",
+                            self._peak_rms, min_peak)
                 return None
 
             return self._write_wav(audio_data)

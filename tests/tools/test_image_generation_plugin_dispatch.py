@@ -23,14 +23,47 @@ class _FakeCodexProvider(ImageGenProvider):
         return {
             "success": True,
             "image": "/tmp/codex-test.png",
-            "model": "gpt-5.2-codex",
+            "model": kwargs.get("model") or "gpt-5.2-codex",
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
             "provider": "codex",
         }
 
 
+class _FailingCodexProvider(ImageGenProvider):
+    @property
+    def name(self) -> str:
+        return "codex"
+
+    def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+        return {
+            "success": False,
+            "image": None,
+            "error": "codex unavailable",
+            "error_type": "api_error",
+            "model": kwargs.get("model"),
+            "provider": "codex",
+        }
+
+
+class _FakeGeminiProvider(ImageGenProvider):
+    @property
+    def name(self) -> str:
+        return "gemini"
+
+    def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+        return {
+            "success": True,
+            "image": "/tmp/gemini-test.png",
+            "model": kwargs.get("model"),
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "provider": "gemini",
+        }
+
+
 class TestPluginDispatch:
+
     def test_dispatch_routes_to_codex_provider(self, monkeypatch, tmp_path):
         from tools import image_generation_tool
         from agent import image_gen_registry as registry_module
@@ -97,3 +130,43 @@ class TestPluginDispatch:
         assert payload["success"] is True
         assert payload["provider"] == "codex"
         assert payload["aspect_ratio"] == "portrait"
+
+    def test_dispatch_falls_back_to_configured_image_provider(self, monkeypatch, tmp_path):
+        from tools import image_generation_tool
+        from agent import image_gen_registry as registry_module
+        from hermes_cli import plugins as plugins_module
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            "image_gen:\n"
+            "  provider: codex\n"
+            "  model: gpt-image-2-high\n"
+            "  fallback_provider: gemini\n"
+            "  fallback_model: gemini-3.1-flash-image\n"
+        )
+
+        providers = {
+            "codex": _FailingCodexProvider(),
+            "gemini": _FakeGeminiProvider(),
+        }
+        monkeypatch.setattr(image_generation_tool, "_read_configured_image_provider", lambda: "codex")
+        monkeypatch.setattr(image_generation_tool, "_read_configured_image_model", lambda: "gpt-image-2-high")
+        monkeypatch.setattr(
+            image_generation_tool,
+            "_read_configured_image_fallback",
+            lambda: ("gemini", "gemini-3.1-flash-image"),
+        )
+        monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda force=False: None)
+        monkeypatch.setattr(registry_module, "get_provider", lambda name: providers.get(name))
+
+        dispatched = image_generation_tool._dispatch_to_plugin_provider("draw backup banana", "square")
+        assert dispatched is not None
+        payload = json.loads(dispatched)
+
+        assert payload["success"] is True
+        assert payload["fallback"] is True
+        assert payload["provider"] == "gemini"
+        assert payload["model"] == "gemini-3.1-flash-image"
+        assert payload["primary_provider"] == "codex"
+        assert payload["primary_model"] == "gpt-image-2-high"
+        assert payload["primary_error"] == "codex unavailable"

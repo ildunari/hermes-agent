@@ -47,6 +47,45 @@ from hermes_time import now as _hermes_now
 logger = logging.getLogger(__name__)
 
 
+_CRON_TITLE_INTERNAL_RE = re.compile(
+    r"\b(automation|automated|dynamic|injection|pre[- ]prompt|extract(?:ion)?|setup review)\b",
+    re.I,
+)
+_CRON_PROMPT_LEADING_RE = re.compile(
+    r"^(please\s+|can you\s+|could you\s+|write\s+|create\s+|generate\s+|run\s+|check\s+(whether\s+)?|monitor\s+|summarize\s+)+",
+    re.I,
+)
+
+
+def _plain_cron_title_text(text: Any, *, limit: int = 60) -> str:
+    clean = " ".join(str(text or "").split())
+    clean = re.sub(r"^\[IMPORTANT:[^\]]*\]\s*", "", clean, flags=re.I)
+    clean = _CRON_PROMPT_LEADING_RE.sub("", clean).strip(" .!?;:—-")
+    if len(clean) > limit:
+        clean = clean[: max(0, limit - 1)].rstrip(" .,!?:;—-") + "…"
+    return clean
+
+
+def _cron_session_title(job: dict, *, run_time=None) -> str:
+    """Return a scan-friendly title for a cron-run session row."""
+    name = _plain_cron_title_text(job.get("name"))
+    prompt = _plain_cron_title_text(job.get("prompt"))
+    job_id = _plain_cron_title_text(job.get("id"), limit=40)
+
+    # Some generated job names describe the mechanism, not the user's reason for
+    # scheduling it. In those cases the prompt is usually closer to what a person
+    # would search for in history.
+    if name and not _CRON_TITLE_INTERNAL_RE.search(name):
+        base = name
+    elif prompt:
+        base = prompt
+    else:
+        base = name or job_id or "Cron job"
+
+    stamp_source = run_time or _hermes_now()
+    return f"{base} · {stamp_source.strftime('%b %d %H:%M')}"
+
+
 def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     """Return a compact one-line failure message for chat delivery.
 
@@ -104,27 +143,46 @@ class CronPromptInjectionBlocked(Exception):
     """Raised by _build_job_prompt when the fully-assembled prompt trips the
     injection scanner. Caught in run_job so the operator sees a clean
     "job blocked" delivery instead of the scheduler crashing.
-
-    Assembled-prompt scanning (including loaded skill content) plugs the
-    gap from #3968: create-time scanning only covers the user-supplied
-    prompt field; skill content loaded at runtime was never scanned, so a
-    malicious skill could carry an injection payload that reached the
-    non-interactive (auto-approve) cron agent.
     """
 
 
+def _cron_job_needs_memory_provider(job: dict) -> bool:
+    """Return True when a cron job explicitly needs memory-provider tools.
+
+    Cron normally skips memory so scheduler prompts do not pollute the compact
+    built-in MEMORY.md / USER.md hot cache. mem0-first/logbook jobs are different:
+    they explicitly need provider tools such as mem0_search, mem0_conclude, and
+    mem0_add_document, so blocking all memory at agent construction makes those
+    jobs false-success no-ops.
+    """
+    enabled_toolsets = job.get("enabled_toolsets") or []
+    if "memory" in enabled_toolsets:
+        return True
+    haystack_parts = [
+        str(job.get("name") or ""),
+        str(job.get("prompt") or ""),
+        str(job.get("skill") or ""),
+        " ".join(str(s) for s in (job.get("skills") or [])),
+    ]
+    haystack = "\n".join(haystack_parts).lower()
+    return "mem0" in haystack or "memory harvest" in haystack
+
+
+class CronPromptInjectionBlocked(Exception):
+    """Raised by _build_job_prompt when the fully-assembled prompt trips the injection scanner."""
+
+
 def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
-    """Toolsets a cron-spawned agent must never receive.
+    """Toolsets disabled for a cron-spawned agent.
 
-    Three protected toolsets are always disabled in cron context:
-      - ``cronjob`` — would let a cron-spawned agent schedule more cron jobs
-      - ``messaging`` — interactive, needs a live gateway session
-      - ``clarify`` — interactive, blocks waiting for user input
-
-    User-level ``agent.disabled_toolsets`` from config.yaml is layered on top
-    so per-job ``enabled_toolsets`` cannot bypass policy that applies to
-    ordinary agent runs (#25752 — LLM-supplied enabled_toolsets was widening
-    past config.yaml's denylist).
+    Cron uses the same default enabled toolsets as every other trusted Hermes
+    surface, then applies a small non-interactive runtime denylist:
+    ``cronjob`` prevents recursive scheduling, ``messaging`` avoids live gateway
+    assumptions, and ``clarify`` avoids blocking on a user who is not present.
+    User-level ``agent.disabled_toolsets`` from config.yaml is layered on top so
+    per-job ``enabled_toolsets`` cannot bypass policy that applies to ordinary
+    agent runs (#25752 — LLM-supplied enabled_toolsets was widening past
+    config.yaml's denylist).
     """
     disabled = ["cronjob", "messaging", "clarify"]
     agent_cfg = (cfg or {}).get("agent") or {}
@@ -1434,7 +1492,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         logger.warning("Job '%s': %s", job["id"], msg)
         return msg
 
-    from tools.send_message_tool import _send_to_platform
+    from tools.send_message_tool import _send_to_platform, _send_ordered_rich_segments_to_platform
     from gateway.config import load_gateway_config, Platform
 
     # Optionally wrap the content with a header/footer so the user knows this
@@ -1461,10 +1519,31 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     else:
         delivery_content = content
 
+    force_document_attachments = "[[as_document]]" in delivery_content
+
+    # Render explicit card artifact blocks before MEDIA extraction so cron
+    # deliveries share the same attachment pipeline as live replies.
+    try:
+        from gateway.rich_cards.artifacts import find_card_artifacts, markdown_table_auto_enabled, render_rich_cards_in_response, response_to_ordered_segments
+        first_platform = targets[0]["platform"] if targets else "cron"
+        original_delivery_content = delivery_content
+        table_auto = markdown_table_auto_enabled(first_platform)
+        explicit_cards = bool(find_card_artifacts(delivery_content))
+        if explicit_cards or table_auto:
+            delivery_content = render_rich_cards_in_response(delivery_content, platform=first_platform, markdown_table_auto=table_auto)
+        rich_segments = response_to_ordered_segments(delivery_content) if explicit_cards or (table_auto and "MEDIA:" in delivery_content and delivery_content != original_delivery_content) else None
+    except Exception as e:
+        rich_segments = None
+        logger.warning("Job '%s': rich-card pre-pass failed; preserving text fallback: %s", job.get("id", "?"), e)
+
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
-    media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
-    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+    if rich_segments:
+        media_files = []
+        cleaned_delivery_content = "\n\n".join(getattr(seg, "markdown", "").strip() for seg in rich_segments if getattr(seg, "markdown", "").strip())
+    else:
+        media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
+        media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
     # Resolve the delivery-mirror gate ONCE (default off). When on, each
     # successful delivery is also appended to the target chat's gateway session
@@ -1686,8 +1765,27 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # (#22773).
                 text_to_send = cleaned_delivery_content.strip()
                 adapter_ok = True
+                if rich_segments and hasattr(runtime_adapter, "_send_rendered_rich_response_ordered"):
+                    from agent.async_utils import safe_schedule_threadsafe
+                    future = safe_schedule_threadsafe(
+                        runtime_adapter._send_rendered_rich_response_ordered(
+                            chat_id=chat_id,
+                            rendered_response=delivery_content,
+                            metadata=route_metadata,
+                            force_document=force_document_attachments,
+                        ),
+                        loop,
+                    )
+                    if future is None:
+                        adapter_ok = False
+                    else:
+                        adapter_ok = bool(future.result(timeout=120))
+                    if adapter_ok:
+                        delivered = True
+                        logger.info("Job '%s': delivered rich card to %s:%s via live adapter", job["id"], platform_name, chat_id)
+                        continue
                 timed_out = False
-                if text_to_send:
+                if adapter_ok and text_to_send:
                     from agent.async_utils import safe_schedule_threadsafe
 
                     router = DeliveryRouter(config, adapters)
@@ -1899,7 +1997,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 delivery_errors.extend(target_errors)
                 continue
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
-            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
+            if rich_segments:
+                coro = _send_ordered_rich_segments_to_platform(platform, pconfig, chat_id, rich_segments, thread_id=thread_id, force_document=force_document_attachments)
+            else:
+                coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files, force_document=force_document_attachments)
             try:
                 result = asyncio.run(coro)
             except RuntimeError as run_err:
@@ -1922,13 +2023,25 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # `except RuntimeError` block is NOT caught by the sibling
                 # `except Exception` below — it would escape _deliver_result()
                 # and crash the whole delivery loop, silently skipping every
-                # remaining target (#47163). Wrap the fallback in its own
-                # try/except so a per-target failure is logged and the loop
-                # continues to the next target.
+                # remaining target. Wrap the fallback in its own try/except so
+                # a per-target failure is logged and the loop continues.
                 try:
                     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                     try:
-                        future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
+                        retry_coro = (
+                            _send_ordered_rich_segments_to_platform(
+                                platform, pconfig, chat_id, rich_segments,
+                                thread_id=thread_id,
+                                force_document=force_document_attachments,
+                            )
+                            if rich_segments
+                            else _send_to_platform(
+                                platform, pconfig, chat_id, cleaned_delivery_content,
+                                thread_id=thread_id, media_files=media_files,
+                                force_document=force_document_attachments,
+                            )
+                        )
+                        future = pool.submit(asyncio.run, retry_coro)
                         result = future.result(timeout=30)
                     finally:
                         pool.shutdown(wait=False)
@@ -2800,15 +2913,17 @@ def run_job(
                 else str(delivery_target["thread_id"])
             )
 
+        explicit_model_env = os.getenv("HERMES_MODEL") or ""
+        model = job.get("model") or explicit_model_env or ""
         # Model resolution precedence: per-job override > HERMES_MODEL env >
-        # config.yaml ``model:`` (string or ``{default: ...}``). The per-job
+        # cron.model/default_model > config.yaml ``model:`` (string or
+        # ``{default: ...}`). The per-job
         # value is intentionally re-read from storage every tick so a
         # ``cronjob action=update model=...`` after a failed run takes effect
         # on the next tick — there is no in-memory cache.
-        model = job.get("model") or os.getenv("HERMES_MODEL") or ""
 
         # Load config.yaml for model, reasoning, prefill, toolsets, provider routing
-        _cfg = {}
+        _cfg: dict[str, Any] = {}
         try:
             import yaml
             _cfg_path = str(_get_hermes_home() / "config.yaml")
@@ -2828,8 +2943,12 @@ def run_job(
                 # Coerce null/missing to {} so a falsy default never
                 # clobbers an already-resolved env value with ``None``.
                 _model_cfg = _cfg.get("model") or {}
-                if not job.get("model"):
-                    if isinstance(_model_cfg, str):
+                _cron_cfg = _cfg.get("cron", {}) if isinstance(_cfg.get("cron"), dict) else {}
+                if not job.get("model") and not explicit_model_env:
+                    cron_model = (_cron_cfg.get("model") or _cron_cfg.get("default_model") or "").strip()
+                    if cron_model:
+                        model = cron_model
+                    elif isinstance(_model_cfg, str):
                         model = _model_cfg
                     elif isinstance(_model_cfg, dict):
                         # Mirror the CLI/oneshot resolution: prefer ``default``,
@@ -2862,12 +2981,20 @@ def run_job(
         except Exception:
             pass
 
-        # Reasoning config from config.yaml (raw value — a YAML boolean False
-        # means thinking disabled, see parse_reasoning_effort)
+        # Reasoning config from job, cron config, then config.yaml. Preserve raw
+        # YAML booleans: False means thinking disabled in parse_reasoning_effort.
         from hermes_constants import parse_reasoning_effort
-        reasoning_config = parse_reasoning_effort(
-            _cfg.get("agent", {}).get("reasoning_effort", "")
-        )
+        _cron_cfg_raw = _cfg.get("cron") if isinstance(_cfg, dict) else None
+        _agent_cfg_raw = _cfg.get("agent") if isinstance(_cfg, dict) else None
+        _cron_cfg_for_reasoning = _cron_cfg_raw if isinstance(_cron_cfg_raw, dict) else {}
+        _agent_cfg_for_reasoning = _agent_cfg_raw if isinstance(_agent_cfg_raw, dict) else {}
+        if "reasoning_effort" in job:
+            effort = job.get("reasoning_effort")
+        elif "reasoning_effort" in _cron_cfg_for_reasoning:
+            effort = _cron_cfg_for_reasoning.get("reasoning_effort")
+        else:
+            effort = _agent_cfg_for_reasoning.get("reasoning_effort", "")
+        reasoning_config = parse_reasoning_effort(effort)
 
         # Prefill messages from env or config.yaml. The top-level
         # prefill_messages_file key is canonical; agent.prefill_messages_file is
@@ -2904,6 +3031,7 @@ def run_job(
             format_runtime_provider_error,
         )
         from hermes_cli.auth import AuthError
+        from hermes_cli.fallback_config import codex_home_access_token
 
         # F8 runtime backstop: never resolve a stored provider/base_url pair that
         # would ship a named provider's stored credential to an off-host endpoint
@@ -2912,18 +3040,28 @@ def run_job(
         # — reaches this sink unchecked. Fail closed before resolution so no
         # off-host call is ever made with a stored key.
         _guard_job_credential_exfil(job)
-
         try:
+            _cron_cfg = _cfg.get("cron", {}) if isinstance(_cfg.get("cron"), dict) else {}
             # Do not inject HERMES_INFERENCE_PROVIDER here. resolve_runtime_provider()
             # already prefers persisted config over stale shell/env overrides when
-            # no explicit provider is requested. Passing the env var here short-
-            # circuits that precedence and can resurrect old providers (for
-            # example DeepSeek) for cron jobs that do not pin provider/model.
+            # no explicit provider is requested.
             runtime_kwargs = {
-                "requested": job.get("provider"),
+                "requested": job.get("provider") or _cron_cfg.get("provider"),
             }
+            credential_label = (
+                job.get("credential_label")
+                or job.get("credential")
+                or job.get("auth_label")
+                or (_cron_cfg.get("credential_label") if isinstance(_cron_cfg, dict) else "")
+                or ""
+            )
+            if credential_label:
+                runtime_kwargs["credential_label"] = str(credential_label).strip()
+            cron_base_url = _cron_cfg.get("base_url") or _cron_cfg.get("default_base_url")
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
+            elif cron_base_url:
+                runtime_kwargs["explicit_base_url"] = cron_base_url
             runtime = resolve_runtime_provider(**runtime_kwargs)
         except AuthError as auth_exc:
             # Primary provider auth failed — try fallback chain before giving up.
@@ -2935,8 +3073,9 @@ def run_job(
                     fb_kwargs = {"requested": entry.get("provider")}
                     if entry.get("base_url"):
                         fb_kwargs["explicit_base_url"] = entry["base_url"]
-                    if entry.get("api_key"):
-                        fb_kwargs["explicit_api_key"] = entry["api_key"]
+                    explicit_api_key = entry.get("api_key") or codex_home_access_token(entry)
+                    if explicit_api_key:
+                        fb_kwargs["explicit_api_key"] = explicit_api_key
                     runtime = resolve_runtime_provider(**fb_kwargs)
                     logger.info("Job '%s': fallback resolved to %s", job_id, runtime.get("provider"))
                     break
@@ -3068,7 +3207,7 @@ def run_job(
             # Without a workdir, keep cwd context discovery disabled.
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
-            skip_memory=True,  # Cron system prompts would corrupt user representations
+            skip_memory=not _cron_job_needs_memory_provider(job),
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
@@ -3293,8 +3432,7 @@ def run_job(
             # system_prompt; this only UPDATEs the title column. The run-time
             # suffix keeps it unique against the sessions.title index across runs.
             try:
-                _title_base = " ".join(job_name.split())[:60].strip() or f"cron {job_id}"
-                _cron_title = f"{_title_base} · {_hermes_now().strftime('%b %d %H:%M')}"
+                _cron_title = _cron_session_title(job)
                 _session_db.set_session_title(_cron_session_id, _cron_title)
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to set cron session title: %s", job_id, e)

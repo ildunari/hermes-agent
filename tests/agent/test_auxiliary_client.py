@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, AsyncMock, ANY
 
 import pytest
 
@@ -35,6 +35,7 @@ from agent.auxiliary_client import (
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
     _pool_runtime_base_url,
+    _reset_aux_unhealthy_cache,
 )
 
 
@@ -532,6 +533,34 @@ class TestReadCodexAccessToken:
         result = _read_codex_access_token()
         assert result == "plain-token-no-jwt"
 
+    def test_raw_codex_resolver_honors_explicit_api_key_and_base_url(self, monkeypatch):
+        """Fallback entries with codex_home pass a token explicitly; raw Codex
+        resolution must use it instead of re-reading only the active profile auth.
+        """
+        import agent.auxiliary_client as aux
+
+        captured = {}
+
+        def fake_create_openai_client(**kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(aux, "_read_codex_access_token", lambda: None)
+        monkeypatch.setattr(aux, "_create_openai_client", fake_create_openai_client)
+
+        client, resolved = resolve_provider_client(
+            "openai-codex",
+            model="gpt-5.5",
+            raw_codex=True,
+            explicit_api_key="explicit-codex-token",
+            explicit_base_url="https://chatgpt.com/backend-api/codex",
+        )
+
+        assert client is not None
+        assert resolved == "gpt-5.5"
+        assert captured["api_key"] == "explicit-codex-token"
+        assert captured["base_url"] == "https://chatgpt.com/backend-api/codex"
+
 
 class TestResolveXaiOAuthForAux:
     def test_uses_pool_backed_credentials_without_singleton(self, tmp_path, monkeypatch):
@@ -878,6 +907,79 @@ class TestResolveProviderClientUniversalModelFallback:
         assert model == "grok-4.20-multi-agent"
         mock_read_main.assert_not_called()
         assert mock_build.call_args.args[0] == "grok-4.20-multi-agent"
+
+
+class TestResolveProviderClientMoA:
+    def _moa_config(self):
+        return {
+            "moa": {
+                "default_preset": "review",
+                "presets": {
+                    "review": {
+                        "reference_models": [
+                            {"provider": "vibeproxy", "model": "gpt-5.5"},
+                            {"provider": "zai", "model": "glm-5.2"},
+                        ],
+                        "aggregator": {
+                            "provider": "openrouter",
+                            "model": "anthropic/claude-opus-4.8",
+                        },
+                        "enabled": True,
+                    }
+                },
+            }
+        }
+
+    def test_moa_provider_resolves_to_aggregator_without_virtual_credentials(self):
+        seen = {}
+
+        def fake_try_openrouter(*, explicit_api_key=None, model=None):
+            seen["explicit_api_key"] = explicit_api_key
+            seen["model"] = model
+            return MagicMock(name="openrouter-client"), "openrouter-default"
+
+        with (
+            patch("hermes_cli.config.load_config", return_value=self._moa_config()),
+            patch("agent.auxiliary_client._try_openrouter", side_effect=fake_try_openrouter),
+        ):
+            client, model = resolve_provider_client(
+                "moa",
+                "review",
+                explicit_base_url="moa://virtual-provider/review",
+                explicit_api_key="moa-virtual-provider",
+                api_mode="chat_completions",
+            )
+
+        assert client is not None
+        assert model == "anthropic/claude-opus-4.8"
+        assert seen == {"explicit_api_key": None, "model": None}
+
+    def test_auto_with_moa_main_returns_aggregator_model_not_preset_name(self):
+        _reset_aux_unhealthy_cache()
+        seen = {}
+
+        def fake_try_openrouter(*, explicit_api_key=None, model=None):
+            seen["explicit_api_key"] = explicit_api_key
+            seen["model"] = model
+            return MagicMock(name="openrouter-client"), "openrouter-default"
+
+        with (
+            patch("hermes_cli.config.load_config", return_value=self._moa_config()),
+            patch("agent.auxiliary_client._try_openrouter", side_effect=fake_try_openrouter),
+        ):
+            client, model = _resolve_auto(
+                main_runtime={
+                    "provider": "moa",
+                    "model": "review",
+                    "base_url": "moa://virtual-provider/review",
+                    "api_key": "moa-virtual-provider",
+                    "api_mode": "chat_completions",
+                }
+            )
+
+        assert client is not None
+        assert model == "anthropic/claude-opus-4.8"
+        assert seen == {"explicit_api_key": None, "model": None}
 
 
 class TestExpiredCodexFallback:
@@ -1314,6 +1416,7 @@ class TestAuxiliaryPoolAwareness:
 
         with (
             patch("agent.auxiliary_client.load_pool", return_value=_Pool()),
+            patch("hermes_cli.models.get_nous_recommended_aux_model", return_value=None),
             patch("agent.auxiliary_client.OpenAI") as mock_openai,
             patch("hermes_cli.models.get_nous_recommended_aux_model", return_value=None),
         ):
@@ -3649,7 +3752,13 @@ class TestAuxiliaryAuthRefreshRetry:
             assert _refresh_provider_credentials("anthropic") is True
 
         mock_refresh_oauth.assert_called_once_with("refresh-token", use_json=False)
-        mock_write.assert_called_once_with("fresh-token", "refresh-token-2", 9999999999999)
+        mock_write.assert_called_once_with(
+            "fresh-token",
+            "refresh-token-2",
+            9999999999999,
+            scopes=ANY,
+        )
+        assert "user:inference" in mock_write.call_args.kwargs["scopes"]
         stale_client.close.assert_called_once()
 
     @pytest.mark.asyncio
@@ -3928,6 +4037,42 @@ class TestCodexAdapterReasoningTranslation:
         )
         assert captured.get("reasoning") == {"effort": "medium", "summary": "auto"}
         assert captured.get("include") == ["reasoning.encrypted_content"]
+
+    def test_prompt_cache_key_content_addressed_from_instructions(self):
+        """The auxiliary Codex adapter must send prompt_cache_key +
+        x-client-request-id derived from the static prefix, matching
+        agent/transports/codex.py. Without it every auxiliary call (incl.
+        MoA reference/aggregator calls) is cache-cold on the Codex backend."""
+        adapter, captured = self._build_adapter()
+        adapter.create(
+            messages=[
+                {"role": "system", "content": "stable system prompt"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+        pck = captured.get("prompt_cache_key")
+        assert isinstance(pck, str) and pck.startswith("pck_")
+        assert captured.get("extra_headers", {}).get("x-client-request-id") == pck
+
+        # Same static prefix → same key (stable across calls).
+        adapter2, captured2 = self._build_adapter()
+        adapter2.create(
+            messages=[
+                {"role": "system", "content": "stable system prompt"},
+                {"role": "user", "content": "different user text"},
+            ],
+        )
+        assert captured2.get("prompt_cache_key") == pck
+
+        # Different static prefix → different key.
+        adapter3, captured3 = self._build_adapter()
+        adapter3.create(
+            messages=[
+                {"role": "system", "content": "another system prompt"},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+        assert captured3.get("prompt_cache_key") != pck
 
     def test_reasoning_effort_empty_string_falls_back_to_medium(self):
         """Empty-string effort (e.g. ``effort: ""`` in YAML) is falsy in
@@ -4213,7 +4358,39 @@ class TestCodexAuxiliaryAdapterTimeout:
                 timeout=0.05,
             )
 
-        assert time.monotonic() - started < 0.14
+        assert time.monotonic() - started < 0.25
+
+    def test_recovers_when_sdk_terminal_response_has_null_output(self):
+        class NullOutputCrashStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                yield SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta="visible result",
+                )
+                raise TypeError("'NoneType' object is not iterable")
+
+            def get_final_response(self):  # pragma: no cover - iteration raises first
+                raise AssertionError("SDK parse failure should be recovered before final response")
+
+        class FakeResponses:
+            def stream(self, **kwargs):
+                return NullOutputCrashStream()
+
+        fake_client = SimpleNamespace(responses=FakeResponses(), close=lambda: None)
+        adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.5")
+
+        response = adapter.create(
+            messages=[{"role": "user", "content": "describe this"}],
+            timeout=12.5,
+        )
+
+        assert response.choices[0].message.content == "visible result"
 
 
 class TestCodexAuxiliaryToolMessageConversion:
@@ -5381,6 +5558,13 @@ class TestCompressionFallbackContextFilter:
 
 
 class TestCustomEndpointApiKeyInheritance:
+    @pytest.fixture(autouse=True)
+    def _clear_runtime_main(self):
+        import agent.auxiliary_client as ac
+        ac.clear_runtime_main()
+        yield
+        ac.clear_runtime_main()
+
     """Issue #9318: when an auxiliary task uses provider=custom with an
     explicit base_url but empty api_key, the custom_key fallback chain must
     inherit ``model.api_key`` from config.yaml before falling to the

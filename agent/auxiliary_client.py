@@ -883,6 +883,37 @@ class _CodexCompletionsAdapter:
             "store": False,
         }
 
+        # Prompt-cache routing parity with the main-agent Codex transport
+        # (agent/transports/codex.py::build_kwargs). Without a cache key the
+        # Codex backend treats every auxiliary call as cache-cold — MoA
+        # aggregator/reference calls through this path recorded 0 cached
+        # input tokens while the identical direct-model run reused hundreds
+        # of thousands. Content-address the key from the static prefix
+        # (instructions + tool names) so repeated calls sharing a system
+        # prompt and toolset land on the same warm cache shard, and mirror
+        # it into the x-client-request-id header the Codex backend uses for
+        # cache-scope routing.
+        # Guard the same way the main transport does: xAI Responses takes the
+        # key in extra_body (not top-level) and GitHub/Copilot Responses opts
+        # out of cache-key routing entirely — for those hosts, skip both the
+        # top-level prompt_cache_key and the x-client-request-id header here so
+        # the host-skip guard below is not defeated by an unconditional set.
+        try:
+            from agent.transports.codex import _content_cache_key as _codex_pck
+            from utils import base_url_host_matches
+
+            _host_src = str(getattr(self._client, "base_url", "") or "")
+            _is_xai = base_url_host_matches(_host_src, "x.ai") or base_url_host_matches(_host_src, "api.x.ai")
+            _is_github = base_url_host_matches(_host_src, "githubcopilot.com")
+            _aux_cache_key = None if (_is_xai or _is_github) else _codex_pck(instructions, kwargs.get("tools"))
+        except Exception:
+            _aux_cache_key = None
+        if _aux_cache_key:
+            resp_kwargs["prompt_cache_key"] = _aux_cache_key
+            resp_kwargs["extra_headers"] = {
+                "x-client-request-id": _aux_cache_key,
+            }
+
         # Preserve the chat.completions timeout contract. This adapter is used
         # by auxiliary calls such as context compression; if the timeout is not
         # forwarded and enforced, a Codex Responses stream can sit behind a
@@ -890,6 +921,10 @@ class _CodexCompletionsAdapter:
         timeout = kwargs.get("timeout")
         if timeout is not None:
             resp_kwargs["timeout"] = timeout
+
+        service_tier = kwargs.get("service_tier")
+        if service_tier:
+            resp_kwargs["service_tier"] = service_tier
 
         # Note: the Codex endpoint (chatgpt.com/backend-api/codex) does NOT
         # support max_output_tokens or temperature — omit to avoid 400 errors.
@@ -997,6 +1032,10 @@ class _CodexCompletionsAdapter:
         text_parts: List[str] = []
         tool_calls_raw: List[Any] = []
         usage = None
+        # Import before starting timeout accounting; first import can be slow
+        # enough in tests/CLI cold starts to consume the whole tiny timeout.
+        from agent.codex_runtime import _consume_codex_event_stream
+
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
         deadline = time.monotonic() + float(total_timeout) if total_timeout else None
         timed_out = threading.Event()
@@ -1061,8 +1100,6 @@ class _CodexCompletionsAdapter:
             # Consuming raw events and assembling the final response
             # ourselves from ``response.output_item.done`` makes us
             # structurally immune to that drift.
-            from agent.codex_runtime import _consume_codex_event_stream
-
             stream_kwargs = dict(resp_kwargs)
             stream_kwargs["stream"] = True
 
@@ -1071,20 +1108,64 @@ class _CodexCompletionsAdapter:
                 # cadence the old in-line ``_check_cancelled()`` used.
                 _check_cancelled()
 
-            event_stream = self._client.responses.create(**stream_kwargs)
-            try:
-                final = _consume_codex_event_stream(
-                    event_stream,
-                    model=resp_kwargs.get("model"),
-                    on_event=_on_each_event,
-                )
-            finally:
-                close_fn = getattr(event_stream, "close", None)
-                if callable(close_fn):
+            create_fn = getattr(self._client.responses, "create", None)
+            if callable(create_fn):
+                event_stream = create_fn(**stream_kwargs)
+                try:
+                    final = _consume_codex_event_stream(
+                        event_stream,
+                        model=resp_kwargs.get("model"),
+                        on_event=_on_each_event,
+                    )
+                finally:
+                    close_fn = getattr(event_stream, "close", None)
+                    if callable(close_fn):
+                        try:
+                            close_fn()
+                        except Exception:
+                            pass
+            else:
+                collected_output_items: List[Any] = []
+                collected_text_deltas: List[str] = []
+                has_function_calls = False
+                with self._client.responses.stream(**resp_kwargs) as stream:
                     try:
-                        close_fn()
-                    except Exception:
-                        pass
+                        for _event in stream:
+                            _check_cancelled()
+                            _etype = getattr(_event, "type", "")
+                            if _etype == "response.output_item.done":
+                                _done = getattr(_event, "item", None)
+                                if _done is not None:
+                                    collected_output_items.append(_done)
+                            elif "output_text.delta" in _etype:
+                                _delta = getattr(_event, "delta", "")
+                                if _delta:
+                                    collected_text_deltas.append(_delta)
+                            elif "function_call" in _etype:
+                                has_function_calls = True
+                        _check_cancelled()
+                        final = stream.get_final_response()
+                    except TypeError as exc:
+                        if "'NoneType' object is not iterable" not in str(exc):
+                            raise
+                        final = SimpleNamespace(output=[], usage=None)
+                        logger.warning(
+                            "Codex auxiliary: recovered from SDK terminal output=null "
+                            "parse failure using %d output items and %d text deltas",
+                            len(collected_output_items), len(collected_text_deltas),
+                        )
+                _out = getattr(final, "output", None)
+                if isinstance(_out, list) and not _out:
+                    if collected_output_items:
+                        final.output = list(collected_output_items)
+                    elif collected_text_deltas and not has_function_calls:
+                        assembled = "".join(collected_text_deltas)
+                        final.output = [SimpleNamespace(
+                            type="message",
+                            role="assistant",
+                            status="completed",
+                            content=[SimpleNamespace(type="output_text", text=assembled)],
+                        )]
 
             if final is None:
                 raise RuntimeError("Codex auxiliary Responses stream did not return a final response")
@@ -3377,6 +3458,7 @@ def _retry_same_provider_sync(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    request_overrides: Optional[Dict[str, Any]] = None,
 ) -> Any:
     if task == "vision":
         _, retry_client, retry_model = resolve_vision_provider_client(
@@ -3410,6 +3492,7 @@ def _retry_same_provider_sync(
         tools=tools,
         timeout=effective_timeout,
         extra_body=effective_extra_body,
+        request_overrides=request_overrides,
         base_url=retry_base or resolved_base_url,
     )
     if _is_anthropic_compat_endpoint(resolved_provider, retry_base):
@@ -3434,6 +3517,7 @@ async def _retry_same_provider_async(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    request_overrides: Optional[Dict[str, Any]] = None,
 ) -> Any:
     if task == "vision":
         _, retry_client, retry_model = resolve_vision_provider_client(
@@ -3467,6 +3551,7 @@ async def _retry_same_provider_async(
         tools=tools,
         timeout=effective_timeout,
         extra_body=effective_extra_body,
+        request_overrides=request_overrides,
         base_url=retry_base or resolved_base_url,
     )
     if _is_anthropic_compat_endpoint(resolved_provider, retry_base):
@@ -3586,6 +3671,7 @@ def _call_fallback_candidate_sync(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    request_overrides: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """Call one fallback candidate with stale-credential recovery.
 
@@ -3607,7 +3693,9 @@ def _call_fallback_candidate_sync(
         fb_label, fb_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout,
-        extra_body=effective_extra_body, base_url=fb_base)
+        extra_body=effective_extra_body,
+        request_overrides=request_overrides,
+        base_url=fb_base)
     try:
         return _validate_llm_response(
             fb_client.chat.completions.create(**fb_kwargs), task)
@@ -3623,6 +3711,7 @@ def _call_fallback_candidate_sync(
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, timeout=effective_timeout,
                     extra_body=effective_extra_body,
+                    request_overrides=_retarget_request_overrides_for_model(request_overrides, retry_model or fb_model),
                     base_url=str(getattr(retry_client, "base_url", "") or fb_base))
                 try:
                     return _validate_llm_response(
@@ -3655,6 +3744,7 @@ async def _call_fallback_candidate_async(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    request_overrides: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """Async mirror of :func:`_call_fallback_candidate_sync`."""
     fb_base = str(getattr(fb_client, "base_url", "") or "")
@@ -3662,7 +3752,9 @@ async def _call_fallback_candidate_async(
         fb_label, fb_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout,
-        extra_body=effective_extra_body, base_url=fb_base)
+        extra_body=effective_extra_body,
+        request_overrides=request_overrides,
+        base_url=fb_base)
     try:
         return _validate_llm_response(
             await fb_client.chat.completions.create(**fb_kwargs), task)
@@ -3679,6 +3771,7 @@ async def _call_fallback_candidate_async(
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, timeout=effective_timeout,
                     extra_body=effective_extra_body,
+                    request_overrides=_retarget_request_overrides_for_model(request_overrides, retry_model or fb_model),
                     base_url=str(getattr(retry_client, "base_url", "") or fb_base))
                 try:
                     return _validate_llm_response(
@@ -3975,6 +4068,14 @@ def _fallback_entry_api_key(entry: Dict[str, Any]) -> Optional[str]:
     explicit = str(entry.get("api_key") or "").strip()
     if explicit:
         return explicit
+    try:
+        from hermes_cli.fallback_config import codex_home_access_token
+
+        codex_token = codex_home_access_token(entry)
+        if codex_token:
+            return codex_token
+    except Exception:
+        pass
     key_env = str(entry.get("key_env") or entry.get("api_key_env") or "").strip()
     if key_env:
         return os.getenv(key_env, "").strip() or None
@@ -4207,6 +4308,12 @@ def _resolve_auto(
             resolved_provider = "custom"
             explicit_base_url = runtime_base_url
             explicit_api_key = runtime_api_key or None
+        elif main_provider == "moa":
+            # MoA is a virtual provider. Its runtime base/key are placeholders
+            # for the main agent's aggregator client, not credentials that
+            # should be forwarded into the resolved aggregator provider.
+            explicit_base_url = None
+            explicit_api_key = None
         elif runtime_api_key:
             # Pin auxiliary to the same api_key as the active main chat session
             # so that a working key is reused instead of re-selecting from the pool
@@ -4221,12 +4328,13 @@ def _resolve_auto(
         if main_chain_label and _is_provider_unhealthy(main_chain_label):
             _log_skip_unhealthy(main_chain_label)
         else:
+            call_api_mode = None if main_provider == "moa" else (runtime_api_mode or None)
             client, resolved = resolve_provider_client(
                 resolved_provider,
                 main_model,
                 explicit_base_url=explicit_base_url,
                 explicit_api_key=explicit_api_key,
-                api_mode=runtime_api_mode or None,
+                api_mode=call_api_mode,
             )
             if client is not None:
                 logger.info("Auxiliary auto-detect: using main provider %s (%s)",
@@ -4368,6 +4476,83 @@ def _normalize_resolved_model(model_name: Optional[str], provider: str) -> Optio
         return model_name
 
 
+# Models whose names identify another provider family and must not be sent to
+# the ChatGPT/Codex OAuth endpoint. A stale runtime override or an over-eager
+# model picker can otherwise produce impossible tuples such as
+# ``openai-codex`` + ``glm-5v-turbo``; Codex rejects those before vision can run.
+_CODEX_INCOMPATIBLE_MODEL_PREFIXES = (
+    "glm-",
+    "qwen",
+    "deepseek",
+    "claude",
+    "gemini",
+    "grok",
+    "mistral",
+    "kimi",
+    "moonshot",
+    "minimax",
+    "llama",
+    "qwopus",
+)
+
+
+def _model_incompatible_with_codex(model_name: Optional[str]) -> bool:
+    model_l = str(model_name or "").strip().lower()
+    if not model_l:
+        return False
+    if "/" in model_l:
+        # Aggregator-style ids (anthropic/..., google/..., zai/...) are never
+        # valid ChatGPT/Codex OAuth model ids.
+        return True
+    return model_l.startswith(_CODEX_INCOMPATIBLE_MODEL_PREFIXES)
+
+
+def _codex_safe_aux_model(task: Optional[str], requested_model: Optional[str]) -> Optional[str]:
+    """Return a Codex-compatible auxiliary model, replacing foreign model ids.
+
+    This is intentionally conservative and only guards the Codex route. Other
+    providers can legitimately accept slash/vendor model ids through aggregators.
+    """
+    if not _model_incompatible_with_codex(requested_model):
+        return requested_model
+
+    cfg_model: Optional[str] = None
+    if task:
+        try:
+            task_config = _get_auxiliary_task_config(task)
+            cfg_provider = str(task_config.get("provider", "") or "").strip().lower()
+            candidate = str(task_config.get("model", "") or "").strip()
+            if cfg_provider in {"openai-codex", "codex"} and candidate:
+                cfg_model = candidate
+        except Exception:
+            cfg_model = None
+    if cfg_model and not _model_incompatible_with_codex(cfg_model):
+        logger.warning(
+            "Auxiliary %s: ignoring non-Codex model %r on openai-codex route; using configured %r",
+            task or "call",
+            requested_model,
+            cfg_model,
+        )
+        return cfg_model
+
+    main_model = _read_main_model()
+    if main_model and not _model_incompatible_with_codex(main_model):
+        logger.warning(
+            "Auxiliary %s: ignoring non-Codex model %r on openai-codex route; using main model %r",
+            task or "call",
+            requested_model,
+            main_model,
+        )
+        return main_model
+
+    logger.warning(
+        "Auxiliary %s: ignoring non-Codex model %r on openai-codex route; no safe replacement configured",
+        task or "call",
+        requested_model,
+    )
+    return None
+
+
 def resolve_provider_client(
     provider: str,
     model: str = None,
@@ -4375,7 +4560,7 @@ def resolve_provider_client(
     raw_codex: bool = False,
     explicit_base_url: str = None,
     explicit_api_key: str = None,
-    api_mode: str = None,
+    api_mode: Optional[str] = None,
     main_runtime: Optional[Dict[str, Any]] = None,
     is_vision: bool = False,
     task: Optional[str] = None,
@@ -4420,6 +4605,12 @@ def resolve_provider_client(
     # Normalise aliases
     provider = _normalize_aux_provider(provider)
 
+    if provider == "openai-codex" and _model_incompatible_with_codex(model):
+        safe_model = _codex_safe_aux_model(task, model)
+        if not safe_model:
+            return None, None
+        model = safe_model
+
     # Universal model-resolution fallback chain.  Callers (notably title
     # generation, vision, session search, and other auxiliary tasks) can
     # reach this function without an explicit model — the user picked their
@@ -4455,6 +4646,11 @@ def resolve_provider_client(
     # request one. (# compression-current-model)
     if not model and provider != "auto":
         model = _get_aux_model_for_provider(provider) or _read_main_model() or model
+    if provider == "openai-codex" and _model_incompatible_with_codex(model):
+        safe_model = _codex_safe_aux_model(task, model)
+        if not safe_model:
+            return None, None
+        model = safe_model
 
     def _needs_codex_wrap(client_obj, base_url_str: str, model_str: str) -> bool:
         """Decide if a plain OpenAI client should be wrapped for Responses API.
@@ -4523,6 +4719,37 @@ def resolve_provider_client(
         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                 else (client, final_model))
 
+    # ── Mixture of Agents virtual provider ────────────────────────
+    if provider == "moa":
+        try:
+            from hermes_cli.config import load_config
+            from hermes_cli.moa_config import resolve_moa_preset
+
+            moa_cfg = (load_config() or {}).get("moa") or {}
+            preset = resolve_moa_preset(moa_cfg, model)
+            aggregator = preset.get("aggregator") or {}
+            agg_provider = str(aggregator.get("provider") or "").strip()
+            agg_model = str(aggregator.get("model") or "").strip()
+            if not agg_provider or agg_provider == "moa":
+                logger.warning(
+                    "resolve_provider_client: moa preset %r has invalid aggregator %r",
+                    model,
+                    aggregator,
+                )
+                return None, None
+            return resolve_provider_client(
+                agg_provider,
+                model=agg_model,
+                async_mode=async_mode,
+                raw_codex=raw_codex,
+                main_runtime=main_runtime,
+                is_vision=is_vision,
+                task=task,
+            )
+        except Exception as exc:
+            logger.warning("resolve_provider_client: moa requested but preset resolution failed: %s", exc)
+            return None, None
+
     # ── OpenRouter ───────────────────────────────────────────
     if provider == "openrouter":
         client, default = _try_openrouter(explicit_api_key=explicit_api_key)
@@ -4565,15 +4792,16 @@ def resolve_provider_client(
         if raw_codex:
             # Return the raw OpenAI client for callers that need direct
             # access to responses.stream() (e.g., the main agent loop).
-            codex_token = _read_codex_access_token()
+            codex_token = explicit_api_key or _read_codex_access_token()
             if not codex_token:
                 logger.warning("resolve_provider_client: openai-codex requested "
                                "but no Codex OAuth token found (run: hermes model)")
                 return None, None
             final_model = _normalize_resolved_model(model, provider)
+            codex_base_url = explicit_base_url or _CODEX_AUX_BASE_URL
             raw_client = _create_openai_client(
                 api_key=codex_token,
-                base_url=_CODEX_AUX_BASE_URL,
+                base_url=codex_base_url,
                 default_headers=_codex_cloudflare_headers(codex_token),
             )
             return (raw_client, final_model)
@@ -5208,9 +5436,10 @@ def _resolve_strict_vision_backend(
         return _try_nous(vision=True)
     if provider == "openai-codex":
         # Route through resolve_provider_client so the caller's explicit
-        # model is used.  There is no safe default Codex model (shifting
-        # allow-list); callers must specify via auxiliary.<task>.model.
-        return resolve_provider_client("openai-codex", model, is_vision=True)
+        # model is used after vision-level compatibility sanitization. There is
+        # no safe hardcoded Codex model (shifting allow-list); callers must
+        # specify via auxiliary.<task>.model or the active main model.
+        return resolve_provider_client("openai-codex", model or "", is_vision=True, task="vision")
     if provider == "anthropic":
         return _try_anthropic()
     if provider == "custom":
@@ -5266,6 +5495,8 @@ def resolve_vision_provider_client(
         "vision", provider, model, base_url, api_key
     )
     requested = _normalize_vision_provider(requested)
+    if requested == "openai-codex" and _model_incompatible_with_codex(resolved_model):
+        resolved_model = _codex_safe_aux_model("vision", resolved_model)
 
     def _finalize(resolved_provider: str, sync_client: Any, default_model: Optional[str]):
         if sync_client is None:
@@ -6174,6 +6405,63 @@ def _convert_openai_images_to_anthropic(messages: list) -> list:
 
 
 
+def _retarget_request_overrides_for_model(
+    request_overrides: Optional[Dict[str, Any]],
+    model: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Retarget fast-mode request overrides when an auxiliary call falls back.
+
+    A GPT-5.5 slot may ask for ``service_tier=priority``. If recovery falls
+    back to a different model/provider, recompute the provider-specific fast
+    override for that fallback model instead of leaking unsupported keys.
+    """
+    if not request_overrides:
+        return None
+    overrides = dict(request_overrides)
+    wants_fast = "service_tier" in overrides or "speed" in overrides
+    if wants_fast:
+        overrides.pop("service_tier", None)
+        overrides.pop("speed", None)
+        try:
+            from hermes_cli.models import resolve_fast_mode_overrides
+
+            overrides.update(resolve_fast_mode_overrides(model) or {})
+        except Exception:
+            pass
+    return overrides or None
+
+
+def _normalize_vibeproxy_claude_extra_body(
+    provider: str | None,
+    model: str | None,
+    extra_body: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep VibeProxy Claude reasoning effort in the nested shape it accepts.
+
+    CLIProxyAPIPlus/VibeProxy accepts ``reasoning.effort`` for Claude models,
+    including real ``xhigh``.  It 502s when the same value is sent as top-level
+    ``reasoning_effort``.  Normalize defensively here because auxiliary callers
+    can pass raw ``extra_body`` without going through provider profiles.
+    """
+    if str(provider or "").strip().lower() != "vibeproxy":
+        return extra_body
+    if "claude" not in str(model or "").lower():
+        return extra_body
+    if "reasoning_effort" not in extra_body:
+        return extra_body
+
+    cleaned = dict(extra_body)
+    effort = cleaned.pop("reasoning_effort", None)
+    reasoning = cleaned.get("reasoning")
+    if not isinstance(reasoning, dict):
+        reasoning = {}
+    if effort and "effort" not in reasoning:
+        reasoning["effort"] = str(effort).strip().lower()
+    if reasoning:
+        cleaned["reasoning"] = reasoning
+    return cleaned
+
+
 def _build_call_kwargs(
     provider: str,
     model: str,
@@ -6183,6 +6471,7 @@ def _build_call_kwargs(
     tools: Optional[list] = None,
     timeout: float = 30.0,
     extra_body: Optional[dict] = None,
+    request_overrides: Optional[dict] = None,
     base_url: Optional[str] = None,
 ) -> dict:
     """Build kwargs for .chat.completions.create() with model/provider adjustments."""
@@ -6270,8 +6559,21 @@ def _build_call_kwargs(
     merged_extra = dict(extra_body or {})
     if provider == "nous":
         merged_extra.setdefault("tags", []).extend(_nous_portal_tags())
+
+    overrides = dict(request_overrides or {})
+    override_extra = overrides.pop("extra_body", None)
+    if isinstance(override_extra, dict):
+        merged_extra.update(override_extra)
+
     if merged_extra:
+        merged_extra = _normalize_vibeproxy_claude_extra_body(
+            provider,
+            model,
+            merged_extra,
+        )
         kwargs["extra_body"] = merged_extra
+    if overrides:
+        kwargs.update(overrides)
 
     return kwargs
 
@@ -6378,10 +6680,11 @@ def call_llm(
     main_runtime: Optional[Dict[str, Any]] = None,
     messages: list,
     temperature: Optional[float] = None,
-    max_tokens: int = None,
+    max_tokens: Optional[int] = None,
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
+    request_overrides: Optional[Dict[str, Any]] = None,
     api_mode: str = None,
     stream: bool = False,
     stream_options: dict = None,
@@ -6509,6 +6812,7 @@ def call_llm(
         resolved_provider, final_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
+        request_overrides=request_overrides,
         base_url=_base_info or resolved_base_url)
 
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
@@ -6761,6 +7065,7 @@ def call_llm(
                     tools=tools,
                     effective_timeout=effective_timeout,
                     effective_extra_body=effective_extra_body,
+                    request_overrides=request_overrides,
                 )
 
         # ── Same-provider credential-pool recovery ─────────────────────
@@ -6803,6 +7108,7 @@ def call_llm(
                         tools=tools,
                         effective_timeout=effective_timeout,
                         effective_extra_body=effective_extra_body,
+                        request_overrides=request_overrides,
                     )
                 except Exception as retry2_err:
                     # The rotated key also hit a quota/auth wall.  Mark it
@@ -6924,7 +7230,8 @@ def call_llm(
                     task=task, messages=messages,
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, effective_timeout=effective_timeout,
-                    effective_extra_body=effective_extra_body)
+                    effective_extra_body=effective_extra_body,
+                    request_overrides=_retarget_request_overrides_for_model(request_overrides, fb_model))
                 if fb_resp is not None:
                     return fb_resp
                 # The candidate had a stale/unrefreshable credential and was
@@ -6938,7 +7245,8 @@ def call_llm(
                         task=task, messages=messages,
                         temperature=temperature, max_tokens=max_tokens,
                         tools=tools, effective_timeout=effective_timeout,
-                        effective_extra_body=effective_extra_body)
+                        effective_extra_body=effective_extra_body,
+                        request_overrides=_retarget_request_overrides_for_model(request_overrides, fb_model))
                     if fb_resp is not None:
                         return fb_resp
             # All fallback layers exhausted — emit a single user-visible
@@ -7033,6 +7341,7 @@ async def async_call_llm(
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
+    request_overrides: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Centralized asynchronous LLM call.
 
@@ -7112,6 +7421,7 @@ async def async_call_llm(
         resolved_provider, final_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
+        request_overrides=request_overrides,
         base_url=_client_base or resolved_base_url)
 
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
@@ -7308,6 +7618,7 @@ async def async_call_llm(
                     tools=tools,
                     effective_timeout=effective_timeout,
                     effective_extra_body=effective_extra_body,
+                    request_overrides=request_overrides,
                 )
 
         # ── Same-provider credential-pool recovery (mirrors sync) ─────
@@ -7345,6 +7656,7 @@ async def async_call_llm(
                         tools=tools,
                         effective_timeout=effective_timeout,
                         effective_extra_body=effective_extra_body,
+                        request_overrides=request_overrides,
                     )
                 except Exception as retry2_err:
                     if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
@@ -7433,7 +7745,8 @@ async def async_call_llm(
                     task=task, messages=messages,
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, effective_timeout=effective_timeout,
-                    effective_extra_body=effective_extra_body)
+                    effective_extra_body=effective_extra_body,
+                    request_overrides=_retarget_request_overrides_for_model(request_overrides, fb_model))
                 if fb_resp is not None:
                     return fb_resp
                 # Stale/unrefreshable candidate credential — quarantined; walk
@@ -7449,7 +7762,8 @@ async def async_call_llm(
                         task=task, messages=messages,
                         temperature=temperature, max_tokens=max_tokens,
                         tools=tools, effective_timeout=effective_timeout,
-                        effective_extra_body=effective_extra_body)
+                        effective_extra_body=effective_extra_body,
+                        request_overrides=_retarget_request_overrides_for_model(request_overrides, fb_model))
                     if fb_resp is not None:
                         return fb_resp
             # All fallback layers exhausted — warn before re-raising. (#26882)

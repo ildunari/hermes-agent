@@ -1127,6 +1127,18 @@ class TestMCPServerTask:
                 "mcp__srv__get_prompt",
             }
 
+    def test_refresh_tools_ignores_closed_session(self):
+        """A queued dynamic refresh can race with shutdown/reconnect."""
+        from tools.mcp_tool import MCPServerTask
+
+        server = MCPServerTask("srv")
+        server.session = None
+        server._registered_tool_names = ["mcp__srv__old"]
+
+        asyncio.run(server._refresh_tools())
+
+        assert server._registered_tool_names == ["mcp__srv__old"]
+
     def test_schedule_tools_refresh_keeps_task_until_done(self):
         """Background refresh tasks are strongly referenced and then discarded."""
         from tools.mcp_tool import MCPServerTask

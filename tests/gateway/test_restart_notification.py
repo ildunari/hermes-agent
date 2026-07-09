@@ -329,7 +329,7 @@ async def test_send_home_channel_startup_notification_skips_restart_target(
 
 
 @pytest.mark.asyncio
-async def test_send_home_channel_startup_notification_does_not_skip_different_thread(
+async def test_send_home_channel_startup_notification_skips_root_when_thread_notified(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
@@ -346,7 +346,30 @@ async def test_send_home_channel_startup_notification_does_not_skip_different_th
         skip_targets={("telegram", "42", "topic-7")}
     )
 
-    assert delivered == {("telegram", "42", None)}
+    assert delivered == set()
+    adapter.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_home_channel_startup_notification_does_not_skip_different_configured_thread(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    runner, adapter = make_restart_runner()
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="42",
+        name="Ops Home",
+        thread_id="topic-8",
+    )
+    adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="home"))
+
+    delivered = await runner._send_home_channel_startup_notifications(
+        skip_targets={("telegram", "42", "topic-7")}
+    )
+
+    assert delivered == {("telegram", "42", "topic-8")}
     adapter.send.assert_called_once()
 
 

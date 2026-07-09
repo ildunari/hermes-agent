@@ -55,6 +55,28 @@ def _get_anthropic_sdk():
 
 logger = logging.getLogger(__name__)
 
+_CLAUDE_CODE_OAUTH_SCOPES = [
+    "org:create_api_key",
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload",
+]
+
+
+def _normalize_claude_code_scopes(value: Any) -> Optional[List[str]]:
+    """Return Claude Code OAuth scopes as a stable list, or None if absent."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        scopes = [part for part in value.split() if part]
+    elif isinstance(value, (list, tuple, set)):
+        scopes = [str(part).strip() for part in value if str(part).strip()]
+    else:
+        return None
+    return scopes or None
+
 THINKING_BUDGET = {"xhigh": 32000, "high": 16000, "medium": 8000, "low": 4000}
 # Hermes effort → Anthropic adaptive-thinking effort (output_config.effort).
 # Anthropic exposes 5 levels on 4.7+: low, medium, high, xhigh, max.
@@ -916,12 +938,18 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
     if oauth_data and isinstance(oauth_data, dict):
         access_token = oauth_data.get("accessToken", "")
         if access_token:
-            return {
+            creds = {
                 "accessToken": access_token,
                 "refreshToken": oauth_data.get("refreshToken", ""),
                 "expiresAt": oauth_data.get("expiresAt", 0),
                 "source": "macos_keychain",
             }
+            scopes = _normalize_claude_code_scopes(
+                oauth_data.get("scopes") or oauth_data.get("scope")
+            )
+            if scopes:
+                creds["scopes"] = scopes
+            return creds
 
     return None
 
@@ -946,12 +974,18 @@ def _read_claude_code_credentials_from_file() -> Optional[Dict[str, Any]]:
     access_token = oauth_data.get("accessToken", "")
     if not access_token:
         return None
-    return {
+    creds = {
         "accessToken": access_token,
         "refreshToken": oauth_data.get("refreshToken", ""),
         "expiresAt": oauth_data.get("expiresAt", 0),
         "source": "claude_code_credentials_file",
     }
+    scopes = _normalize_claude_code_scopes(
+        oauth_data.get("scopes") or oauth_data.get("scope")
+    )
+    if scopes:
+        creds["scopes"] = scopes
+    return creds
 
 
 def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
@@ -1062,10 +1096,14 @@ def refresh_anthropic_oauth_pure(refresh_token: str, *, use_json: bool = False) 
             raise ValueError("Anthropic refresh response was missing access_token")
         next_refresh = result.get("refresh_token", refresh_token)
         expires_in = result.get("expires_in", 3600)
+        scopes = _normalize_claude_code_scopes(
+            result.get("scopes") or result.get("scope")
+        )
         return {
             "access_token": access_token,
             "refresh_token": next_refresh,
             "expires_at_ms": int(time.time() * 1000) + (expires_in * 1000),
+            "scopes": scopes,
         }
 
     if last_error is not None:
@@ -1114,10 +1152,17 @@ def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
 
     try:
         refreshed = refresh_anthropic_oauth_pure(refresh_token, use_json=False)
+        scopes = (
+            _normalize_claude_code_scopes(refreshed.get("scopes"))
+            or _normalize_claude_code_scopes((current or {}).get("scopes"))
+            or _normalize_claude_code_scopes(creds.get("scopes"))
+            or list(_CLAUDE_CODE_OAUTH_SCOPES)
+        )
         _write_claude_code_credentials(
             refreshed["access_token"],
             refreshed["refresh_token"],
             refreshed["expires_at_ms"],
+            scopes=scopes,
         )
         logger.debug("Successfully refreshed Claude Code OAuth token")
         return refreshed["access_token"]
@@ -2641,6 +2686,8 @@ def build_anthropic_kwargs(
     if reasoning_config and isinstance(reasoning_config, dict) and not _is_kimi_coding:
         if reasoning_config.get("enabled") is not False and "haiku" not in model.lower():
             effort = str(reasoning_config.get("effort", "medium")).lower()
+            if effort in {"", "medium"} and "claude" in model.lower():
+                effort = "high"
             budget = THINKING_BUDGET.get(effort, 8000)
             if _supports_adaptive_thinking(model):
                 kwargs["thinking"] = {

@@ -145,6 +145,23 @@ class ProviderProfile:
         """
         return {}, {}
 
+    def finalize_api_kwargs(
+        self,
+        api_kwargs: dict[str, Any],
+        *,
+        model: str | None = None,
+        **context: Any,
+    ) -> dict[str, Any]:
+        """Last-chance request normalization for provider plugins.
+
+        Called by the chat-completions transport after generic request
+        assembly, provider extras, and user request overrides. Most providers
+        should leave this as a no-op; gateways with model-specific validation
+        quirks can strip or adjust unsupported fields here without adding
+        provider branches to the transport.
+        """
+        return api_kwargs
+
     def get_max_tokens(self, model: str | None) -> int | None:
         """Return the default max_tokens cap for *model*.
 

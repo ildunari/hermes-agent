@@ -10,6 +10,7 @@ import re
 import sys
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from difflib import unified_diff
 from pathlib import Path
@@ -115,6 +116,404 @@ def get_tool_preview_max_len() -> int:
     return _tool_preview_max_len
 
 
+def _shell_tokens(command: str) -> list[str]:
+    """Best-effort shell tokenization for HUD command classification."""
+    try:
+        import shlex
+
+        return shlex.split(command, posix=True)
+    except Exception:
+        return re.findall(r"[^\s'\"]+", command)
+
+
+def _path_segments(token: str) -> list[str]:
+    cleaned = token.strip().strip("'\"").lower()
+    return [part for part in re.split(r"[\/]+", cleaned) if part]
+
+
+def _looks_like_executable_script(token: str) -> bool:
+    base = Path(token.strip().strip("'\"")).name.lower()
+    return (
+        bool(re.search(r"(?:^|[-_.])(start|run|launch)(?:[-_.]|$)", base))
+        or base.endswith((".sh", ".bash", ".zsh", ".command", ".py"))
+    )
+
+
+def _agent_lane_from_terminal_command(command: str) -> str | None:
+    """Detect external agent CLIs hidden behind shell/PTY/wrapper commands.
+
+    Gateway compact progress receives only the parent ``terminal`` tool name, so
+    the HUD has to infer Claude Code / Antigravity from the shell command.  This
+    intentionally looks at executable/script tokens and known wrapper paths, not
+    arbitrary grep/search arguments mentioning "claude".
+    """
+    tokens = _shell_tokens(command)
+    if not tokens:
+        return None
+
+    claude_bins = {"claude", "claude-code", "cc", "claude-agent-acp"}
+    agy_bins = {"agy", "antigravity", "antigravity-cli"}
+    shell_wrappers = {"bash", "sh", "zsh", "fish"}
+    passthrough_wrappers = {"env", "nohup", "setsid", "time", "timeout", "nice", "arch"}
+
+    def lane_for_token(token: str, *, allow_wrapper_path: bool = False) -> str | None:
+        base = Path(token.strip().strip("'\"")).name.lower()
+        segments = _path_segments(token)
+        if base in claude_bins:
+            return "claude_code"
+        if base in agy_bins:
+            return "antigravity"
+        if allow_wrapper_path and _looks_like_executable_script(token):
+            if any("claude" in seg for seg in segments):
+                return "claude_code"
+            if any("antigravity" in seg for seg in segments) or base.startswith("agy"):
+                return "antigravity"
+        return None
+
+    first_base = Path(tokens[0]).name.lower()
+    direct = lane_for_token(tokens[0], allow_wrapper_path=True)
+    if direct:
+        return direct
+
+    if first_base in passthrough_wrappers:
+        idx = 1
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok.startswith("-") or ("=" in tok and not tok.startswith("/")):
+                idx += 1
+                continue
+            if first_base == "timeout" and re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", tok):
+                idx += 1
+                continue
+            return _agent_lane_from_terminal_command(" ".join(tokens[idx:]))
+
+    if first_base in shell_wrappers:
+        for flag in ("-c", "-lc", "-cl"):
+            if flag in tokens:
+                pos = tokens.index(flag)
+                if pos + 1 < len(tokens):
+                    return _agent_lane_from_terminal_command(tokens[pos + 1])
+
+    if first_base == "script":
+        # macOS/BSD form: script -q OUTFILE COMMAND ...; util-linux can use -c COMMAND.
+        if "-c" in tokens:
+            pos = tokens.index("-c")
+            if pos + 1 < len(tokens):
+                return _agent_lane_from_terminal_command(tokens[pos + 1])
+        for tok in tokens[1:]:
+            lane = lane_for_token(tok, allow_wrapper_path=True)
+            if lane:
+                return lane
+
+    if first_base in {"tmux", "screen"}:
+        # Terminal multiplexers wrap the real agent launch, often as
+        #   tmux new-session -d -s <name> -c <dir> export PATH=...; exec '.../claude' ...
+        # The agent binary lives after an ``exec`` token (or simply later in the
+        # string), so re-scan everything following the first ``exec`` when present,
+        # then fall back to inspecting each token for a known agent binary.
+        if "exec" in tokens:
+            pos = tokens.index("exec")
+            if pos + 1 < len(tokens):
+                lane = _agent_lane_from_terminal_command(" ".join(tokens[pos + 1:]))
+                if lane:
+                    return lane
+        for tok in tokens[1:]:
+            lane = lane_for_token(tok, allow_wrapper_path=True)
+            if lane:
+                return lane
+
+    # Other launchers often pass a wrapper script as an arg
+    # (e.g. python run_claude_lane.py). Avoid treating arbitrary grep/cat
+    # arguments that merely mention Claude as an active Claude Code lane.
+    for tok in tokens[1:]:
+        if _looks_like_executable_script(tok):
+            lane = lane_for_token(tok, allow_wrapper_path=True)
+            if lane:
+                return lane
+    return None
+
+
+def group_compact_progress_tool(name: str | None, args: dict | None = None) -> str:
+    """Map a tool name to the compact progress bucket used across CLI/gateway."""
+    name = str(name or "").strip().lower()
+    if not name:
+        return "tool"
+    if name.startswith("browser"):
+        return "browser"
+    if name == "computer_use":
+        return "macos"
+    if name == "swiftui_preview":
+        return "apple_dev"
+    if (
+        name in {"send_message", "telegram_actions", "imessage_mini"}
+        or name.startswith("discord")
+        or name.startswith("yb_")
+        or name.startswith("feishu_drive_")
+    ):
+        return "messaging"
+    if name.startswith("ha_"):
+        return "homeassistant"
+    if name in {"kanban_create", "kanban_list", "kanban_show", "kanban_comment", "kanban_link", "kanban_block", "kanban_unblock", "kanban_complete", "kanban_heartbeat"}:
+        return "kanban"
+    if name in {"image_generate", "image_process"}:
+        return "images"
+    if name == "video_generate":
+        return "video"
+    if name == "video_analyze":
+        return "video_analysis"
+    if name in {"github_repo_brief"}:
+        return "github"
+    if name in {"curlmd_fetch"}:
+        return "web"
+    if name in {"terminal"}:
+        command = ""
+        if isinstance(args, dict):
+            command = str(args.get("command") or "").strip()
+        command_lower = command.lower()
+        lane = _agent_lane_from_terminal_command(command)
+        if lane:
+            return lane
+        first = command_lower.split(None, 1)[0] if command_lower else ""
+        command_words = re.findall(r"[\w./@+-]+", command_lower)
+        command_basenames = {word.rsplit("/", 1)[-1] for word in command_words}
+
+        def _has(*names: str) -> bool:
+            return first in names or bool(set(names) & command_basenames)
+
+        if _has("codex"):
+            return "codex"
+        if _has("xcodebuild", "xcrun", "simctl", "swift", "swiftc", "asc"):
+            return "apple_dev"
+        if _has("git"):
+            return "git"
+        if _has("gh"):
+            return "github"
+        if _has("op"):
+            return "onepassword"
+        if _has("ssh", "scp", "rsync"):
+            return "ssh"
+        if _has("launchctl"):
+            return "launchctl"
+        if _has("brew"):
+            return "homebrew"
+        if _has("pytest", "jest", "vitest", "mocha"):
+            return "tests"
+        if _has("npm", "pnpm", "yarn", "bun", "npx"):
+            return "packages"
+        if _has("python", "python3", "pip", "pip3", "uv", "poetry"):
+            return "python"
+        return "terminal"
+    if name == "fs":
+        action = ""
+        if isinstance(args, dict):
+            action = str(args.get("action") or "").strip().lower()
+        if action == "search":
+            return "files_search"
+        if action in {"write", "patch"}:
+            return "files_write"
+        if action == "read":
+            return "files_read"
+        return "files"
+    if name == "guest_fs":
+        action = ""
+        if isinstance(args, dict):
+            action = str(args.get("action") or "list").strip().lower()
+        if action == "search":
+            return "files_search"
+        if action == "write":
+            return "files_write"
+        if action == "read":
+            return "files_read"
+        return "files"
+    if name in {"execute_code", "python", "code_execution"}:
+        return "python"
+    if name in {"delegate_task", "agents", "subagent", "forge-agent", "forge-sage", "mixture_of_agents"}:
+        return "agents"
+    if name == "codex_subtask":
+        action = ""
+        if isinstance(args, dict):
+            action = str(args.get("action") or "create").strip().lower()
+        return "codex" if action in {"", "create", "send"} else "processes"
+    if name.startswith("codex_subtask_"):
+        # Lifecycle/control helpers (status, await, logs, cancel, list) are not
+        # new Codex runs, so don't show them as 🌀 Running Codex in chat HUDs.
+        return "processes"
+    if name == "todo":
+        return "tasks"
+    if name == "cronjob":
+        return "cron"
+    if name == "process":
+        return "processes"
+    if name in {"vision_analyze", "browser_vision"}:
+        return "vision"
+    if name in {"pdf_parse", "feishu_doc_read"}:
+        return "documents"
+    if name == "clarify":
+        return "questions"
+    if name == "text_to_speech":
+        return "audio"
+    if name == "image_generate":
+        return "images"
+    if name in {"skill_manage", "skill_create", "skill_update", "skill_delete"}:
+        return "skills_write"
+    if name in {"skill_view", "skills_list", "skill_search"}:
+        return "skills_read"
+    if name == "skill":
+        action = ""
+        if isinstance(args, dict):
+            action = str(args.get("action") or "list").strip().lower()
+        return "skills_write" if action == "manage" else "skills_read"
+    if name == "read_file":
+        return "files_read"
+    if name == "search_files":
+        return "files_search"
+    if name in {"patch", "write_file"}:
+        return "files_write"
+    if name.startswith("read_"):
+        return "files_read"
+    if name.startswith("search_"):
+        return "files_search"
+    if name.startswith("write_"):
+        return "files_write"
+    if name in {"mem0_search", "session_search"}:
+        return "memory_read"
+    if name in {"memory", "mem0_conclude", "mem0_add_document"}:
+        return "memory_write"
+    if name.startswith("mem0_"):
+        return "memory"
+    if name in {"x_twitter", "x_search", "grok_research", "xurl"}:
+        return "x"
+    if (
+        name == "web"
+        or name.startswith("web_")
+        or name.startswith("fast_web_")
+        or name.startswith("mcp_exa_web_")
+        or name.startswith("mcp_firecrawl_firecrawl_")
+        or name in {
+            "web_search",
+            "web_extract",
+            "fast_web_search",
+            "fetch_page_clean",
+            "scrape_page_answer",
+        }
+    ):
+        return "web"
+    if name == "plik":
+        return "file_sharing"
+    if name == "tools":
+        return "tools"
+    return "tool"
+
+
+def render_compact_tool_progress(
+    tool_counts: "OrderedDict[str, int]",
+    layout: str = "multi_line",
+) -> str:
+    """Render compact tool progress as grouped emoji rows shared by CLI/gateway."""
+
+    labels = {
+        "thinking": ("☁️", "Thinking"),
+        "terminal": ("💻", "Running terminal"),
+        "git": ("🌿", "Using git"),
+        "tests": ("🧪", "Running tests"),
+        "github": ("🐙", "Using GitHub"),
+        "onepassword": ("🔑", "Using 1Password"),
+        "ssh": ("💻", "SSH session"),
+        "launchctl": ("🚀", "Using launchctl"),
+        "homebrew": ("🍺", "Using Homebrew"),
+        "packages": ("📦", "Using npm/pnpm"),
+        "python": ("🐍", "Using Python"),
+        "x": ("🐦", "Using X/Grok"),
+        "web": ("🌐", "Searching the web"),
+        "files_read": ("📖", "Reading files"),
+        "files_search": ("🔎", "Searching files"),
+        "files_write": ("✏️", "Editing files"),
+        "files": ("📁", "Using files"),
+        "memory": ("🧠", "Using memory"),
+        "memory_read": ("🧠", "Reading memory"),
+        "memory_write": ("💾", "Saving memory"),
+        "tasks": ("📋", "Updating tasks"),
+        "cron": ("⏰", "Scheduling jobs"),
+        "processes": ("🧵", "Checking processes"),
+        "vision": ("👁️", "Analyzing images"),
+        "video_analysis": ("🎞️", "Analyzing video"),
+        "documents": ("📄", "Reading documents"),
+        "homeassistant": ("🏠", "Using Home Assistant"),
+        "kanban": ("🗂️", "Using kanban"),
+        "file_sharing": ("📤", "Sharing files"),
+        "tools": ("🧰", "Inspecting tools"),
+        "questions": ("❓", "Asking a question"),
+        "audio": ("🔊", "Making audio"),
+        "images": ("🎨", "Making images"),
+        "video": ("🎬", "Making video"),
+        "messaging": ("💬", "Messaging"),
+        "macos": ("🖥️", "Using Mac"),
+        "apple_dev": ("🍎", "Using Apple dev tools"),
+        "skills_read": ("📜", "Reading skills"),
+        "skills_write": ("📝", "Writing skills"),
+        "browser": ("🖱️", "Using browser"),
+        "agents": ("🤖", "Running agents"),
+        "antigravity": ("✨", "Running Antigravity"),
+        "codex": ("🌀", "Running Codex"),
+        "claude_code": ("☀️", "Running Claude Code"),
+        "tool": ("⚙️", "Using tools"),
+    }
+
+    lines = []
+    for tool_name, count in tool_counts.items():
+        emoji, label = labels.get(tool_name, ("⚙️", "Using tools"))
+        lines.append(f"{emoji}×{count} {label}")
+    separator = " · " if layout == "single_line" else "\n"
+    return separator.join(lines)
+
+
+def render_todo_checklist_progress(args: dict | None, max_items: int = 5) -> str:
+    """Render a chat-friendly todo progress card for gateway compact progress."""
+    if not isinstance(args, dict):
+        return "📋 Updating tasks"
+    todos = args.get("todos")
+    if not isinstance(todos, list) or not todos:
+        return "📋 Checking tasks"
+
+    status_marks = {
+        "completed": "☑",
+        "in_progress": "◐",
+        "pending": "☐",
+        "cancelled": "☒",
+    }
+    lines = ["📋 Updating tasks"]
+    for item in todos[:max_items]:
+        if not isinstance(item, dict):
+            continue
+        text = " ".join(str(item.get("content") or item.get("id") or "Task").split())
+        if len(text) > 72:
+            text = text[:69].rstrip() + "..."
+        mark = status_marks.get(str(item.get("status") or "pending"), "☐")
+        lines.append(f"{mark} {text}")
+    hidden = len(todos) - (len(lines) - 1)
+    if hidden > 0:
+        lines.append(f"… +{hidden} more")
+    return "\n".join(lines)
+
+
+def render_compact_progress_summary(
+    tool_counts: "OrderedDict[str, int]",
+    layout: str = "multi_line",
+    max_items: int = 8,
+) -> str:
+    """Render the compact progress HUD with truncation rules shared by CLI/gateway."""
+    if not tool_counts:
+        return "⚡ Working"
+
+    items = OrderedDict(list(tool_counts.items())[:max_items])
+    hidden_count = max(0, len(tool_counts) - len(items))
+    rendered = render_compact_tool_progress(items, layout)
+    if hidden_count:
+        suffix = f"⚙️+{hidden_count} more"
+        rendered = f"{rendered} · {suffix}" if layout == "single_line" else f"{rendered}\n{suffix}"
+    return rendered
+
+
 # =========================================================================
 # Skin-aware helpers (lazy import to avoid circular deps)
 # =========================================================================
@@ -158,7 +557,39 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
             return emoji
     except Exception:
         pass
-    # 3. Hardcoded fallback
+    # 3. Minimal built-in fallback map for core tools whose registry entries
+    # do not carry per-tool emoji metadata.
+    default_emojis = {
+        "search_files": "🔎",
+        "web_search": "🔍",
+        "fast_web_search": "🔍",
+        "web_extract": "📄",
+        "fetch_page_clean": "📄",
+        "scrape_page_answer": "📄",
+        "read_file": "📖",
+        "write_file": "✍️",
+        "patch": "🩹",
+        "terminal": "💻",
+        "antigravity": "✨",
+        "claude_code": "☀️",
+        "codex": "🌀",
+        "execute_code": "🐍",
+        "vision_analyze": "👁️",
+        "image_generate": "🖼️",
+        "memory": "🧠",
+        "todo": "✅",
+        "grok_research": "🐦",
+        "x_search": "🐦",
+        "x_twitter": "🐦",
+        "xurl": "🐦",
+        "thinking": "🧠",
+        "reasoning": "🧠",
+        "think": "🧠",
+    }
+    if tool_name in default_emojis:
+        return default_emojis[tool_name]
+
+    # 4. Hardcoded fallback
     return default
 
 
@@ -1418,8 +1849,9 @@ def get_cute_tool_message(
         return _wrap(f"┊ ⏰ cron      {action} {args.get('job_id', '')}  {dur}")
     if tool_name == "execute_code":
         code = args.get("code", "")
-        first_line = code.strip().split("\n")[0] if code.strip() else ""
-        return _wrap(f"┊ 🐍 exec      {_trunc(first_line, 35)}  {dur}")
+        lines = len([l for l in code.strip().split("\n") if l.strip()]) if code.strip() else 0
+        label = f"{lines} line(s)" if lines else "exec"
+        return _wrap(f"┊ 🐍 exec      {label}  {dur}")
     if tool_name == "delegate_task":
         tasks = args.get("tasks")
         if tasks and isinstance(tasks, list):

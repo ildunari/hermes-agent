@@ -112,8 +112,63 @@ class TurnContext:
     should_review_memory: bool = False
     # Context contributed by ``pre_llm_call`` plugins (appended to user message).
     plugin_user_context: str = ""
+    # Internal context contributed by ``pre_llm_call`` plugins (appended to system prompt).
+    plugin_system_context: str = ""
     # External-memory prefetch result, reused across loop iterations.
     ext_prefetch_cache: str = ""
+
+
+def _estimate_compression_payload_tokens(
+    agent: Any,
+    messages: List[Dict[str, Any]],
+    system_prompt: Optional[str],
+) -> Optional[int]:
+    """Estimate the durable conversation payload compression can affect."""
+    try:
+        return estimate_request_tokens_rough(
+            messages,
+            system_prompt=system_prompt or "",
+            tools=getattr(agent, "tools", None) or None,
+        )
+    except Exception:
+        try:
+            return estimate_messages_tokens_rough(messages)
+        except Exception:
+            return None
+
+
+def _compression_progress(
+    agent: Any,
+    before_messages: List[Dict[str, Any]],
+    after_messages: List[Dict[str, Any]],
+    *,
+    before_tokens: Optional[int],
+    after_system_prompt: Optional[str],
+) -> tuple[bool, Optional[int]]:
+    """Return whether compression made retry-worthy progress.
+
+    Compression can shrink large tool/message contents while preserving the
+    same number of OpenAI messages. Treat a meaningful token drop as progress,
+    not just a smaller message count.
+    """
+    if len(after_messages) < len(before_messages):
+        return True, None
+
+    if not before_tokens or before_tokens <= 0:
+        return False, None
+
+    try:
+        after_tokens = _estimate_compression_payload_tokens(
+            agent, after_messages, after_system_prompt
+        )
+        if after_tokens is None:
+            return False, None
+    except Exception:
+        return False, None
+
+    tokens_saved = before_tokens - after_tokens
+    min_saved = max(1024, int(before_tokens * 0.05))
+    return tokens_saved >= min_saved, after_tokens
 
 
 def build_turn_context(
@@ -348,6 +403,7 @@ def build_turn_context(
         )
 
     # ── Preflight context compression ──
+    compaction_applied = False
     # Gate the (expensive) full token estimate behind a cheap pre-check.
     # See ``_should_run_preflight_estimate`` for the OR semantics that fix
     # issue #27405 (a few very large messages slipping past the count gate).
@@ -431,25 +487,33 @@ def build_turn_context(
                 "This may take a moment."
             )
             for _pass in range(3):
+                _orig_messages = messages
                 _orig_len = len(messages)
-                _orig_tokens = _preflight_tokens
+                _orig_tokens = _estimate_compression_payload_tokens(
+                    agent, _orig_messages, active_system_prompt
+                ) or _preflight_tokens
                 messages, active_system_prompt = agent._compress_context(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
-                # Re-estimate now so size-only compression (same row count,
-                # lower token count — e.g. summarising tool outputs) is
-                # recognised as progress instead of being misread as
-                # "Cannot compress further". Fixes #39548.
-                _preflight_tokens = estimate_request_tokens_rough(
+                _made_progress, _compressed_tokens = _compression_progress(
+                    agent,
+                    _orig_messages,
                     messages,
-                    system_prompt=active_system_prompt or "",
-                    tools=agent.tools or None,
+                    before_tokens=_orig_tokens,
+                    after_system_prompt=active_system_prompt,
                 )
-                if not _compression_made_progress(
-                    _orig_len, len(messages), _orig_tokens, _preflight_tokens
-                ):
+                if _compressed_tokens is not None:
+                    _preflight_tokens = _compressed_tokens
+                else:
+                    _preflight_tokens = estimate_request_tokens_rough(
+                        messages,
+                        system_prompt=active_system_prompt or "",
+                        tools=agent.tools or None,
+                    )
+                if not _made_progress:
                     break  # Cannot compress further: neither rows nor tokens moved
+                compaction_applied = True
                 conversation_history = conversation_history_after_compression(
                     agent, messages
                 )
@@ -461,8 +525,10 @@ def build_turn_context(
                 if not _compressor.should_compress(_preflight_tokens):
                     break
 
-    # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
+    # Plugin hook: pre_llm_call. Legacy ``context`` is injected into the user
+    # message; newer ``system_context`` is layered onto the API system prompt.
     plugin_user_context = ""
+    plugin_system_context = ""
     try:
         from hermes_cli.plugins import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
@@ -473,11 +539,13 @@ def build_turn_context(
             user_message=original_user_message,
             conversation_history=list(messages),
             is_first_turn=(not bool(conversation_history)),
+            compaction_applied=compaction_applied,
             model=agent.model,
             platform=getattr(agent, "platform", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
         )
         _ctx_parts: list[str] = []
+        _system_ctx_parts: list[str] = []
         # Spill oversized per-hook context to disk so a runaway plugin
         # can't inflate every subsequent turn's prompt. Ported from
         # openai/codex PR #21069 ("Spill large hook outputs from context").
@@ -490,10 +558,36 @@ def build_turn_context(
         except Exception:
             _spill_if_oversized = None  # type: ignore[assignment]
             _spill_config_cached = None
+
         for r in _pre_results:
             _piece: str = ""
-            if isinstance(r, dict) and r.get("context"):
-                _piece = str(r["context"])
+            _system_piece: str = ""
+            if isinstance(r, dict):
+                if r.get("system_context"):
+                    _system_piece = str(r["system_context"])
+                    # If a hook emits both the new internal system lane and
+                    # the old user-message fallback, do not duplicate the
+                    # fallback into visible user-authored text.
+                elif r.get("context"):
+                    _piece = str(r["context"])
+            elif isinstance(r, str) and r.strip():
+                _piece = r
+            else:
+                continue
+            if _spill_if_oversized is not None and _system_piece:
+                try:
+                    _system_piece = _spill_if_oversized(
+                        _system_piece,
+                        session_id=agent.session_id,
+                        source="plugin hook system",
+                        config=_spill_config_cached,
+                    )
+                except Exception as _spill_exc:
+                    logger.warning("hook system context spill failed: %s", _spill_exc)
+            if _system_piece:
+                _system_ctx_parts.append(_system_piece)
+                continue
+
             elif isinstance(r, str) and r.strip():
                 _piece = r
             else:
@@ -511,6 +605,8 @@ def build_turn_context(
             _ctx_parts.append(_piece)
         if _ctx_parts:
             plugin_user_context = "\n\n".join(_ctx_parts)
+        if _system_ctx_parts:
+            plugin_system_context = "\n\n".join(_system_ctx_parts)
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
 
@@ -561,5 +657,6 @@ def build_turn_context(
         current_turn_user_idx=current_turn_user_idx,
         should_review_memory=should_review_memory,
         plugin_user_context=plugin_user_context,
+        plugin_system_context=plugin_system_context,
         ext_prefetch_cache=ext_prefetch_cache,
     )

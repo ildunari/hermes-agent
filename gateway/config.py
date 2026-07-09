@@ -235,6 +235,7 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    GOOGLE_CHAT = "google_chat"
     RELAY = "relay"  # generic relay adapter fronted by the connector (EXPERIMENTAL)
     @classmethod
     def _missing_(cls, value):
@@ -546,22 +547,21 @@ class StreamingConfig:
     """Configuration for real-time token streaming to messaging platforms."""
     enabled: bool = False
     # Transport selection:
+    #   "edit"  — progressive editMessageText updates. This is the default
+    #             because it grows the visible bot message in chat history.
     #   "auto"  — prefer native streaming-draft updates when the platform
-    #             supports them (Telegram sendMessageDraft, Bot API 9.5+);
-    #             fall back to edit-based when not.
+    #             supports them (Telegram DMs via sendMessageDraft);
+    #             fall back to edit-based when not. Telegram drafts are
+    #             ephemeral previews, not persisted token-by-token messages.
     #   "draft" — explicitly request native drafts; falls back to edit when
     #             the platform/chat doesn't support them.
-    #   "edit"  — progressive editMessageText only (legacy behaviour).
     #   "off"   — disable streaming entirely.
     #
-    # Default is "auto": prefer native draft streaming on platforms that
-    # support it (Telegram DMs via sendMessageDraft, Bot API 9.5+) and fall
-    # back to edit-based streaming everywhere else.  This is safe as a global
-    # default because adapters without draft support (Discord, Slack, Matrix,
-    # …) report supports_draft_streaming() == False and transparently use the
-    # edit path — so "auto" never regresses non-Telegram platforms, it only
-    # upgrades the chats that can render the smoother native preview.
-    transport: str = "auto"
+    # Draft transport can animate nicely on some Telegram clients, but in
+    # practice it may look like a twitching temporary bubble followed by one
+    # final message. Keep it opt-in; the out-of-box path should visibly update
+    # the actual response bubble.
+    transport: str = "edit"
     edit_interval: float = DEFAULT_STREAMING_EDIT_INTERVAL
     buffer_threshold: int = DEFAULT_STREAMING_BUFFER_THRESHOLD
     cursor: str = DEFAULT_STREAMING_CURSOR
@@ -590,7 +590,7 @@ class StreamingConfig:
             return cls()
         return cls(
             enabled=_coerce_bool(data.get("enabled"), False),
-            transport=data.get("transport", "auto"),
+            transport=data.get("transport", "edit"),
             edit_interval=_coerce_float(
                 data.get("edit_interval"), DEFAULT_STREAMING_EDIT_INTERVAL,
             ),
@@ -632,6 +632,13 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     ),
     Platform.YUANBAO: lambda cfg: bool(
         cfg.extra.get("app_id") and cfg.extra.get("app_secret")
+    ),
+    Platform.GOOGLE_CHAT: lambda cfg: bool(
+        cfg.extra.get("project_id") and cfg.extra.get("subscription_id")
+    ),
+    Platform.DINGTALK: lambda cfg: bool(
+        (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
+        and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
     ),
     # Relay dials OUT to a connector; it is "connected" once an endpoint URL is
     # configured (extra["relay_url"] or extra["url"]). The capability descriptor
@@ -1241,6 +1248,7 @@ def load_gateway_config() -> GatewayConfig:
                 plat_data, extra = _ensure_platform_extra_dict(platforms_data, plat.value)
                 if enabled_was_explicit:
                     plat_data["enabled"] = platform_cfg["enabled"]
+                if enabled_was_explicit:
                     # Mark the explicit enable/disable so the registry-driven
                     # plugin-enable pass in _apply_env_overrides honors an
                     # explicit ``enabled: false`` for migrated plugin platforms
@@ -1697,8 +1705,14 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             config.platforms[Platform.HOMEASSISTANT].extra["url"] = hass_url
 
     # Email
+    from gateway.email_auth import email_password_configured
+
     email_addr = getenv("EMAIL_ADDRESS")
-    email_pwd = getenv("EMAIL_PASSWORD")
+    email_pwd = bool(
+        getenv("EMAIL_PASSWORD", "")
+        or getenv("EMAIL_PASSWORD_CMD", "").strip()
+        or email_password_configured()
+    )
     email_imap = getenv("EMAIL_IMAP_HOST")
     email_smtp = getenv("EMAIL_SMTP_HOST")
     if all([email_addr, email_pwd, email_imap, email_smtp]):
@@ -1741,7 +1755,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     api_server_cors_origins = getenv("API_SERVER_CORS_ORIGINS", "")
     api_server_port = getenv("API_SERVER_PORT")
     api_server_host = getenv("API_SERVER_HOST")
-    if api_server_enabled or api_server_key:
+    if (api_server_enabled or api_server_key) and not (
+        Platform.API_SERVER in config.platforms
+        and config.platforms[Platform.API_SERVER].enabled is False
+    ):
         if Platform.API_SERVER not in config.platforms:
             config.platforms[Platform.API_SERVER] = PlatformConfig()
         config.platforms[Platform.API_SERVER].enabled = True
@@ -1766,7 +1783,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     webhook_enabled = is_truthy_value(getenv("WEBHOOK_ENABLED", ""))
     webhook_port = getenv("WEBHOOK_PORT")
     webhook_secret = getenv("WEBHOOK_SECRET", "")
-    if webhook_enabled:
+    if webhook_enabled and not (
+        Platform.WEBHOOK in config.platforms
+        and config.platforms[Platform.WEBHOOK].enabled is False
+    ):
         if Platform.WEBHOOK not in config.platforms:
             config.platforms[Platform.WEBHOOK] = PlatformConfig()
         config.platforms[Platform.WEBHOOK].enabled = True
@@ -1973,6 +1993,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             "webhook_host": getenv("BLUEBUBBLES_WEBHOOK_HOST", "127.0.0.1"),
             "webhook_port": getenv_int("BLUEBUBBLES_WEBHOOK_PORT", 8645),
             "webhook_path": getenv("BLUEBUBBLES_WEBHOOK_PATH", "/bluebubbles-webhook"),
+            "webhook_public_url": (
+                getenv("BLUEBUBBLES_WEBHOOK_PUBLIC_URL", "")
+                or getenv("BLUEBUBBLES_WEBHOOK_URL", "")
+            ),
             "send_read_receipts": is_truthy_value(getenv("BLUEBUBBLES_SEND_READ_RECEIPTS", "true")),
         })
         bluebubbles_require_mention = getenv("BLUEBUBBLES_REQUIRE_MENTION")

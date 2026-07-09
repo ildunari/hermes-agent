@@ -1,3 +1,4 @@
+from hermes_cli.config import DEFAULT_CONFIG
 from hermes_cli.moa_config import (
     DEFAULT_MOA_AGGREGATOR,
     DEFAULT_MOA_PRESET_NAME,
@@ -9,6 +10,18 @@ from hermes_cli.moa_config import (
     resolve_moa_preset,
     set_active_moa_preset,
 )
+
+
+def test_default_config_preserves_provider_sampling_defaults():
+    cfg = normalize_moa_config(DEFAULT_CONFIG["moa"])
+    preset = cfg["presets"][cfg["default_preset"]]
+
+    assert preset["reference_temperature"] is None
+    assert preset["aggregator_temperature"] is None
+    assert cfg["reference_temperature"] is None
+    assert cfg["aggregator_temperature"] is None
+    assert preset["max_tokens"] == 4096
+    assert cfg["max_tokens"] == 4096
 
 
 def test_normalize_moa_config_uses_default_named_preset():
@@ -39,7 +52,9 @@ def test_normalize_moa_config_preserves_named_presets():
 
     assert cfg["default_preset"] == "coding"
     assert set(cfg["presets"]) == {"coding", "review"}
-    assert cfg["reference_models"] == [{"provider": "openai-codex", "model": "gpt-5.5"}]
+    assert cfg["reference_models"] == [
+        {"provider": "openai-codex", "model": "gpt-5.5", "reasoning_effort": "medium", "service_tier": "fast"}
+    ]
 
 
 def test_legacy_flat_config_becomes_default_preset():
@@ -51,7 +66,7 @@ def test_legacy_flat_config_becomes_default_preset():
     )
 
     assert cfg["presets"][DEFAULT_MOA_PRESET_NAME]["reference_models"] == [
-        {"provider": "openai-codex", "model": "gpt-5.5"}
+        {"provider": "openai-codex", "model": "gpt-5.5", "reasoning_effort": "medium", "service_tier": "fast"}
     ]
 
 

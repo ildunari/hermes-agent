@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import subprocess
 import threading
 import time
@@ -30,6 +31,36 @@ from tools.environments.local import hermes_subprocess_env
 # Default minimum codex version we test against. The PR sets this from the
 # `codex --version` parsed at install time; bumping is a one-line change here.
 MIN_CODEX_VERSION = (0, 125, 0)
+_CODEX_PATH_EXTRAS = (
+    os.path.expanduser("~/.npm-global/bin"),
+    os.path.expanduser("~/.local/bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+)
+
+
+def _codex_spawn_env(env: Optional[dict[str, str]] = None, codex_home: Optional[str] = None) -> dict[str, str]:
+    # codex app-server needs model-provider credentials, but not Hermes gateway
+    # and infrastructure secrets. Use the centralized subprocess env scrubber,
+    # then add the Codex-specific PATH/codex-home shaping below.
+    spawn_env = hermes_subprocess_env(inherit_credentials=True)
+    if env:
+        spawn_env.update(env)
+    path_parts = [p for p in _CODEX_PATH_EXTRAS if p]
+    current_path = spawn_env.get("PATH") or os.defpath
+    for part in reversed(path_parts):
+        if part not in current_path.split(os.pathsep):
+            current_path = part + os.pathsep + current_path
+    spawn_env["PATH"] = current_path
+    if codex_home:
+        spawn_env["CODEX_HOME"] = codex_home
+    return spawn_env
+
+
+def _resolve_codex_bin(codex_bin: str, spawn_env: dict[str, str]) -> str:
+    if os.path.isabs(codex_bin):
+        return codex_bin
+    return shutil.which(codex_bin, path=spawn_env.get("PATH")) or codex_bin
 
 
 @dataclass
@@ -72,28 +103,18 @@ class CodexAppServerClient:
         self,
         codex_bin: str = "codex",
         codex_home: Optional[str] = None,
+        config_profile: Optional[str] = None,
+        config_overrides: Optional[list[str]] = None,
         extra_args: Optional[list[str]] = None,
         env: Optional[dict[str, str]] = None,
     ) -> None:
         self._codex_bin = codex_bin
-        # codex app-server is a model-driving CLI executor: it runs a
-        # model-chosen agentic loop that executes shell commands, so it
-        # legitimately needs LLM provider credentials (inherit_credentials=True)
-        # to authenticate against the model endpoint. But the previous
-        # `os.environ.copy()` also handed it every Tier-1 Hermes secret — gateway
-        # bot tokens, GitHub auth, Modal/Daytona infra tokens, the dashboard
-        # session token, AUXILIARY_* side-LLM keys, GATEWAY_RELAY_* auth — none
-        # of which a coding subprocess has any use for. Route through the
-        # centralized helper so Tier-1 + dynamic-internal secrets are always
-        # stripped while provider creds still flow, matching copilot_acp_client
-        # (#29157 sibling spawn-site gap).
-        spawn_env = hermes_subprocess_env(inherit_credentials=True)
-        if env:
-            spawn_env.update(env)
-        if codex_home:
-            spawn_env["CODEX_HOME"] = codex_home
+        spawn_env = _codex_spawn_env(env, codex_home)
 
-        app_server_args = list(extra_args or [])
+        app_server_args: list[str] = []
+        for override in config_overrides or []:
+            app_server_args.extend(["-c", override])
+        app_server_args.extend(list(extra_args or []))
         # Kanban workers must be able to write their handoff/status back to
         # the board DB, which lives outside the per-task workspace. Keep the
         # Codex sandbox on, but add the Kanban root as the only extra writable
@@ -123,7 +144,11 @@ class CodexAppServerClient:
                 ]
             )
 
-        cmd = [codex_bin, "app-server"] + app_server_args
+        cmd = [_resolve_codex_bin(codex_bin, spawn_env)]
+        # `codex app-server` currently rejects `--profile`; runtime profile
+        # requests are tracked by Hermes but not passed as a CLI profile flag.
+        cmd.append("app-server")
+        cmd.extend(app_server_args)
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.
         spawn_env.setdefault("RUST_LOG", "warn")
 

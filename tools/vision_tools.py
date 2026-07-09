@@ -40,7 +40,12 @@ from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
-from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+from agent.auxiliary_client import async_call_llm
+from agent.image_normalization import (
+    convert_heic_to_jpeg_for_vision,
+    detect_image_mime_type,
+    normalize_image_file_for_vision,
+)
 from hermes_constants import get_hermes_dir
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
@@ -49,6 +54,21 @@ import sys
 logger = logging.getLogger(__name__)
 
 _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
+
+
+def _hydrate_vision_env() -> None:
+    """Load the active Hermes profile .env before auxiliary vision calls.
+
+    Gateway image pre-analysis can run before the main agent turn's normal
+    dotenv refresh. Without this, long-lived gateway processes may call Z.ai
+    vision with stale or missing credentials even though the profile .env is
+    correct.
+    """
+    try:
+        from hermes_cli.env_loader import load_hermes_dotenv
+        load_hermes_dotenv()
+    except Exception as exc:  # best-effort; provider call will surface failures
+        logger.debug("Could not hydrate Hermes vision env: %s", exc)
 
 # Configurable HTTP download timeout for _download_image().
 # Separate from auxiliary.vision.timeout which governs the LLM API call.
@@ -221,6 +241,11 @@ async def _validate_image_url_async(url: str) -> bool:
     return await async_is_safe_url(url)
 
 
+def _detect_image_mime_type(image_path: Path) -> Optional[str]:
+    """Return a MIME type when the file looks like a supported image."""
+    return detect_image_mime_type(image_path)
+
+
 def _detect_image_mime_type_from_bytes(data: bytes) -> Optional[str]:
     """Magic-byte MIME sniff on raw bytes (authoritative; no extension trust).
 
@@ -240,6 +265,16 @@ def _detect_image_mime_type_from_bytes(data: bytes) -> Optional[str]:
     if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+def _convert_heic_to_jpeg_for_vision(image_path: Path) -> Path:
+    """Convert HEIC/HEIF into a provider-safe image; PNG is preferred."""
+    return convert_heic_to_jpeg_for_vision(image_path)
+
+
+def _normalize_image_for_vision(image_path: Path, mime_type: str) -> tuple[Path, str, bool]:
+    """Return a provider-safe image path/mime plus whether the returned file is temporary."""
+    return normalize_image_file_for_vision(image_path, mime_type)
 
 
 # Media types the major vision providers (Anthropic in particular) accept for
@@ -950,7 +985,7 @@ async def _vision_analyze_native(
         return tool_error("image_url is required", success=False)
 
     temp_image_path: Optional[Path] = None
-    should_cleanup = False
+    cleanup_paths: list[Path] = []
     try:
         from tools.interrupt import is_interrupted
         if is_interrupted():
@@ -1000,6 +1035,13 @@ async def _vision_analyze_native(
                     pass
             temp_image_path = normalized_path
             should_cleanup = True
+            image_size_bytes = temp_image_path.stat().st_size
+
+        temp_image_path, detected_mime_type, converted_cleanup = _normalize_image_for_vision(
+            temp_image_path, detected_mime_type,
+        )
+        if converted_cleanup:
+            cleanup_paths.append(temp_image_path)
             image_size_bytes = temp_image_path.stat().st_size
 
         image_data_url = await _run_encode_on_cpu_executor(
@@ -1052,10 +1094,10 @@ async def _vision_analyze_native(
         return tool_error(f"Native vision failed: {exc}", success=False)
     finally:
         # Only delete temp files we created — never user-provided paths.
-        if should_cleanup and temp_image_path is not None:
+        for cleanup_path in cleanup_paths:
             try:
-                if temp_image_path.exists():
-                    temp_image_path.unlink()
+                if cleanup_path.exists():
+                    cleanup_path.unlink()
             except Exception:
                 pass
 
@@ -1100,6 +1142,7 @@ async def vision_analyze_tool(
     """
     if not isinstance(user_prompt, str):
         user_prompt = str(user_prompt) if user_prompt is not None else ""
+    _hydrate_vision_env()
     debug_call_data = {
         "parameters": {
             "image_url": image_url,
@@ -1117,6 +1160,7 @@ async def vision_analyze_tool(
     # Track whether we should clean up the file after processing.
     # Local files (e.g. from the image cache) should NOT be deleted.
     should_cleanup = True
+    cleanup_paths: list[Path] = []
     detected_mime_type = None
     
     try:
@@ -1268,14 +1312,18 @@ async def vision_analyze_tool(
             else:
                 raise
         
-        # Extract the analysis — fall back to reasoning if content is empty
-        analysis = extract_content_or_reasoning(response)
+        # Extract only visible model content. Do not fall back to structured
+        # reasoning_content for vision: it is hidden scratchpad and should not be
+        # injected into user-facing output or the main agent context.
+        analysis = ((response.choices[0].message.content or "").strip())
 
-        # Retry once on empty content (reasoning-only response)
+        # Retry once on empty content. If the provider still returns only
+        # reasoning_content, treat it as an empty vision result rather than
+        # leaking hidden reasoning into the final answer.
         if not analysis:
-            logger.warning("Vision LLM returned empty content, retrying once")
+            logger.warning("Vision LLM returned empty visible content, retrying once")
             response = await async_call_llm(**call_kwargs)
-            analysis = extract_content_or_reasoning(response)
+            analysis = ((response.choices[0].message.content or "").strip())
 
         analysis_length = len(analysis)
         
@@ -1347,9 +1395,13 @@ async def vision_analyze_tool(
     
     finally:
         # Clean up temporary image file (but NOT local/cached files)
-        if should_cleanup and temp_image_path and temp_image_path.exists():
+        if should_cleanup and temp_image_path and temp_image_path not in cleanup_paths:
+            cleanup_paths.append(temp_image_path)
+        for cleanup_path in cleanup_paths:
             try:
-                temp_image_path.unlink()
+                if not cleanup_path.exists():
+                    continue
+                cleanup_path.unlink()
                 logger.debug("Cleaned up temporary image file")
             except Exception as cleanup_error:
                 logger.warning(
@@ -1635,6 +1687,7 @@ async def video_analyze_tool(
     """Analyze a video via multimodal LLM. Returns JSON {success, analysis}."""
     if not isinstance(user_prompt, str):
         user_prompt = str(user_prompt) if user_prompt is not None else ""
+    _hydrate_vision_env()
     debug_call_data = {
         "parameters": {
             "video_url": video_url,
@@ -1754,12 +1807,12 @@ async def video_analyze_tool(
             call_kwargs["model"] = model
 
         response = await async_call_llm(**call_kwargs)
-        analysis = extract_content_or_reasoning(response)
+        analysis = ((response.choices[0].message.content or "").strip())
 
         if not analysis:
-            logger.warning("Empty video response, retrying once")
+            logger.warning("Empty visible video response, retrying once")
             response = await async_call_llm(**call_kwargs)
-            analysis = extract_content_or_reasoning(response)
+            analysis = ((response.choices[0].message.content or "").strip())
 
         analysis_length = len(analysis) if analysis else 0
         logger.info("Video analysis completed (%s characters)", analysis_length)

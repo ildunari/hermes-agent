@@ -52,15 +52,157 @@ _UNCAPPED_PICKER_PROVIDERS: frozenset[str] = frozenset({"opencode-zen", "opencod
 logger = logging.getLogger(__name__)
 
 
-def _declared_model_ids(value: Any) -> list[str]:
-    """Return configured model IDs from supported config shapes.
+def _normalize_discover_models(value) -> bool | str:
+    """Normalize discover_models config.
 
-    Accepts:
-    - ``{"model-id": {...}}``
-    - ``["model-a", "model-b"]``
-    - ``[{"id": "model-a"}, {"name": "model-b"}]``
-    - ``"model-a"``
+    ``False`` preserves an explicit model subset. ``"force"``/``"dynamic"``
+    means the endpoint's live /models catalog is authoritative even when the
+    config has a seed ``model:`` or ``models:`` block for overrides.
     """
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"false", "no", "0", "off"}:
+            return False
+        if lowered in {"force", "always", "dynamic", "live"}:
+            return "force"
+        return True
+    if value is False:
+        return False
+    return True
+
+
+def load_hidden_provider_policy(config: dict | None = None) -> tuple[str, ...]:
+    """Read provider slugs/groups hidden from display pickers."""
+    if config is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            config = {}
+    hidden: list[str] = []
+    for section_name in ("model_picker", "model_catalog"):
+        section = (config or {}).get(section_name)
+        if not isinstance(section, dict):
+            continue
+        values = section.get("hidden_providers") or section.get("hide_providers") or []
+        if isinstance(values, str):
+            hidden.extend(part.strip() for part in values.split(","))
+        elif isinstance(values, (list, tuple, set)):
+            hidden.extend(str(part).strip() for part in values)
+    return tuple(part for part in hidden if part)
+
+
+def load_visible_model_policy(config: dict | None = None) -> dict[str, tuple[str, ...]]:
+    """Read per-provider model allowlists for display pickers."""
+    if config is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            config = {}
+
+    visible: dict[str, list[str]] = {}
+    for section_name in ("model_picker", "model_catalog"):
+        section = (config or {}).get(section_name)
+        if not isinstance(section, dict):
+            continue
+        raw = section.get("visible_models") or section.get("show_models") or {}
+        if not isinstance(raw, dict):
+            continue
+        for provider, values in raw.items():
+            key = str(provider or "").strip()
+            if not key:
+                continue
+            if isinstance(values, str):
+                models = [part.strip() for part in values.split(",")]
+            elif isinstance(values, (list, tuple, set)):
+                models = [str(part).strip() for part in values]
+            else:
+                continue
+            visible[key] = [model for model in models if model]
+
+    if not visible:
+        return {}
+
+    try:
+        from hermes_cli.models import normalize_provider as _normalize_provider
+    except Exception:
+        def _normalize_provider(provider: str | None) -> str:
+            return str(provider or "").strip().lower()
+
+    normalized: dict[str, tuple[str, ...]] = {}
+    for provider, models in visible.items():
+        key = str(_normalize_provider(provider) or provider).strip().lower()
+        if key:
+            normalized[key] = tuple(models)
+    return normalized
+
+
+def expand_hidden_provider_slugs(hidden: tuple[str, ...] | list[str] | set[str] | None) -> set[str]:
+    """Normalize display-hidden provider names to concrete provider slugs."""
+    if not hidden:
+        return set()
+    try:
+        from hermes_cli.models import PROVIDER_GROUPS, normalize_provider
+    except Exception:
+        PROVIDER_GROUPS = {}  # type: ignore[assignment]
+
+        def normalize_provider(value: str) -> str:  # type: ignore[no-redef]
+            return str(value or "").strip().lower()
+
+    out: set[str] = set()
+    for raw in hidden:
+        value = str(raw or "").strip().lower()
+        if not value:
+            continue
+        if value in PROVIDER_GROUPS:
+            _label, _desc, members = PROVIDER_GROUPS[value]
+            out.update(str(member).lower() for member in members)
+            continue
+        canonical = str(normalize_provider(value) or value).strip().lower()
+        if canonical:
+            out.add(canonical)
+    return out
+
+
+def filter_visible_model_rows(rows: list[dict], visible: dict[str, tuple[str, ...]] | None) -> list[dict]:
+    """Return provider rows with configured per-provider model allowlists applied."""
+    if not visible:
+        return rows
+
+    out: list[dict] = []
+    for row in rows:
+        slug = str(row.get("slug", "") or "").strip().lower()
+        allowed = visible.get(slug)
+        if not allowed:
+            out.append(row)
+            continue
+
+        allowed_lower = {model.lower() for model in allowed}
+        models = [m for m in (row.get("models") or []) if str(m).lower() in allowed_lower]
+        next_row = dict(row)
+        next_row["models"] = models
+        next_row["total_models"] = len(models)
+        out.append(next_row)
+
+    return out
+
+
+def filter_hidden_provider_rows(rows: list[dict], hidden: tuple[str, ...] | list[str] | set[str] | None) -> list[dict]:
+    """Return provider rows excluding configured hidden provider slugs."""
+    hidden_slugs = expand_hidden_provider_slugs(hidden)
+    if not hidden_slugs:
+        return rows
+    return [
+        row for row in rows
+        if str(row.get("slug", "")).strip().lower() not in hidden_slugs
+    ]
+
+
+def _declared_model_ids(value: Any) -> list[str]:
+    """Return configured model IDs from supported config shapes."""
     ids: list[str] = []
     seen: set[str] = set()
 
@@ -79,27 +221,21 @@ def _declared_model_ids(value: Any) -> list[str]:
     if isinstance(value, str):
         _add(value)
         return ids
-
     if isinstance(value, dict):
         for model_id in value:
             _add(model_id)
         return ids
-
     if isinstance(value, (list, tuple)):
         for item in value:
             if isinstance(item, str):
                 _add(item)
-                continue
-            if isinstance(item, dict):
+            elif isinstance(item, dict):
                 model_id = item.get("id")
                 if not isinstance(model_id, str) or not model_id.strip():
                     model_id = item.get("name")
                 _add(model_id)
         return ids
-
     return ids
-
-
 def _bare_custom_provider_def(current_base_url: str) -> Optional[ProviderDef]:
     """ProviderDef for a direct ``model.provider: custom`` endpoint."""
     base_url = str(current_base_url or "").strip()
@@ -678,6 +814,7 @@ def resolve_display_context_length(
     model_info: Optional[ModelInfo] = None,
     custom_providers: list | None = None,
     config_context_length: int | None = None,
+    config_model: str | None = None,
 ) -> Optional[int]:
     """Resolve the context length to show in /model output.
 
@@ -705,6 +842,7 @@ def resolve_display_context_length(
             provider=provider or None,
             custom_providers=custom_providers,
             config_context_length=config_context_length,
+            config_model=config_model,
         )
         if ctx:
             return int(ctx)
@@ -1250,6 +1388,17 @@ def switch_model(
             if not api_key:
                 api_key = "no-key-required"
 
+    # MoA is a virtual provider. It must never inherit the previous provider's
+    # OpenAI-compatible endpoint (often http://127.0.0.1/v1 for local models),
+    # because the live runtime is agent.moa_loop.MoAClient, not a network API.
+    # Keep the persisted/session override explicit so resumed sessions,
+    # manual compression, and slash workers rebuild the virtual facade instead
+    # of trying to POST to a stale local URL.
+    if target_provider == "moa":
+        api_key = "moa-virtual-provider"
+        base_url = "moa://local"
+        api_mode = "chat_completions"
+
     # --- Normalize model name for target provider ---
     new_model = normalize_model_for_provider(new_model, target_provider)
 
@@ -1447,7 +1596,7 @@ def prewarm_picker_cache_async() -> Optional["_threading.Thread"]:
 def list_authenticated_providers(
     current_provider: str = "",
     current_base_url: str = "",
-    user_providers: dict = None,
+    user_providers: dict | None = None,
     custom_providers: list | None = None,
     *,
     force_fresh_nous_tier: bool = False,
@@ -1598,6 +1747,20 @@ def list_authenticated_providers(
         except Exception:
             return False
 
+    def _has_vibeproxy_signal() -> bool:
+        """Return True when VibeProxy is explicitly selected or reachable locally."""
+        if current_provider.strip().lower() == "vibeproxy":
+            return True
+        if os.environ.get("VIBEPROXY_API_KEY", "").strip() or os.environ.get("VIBEPROXY_BASE_URL", "").strip():
+            return True
+        try:
+            import urllib.request
+            base = os.environ.get("VIBEPROXY_BASE_URL", "").strip().rstrip("/") or "http://127.0.0.1:8485/v1"
+            with urllib.request.urlopen(base + "/models", timeout=0.5) as resp:
+                return 200 <= getattr(resp, "status", 200) < 500
+        except Exception:
+            return False
+
     data = fetch_models_dev()
 
     # Build curated model lists keyed by hermes provider ID
@@ -1703,6 +1866,18 @@ def list_authenticated_providers(
         # disk caching to keep the picker open snappy. Falls back to the
         # curated static list when the live fetcher returns nothing.
         model_ids = cached_provider_model_ids(hermes_id)
+        if hermes_id == "deepseek":
+            # DeepSeek's live /models endpoint can lag first-class V-series IDs;
+            # keep Hermes' curated direct list visible in pickers.
+            model_ids = list(curated.get("deepseek", []) or model_ids)
+        if hermes_id == "xai-oauth":
+            # SuperGrok OAuth's /models surface can lag xAI's published API
+            # slugs; merge Hermes' curated subscription-friendly list so new
+            # chat models appear without waiting for the OAuth catalog to catch up.
+            seen = {m.lower() for m in model_ids}
+            model_ids = list(model_ids) + [
+                m for m in curated.get("xai-oauth", []) if m.lower() not in seen
+            ]
         if not model_ids:
             model_ids = curated.get(hermes_id, [])
             if hermes_id in _MODELS_DEV_PREFERRED:
@@ -1752,6 +1927,8 @@ def list_authenticated_providers(
         has_creds = False
         if overlay.auth_type == "aws_sdk":
             has_creds = _has_aws_sdk_creds_for_listing(hermes_slug)
+        elif hermes_slug == "vibeproxy":
+            has_creds = _has_vibeproxy_signal()
         elif overlay.extra_env_vars:
             has_creds = any(os.environ.get(ev) for ev in overlay.extra_env_vars)
         # Also check api_key_env_vars from PROVIDER_REGISTRY for api_key auth_type
@@ -1810,7 +1987,12 @@ def list_authenticated_providers(
         if not has_creds:
             continue
 
-        if hermes_slug in {"openai-codex", "copilot", "copilot-acp"}:
+        if hermes_slug == "vibeproxy":
+            # VibeProxy is a subscription-backed local gateway; keep the picker
+            # on the small Claude set we curate instead of expanding to every
+            # model its OpenAI-compatible /models endpoint advertises.
+            model_ids = list(curated.get("vibeproxy", []))
+        elif hermes_slug in {"openai-codex", "copilot", "copilot-acp"}:
             # Use live OAuth-backed discovery so the gateway /model picker
             # matches what the user's authenticated Codex/Copilot backend
             # actually serves — including ChatGPT-Pro-only Codex slugs
@@ -1934,13 +2116,17 @@ def list_authenticated_providers(
         # ~/.aws/credentials, instance roles, etc.)
         if not _cp_has_creds and _cp_config and getattr(_cp_config, "auth_type", "") == "aws_sdk":
             _cp_has_creds = _has_aws_sdk_creds_for_listing(_cp.slug)
+        if not _cp_has_creds and _cp.slug == "vibeproxy":
+            _cp_has_creds = _has_vibeproxy_signal()
 
         if not _cp_has_creds:
             continue
 
         # For bedrock, use live discovery so the list reflects the active
         # region (eu.*, us.*, ap.*) instead of the hardcoded us.* static list.
-        if _cp_config and getattr(_cp_config, "auth_type", "") == "aws_sdk":
+        if _cp.slug == "vibeproxy":
+            _cp_model_ids = list(curated.get("vibeproxy", []))
+        elif _cp_config and getattr(_cp_config, "auth_type", "") == "aws_sdk":
             try:
                 _ids = cached_provider_model_ids(_cp.slug)
                 _cp_model_ids = _ids if _ids else curated.get(_cp.slug, [])
@@ -2029,9 +2215,7 @@ def list_authenticated_providers(
             if not api_key:
                 key_env = str(ep_cfg.get("key_env", "") or "").strip()
                 api_key = os.environ.get(key_env, "").strip() if key_env else ""
-            discover = ep_cfg.get("discover_models", True)
-            if isinstance(discover, str):
-                discover = discover.lower() not in {"false", "no", "0"}
+            discover = _normalize_discover_models(ep_cfg.get("discover_models", True))
             has_explicit_models = bool(models_list)
             _ep_url_norm = str(api_url).strip().rstrip("/").lower()
             _ep_slug_norm = str(ep_name).strip().lower()
@@ -2147,6 +2331,17 @@ def list_authenticated_providers(
             if not isinstance(entry, dict):
                 continue
 
+            provider_key = str(entry.get("provider_key", "") or "").strip().lower()
+            if provider_key:
+                try:
+                    from hermes_cli.models import normalize_provider as _normalize_provider
+
+                    normalized_key = _normalize_provider(provider_key)
+                except Exception:
+                    normalized_key = provider_key
+                if normalized_key.lower() in seen_slugs:
+                    continue
+
             raw_name = (entry.get("name") or "").strip()
             api_url = (
                 entry.get("base_url", "")
@@ -2175,9 +2370,7 @@ def list_authenticated_providers(
             # Read discover_models from the entry (same semantics as
             # section 3: true by default, set false to keep the explicit
             # ``models:`` list instead of replacing it with live /models).
-            discover = entry.get("discover_models", True)
-            if isinstance(discover, str):
-                discover = discover.lower() not in {"false", "no", "0"}
+            discover = _normalize_discover_models(entry.get("discover_models", True))
 
             # Per-provider extra_headers participate in the group identity:
             # two entries sharing (api_url, credential, api_mode) but declaring
@@ -2220,6 +2413,8 @@ def list_authenticated_providers(
                 # honour that for the whole grouped row.
                 if not discover:
                     groups[group_key]["discover_models"] = False
+                elif discover == "force" and groups[group_key].get("discover_models") is not False:
+                    groups[group_key]["discover_models"] = "force"
 
             # The singular ``model:`` field only holds the currently
             # active model. Hermes's own writer (main.py::_save_custom_provider)
@@ -2315,7 +2510,11 @@ def list_authenticated_providers(
             should_probe = (
                 _can_probe_custom_provider(row_is_current=_grp_is_current)
                 and bool(api_url)
-                and (bool(api_key) or not grp["models"])
+                and (
+                    grp.get("discover_models") == "force"
+                    or bool(api_key)
+                    or not grp["models"]
+                )
                 and grp.get("discover_models", True)
             )
             if should_probe:
@@ -2392,11 +2591,12 @@ def _prepend_moa_picker_provider(providers: List[dict], current_provider: str = 
 def list_picker_providers(
     current_provider: str = "",
     current_base_url: str = "",
-    user_providers: dict = None,
+    user_providers: dict | None = None,
     custom_providers: list | None = None,
     max_models: int | None = None,
     current_model: str = "",
     include_moa: bool = False,
+    hidden_providers: tuple[str, ...] | list[str] | set[str] | None = None,
 ) -> List[dict]:
     """Interactive-picker variant of :func:`list_authenticated_providers`.
 
@@ -2429,6 +2629,10 @@ def list_picker_providers(
     )
     if include_moa:
         providers = _prepend_moa_picker_provider(providers, current_provider=current_provider)
+    if hidden_providers is None:
+        hidden_providers = load_hidden_provider_policy()
+    providers = filter_hidden_provider_rows(providers, hidden_providers)
+    visible_models = load_visible_model_policy()
 
     filtered: List[dict] = []
     for p in providers:
@@ -2443,6 +2647,7 @@ def list_picker_providers(
             p["models"] = live_ids[:max_models] if max_models is not None else live_ids
             p["total_models"] = len(live_ids)
 
+        p = filter_visible_model_rows([p], visible_models)[0]
         has_models = bool(p.get("models"))
         is_custom_endpoint = bool(p.get("is_user_defined")) and bool(p.get("api_url"))
         if not has_models and not is_custom_endpoint:

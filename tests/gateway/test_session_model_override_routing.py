@@ -10,13 +10,14 @@ import asyncio
 import sys
 import threading
 import types
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import gateway.run as gateway_run
 from gateway.config import Platform
-from gateway.session import SessionSource
+from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 class _CapturingAgent:
@@ -56,6 +57,21 @@ def _make_runner():
     runner._session_model_overrides = {}
     runner._session_reasoning_overrides = {}
     runner._pending_model_notes = {}
+    runner.session_store = MagicMock()
+
+    def _session_entry(source):
+        return SessionEntry(
+            session_key=build_session_key(source),
+            session_id="session-for-test",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=source,
+            platform=source.platform,
+            chat_type=source.chat_type,
+            cwd_override=None,
+        )
+
+    runner.session_store.get_or_create_session.side_effect = _session_entry
     runner._pending_approvals = {}
     runner._agent_cache = {}
     runner._agent_cache_lock = threading.Lock()

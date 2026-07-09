@@ -36,6 +36,7 @@ from agent.prompt_builder import (
     OPENAI_MODEL_EXECUTION_GUIDANCE,
     PARALLEL_TOOL_CALL_GUIDANCE,
     PLATFORM_HINTS,
+    QWOPUS_TOOL_CALL_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE,
     STEER_CHANNEL_NOTE,
@@ -237,6 +238,36 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
 
+    # Compact directory for tools hidden behind progressive disclosure. This is
+    # generated from the active session's raw pre-deferred tool list so it tracks
+    # profile/platform/MCP changes automatically without hand-maintained prompt
+    # notes. Only render it when the bridge is actually visible; otherwise the
+    # tools are direct calls and an appendix would be misleading.
+    if "tool_search" in agent.valid_tool_names:
+        try:
+            import model_tools as _model_tools
+            from tools.tool_search import format_deferred_tool_directory
+
+            _previous_resolved_names = list(getattr(_model_tools, "_last_resolved_tool_names", []) or [])
+            try:
+                _raw_tool_defs = _r.get_tool_definitions(
+                    enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+                    disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+                    quiet_mode=True,
+                    skip_tool_search_assembly=True,
+                ) or []
+                _directory = format_deferred_tool_directory(_raw_tool_defs)
+                if _directory:
+                    stable_parts.append(_directory)
+            finally:
+                # The raw-catalog probe should not widen execute_code's fallback
+                # view or other legacy readers of the process-global
+                # last-resolved names. The agent already stores its real visible
+                # names locally.
+                _model_tools._last_resolved_tool_names = _previous_resolved_names
+        except Exception:
+            pass
+
     # Steering only lands inside tool results, so it's only reachable when the
     # agent has tools. Static text → byte-stable prompt (no cache hit).
     if agent.valid_tool_names:
@@ -288,8 +319,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             # existing tools, replies with plans instead of executing).
             if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
                 stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+            if "qwopus" in _model_lower:
+                stable_parts.append(QWOPUS_TOOL_CALL_GUIDANCE)
 
-    has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
+    has_skills_tools = any(name in agent.valid_tool_names for name in ['skill', 'skills_list', 'skill_view', 'skill_manage'])
     if has_skills_tools:
         avail_toolsets = {
             toolset
@@ -444,13 +477,18 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         context_parts.append(system_message)
 
     if not agent.skip_context_files:
-        # Prefer the configured TERMINAL_CWD (gateway mode). When unset (local
-        # CLI), None lets build_context_files_prompt fall back to the launch
-        # dir — the user's real cwd there, but the install dir for the gateway
-        # daemon, which is why the gateway sets TERMINAL_CWD.
+        # Use the effective task working directory for context file discovery
+        # when available. Gateway mode may bind different chats to different
+        # projects; TERMINAL_CWD remains the process-level fallback.
+        try:
+            _context_cwd = agent._resolve_task_cwd()
+        except Exception:
+            _context_cwd = resolve_context_cwd() or os.getenv("TERMINAL_CWD") or None
         context_files_prompt = _r.build_context_files_prompt(
-            cwd=resolve_context_cwd(), skip_soul=_soul_loaded,
-            context_length=_ctx_len)
+            cwd=_context_cwd,
+            skip_soul=_soul_loaded,
+            context_length=_ctx_len,
+        )
         if context_files_prompt:
             context_parts.append(context_files_prompt)
 
@@ -467,6 +505,14 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             user_block = agent._memory_store.format_for_system_prompt("user")
             if user_block:
                 volatile_parts.append(user_block)
+
+    shared_user_block = _r.load_shared_user_md()
+    if shared_user_block:
+        volatile_parts.append(shared_user_block)
+
+    local_context_block = _r.load_local_context()
+    if local_context_block:
+        volatile_parts.append(local_context_block)
 
     # External memory provider system prompt block (additive to built-in)
     if agent._memory_manager:

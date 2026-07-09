@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, findByText, fireEvent, render } from '@testing-library/react'
+import { cleanup, findByText, fireEvent, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu'
-import { $activeSessionId, $currentModel, $currentProvider } from '@/store/session'
+import { $activeSessionId, $currentModel, $currentProvider, $currentReasoningEffort } from '@/store/session'
 
 import { ModelMenuPanel } from './model-menu-panel'
 
@@ -29,6 +29,7 @@ beforeEach(() => {
   $activeSessionId.set('runtime-1')
   $currentModel.set('')
   $currentProvider.set('')
+  $currentReasoningEffort.set('')
   getGlobalModelOptions.mockResolvedValue({ providers: [MOA_PROVIDER] })
 })
 
@@ -51,6 +52,49 @@ function renderPanel(onSelectModel = vi.fn()) {
 
   return onSelectModel
 }
+
+describe('ModelMenuPanel model presets', () => {
+  it('preserves the current reasoning effort when switching to a model without a saved preset', async () => {
+    $currentReasoningEffort.set('high')
+    const provider = {
+      capabilities: { 'claude-fable-5': { fast: false, reasoning: true } },
+      models: ['claude-fable-5'],
+      name: 'VibeProxy',
+      slug: 'vibeproxy'
+    }
+    getGlobalModelOptions.mockResolvedValue({ providers: [provider] })
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const requestGateway = vi.fn(async <T,>(method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      return {} as T
+    })
+    const onSelectModel = vi.fn(async () => true)
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={client}>
+        <DropdownMenu open>
+          <DropdownMenuContent>
+            <ModelMenuPanel onSelectModel={onSelectModel} requestGateway={requestGateway as never} />
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </QueryClientProvider>
+    )
+
+    const row = await findByText(document.body, /Fable 5/i)
+    fireEvent.click(row)
+
+    expect(onSelectModel).toHaveBeenCalledWith({ model: 'claude-fable-5', provider: 'vibeproxy' })
+    await waitFor(() =>
+      expect(calls).toEqual([
+        {
+          method: 'config.set',
+          params: { key: 'reasoning', session_id: 'runtime-1', value: 'high' }
+        }
+      ])
+    )
+  })
+})
 
 describe('ModelMenuPanel MoA presets', () => {
   it('selecting a MoA preset switches PERSISTENTLY via onSelectModel (not the one-shot dispatch)', async () => {

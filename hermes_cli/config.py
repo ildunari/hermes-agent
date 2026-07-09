@@ -2036,6 +2036,14 @@ DEFAULT_CONFIG = {
         # falls through to request reconstruction rather than breaking
         # the login flow.
         "public_url": "",
+        # Exact extra Host header values accepted by the dashboard's
+        # DNS-rebinding guard. Use this for trusted reverse proxies that
+        # expose a loopback-bound dashboard under a stable hostname, e.g.
+        # Tailscale Serve forwarding
+        # ``https://macstudio.tailnet.ts.net:9119`` to ``127.0.0.1:9119``.
+        # Entries may be bare hostnames, IPs, host:port values, or full URLs;
+        # only the hostname/IP is used. Wildcards are intentionally ignored.
+        "allowed_hosts": [],
     },
 
     # Privacy settings
@@ -3021,6 +3029,10 @@ DEFAULT_CONFIG = {
         # GBs of disk on heavy users.  Opt in only if you have an external
         # tool that consumes the JSON files directly.
         "write_json_snapshots": False,
+        # Disable the optional trigram FTS5 index used for CJK/substring
+        # search.  When true, SessionDB drops messages_fts_trigram on init and
+        # falls back to the unicode FTS/LIKE search paths.
+        "disable_fts_trigram": False,
     },
 
     # Contextual first-touch onboarding hints (see agent/onboarding.py).

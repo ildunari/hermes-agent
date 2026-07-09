@@ -247,9 +247,11 @@ class TestRunBackgroundTask:
         )
 
         mock_result = {"final_response": "Hello from background!", "messages": []}
+        runner._resolve_session_agent_runtime = MagicMock(
+            return_value=("test-model", {"api_key": "test-key"})
+        )
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
-             patch("run_agent.AIAgent") as MockAgent:
+        with patch("run_agent.AIAgent") as MockAgent:
             mock_agent_instance = MagicMock()
             mock_agent_instance.shutdown_memory_provider = MagicMock()
             mock_agent_instance.close = MagicMock()
@@ -298,7 +300,9 @@ class TestRunBackgroundTask:
         # (default mode requires the file to exist as a regular file).
         import os as _os
         import tempfile as _tempfile
-        _tmpdir = _tempfile.mkdtemp(prefix="bg_media_")
+        # realpath so expected paths match validate_media_delivery_path(), which
+        # resolves symlinks (macOS /var/folders -> /private/var/folders).
+        _tmpdir = _os.path.realpath(_tempfile.mkdtemp(prefix="bg_media_"))
         _ogg = _os.path.join(_tmpdir, "clip.ogg")
         _mp4 = _os.path.join(_tmpdir, "render.mp4")
         _png = _os.path.join(_tmpdir, "chart.png")
@@ -396,6 +400,7 @@ class TestRunBackgroundTask:
         mock_adapter.send.assert_called_once()
         assert mock_adapter.send.call_args.kwargs["metadata"] == {
             "thread_id": "20197",
+            "chat_type": "dm",
             "telegram_dm_topic_reply_fallback": True,
             "direct_messages_topic_id": "20197",
             "telegram_reply_to_message_id": "463",
@@ -416,8 +421,11 @@ class TestRunBackgroundTask:
             user_name="testuser",
         )
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
-             patch("run_agent.AIAgent") as MockAgent:
+        runner._resolve_session_agent_runtime = MagicMock(
+            return_value=("test-model", {"api_key": "test-key"})
+        )
+
+        with patch("run_agent.AIAgent") as MockAgent:
             mock_agent_instance = MagicMock()
             mock_agent_instance.shutdown_memory_provider = MagicMock()
             mock_agent_instance.close = MagicMock()

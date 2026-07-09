@@ -429,14 +429,44 @@ def _handle_send(args):
 
     from gateway.platforms.base import BasePlatformAdapter
 
+    # Render explicit message-card artifact blocks before media extraction so
+    # send_message reaches the same rich-card path as normal gateway replies.
+    try:
+        from gateway.rich_cards.artifacts import (
+            find_card_artifacts,
+            render_rich_cards_in_response,
+            response_to_ordered_segments,
+        )
+        _has_rich_cards = bool(find_card_artifacts(message))
+        message = render_rich_cards_in_response(
+            message,
+            platform=platform_name,
+            markdown_table_auto=False,
+        )
+        rich_segments = response_to_ordered_segments(message) if _has_rich_cards else None
+    except Exception as e:
+        rich_segments = None
+        logger.warning(
+            "send_message rich-card pre-pass failed; preserving text fallback: %s",
+            e,
+        )
+
     # Capture [[as_document]] directive before extract_media strips it.
     # Image-extension files in this batch will route through send_document
     # instead of send_photo so the original bytes survive (e.g. info-graph
     # JPGs where Telegram's sendPhoto recompresses to 1280px).
     force_document_attachments = "[[as_document]]" in message
 
-    media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
-    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+    if rich_segments:
+        media_files = []
+        cleaned_message = "\n\n".join(
+            getattr(seg, "markdown", "").strip()
+            for seg in rich_segments
+            if getattr(seg, "markdown", "").strip()
+        )
+    else:
+        media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
+        media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
 
     used_home_channel = False
@@ -488,17 +518,29 @@ def _handle_send(args):
 
     try:
         from model_tools import _run_async
-        result = _run_async(
-            _send_to_platform(
-                platform,
-                pconfig,
-                chat_id,
-                cleaned_message,
-                thread_id=thread_id,
-                media_files=media_files,
-                force_document=force_document_attachments,
+        if rich_segments:
+            result = _run_async(
+                _send_ordered_rich_segments_to_platform(
+                    platform,
+                    pconfig,
+                    chat_id,
+                    rich_segments,
+                    thread_id=thread_id,
+                    force_document=force_document_attachments,
+                )
             )
-        )
+        else:
+            result = _run_async(
+                _send_to_platform(
+                    platform,
+                    pconfig,
+                    chat_id,
+                    cleaned_message,
+                    thread_id=thread_id,
+                    media_files=media_files,
+                    force_document=force_document_attachments,
+                )
+            )
         if used_home_channel and isinstance(result, dict) and result.get("success"):
             result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
 
@@ -724,14 +766,50 @@ async def _send_via_adapter(
                     metadata["publish_topic"] = chat_id
                 if not metadata:
                     metadata = None
-                result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
+                result = None
+                if chunk.strip():
+                    result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
+                    if result and not result.success:
+                        return {"error": f"Adapter send failed: {result.error}"}
+                for media_path, is_voice in media_files or []:
+                    ext = os.path.splitext(media_path)[1].lower()
+                    if ext in _IMAGE_EXTS and hasattr(adapter, "send_image_file"):
+                        result = await adapter.send_image_file(
+                            chat_id=chat_id,
+                            image_path=media_path,
+                            metadata=metadata,
+                        )
+                    elif ext in _VIDEO_EXTS and hasattr(adapter, "send_video"):
+                        result = await adapter.send_video(
+                            chat_id=chat_id,
+                            video_path=media_path,
+                            metadata=metadata,
+                        )
+                    elif ext in _AUDIO_EXTS and hasattr(adapter, "send_voice"):
+                        result = await adapter.send_voice(
+                            chat_id=chat_id,
+                            audio_path=media_path,
+                            metadata=metadata,
+                        )
+                    elif hasattr(adapter, "send_document"):
+                        result = await adapter.send_document(
+                            chat_id=chat_id,
+                            file_path=media_path,
+                            metadata=metadata,
+                        )
+                    else:
+                        return {"error": f"Live adapter for {platform.value} cannot send media attachments"}
+                    if result and not result.success:
+                        return {"error": f"Adapter media send failed: {result.error}"}
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 return {"error": f"Plugin platform send failed: {e}"}
-            if result.success:
+            if result and result.success:
                 return {"success": True, "message_id": result.message_id}
-            return {"error": f"Adapter send failed: {result.error}"}
+            if result:
+                return {"error": f"Adapter send failed: {result.error}"}
+            return {"error": "Live adapter had no text or media to send"}
 
     entry = None
     try:
@@ -1033,17 +1111,25 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
 
     # --- Non-media platforms ---
     if media_files and not message.strip():
-        return {
-            "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and whatsapp; "
-                f"target {platform.value} had only media attachments"
-            )
-        }
+        plugin_can_send_media = False
+        try:
+            from gateway.platform_registry import platform_registry
+            entry = platform_registry.get(platform.value)
+            plugin_can_send_media = bool(entry and entry.standalone_sender_fn)
+        except Exception:
+            plugin_can_send_media = False
+        if not plugin_can_send_media and platform != Platform.BLUEBUBBLES:
+            return {
+                "error": (
+                    f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, bluebubbles, feishu and whatsapp; "
+                    f"target {platform.value} had only media attachments"
+                )
+            }
     warning = None
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and whatsapp"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, bluebubbles, feishu and whatsapp"
         )
 
     last_result = None
@@ -1075,7 +1161,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         elif platform == Platform.WECOM:
             result = await _registry_standalone_send("wecom", pconfig, chat_id, chunk, thread_id)
         elif platform == Platform.BLUEBUBBLES:
-            result = await _send_bluebubbles(pconfig.extra, chat_id, chunk)
+            result = await _send_bluebubbles(pconfig.extra, chat_id, chunk, media_files=media_files)
         elif platform == Platform.QQBOT:
             result = await _send_qqbot(pconfig, chat_id, chunk)
         elif platform == Platform.YUANBAO:
@@ -1102,6 +1188,78 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         warnings.append(warning)
         last_result["warnings"] = warnings
     return last_result
+
+
+async def _send_ordered_rich_segments_to_platform(
+    platform,
+    pconfig,
+    chat_id,
+    rich_segments,
+    thread_id=None,
+    force_document=False,
+):
+    """Standalone cron/send_message helper for ordered rich-card segments.
+
+    Cron delivery can render rich-card responses into an ordered sequence of
+    text and MEDIA segments before it reaches the normal platform send helper.
+    Keep the standalone path conservative: send each text segment in order and
+    route media segments through the existing _send_to_platform media handling
+    so platform-specific standalone senders stay the single attachment surface.
+    """
+    from gateway.rich_cards.artifacts import MediaSegment, TextSegment
+    from gateway.platforms.base import BasePlatformAdapter
+
+    last_result = None
+    delivered_any = False
+    for segment in rich_segments or []:
+        if isinstance(segment, TextSegment):
+            text = (segment.markdown or "").strip()
+            if not text:
+                continue
+            result = await _send_to_platform(
+                platform,
+                pconfig,
+                chat_id,
+                text,
+                thread_id=thread_id,
+                force_document=force_document,
+            )
+        elif isinstance(segment, MediaSegment):
+            media_path = BasePlatformAdapter.validate_media_delivery_path(str(segment.path))
+            if not media_path:
+                fallback = (segment.fallback_markdown or "").strip()
+                if not fallback:
+                    continue
+                result = await _send_to_platform(
+                    platform,
+                    pconfig,
+                    chat_id,
+                    fallback,
+                    thread_id=thread_id,
+                    force_document=force_document,
+                )
+            else:
+                media_files = [(media_path, bool(getattr(segment, "is_voice", False)))]
+                result = await _send_to_platform(
+                    platform,
+                    pconfig,
+                    chat_id,
+                    segment.alt or "",
+                    thread_id=thread_id,
+                    media_files=media_files,
+                    force_document=force_document or bool(getattr(segment, "force_document", False)),
+                )
+        else:
+            continue
+
+        if isinstance(result, dict) and result.get("error"):
+            return result
+        last_result = result
+        delivered_any = True
+
+    if not delivered_any:
+        return {"success": True, "delivered": False}
+    return last_result or {"success": True}
 
 
 def _is_telegram_thread_not_found(error: Exception) -> bool:
@@ -1790,7 +1948,7 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
         return _error(f"Weixin send failed: {e}")
 
 
-async def _send_bluebubbles(extra, chat_id, message):
+async def _send_bluebubbles(extra, chat_id, message, media_files=None):
     """Send via BlueBubbles iMessage server using the adapter's REST API."""
     try:
         from gateway.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
@@ -1807,10 +1965,33 @@ async def _send_bluebubbles(extra, chat_id, message):
         if not connected:
             return _error("BlueBubbles: failed to connect to server")
         try:
-            result = await adapter.send(chat_id, message)
-            if not result.success:
-                return _error(f"BlueBubbles send failed: {result.error}")
-            return {"success": True, "platform": "bluebubbles", "chat_id": chat_id, "message_id": result.message_id}
+            last_result = None
+            if message.strip():
+                last_result = await adapter.send(chat_id, message)
+                if not last_result.success:
+                    return _error(f"BlueBubbles send failed: {last_result.error}")
+            for media_path, is_voice in media_files or []:
+                if not os.path.exists(media_path):
+                    return _error(f"Media file not found: {media_path}")
+                ext = os.path.splitext(media_path)[1].lower()
+                if ext in _IMAGE_EXTS:
+                    last_result = await adapter.send_image_file(chat_id, media_path)
+                elif ext in _VIDEO_EXTS:
+                    last_result = await adapter.send_video(chat_id, media_path)
+                elif ext in _AUDIO_EXTS:
+                    last_result = await adapter.send_voice(chat_id, media_path)
+                else:
+                    last_result = await adapter.send_document(chat_id, media_path)
+                if not last_result.success:
+                    return _error(f"BlueBubbles media send failed: {last_result.error}")
+            if last_result is None:
+                return _error("BlueBubbles: no deliverable text or media remained after processing MEDIA tags")
+            return {
+                "success": True,
+                "platform": "bluebubbles",
+                "chat_id": chat_id,
+                "message_id": last_result.message_id,
+            }
         finally:
             await adapter.disconnect()
     except Exception as e:

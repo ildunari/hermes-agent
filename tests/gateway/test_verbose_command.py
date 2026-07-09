@@ -76,13 +76,13 @@ class TestVerboseCommand:
         runner = _make_runner()
         result = await runner._handle_verbose_command(_make_event())
 
-        # all -> verbose
-        assert "VERBOSE" in result
+        # all -> compact
+        assert "COMPACT" in result
         assert "telegram" in result.lower()  # per-platform feedback
 
         # Verify config was saved to display.platforms.telegram
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "verbose"
+        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "compact"
 
     @pytest.mark.asyncio
     async def test_quoted_false_keeps_command_disabled(self, tmp_path, monkeypatch):
@@ -106,6 +106,7 @@ class TestVerboseCommand:
     @pytest.mark.asyncio
     async def test_cycles_through_all_modes(self, tmp_path, monkeypatch):
         """Calling /verbose repeatedly cycles through all tool-progress visibility modes."""
+
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -117,8 +118,8 @@ class TestVerboseCommand:
         monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
         runner = _make_runner()
 
-        # off -> new -> all -> verbose -> log -> off
-        expected = ["new", "all", "verbose", "log", "off"]
+        # off -> all -> compact -> verbose -> off
+        expected = ["all", "compact", "verbose", "off"]
         for mode in expected:
             result = await runner._handle_verbose_command(_make_event())
             saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -147,10 +148,36 @@ class TestVerboseCommand:
         runner = _make_runner()
         result = await runner._handle_verbose_command(_make_event())
 
-        # Telegram platform default is "off" → cycles to "new"
-        assert "NEW" in result
+        # Telegram platform default is "new" → cycles to "all"
+        assert "ALL" in result
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "new"
+        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "all"
+
+    @pytest.mark.asyncio
+    async def test_runtime_resolver_honors_platform_specific_tool_progress(self):
+        display_cfg = {
+            "tool_progress": "all",
+            "platforms": {
+                "telegram": {"tool_progress": "compact"},
+                "slack": {"tool_progress": "off"},
+            },
+        }
+
+        assert gateway_run.GatewayRunner._resolve_gateway_tool_progress_mode(display_cfg, "telegram") == "compact"
+        assert gateway_run.GatewayRunner._resolve_gateway_tool_progress_mode(display_cfg, "slack") == "off"
+        assert gateway_run.GatewayRunner._resolve_gateway_tool_progress_mode(display_cfg, "discord") == "all"
+
+    @pytest.mark.asyncio
+    async def test_runtime_resolver_invalid_tool_progress_falls_back_to_all(self):
+        display_cfg = {
+            "tool_progress": "bogus",
+            "platforms": {
+                "telegram": {"tool_progress": " also-bogus "},
+            },
+        }
+
+        assert gateway_run.GatewayRunner._resolve_gateway_tool_progress_mode(display_cfg, "telegram") == "all"
+        assert gateway_run.GatewayRunner._resolve_gateway_tool_progress_mode(display_cfg, "discord") == "all"
 
     @pytest.mark.asyncio
     async def test_per_platform_isolation(self, tmp_path, monkeypatch):
@@ -183,10 +210,10 @@ class TestVerboseCommand:
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         platforms = saved["display"]["platforms"]
-        # Telegram: off -> new (platform default = off, tier-1 inbox override)
-        assert platforms["telegram"]["tool_progress"] == "new"
-        # Slack: off -> new (first /verbose cycle from quiet default)
-        assert platforms["slack"]["tool_progress"] == "new"
+        # Telegram: new -> all (platform default = new)
+        assert platforms["telegram"]["tool_progress"] == "all"
+        # Slack: new -> all (platform default = new)
+        assert platforms["slack"]["tool_progress"] == "all"
 
     @pytest.mark.asyncio
     async def test_no_config_file_returns_disabled(self, tmp_path, monkeypatch):

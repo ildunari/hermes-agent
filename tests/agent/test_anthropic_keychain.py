@@ -79,6 +79,7 @@ class TestReadClaudeCodeCredentialsFromKeychain:
                         "accessToken": "kc-access-token-abc",
                         "refreshToken": "kc-refresh-token-xyz",
                         "expiresAt": 9999999999999,
+                        "scopes": ["user:profile", "user:inference"],
                     }
                 }),
                 stderr="",
@@ -88,6 +89,7 @@ class TestReadClaudeCodeCredentialsFromKeychain:
             assert creds["accessToken"] == "kc-access-token-abc"
             assert creds["refreshToken"] == "kc-refresh-token-xyz"
             assert creds["expiresAt"] == 9999999999999
+            assert creds["scopes"] == ["user:profile", "user:inference"]
             assert creds["source"] == "macos_keychain"
 
 
@@ -151,6 +153,32 @@ class TestReadClaudeCodeCredentialsPriority:
         assert creds is not None
         assert creds["accessToken"] == "json-fallback-token"
         assert creds["source"] == "claude_code_credentials_file"
+
+    def test_json_file_preserves_scopes(self, tmp_path, monkeypatch):
+        json_cred_file = tmp_path / ".claude" / ".credentials.json"
+        json_cred_file.parent.mkdir(parents=True)
+        json_cred_file.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "json-token",
+                "refreshToken": "json-refresh",
+                "expiresAt": 9999999999999,
+                "scope": "user:profile user:inference user:sessions:claude_code",
+            }
+        }))
+        monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+
+        with patch("agent.anthropic_adapter.platform.system", return_value="Darwin"), \
+             patch("agent.anthropic_adapter.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="")
+            creds = read_claude_code_credentials()
+
+        assert creds is not None
+        assert creds["accessToken"] == "json-token"
+        assert creds["scopes"] == [
+            "user:profile",
+            "user:inference",
+            "user:sessions:claude_code",
+        ]
 
     def test_returns_none_when_neither_keychain_nor_json_has_creds(self, tmp_path, monkeypatch):
         """No credentials anywhere — must return None cleanly."""
@@ -310,7 +338,12 @@ class TestRefreshOAuthTokenAdoptsFreshCredential:
         # Live read returns an expired credential carrying a refresh token.
         monkeypatch.setattr(
             "agent.anthropic_adapter.read_claude_code_credentials",
-            lambda: {"accessToken": "expired", "refreshToken": "live-refresh", "expiresAt": 1},
+            lambda: {
+                "accessToken": "expired",
+                "refreshToken": "live-refresh",
+                "expiresAt": 1,
+                "scopes": ["user:profile", "user:inference"],
+            },
         )
         captured = {}
 
@@ -327,11 +360,66 @@ class TestRefreshOAuthTokenAdoptsFreshCredential:
         )
         monkeypatch.setattr(
             "agent.anthropic_adapter._write_claude_code_credentials",
-            lambda *a, **k: None,
+            lambda *a, **k: captured.setdefault("write", {"args": a, "kwargs": k}),
         )
 
         result = _refresh_oauth_token({"refreshToken": "caller-refresh", "expiresAt": 1})
         assert result == "newly-minted"
         # Prefers the live source's refresh token over the caller's stale copy.
         assert captured["refresh_token"] == "live-refresh"
+        assert captured["write"]["kwargs"]["scopes"] == ["user:profile", "user:inference"]
+
+    def test_network_refresh_uses_response_scopes_when_present(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.anthropic_adapter.read_claude_code_credentials",
+            lambda: {"accessToken": "expired", "refreshToken": "live-refresh", "expiresAt": 1},
+        )
+        captured = {}
+
+        def _fake_refresh(refresh_token, **kwargs):
+            return {
+                "access_token": "newly-minted",
+                "refresh_token": "rotated",
+                "expires_at_ms": self._FRESH,
+                "scopes": ["user:inference", "user:sessions:claude_code"],
+            }
+
+        monkeypatch.setattr(
+            "agent.anthropic_adapter.refresh_anthropic_oauth_pure", _fake_refresh
+        )
+        monkeypatch.setattr(
+            "agent.anthropic_adapter._write_claude_code_credentials",
+            lambda *a, **k: captured.setdefault("write", {"args": a, "kwargs": k}),
+        )
+
+        assert _refresh_oauth_token({"refreshToken": "caller-refresh", "expiresAt": 1}) == "newly-minted"
+        assert captured["write"]["kwargs"]["scopes"] == [
+            "user:inference",
+            "user:sessions:claude_code",
+        ]
+
+    def test_network_refresh_falls_back_to_claude_code_scopes(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.anthropic_adapter.read_claude_code_credentials",
+            lambda: {"accessToken": "expired", "refreshToken": "live-refresh", "expiresAt": 1},
+        )
+        captured = {}
+
+        def _fake_refresh(refresh_token, **kwargs):
+            return {
+                "access_token": "newly-minted",
+                "refresh_token": "rotated",
+                "expires_at_ms": self._FRESH,
+            }
+
+        monkeypatch.setattr(
+            "agent.anthropic_adapter.refresh_anthropic_oauth_pure", _fake_refresh
+        )
+        monkeypatch.setattr(
+            "agent.anthropic_adapter._write_claude_code_credentials",
+            lambda *a, **k: captured.setdefault("write", {"args": a, "kwargs": k}),
+        )
+
+        assert _refresh_oauth_token({"refreshToken": "caller-refresh", "expiresAt": 1}) == "newly-minted"
+        assert "user:inference" in captured["write"]["kwargs"]["scopes"]
 

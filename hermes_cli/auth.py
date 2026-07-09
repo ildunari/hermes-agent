@@ -97,6 +97,8 @@ DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
 DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
 DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
+DEFAULT_VIBEPROXY_BASE_URL = "http://127.0.0.1:8485/v1"
+VIBEPROXY_NOAUTH_PLACEHOLDER = "dummy-vibeproxy-api-key"
 STEPFUN_STEP_PLAN_INTL_BASE_URL = "https://api.stepfun.ai/step_plan/v1"
 STEPFUN_STEP_PLAN_CN_BASE_URL = "https://api.stepfun.com/step_plan/v1"
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -188,6 +190,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         name="OpenAI Codex",
         auth_type="oauth_external",
         inference_base_url=DEFAULT_CODEX_BASE_URL,
+    ),
+    "vibeproxy": ProviderConfig(
+        id="vibeproxy",
+        name="VibeProxy",
+        auth_type="api_key",
+        inference_base_url=DEFAULT_VIBEPROXY_BASE_URL,
+        api_key_env_vars=("VIBEPROXY_API_KEY",),
+        base_url_env_var="VIBEPROXY_BASE_URL",
     ),
     "openai-api": ProviderConfig(
         id="openai-api",
@@ -1773,7 +1783,7 @@ def resolve_provider(
         # whose availability isn't implied by LM_API_KEY presence (it may be
         # offline, and the no-auth setup uses a placeholder value), so it
         # also requires explicit selection.
-        if pid in {"copilot", "lmstudio"}:
+        if pid in {"copilot", "lmstudio", "vibeproxy"}:
             continue
         for env_var in pconfig.api_key_env_vars:
             if has_usable_secret(os.getenv(env_var, "")):
@@ -6145,6 +6155,12 @@ def get_codex_auth_status() -> Dict[str, Any]:
 
 
 def get_xai_oauth_auth_status() -> Dict[str, Any]:
+    """Return a passive xAI OAuth status snapshot.
+
+    xAI refresh tokens are single-use, so status/doctor/setup probes must not
+    perform a refresh. Runtime resolution owns refresh and quarantine side
+    effects; this function only reports the current pool/on-disk state.
+    """
     try:
         from agent.credential_pool import load_pool
 
@@ -6170,23 +6186,55 @@ def get_xai_oauth_auth_status() -> Dict[str, Any]:
                     }
     except Exception:
         pass
-
     try:
-        creds = resolve_xai_oauth_runtime_credentials()
-        return {
-            "logged_in": True,
-            "auth_store": str(_auth_file_path()),
-            "last_refresh": creds.get("last_refresh"),
-            "auth_mode": creds.get("auth_mode"),
-            "source": creds.get("source"),
-            "api_key": creds.get("api_key"),
-        }
+        data = _read_xai_oauth_tokens()
     except AuthError as exc:
         return {
             "logged_in": False,
             "auth_store": str(_auth_file_path()),
             "error": str(exc),
         }
+
+    tokens = data.get("tokens") if isinstance(data, dict) else {}
+    if not isinstance(tokens, dict):
+        return {
+            "logged_in": False,
+            "auth_store": str(_auth_file_path()),
+            "error": "xAI OAuth state is missing tokens. Re-authenticate with `hermes model`.",
+        }
+
+    api_key = str(tokens.get("access_token", "") or "").strip()
+    refresh_token = str(tokens.get("refresh_token", "") or "").strip()
+    if not api_key:
+        return {
+            "logged_in": False,
+            "auth_store": str(_auth_file_path()),
+            "error": "xAI OAuth state is missing access_token. Re-authenticate with `hermes model`.",
+            "has_refresh_token": bool(refresh_token),
+        }
+
+    expired = _xai_access_token_is_expiring(api_key, 0)
+    if expired:
+        return {
+            "logged_in": False,
+            "auth_store": str(_auth_file_path()),
+            "last_refresh": data.get("last_refresh"),
+            "auth_mode": "oauth_device_code",
+            "source": "hermes-auth-store",
+            "expired": True,
+            "has_refresh_token": bool(refresh_token),
+            "error": "xAI OAuth access_token is expired; the next runtime request will try to refresh it.",
+        }
+
+    return {
+        "logged_in": True,
+        "auth_store": str(_auth_file_path()),
+        "last_refresh": data.get("last_refresh"),
+        "auth_mode": "oauth_device_code",
+        "source": "hermes-auth-store",
+        "api_key": api_key,
+        "has_refresh_token": bool(refresh_token),
+    }
 
 
 def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
@@ -6384,6 +6432,13 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     # because get_api_key_provider_status uses the raw secret resolver.
     if not api_key and provider_id == "lmstudio":
         api_key = LMSTUDIO_NOAUTH_PLACEHOLDER
+        key_source = key_source or "default"
+
+    # Local VibeProxy accepts any non-empty key field. Use a sentinel so the
+    # OpenAI-compatible client paths treat the provider as configured without
+    # requiring Kosta to store a fake secret.
+    if not api_key and provider_id == "vibeproxy":
+        api_key = VIBEPROXY_NOAUTH_PLACEHOLDER
         key_source = key_source or "default"
 
     env_url = ""

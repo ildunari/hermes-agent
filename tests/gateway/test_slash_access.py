@@ -220,10 +220,10 @@ class TestPolicyForSource:
         p = policy_for_source(cfg, grp_src)
         assert p.is_admin("222") is True
         assert p.is_admin("111") is False  # DM admin, not group admin
-        # In group scope, the only listed user command is "help"; "status"
+        # In group scope, the only listed user command is "help"; "model"
         # is not in the group list and should be denied for non-admins.
         assert p.can_run("999", "help") is True
-        assert p.can_run("999", "status") is False
+        assert p.can_run("999", "model") is False
 
     def test_channel_thread_chat_types_treated_as_group_scope(self):
         # Discord channels and threads are group-scoped, not DM-scoped.
@@ -286,3 +286,70 @@ class TestPolicyForSource:
         p = policy_for_source(cfg, tg_src)
         assert p.enabled is False
         assert p.can_run("999", "stop") is True
+
+    def test_guest_dm_allowlist_is_safety_filtered(self):
+        cfg = GatewayConfig(
+            platforms={
+                Platform.BLUEBUBBLES: PlatformConfig(
+                    enabled=True,
+                    extra={
+                        "guest_allowed_commands": [
+                            "usage",
+                            "restart",
+                            "model",
+                            "yolo",
+                        ]
+                    },
+                )
+            }
+        )
+        src = SessionSource(
+            platform=Platform.BLUEBUBBLES,
+            chat_id="guest@example.com",
+            chat_type="dm",
+            user_id="guest@example.com",
+        )
+        src.user_id_alt = "guest:steve"
+
+        p = policy_for_source(cfg, src)
+
+        assert p.enabled is True
+        assert p.can_run("guest@example.com", "help") is True
+        assert p.can_run("guest@example.com", "status") is True
+        assert p.can_run("guest@example.com", "whoami") is True
+        assert p.can_run("guest@example.com", "usage") is True
+        assert p.can_run("guest@example.com", "restart") is False
+        assert p.can_run("guest@example.com", "model") is False
+        assert p.can_run("guest@example.com", "yolo") is False
+
+    def test_guest_group_allowlist_is_safety_filtered(self):
+        cfg = GatewayConfig(
+            platforms={
+                Platform.BLUEBUBBLES: PlatformConfig(
+                    enabled=True,
+                    extra={
+                        "group_guest_allowed_commands": [
+                            "usage",
+                            "restart",
+                            "model",
+                            "yolo",
+                        ]
+                    },
+                )
+            }
+        )
+        src = SessionSource(
+            platform=Platform.BLUEBUBBLES,
+            chat_id="iMessage;+;family-chat",
+            chat_type="group",
+            user_id="guest@example.com",
+        )
+        src.user_id_alt = "guest:steve"
+
+        p = policy_for_source(cfg, src)
+
+        assert p.enabled is True
+        assert p.can_run("guest@example.com", "usage") is True
+        assert p.can_run("guest@example.com", "restart") is False
+        assert p.can_run("guest@example.com", "model") is False
+        assert p.can_run("guest@example.com", "yolo") is False

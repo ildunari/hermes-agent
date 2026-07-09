@@ -1,5 +1,8 @@
 """Tests for the central command registry and autocomplete."""
 
+import pathlib
+import re
+
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
@@ -15,6 +18,7 @@ from hermes_cli.commands import (
     _CMD_NAME_LIMIT,
     _SLACK_RESERVED_COMMANDS,
     _SLACK_VIA_HERMES_ONLY,
+    _TELEGRAM_ONLY_GATEWAY_COMMANDS,
     _TG_NAME_LIMIT,
     _clamp_command_names,
     _clamp_telegram_names,
@@ -69,7 +73,7 @@ class TestCommandRegistry:
                         f"Alias '{alias}' of '{cmd.name}' shadows canonical '{target.name}'"
 
     def test_every_entry_has_valid_category(self):
-        valid_categories = {"Session", "Configuration", "Tools & Skills", "Info", "Exit"}
+        valid_categories = {"Session", "Configuration", "Tools & Skills", "Info", "Media", "Exit"}
         for cmd in COMMAND_REGISTRY:
             assert cmd.category in valid_categories, f"{cmd.name} has invalid category '{cmd.category}'"
 
@@ -88,6 +92,59 @@ class TestCommandRegistry:
         for cmd in COMMAND_REGISTRY:
             assert not (cmd.cli_only and cmd.gateway_only), \
                 f"{cmd.name} cannot be both cli_only and gateway_only"
+
+    def test_detached_restart_commands_are_cross_surface(self):
+        restart = resolve_command("restart")
+        restart_gateways = resolve_command("restart-gateways")
+        restart_hermes = resolve_command("restart-hermes")
+        assert restart is not None
+        assert restart_gateways is not None
+        assert restart_hermes is not None
+        assert restart.gateway_only and not restart.advertise_in_gateway
+        assert not restart_gateways.cli_only and not restart_gateways.gateway_only
+        assert not restart_hermes.cli_only and not restart_hermes.gateway_only
+        assert resolve_command("restart_gateways").name == "restart-gateways"
+        assert resolve_command("restart_hermes").name == "restart-hermes"
+        telegram_names = {name for name, _desc in telegram_bot_commands()}
+        assert "restart" not in telegram_names
+        assert "restart_gateways" in telegram_names
+        assert "restart_hermes" in telegram_names
+        help_text = "\n".join(gateway_help_lines())
+        assert "/restart " not in help_text
+        assert "/restart-gateways" in help_text
+        assert "/restart-hermes" in help_text
+
+    def test_discord_registers_safe_restart_commands_not_single_gateway_restart(self):
+        repo = pathlib.Path(__file__).resolve().parents[2]
+        adapter_py = (repo / "plugins" / "platforms" / "discord" / "adapter.py").read_text()
+        assert '@tree.command(name="restart"' not in adapter_py
+        assert '@tree.command(name="restart-gateways"' in adapter_py
+        assert '@tree.command(name="restart-hermes"' in adapter_py
+        assert "not cmd_def.advertise_in_gateway" in adapter_py
+
+    def test_telegram_visible_core_commands_have_cold_gateway_dispatch(self):
+        """Commands shown in Telegram must not fall through as model text."""
+        repo = pathlib.Path(__file__).resolve().parents[2]
+        run_py = (repo / "gateway" / "run.py").read_text()
+        dispatched = set(re.findall(r"canonical\s*==\s*[\"']([^\"']+)[\"']", run_py))
+        for tuple_body in re.findall(r"canonical\s+in\s+\(([^)]*)\)", run_py):
+            dispatched.update(re.findall(r"[\"']([^\"']+)[\"']", tuple_body))
+
+        telegram_names = {name for name, _desc in telegram_bot_commands()}
+        visible_core = []
+        for cmd in COMMAND_REGISTRY:
+            if cmd.cli_only and not cmd.gateway_config_gate:
+                continue
+            if cmd.name.replace("-", "_") in telegram_names:
+                visible_core.append(cmd.name)
+
+        missing = sorted(name for name in visible_core if name not in dispatched)
+        assert missing == []
+        assert "sessions" not in telegram_names
+        assert "curator" not in telegram_names
+        assert "codex" in telegram_names
+        assert "cc" in telegram_names
+        assert "antigravity" in telegram_names
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +168,11 @@ class TestResolveCommand:
         assert resolve_command("reload_mcp").name == "reload-mcp"
         assert resolve_command("codex_runtime").name == "codex-runtime"
         assert resolve_command("tasks").name == "agents"
+        assert resolve_command("codex").name == "codex"
+        cc = resolve_command("cc")
+        antigravity = resolve_command("antigravity")
+        assert cc is not None and cc.name == "cc"
+        assert antigravity is not None and antigravity.name == "antigravity"
 
     def test_topic_is_gateway_command(self):
         topic = resolve_command("topic")
@@ -246,13 +308,17 @@ class TestTelegramBotCommands:
                 assert tg_name not in names
 
     def test_includes_builtin_commands_with_required_args(self):
-        """Built-in arg-taking commands (e.g. /queue, /steer, /background)
-        are now included because their handlers return usage text when
-        invoked without arguments — issue #24312."""
+        """Built-in arg-taking commands are included because handlers return usage text."""
+
         names = {name for name, _ in telegram_bot_commands()}
         assert "background" in names
         assert "queue" in names
         assert "steer" in names
+        assert "tts" in names
+        assert "background" in GATEWAY_KNOWN_COMMANDS
+        assert "queue" in GATEWAY_KNOWN_COMMANDS
+        assert "tts" in GATEWAY_KNOWN_COMMANDS
+
 
     def test_hyphenated_codex_runtime_is_exposed_as_underscore_command(self):
         """Telegram autocomplete exposes /codex-runtime as /codex_runtime."""
@@ -380,10 +446,11 @@ class TestSlackNativeSlashes:
         slack_norm = {_norm(n) for n in slack_names}
         tg_norm = {_norm(n) for n in tg_names}
         reserved_norm = {_norm(n) for n in _SLACK_RESERVED_COMMANDS}
+        telegram_only_norm = {_norm(n) for n in _TELEGRAM_ONLY_GATEWAY_COMMANDS}
         # Commands deliberately routed through /hermes <command> on Slack only
         # (Slack's 50-slash cap) are expected to be absent from native slashes.
         via_hermes_norm = {_norm(n) for n in _SLACK_VIA_HERMES_ONLY}
-        missing = (tg_norm - slack_norm) - reserved_norm - via_hermes_norm
+        missing = (tg_norm - slack_norm) - reserved_norm - telegram_only_norm - via_hermes_norm
         assert not missing, (
             f"commands on Telegram but missing from Slack native slashes: {sorted(missing)}"
         )
@@ -1251,7 +1318,8 @@ class TestTelegramMenuCommands:
         assert hidden > 0
         for name in (
             "debug",
-            "restart",
+            "restart_gateways",
+            "restart_hermes",
             "update",
             "verbose",
             "commands",
@@ -1719,6 +1787,40 @@ class TestDiscordSkillCommands:
         assert len(entries) == 5
         assert hidden == 15
 
+    def test_command_priority_keeps_skill_visible_under_cap(self, tmp_path, monkeypatch):
+        """High-priority skills should beat alphabetical order when command slots are scarce."""
+        from unittest.mock import patch
+
+        fake_skills_dir = str(tmp_path / "skills")
+        fake_cmds = {
+            f"/alpha-{i:03d}": {
+                "name": f"alpha-{i:03d}",
+                "description": f"Skill {i}",
+                "skill_md_path": f"{fake_skills_dir}/alpha-{i:03d}/SKILL.md",
+                "skill_dir": f"{fake_skills_dir}/alpha-{i:03d}",
+            }
+            for i in range(20)
+        }
+        fake_cmds["/moss"] = {
+            "name": "moss",
+            "description": "MOSS voiceover",
+            "skill_md_path": f"{fake_skills_dir}/moss/SKILL.md",
+            "skill_dir": f"{fake_skills_dir}/moss",
+            "command_priority": 100,
+        }
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "skills").mkdir(exist_ok=True)
+        with (
+            patch("agent.skill_commands.get_skill_commands", return_value=fake_cmds),
+            patch("tools.skills_tool.SKILLS_DIR", tmp_path / "skills"),
+        ):
+            entries, hidden = discord_skill_commands(max_slots=5, reserved_names=set())
+
+        names = [name for name, _d, _k in entries]
+        assert names[0] == "moss"
+        assert "moss" in names
+        assert hidden == 16
+
     def test_excludes_discord_disabled_skills(self, tmp_path, monkeypatch):
         """Skills disabled for discord should not appear."""
         from unittest.mock import patch
@@ -1954,6 +2056,73 @@ class TestDiscordSkillCommandsByCategory:
 
         assert categories == {}
         assert uncategorized == []
+
+    def test_flat_skillshare_names_are_grouped_by_prefix(self, tmp_path, monkeypatch):
+        """Flat Skillshare targets like creative__ascii-video should group under creative."""
+        from unittest.mock import patch
+
+        fake_skills_dir = str(tmp_path / "skills")
+        (tmp_path / "skills" / "creative__animation-lab").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "skills" / "creative__animation-lab" / "SKILL.md").write_text("")
+        fake_cmds = {
+            "/animation-lab": {
+                "name": "animation-lab",
+                "description": "Animation lab",
+                "skill_md_path": f"{fake_skills_dir}/creative__animation-lab/SKILL.md",
+                "command_priority": 90,
+            },
+        }
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        with (
+            patch("agent.skill_commands.get_skill_commands", return_value=fake_cmds),
+            patch("tools.skills_tool.SKILLS_DIR", tmp_path / "skills"),
+        ):
+            categories, uncategorized, hidden = discord_skill_commands_by_category(
+                reserved_names=set(),
+            )
+
+        assert categories["creative"] == [("animation-lab", "Animation lab", "/animation-lab")]
+        assert uncategorized == []
+        assert hidden == 0
+
+    def test_high_priority_skill_order_without_discord_category_cap(self, tmp_path, monkeypatch):
+        """All skills stay visible; priority only controls ordering."""
+        from unittest.mock import patch
+
+        fake_skills_dir = str(tmp_path / "skills")
+        fake_cmds = {}
+        for i in range(30):
+            name = f"skill-{i:02d}"
+            (tmp_path / "skills" / "creative" / name).mkdir(parents=True, exist_ok=True)
+            (tmp_path / "skills" / "creative" / name / "SKILL.md").write_text("")
+            fake_cmds[f"/{name}"] = {
+                "name": name,
+                "description": f"Skill {i}",
+                "skill_md_path": f"{fake_skills_dir}/creative/{name}/SKILL.md",
+            }
+        (tmp_path / "skills" / "creative" / "z-animation-lab").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "skills" / "creative" / "z-animation-lab" / "SKILL.md").write_text("")
+        fake_cmds["/z-animation-lab"] = {
+            "name": "z-animation-lab",
+            "description": "Animation lab",
+            "skill_md_path": f"{fake_skills_dir}/creative/z-animation-lab/SKILL.md",
+            "command_priority": 90,
+        }
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        with (
+            patch("agent.skill_commands.get_skill_commands", return_value=fake_cmds),
+            patch("tools.skills_tool.SKILLS_DIR", tmp_path / "skills"),
+        ):
+            categories, _uncategorized, hidden = discord_skill_commands_by_category(
+                reserved_names=set(),
+            )
+
+        creative_names = {n for n, _d, _k in categories["creative"]}
+        assert "z-animation-lab" in creative_names
+        assert categories["creative"][0][0] == "z-animation-lab"
+        assert len(categories["creative"]) == 31
+        assert hidden == 0
 
     def test_deep_nested_skills_use_top_category(self, tmp_path, monkeypatch):
         """Skills like mlops/training/axolotl should group under 'mlops'."""

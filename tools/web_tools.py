@@ -41,6 +41,7 @@ import logging
 import os
 import re
 import asyncio
+import inspect
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
@@ -97,7 +98,8 @@ from tools.tool_backend_helpers import (  # noqa: F401
     nous_tool_gateway_unavailable_message,
     prefers_gateway,
 )
-from tools.url_safety import async_is_safe_url, normalize_url_for_request, sensitive_query_param_name
+from tools.url_safety import async_is_safe_url, is_safe_url, normalize_url_for_request, sensitive_query_param_name
+from tools.web_fast_extract import try_fast_extract_urls
 import sys
 
 logger = logging.getLogger(__name__)
@@ -333,6 +335,19 @@ def _is_backend_available(backend: str) -> bool:
     return False
 
 
+def _backend_usable(backend: str) -> bool:
+    """Backward-compatible alias for tests and availability probes."""
+    return _is_backend_available(backend)
+
+
+async def _safe_url_allowed(url: str) -> bool:
+    """URL safety hook that supports legacy sync test monkeypatches."""
+    result = is_safe_url(url)
+    if inspect.isawaitable(result):
+        result = await result
+    return bool(result)
+
+
 def _ddgs_package_importable() -> bool:
     """Return True when the ``ddgs`` Python package can be imported.
 
@@ -401,6 +416,61 @@ def _web_requires_env() -> list[str]:
 # not API dollars — so this is generous relative to the old 5k summary cap.
 # Override via web.extract_char_limit in config.yaml.
 DEFAULT_EXTRACT_CHAR_LIMIT = 15000
+# Backward-compatible threshold for legacy LLM summarization paths that still
+# call web_extract_tool(..., use_llm_processing=True). Upstream's new default
+# path uses DEFAULT_EXTRACT_CHAR_LIMIT for direct extraction/truncation.
+DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION = 5000
+
+
+def _is_nous_auxiliary_client(client: Any) -> bool:
+    """Return True when the resolved auxiliary backend is Nous Portal."""
+    from urllib.parse import urlparse
+
+    base_url = str(getattr(client, "base_url", "") or "")
+    host = (urlparse(base_url).hostname or "").lower()
+    return host == "nousresearch.com" or host.endswith(".nousresearch.com")
+
+
+def _resolve_web_extract_auxiliary(model: Optional[str] = None) -> tuple[Optional[Any], Optional[str], Dict[str, Any]]:
+    """Resolve the current web-extract auxiliary client, model, and extra body."""
+    from agent.auxiliary_client import get_async_text_auxiliary_client
+
+    client, default_model = get_async_text_auxiliary_client("web_extract")
+    configured_model = os.getenv("AUXILIARY_WEB_EXTRACT_MODEL", "").strip()
+    effective_model = model or configured_model or default_model
+
+    extra_body: Dict[str, Any] = {}
+    if client is not None and _is_nous_auxiliary_client(client):
+        from agent.auxiliary_client import get_auxiliary_extra_body
+        from agent.portal_tags import nous_portal_tags
+        extra_body = get_auxiliary_extra_body() or {"tags": nous_portal_tags()}
+
+    return client, effective_model, extra_body
+
+
+def _get_default_summarizer_model() -> Optional[str]:
+    """Return the current default model for web extraction summarization."""
+    _, model, _ = _resolve_web_extract_auxiliary()
+    return model
+
+
+async def process_content_with_llm(
+    raw_content: str,
+    url: str,
+    title: str,
+    model: Optional[str],
+    min_length: int = DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION,
+) -> Optional[str]:
+    """Legacy auxiliary summarization hook for oversized markdown/html extracts.
+
+    Modern ``web`` calls rely on provider-native focused modes and
+    truncate-and-store. Keep this hook present for compatibility and return
+    ``None`` for short/no-content inputs so callers retain the original text.
+    """
+    if not raw_content or len(raw_content) < min_length:
+        return None
+    return None
+
 
 # Hard ceiling on the full-text file written to cache/web. The truncate-store
 # path otherwise calls path.write_text(content) with no upper bound, so a
@@ -724,14 +794,23 @@ def web_search_tool(query: str, limit: int = 5) -> str:
 async def web_extract_tool(
     urls: List[str],
     format: str = None,
+    use_llm_processing: bool = True,
+    model: Optional[str] = None,
+    min_length: int = DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION,
+    mode: Optional[str] = None,
+    question: Optional[str] = None,
+    max_chars: Optional[int] = None,
     char_limit: Optional[int] = None,
+    only_main_content: Optional[bool] = None,
+    wait_for: Optional[int] = None,
+    schema: Optional[dict] = None,
 ) -> str:
     """
-    Extract content from specific web pages using available extraction API backend.
+    Extract content from specific web pages using the configured extraction backend.
 
-    Returns clean page content (markdown/text) with NO LLM summarization. The
-    extract backends (Firecrawl, Tavily, Exa, Parallel) already return clean,
-    boilerplate-stripped content, so we return it directly and fast. Pages over
+    This function provides a generic interface for web content extraction that
+    can work with multiple backends. Advanced modes (answer, summary, json,
+    links) require Firecrawl; other backends support basic markdown/html. Pages over
     ``char_limit`` are head+tail truncated with an explicit footer; the full
     text is stored under cache/web and the footer tells the model how to
     read_file the omitted middle. Inline base64 images are replaced with
@@ -739,9 +818,18 @@ async def web_extract_tool(
 
     Args:
         urls (List[str]): List of URLs to extract content from
-        format (str): Desired output format ("markdown" or "html", optional)
+        format (str): Backward-compatible alias for mode.
+        mode (Optional[str]): Extraction mode: markdown/html, or Firecrawl-only answer, summary, json, links.
+        question (Optional[str]): Focused page question for Firecrawl mode="answer".
+        max_chars (Optional[int]): Backward-compatible alias for char_limit.
         char_limit (Optional[int]): Per-page char budget sent to the model
             (default: web.extract_char_limit or 15000). Larger pages truncate.
+        only_main_content (Optional[bool]): Prefer main article/body content when the backend supports it.
+        wait_for (Optional[int]): Milliseconds to wait for JS-rendered content when the backend supports it.
+        schema (Optional[dict]): Firecrawl-only JSON schema for mode="json".
+        use_llm_processing (bool): Whether markdown/html content may be summarized with an auxiliary LLM (default: True)
+        model (Optional[str]): The model to use for LLM processing (defaults to current auxiliary backend model)
+        min_length (int): Minimum content length to trigger LLM processing (default: 5000)
 
     Security: URLs are checked for embedded secrets before fetching.
 
@@ -788,13 +876,24 @@ async def web_extract_tool(
         "parameters": {
             "urls": normalized_urls,
             "format": format,
+            "mode": mode,
+            "question": question,
+            "max_chars": max_chars,
             "char_limit": char_limit,
+            "only_main_content": only_main_content,
+            "wait_for": wait_for,
+            "schema": schema,
+            "use_llm_processing": use_llm_processing,
+            "model": model,
+            "min_length": min_length
         },
         "error": None,
         "pages_extracted": 0,
         "pages_truncated": 0,
         "original_response_size": 0,
         "final_response_size": 0,
+        "pages_processed_with_llm": 0,
+        "compression_metrics": [],
         "truncation_metrics": [],
         "processing_applied": []
     }
@@ -806,7 +905,7 @@ async def web_extract_tool(
         safe_urls = []
         ssrf_blocked: List[Dict[str, Any]] = []
         for url in normalized_urls:
-            if not await async_is_safe_url(url):
+            if not await _safe_url_allowed(url):
                 ssrf_blocked.append({
                     "url": url, "title": "", "content": "",
                     "error": "Blocked: URL targets a private or internal network address",
@@ -814,10 +913,28 @@ async def web_extract_tool(
             else:
                 safe_urls.append(url)
 
-        # Dispatch only safe URLs to the configured backend
-        if not safe_urls:
-            results = []
-        else:
+        # Dispatch only safe URLs. For default markdown fetches, try cheap
+        # machine-readable/static extractors first (Shopify product JSON,
+        # WordPress/WooCommerce REST, JSON-LD/OpenGraph) and fall back to the
+        # configured provider only for misses.
+        results: List[Dict[str, Any]] = []
+        if safe_urls:
+            fast_results, provider_urls = await try_fast_extract_urls(
+                safe_urls,
+                mode=mode or format or "markdown",
+                format=format,
+                only_main_content=only_main_content,
+                wait_for=wait_for,
+                question=question,
+                schema=schema,
+            )
+            results.extend(fast_results)
+            if fast_results:
+                debug_call_data["processing_applied"].append("fast_extract")
+                debug_call_data["fast_extract_count"] = len(fast_results)
+            safe_urls = provider_urls
+
+        if safe_urls:
             backend = _get_extract_backend()
 
             # All seven providers (brave-free, ddgs, searxng, exa, parallel,
@@ -894,21 +1011,66 @@ async def web_extract_tool(
                 "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
             )
 
+            requested_mode = (mode or format or "markdown").lower()
+            if requested_mode not in {"markdown", "html"} and provider.name != "firecrawl":
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            f"web_extract mode={requested_mode!r} requires Firecrawl. "
+                            f"Configured extract backend {provider.display_name} supports "
+                            "basic markdown/html extraction only."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+
             # Async-or-sync dispatch: parallel + firecrawl have async
             # extract(); exa + tavily are sync.
             import inspect
+            extract_kwargs = {
+                "mode": mode,
+                "question": question,
+                "only_main_content": only_main_content,
+                "wait_for": wait_for,
+                "schema": schema,
+            }
+            if format is not None:
+                extract_kwargs["format"] = format
+            extract_kwargs = {k: v for k, v in extract_kwargs.items() if v is not None}
             if inspect.iscoroutinefunction(provider.extract):
-                results = await provider.extract(safe_urls, format=format)
+                provider_results = await provider.extract(safe_urls, **extract_kwargs)
             else:
                 # Run sync extract() in a thread so we don't block the
                 # event loop on network I/O.
-                results = await asyncio.to_thread(
-                    provider.extract, safe_urls, format=format
+                provider_results = await asyncio.to_thread(
+                    provider.extract, safe_urls, **extract_kwargs
                 )
+            for requested_url, item in zip(safe_urls, provider_results):
+                if isinstance(item, dict):
+                    item.setdefault("requested_url", requested_url)
+            results.extend(provider_results)
 
-        # Merge any SSRF-blocked results back in
+        # Merge any SSRF-blocked results back in and preserve caller URL order
+        # even when some URLs used the fast path and others fell back.
         if ssrf_blocked:
             results = ssrf_blocked + results
+        if results:
+            buckets: Dict[str, List[Dict[str, Any]]] = {}
+            leftovers: List[Dict[str, Any]] = []
+            for item in results:
+                key = item.get("requested_url") or item.get("url")
+                if key:
+                    buckets.setdefault(key, []).append(item)
+                else:
+                    leftovers.append(item)
+            ordered_results: List[Dict[str, Any]] = []
+            for original_url in normalized_urls:
+                if buckets.get(original_url):
+                    ordered_results.append(buckets[original_url].pop(0))
+            for bucket in buckets.values():
+                leftovers.extend(bucket)
+            results = ordered_results + leftovers
 
         response = {"results": results}
         
@@ -917,28 +1079,122 @@ async def web_extract_tool(
         
         debug_call_data["pages_extracted"] = pages_extracted
         debug_call_data["original_response_size"] = len(json.dumps(response))
+        effective_model = model or _get_default_summarizer_model()
+        auxiliary_available = check_auxiliary_model()
+        effective_use_llm_processing = use_llm_processing and not (
+            (mode or format or "markdown").lower() in {"answer", "summary", "json", "links"}
+        )
+        
+        # Process each result with LLM if enabled
+        if effective_use_llm_processing and auxiliary_available:
+            logger.info("Processing extracted content with LLM (parallel)...")
+            debug_call_data["processing_applied"].append("llm_processing")
+            
+            # Prepare tasks for parallel processing
+            async def process_single_result(result):
+                """Process a single result with LLM and return updated result with metrics."""
+                url = result.get('url', 'Unknown URL')
+                title = result.get('title', '')
+                raw_content = result.get('raw_content', '') or result.get('content', '')
+                
+                if not raw_content:
+                    return result, None, "no_content"
+                
+                original_size = len(raw_content)
+                
+                # Process content with LLM
+                processed = await process_content_with_llm(
+                    raw_content, url, title, effective_model, min_length
+                )
+                
+                if processed:
+                    processed_size = len(processed)
+                    compression_ratio = processed_size / original_size if original_size > 0 else 1.0
+                    
+                    # Update result with processed content
+                    result['content'] = processed
+                    result['raw_content'] = raw_content
+                    
+                    metrics = {
+                        "url": url,
+                        "original_size": original_size,
+                        "processed_size": processed_size,
+                        "compression_ratio": compression_ratio,
+                        "model_used": effective_model
+                    }
+                    return result, metrics, "processed"
+                else:
+                    metrics = {
+                        "url": url,
+                        "original_size": original_size,
+                        "processed_size": original_size,
+                        "compression_ratio": 1.0,
+                        "model_used": None,
+                        "reason": "content_too_short"
+                    }
+                    return result, metrics, "too_short"
+            
+            # Run all LLM processing in parallel
+            results_list = response.get('results', [])
+            tasks = [process_single_result(result) for result in results_list]
+            # Use return_exceptions=True so a single task failure does not
+            # discard all other successfully processed results.
+            processed_results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Collect metrics and print results
+            for result_item in processed_results:
+                if isinstance(result_item, BaseException):
+                    logger.warning("Web result processing task failed: %s", result_item)
+                    continue
+                result, metrics, status = result_item
+                url = result.get('url', 'Unknown URL')
+                if status == "processed":
+                    debug_call_data["compression_metrics"].append(metrics)
+                    debug_call_data["pages_processed_with_llm"] += 1
+                    logger.info("%s (processed)", url)
+                elif status == "too_short":
+                    debug_call_data["compression_metrics"].append(metrics)
+                    logger.info("%s (no processing - content too short)", url)
+                else:
+                    logger.warning("%s (no content to process)", url)
+        else:
+            if effective_use_llm_processing and not auxiliary_available:
+                logger.warning("LLM processing requested but no auxiliary model available, returning raw content")
+                debug_call_data["processing_applied"].append("llm_processing_unavailable")
+            # Print summary of extracted pages for debugging (original behavior)
+            for result in response.get('results', []):
+                url = result.get('url', 'Unknown URL')
+                content_length = len(result.get('raw_content', ''))
+                logger.info("%s (%d characters)", url, content_length)
 
-        effective_char_limit = char_limit if char_limit is not None else _get_extract_char_limit()
+        effective_char_limit = (
+            char_limit
+            if char_limit is not None
+            else max_chars
+            if max_chars is not None
+            else _get_extract_char_limit()
+        )
         try:
             effective_char_limit = max(2000, min(int(effective_char_limit), 500_000))
         except (TypeError, ValueError):
             effective_char_limit = DEFAULT_EXTRACT_CHAR_LIMIT
 
-        # Truncate-and-store: no LLM. For each result, convert inline base64
-        # images to labeled placeholders (keeping alt text + real image URLs),
-        # then return the clean content directly if within budget, or a
-        # head+tail window plus a footer pointing at the stored full text.
+        # Truncate-and-store after optional backend/LLM processing. For each
+        # result, convert inline base64 images to labeled placeholders (keeping
+        # alt text + real image URLs), then return the clean content directly if
+        # within budget, or a head+tail window plus a footer pointing at the
+        # stored full text.
         debug_call_data["processing_applied"].append("truncate_and_store")
         for result in response.get("results", []):
             if result.get("error"):
                 continue
             url = result.get("url", "")
-            raw_content = result.get("raw_content", "") or result.get("content", "")
+            raw_content = result.get("content", "") or result.get("raw_content", "")
             if not raw_content:
                 continue
             clean = convert_base64_images_to_links(raw_content)
             model_text, truncated = _truncate_with_footer(clean, url, effective_char_limit)
             result["content"] = model_text
+            result["truncated"] = truncated
             if truncated:
                 debug_call_data["pages_truncated"] += 1
                 debug_call_data["truncation_metrics"].append({
@@ -957,6 +1213,9 @@ async def web_extract_tool(
                 "title": r.get("title", ""),
                 "content": r.get("content", ""),
                 "error": r.get("error"),
+                **({"truncated": r["truncated"]} if "truncated" in r else {}),
+                **({"backend_used": r["backend_used"]} if "backend_used" in r else {}),
+                **({"metadata": r["metadata"]} if "metadata" in r else {}),
                 **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
             }
             for r in response.get("results", [])
@@ -994,27 +1253,36 @@ async def web_extract_tool(
 
 
 # Convenience function to check Firecrawl credentials
-def check_web_api_key() -> bool:
-    """Check whether the configured web backend is available.
+def web_tools_registered() -> bool:
+    """Registration probe for legacy web tools; availability is checked separately."""
+    return True
 
-    Used as the ``check_fn`` gate for the ``web_search`` and ``web_extract``
-    tool registry entries — so a plugin-registered provider that reports
-    ``is_available()`` must light the tools up even when no built-in backend
-    has credentials (issues #28651, #31873). Resolution funnels through
-    :func:`_is_backend_available`, which delegates non-legacy names to the
-    registry.
+
+def check_web_api_key() -> bool:
+    """Usability probe: True when the selected web backends can service calls.
+
+    Probes the backends that :func:`_get_search_backend` /
+    :func:`_get_extract_backend` actually select, while also honoring
+    plugin-registered providers. An explicit per-capability backend with missing
+    credentials reports unusable instead of being masked by a shared fallback.
+    Distinct from :func:`web_tools_registered` (always True — whether the tool
+    is offered).
     """
-    configured = _load_web_config().get("backend", "").lower().strip()
-    if configured and _is_backend_available(configured):
-        return True
-    # Any built-in backend with credentials present. This is a boolean OR, so
-    # unlike _get_backend() the probe order is irrelevant.
+    cfg = _load_web_config()
+    search_specific = str(cfg.get("search_backend") or "").lower().strip()
+    extract_specific = str(cfg.get("extract_backend") or "").lower().strip()
+    if search_specific and not _is_backend_available(search_specific):
+        return False
+    if extract_specific and not _is_backend_available(extract_specific):
+        return False
+    if search_specific or extract_specific:
+        return _backend_usable(_get_search_backend()) and _backend_usable(_get_extract_backend())
+
+    configured = str(cfg.get("backend") or "").lower().strip()
+    if configured:
+        return _is_backend_available(configured)
     if any(_is_backend_available(backend) for backend in _LEGACY_WEB_BACKENDS):
         return True
-    # Any plugin-registered provider the registry considers active for either
-    # capability. Delegating to the registry's own availability-filtered
-    # resolvers keeps a single authority for "is a custom provider usable"
-    # rather than re-implementing the walk here.
     try:
         from agent.web_search_registry import (
             get_active_search_provider,
@@ -1028,6 +1296,12 @@ def check_web_api_key() -> bool:
     except Exception as exc:  # noqa: BLE001 — registry optional; never fatal
         logger.debug("web provider registry availability check failed: %s", exc)
         return False
+
+
+def check_auxiliary_model() -> bool:
+    """Check if an auxiliary text model is available for LLM content processing."""
+    client, _, _ = _resolve_web_extract_auxiliary()
+    return client is not None
 
 
 if __name__ == "__main__":
@@ -1136,7 +1410,7 @@ WEB_SEARCH_SCHEMA = {
 
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
-    "description": "Extract content from web page URLs. Returns clean page content in markdown/text (no LLM summarization — fast). Also works with PDF URLs (arxiv papers, documents) — pass the PDF link directly. Pages within the char budget (default 15000) return whole; larger pages return a head+tail window with a footer telling you the full text's saved file path and the read_file call to page through the omitted middle. Inline images appear as [IMAGE: alt] placeholders; real image URLs are kept as links. If a URL fails or times out, use the browser tool instead.",
+    "description": "Extract content from web page URLs using the configured extract backend. Default mode returns markdown/text. Also works with PDF URLs. Firecrawl adds mode=answer with question for focused page Q&A, mode=summary for compact summaries, mode=json with schema for structured extraction, and mode=links for link extraction. Pages within the char budget (default 15000) return whole; larger pages return a head+tail window with a footer telling you the full text's saved file path and read_file call. Inline images appear as [IMAGE: alt] placeholders; real image URLs are kept as links.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1146,16 +1420,150 @@ WEB_EXTRACT_SCHEMA = {
                 "description": "List of URLs to extract content from (max 5 URLs per call)",
                 "maxItems": 5
             },
+            "mode": {
+                "type": "string",
+                "enum": ["markdown", "html", "answer", "summary", "json", "links"],
+                "description": "Extraction mode. Defaults to markdown. answer/summary/json/links require Firecrawl."
+            },
+            "format": {
+                "type": "string",
+                "enum": ["markdown", "html"],
+                "description": "Backward-compatible alias for mode. Prefer mode for new calls."
+            },
+            "question": {"type": "string", "description": "Focused question for Firecrawl mode=answer."},
+            "max_chars": {"type": "integer", "description": "Backward-compatible alias for char_limit."},
             "char_limit": {
                 "type": "integer",
                 "description": "Optional per-page character budget sent back (default 15000). Pages larger than this are head+tail truncated with the full text stored to disk. Raise it when you need more of a long page inline.",
                 "minimum": 2000
-            }
+            },
+            "only_main_content": {"type": "boolean", "description": "Prefer main article/body content when supported."},
+            "wait_for": {"type": "integer", "description": "Milliseconds to wait for JS-rendered content when supported."},
+            "schema": {"type": "object", "description": "Firecrawl-only JSON schema for mode=json."}
         },
         "required": ["urls"]
     }
 }
 
+WEB_SCHEMA = {
+    "name": "web",
+    "description": (
+        "Web research wrapper. Search the web, fetch pages, ask focused page questions, "
+        "summarize, extract structured JSON/links, or use curl.md fallback. Keep "
+        "github_repo_brief separate for GitHub repositories."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["search", "fetch", "answer", "summary", "json", "links", "curlmd"],
+                "description": "Web operation to perform.",
+            },
+            "query": {"type": "string", "description": "For action='search': search query."},
+            "limit": {"type": "integer", "description": "For action='search': max results.", "minimum": 1, "maximum": 100, "default": 5},
+            "urls": {"type": "array", "items": {"type": "string"}, "description": "For fetch/answer/summary/json/links: URLs to extract (max 5).", "maxItems": 5},
+            "url": {"type": "string", "description": "For action='curlmd': absolute http(s) URL to fetch."},
+            "mode": {"type": "string", "enum": ["markdown", "html", "answer", "summary", "json", "links"], "description": "Optional extract mode override. Usually inferred from action."},
+            "question": {"type": "string", "description": "Focused question for action='answer'."},
+            "max_chars": {"type": "integer", "description": "Maximum characters returned after extraction/fetch."},
+            "only_main_content": {"type": "boolean", "description": "Prefer main article/body content when supported."},
+            "wait_for": {"type": "integer", "description": "Milliseconds to wait for JS-rendered content when supported."},
+            "schema": {"type": "object", "description": "Firecrawl-only JSON schema for action='json'."},
+            "objective": {"type": "string", "description": "For curlmd: focused extraction objective."},
+            "keywords": {"description": "For curlmd: keyword prefilter; string or list of strings.", "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+            "curlmd_mode": {"type": "string", "enum": ["smart", "rush"], "description": "For curlmd: curl.md processing mode.", "default": "smart"},
+            "fresh": {"type": "boolean", "description": "For curlmd: bypass curl.md cache.", "default": False},
+            "retries": {"type": "integer", "description": "For curlmd: retry count.", "minimum": 0, "maximum": 4, "default": 2},
+            "timeout_seconds": {"type": "integer", "description": "For curlmd: per-attempt timeout.", "minimum": 5, "maximum": 180, "default": 45},
+            "fallback": {"type": "boolean", "description": "For fetch actions: allow explicit fallback when supported. Results must say fallback_used/reason.", "default": False},
+            "fallback_to_curl": {"type": "boolean", "description": "For curlmd: allow plain curl fallback.", "default": True},
+        },
+        "required": ["action"],
+    },
+}
+
+def _load_curlmd_tool_module():
+    """Load the curl.md helper from the user plugin, with legacy fallback."""
+    import importlib
+
+    for module_name in (
+        "hermes_plugins.local_tools.curlmd_tool",
+        "plugins.local_tools.curlmd_tool",
+        "tools.curlmd_tool",
+    ):
+        try:
+            return importlib.import_module(module_name)
+        except Exception:
+            continue
+    raise ModuleNotFoundError("curlmd_tool is not available from local-tools plugin or legacy tools package")
+
+
+def _check_web_wrapper_available() -> bool:
+    if check_web_api_key():
+        return True
+    try:
+        return bool(_load_curlmd_tool_module().check_curlmd_available())
+    except Exception:
+        return False
+
+
+async def _handle_web(args, **kw):
+    action = args.get("action")
+    if action == "search":
+        if not check_web_api_key():
+            return tool_error("web(action='search') requires a configured web search backend/API key. Configure web search, or use action='curlmd' with a specific URL.")
+        if not args.get("query"):
+            return tool_error("web(action='search') requires 'query'.")
+        return web_search_tool(args.get("query", ""), limit=args.get("limit", 5))
+
+    if action in {"fetch", "answer", "summary", "json", "links"}:
+        urls = args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else []
+        if not urls:
+            if args.get("url"):
+                return tool_error("web(action='fetch'/'answer'/'summary'/'json'/'links') requires 'urls' as a list. Use action='curlmd' for a single 'url'.")
+            return tool_error("web extract actions require 'urls' as a non-empty list.")
+        mode = args.get("mode") or ("markdown" if action == "fetch" else action)
+        return await web_extract_tool(
+            urls,
+            format=args.get("format"),
+            mode=mode,
+            question=args.get("question"),
+            max_chars=args.get("max_chars"),
+            char_limit=args.get("char_limit"),
+            only_main_content=args.get("only_main_content"),
+            wait_for=args.get("wait_for"),
+            schema=args.get("schema"),
+            use_llm_processing=mode not in {"answer", "summary", "json", "links"},
+        )
+
+    if action == "curlmd":
+        curlmd_tool = _load_curlmd_tool_module()
+        return curlmd_tool.curlmd_fetch_tool(
+            url=args.get("url", ""),
+            objective=args.get("objective"),
+            keywords=args.get("keywords"),
+            mode=args.get("curlmd_mode", "smart"),
+            fresh=bool(args.get("fresh", False)),
+            retries=args.get("retries", 2),
+            timeout_seconds=args.get("timeout_seconds", 45),
+            fallback_to_curl=bool(args.get("fallback_to_curl", True)),
+            max_chars=args.get("max_chars", 50_000),
+        )
+
+    return tool_error("Unknown web action. Use one of: search, fetch, answer, summary, json, links, curlmd.")
+
+
+registry.register(
+    name="web",
+    toolset="web",
+    schema=WEB_SCHEMA,
+    handler=_handle_web,
+    check_fn=_check_web_wrapper_available,
+    is_async=True,
+    emoji="🌐",
+    max_result_size_chars=100_000,
+)
 registry.register(
     name="web_search",
     toolset="web",
@@ -1168,14 +1576,21 @@ registry.register(
 )
 registry.register(
     name="web_extract",
-    toolset="web",
+    toolset="web_legacy",
     schema=WEB_EXTRACT_SCHEMA,
     handler=lambda args, **kw: web_extract_tool(
         args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [],
-        "markdown",
+        format=args.get("format"),
+        mode=args.get("mode") or args.get("format") or "markdown",
+        question=args.get("question"),
+        max_chars=args.get("max_chars"),
         char_limit=args.get("char_limit"),
+        only_main_content=args.get("only_main_content"),
+        wait_for=args.get("wait_for"),
+        schema=args.get("schema"),
+        use_llm_processing=(args.get("mode") or args.get("format") or "markdown") not in {"answer", "summary", "json", "links"},
     ),
-    check_fn=check_web_api_key,
+    check_fn=web_tools_registered,
     requires_env=_web_requires_env(),
     is_async=True,
     emoji="📄",

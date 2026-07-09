@@ -497,6 +497,32 @@ class TestGeneratedSystemdUnits:
         assert str(local_bin) in plist
         assert str(profile_node_bin) not in plist
 
+    def test_launchd_default_plist_pins_root_profile_against_sticky_active_profile(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: hermes_home)
+        monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: None)
+
+        plist = gateway_cli.generate_launchd_plist()
+
+        assert "<key>HERMES_S6_SUPERVISED_CHILD</key>" in plist
+        assert "<string>1</string>" in plist
+        assert "<string>--profile</string>" not in plist
+
+    def test_launchd_named_profile_plist_does_not_set_supervised_default_sentinel(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes" / "profiles" / "gpt"
+        hermes_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: hermes_home)
+        monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: None)
+
+        plist = gateway_cli.generate_launchd_plist()
+
+        assert "<string>--profile</string>" in plist
+        assert "<string>gpt</string>" in plist
+        assert "HERMES_S6_SUPERVISED_CHILD" not in plist
+
     def test_user_unit_includes_wsl_windows_interop_paths(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "is_wsl", lambda: True)
         monkeypatch.setenv(

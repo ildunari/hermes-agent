@@ -216,3 +216,53 @@ class TestGetCrossProfileWarning:
         # Must self-document as defense-in-depth so future reviewers
         # don't promote it to a hard block.
         assert "not a security boundary" in warn.lower()
+
+
+# ---------------------------------------------------------------------------
+# Configured file-access deny paths
+# ---------------------------------------------------------------------------
+
+
+class TestConfiguredDeniedPaths:
+    def test_configured_denied_path_blocks_nested_reads(self, monkeypatch, tmp_path):
+        import agent.file_safety as fs
+
+        private_root = tmp_path / "private-contacts"
+        nested = private_root / "profiles" / "joe.md"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("secret")
+
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {
+                "file_access": {
+                    "denied_paths": [
+                        {
+                            "path": str(private_root),
+                            "reason": "guest profile must not access contact profiles",
+                        }
+                    ]
+                }
+            },
+        )
+
+        err = fs.get_configured_denied_path_error(str(nested), operation="read")
+        assert err is not None
+        assert "file_access.denied_paths" in err
+        assert "guest profile" in err
+
+    def test_configured_denied_path_miss_returns_none(self, monkeypatch, tmp_path):
+        import agent.file_safety as fs
+
+        private_root = tmp_path / "private-contacts"
+        public_file = tmp_path / "public" / "notes.md"
+        public_file.parent.mkdir()
+        public_file.write_text("ok")
+
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"file_access": {"denied_paths": [str(private_root)]}},
+        )
+
+        assert fs.get_configured_denied_path_error(str(public_file)) is None
+        assert fs.is_write_denied(str(public_file)) is False

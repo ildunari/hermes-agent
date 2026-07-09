@@ -46,10 +46,12 @@ def _create_runs_app(adapter: APIServerAdapter) -> web.Application:
     app = web.Application(middlewares=mws)
     app["api_server_adapter"] = adapter
     app.router.add_post("/v1/runs", adapter._handle_runs)
+    app.router.add_get("/v1/runs", adapter._handle_list_runs)
     app.router.add_get("/v1/runs/{run_id}", adapter._handle_get_run)
     app.router.add_get("/v1/runs/{run_id}/events", adapter._handle_run_events)
     app.router.add_post("/v1/runs/{run_id}/approval", adapter._handle_run_approval)
     app.router.add_post("/v1/runs/{run_id}/stop", adapter._handle_stop_run)
+    app.router.add_get("/api/background-tasks", adapter._handle_background_tasks)
     return app
 
 
@@ -268,6 +270,75 @@ class TestRunStatus:
         app = _create_runs_app(auth_adapter)
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.get("/v1/runs/run_any")
+        assert resp.status == 401
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/runs — list known runs
+# ---------------------------------------------------------------------------
+
+
+class TestListRuns:
+    @pytest.mark.asyncio
+    async def test_list_runs_returns_newest_first_and_input(self, adapter):
+        adapter._set_run_status("run_old", "completed", created_at=10, updated_at=20, input="old task")
+        adapter._set_run_status("run_new", "running", created_at=30, updated_at=40, input="new task")
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/v1/runs")
+            assert resp.status == 200
+            data = await resp.json()
+        assert data["object"] == "list"
+        assert data["count"] == 2
+        assert [run["run_id"] for run in data["data"]] == ["run_new", "run_old"]
+        assert data["data"][0]["input"] == "new task"
+
+    @pytest.mark.asyncio
+    async def test_list_runs_active_filter(self, adapter):
+        adapter._set_run_status("run_done", "completed", created_at=10, updated_at=20)
+        adapter._set_run_status("run_live", "running", created_at=30, updated_at=40)
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/v1/runs?active=true")
+            assert resp.status == 200
+            data = await resp.json()
+        assert [run["run_id"] for run in data["data"]] == ["run_live"]
+
+    @pytest.mark.asyncio
+    async def test_list_runs_requires_auth(self, auth_adapter):
+        app = _create_runs_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/v1/runs")
+        assert resp.status == 401
+
+
+# ---------------------------------------------------------------------------
+# GET /api/background-tasks — inspect active background work
+# ---------------------------------------------------------------------------
+
+
+class TestBackgroundTasks:
+    @pytest.mark.asyncio
+    async def test_background_tasks_includes_active_api_runs(self, adapter):
+        adapter._set_run_status("run_live", "running", created_at=30, updated_at=40, input="research task")
+        adapter._set_run_status("run_done", "completed", created_at=10, updated_at=20, input="done task")
+        app = _create_runs_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/api/background-tasks")
+            assert resp.status == 200
+            data = await resp.json()
+        api_runs = [task for task in data["tasks"] if task["kind"] == "api_run"]
+        assert len(api_runs) == 1
+        assert api_runs[0]["id"] == "run_live"
+        assert api_runs[0]["label"] == "research task"
+        assert api_runs[0]["controllable"] is True
+        assert data["summary"]["api_runs"] == 1
+
+    @pytest.mark.asyncio
+    async def test_background_tasks_requires_auth(self, auth_adapter):
+        app = _create_runs_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/api/background-tasks")
         assert resp.status == 401
 
 

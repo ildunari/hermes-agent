@@ -2377,11 +2377,11 @@ def delegate_task(
     # Normalise the top-level role once; per-task overrides re-normalise.
     top_role = _normalize_role(role)
 
-    # Background (async) delegation now applies to BOTH single tasks and
-    # batches. A batch simply becomes N independent async dispatches: each
-    # child runs on the daemon executor and re-enters the conversation via
-    # the completion queue on its own, carrying its own handle. There's no
-    # combined "wait for all" — fan-out is exactly N background subagents.
+    # Background (async) delegation is opt-in. By default, top-level model
+    # calls run synchronously: a batch still fans out children in parallel, but
+    # this tool joins them and returns one consolidated result to the parent.
+    # With background=true, the whole fan-out runs as one detached async unit
+    # and re-enters later with one consolidated result block.
     background = is_truthy_value(background, default=False) if background is not None else False
 
     # Depth limit — configurable via delegation.max_spawn_depth,
@@ -3217,12 +3217,12 @@ def _build_top_level_description() -> str:
         f"2. Batch (parallel): provide 'tasks' array with up to {max_children} "
         f"items concurrently for this user (configured via "
         f"delegation.max_concurrent_children in config.yaml). {nesting_clause}\n\n"
-        "BOTH MODES RUN IN THE BACKGROUND. delegate_task returns immediately — "
-        "you and the user keep working, and each subagent's full result "
-        "re-enters the conversation as its own new message when it finishes. A "
-        "batch is just N independent background subagents (N handles, each "
-        "completes on its own). Do NOT wait or poll; just continue with other "
-        "work after dispatching.\n\n"
+        "DEFAULT EXECUTION IS SYNCHRONOUS. delegate_task waits for its "
+        "subagent result before returning. In batch mode, children run in "
+        "parallel and the parent receives one consolidated results array after "
+        "all children finish. Use background=true only for detached "
+        "fire-and-forget work; detached results are process-local and "
+        "non-durable.\n\n"
         "WHEN TO USE delegate_task:\n"
         "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
         "- Tasks that would flood your context with intermediate data\n"
@@ -3405,13 +3405,12 @@ DELEGATE_TASK_SCHEMA = {
             "background": {
                 "type": "boolean",
                 "description": (
-                    "DEPRECATED / IGNORED. Single-task delegations always run "
-                    "in the background automatically — you do not need to (and "
-                    "cannot) opt in or out. The result re-enters the "
-                    "conversation as a new message when the subagent finishes; "
-                    "just continue working in the meantime. Setting this has no "
-                    "effect; the parameter remains only for backward "
-                    "compatibility."
+                    "Optional. Defaults to false. When false, delegation is "
+                    "synchronous: single tasks return their result directly; "
+                    "batch tasks run in parallel and return one consolidated "
+                    "results array after all children finish. When true, the "
+                    "whole delegation runs as a detached, process-local "
+                    "background unit and re-enters later."
                 ),
             },
         },
@@ -3427,17 +3426,17 @@ from tools.registry import registry, tool_error
 def _model_background_value(args: dict, parent_agent=None) -> bool:
     """Background flag for the MODEL-facing dispatch path (registry fallback).
 
-    Delegations from the top-level agent always run in the background — the
-    model does not choose. This applies to both a single task and a fan-out
-    batch (each task becomes its own independent background subagent). The one
-    exception is a delegation from an orchestrator subagent (depth > 0), which
-    needs its workers' results within its own turn. The live path is
+    Delegations from the top-level agent default to synchronous execution; a
+    model can opt into detached execution with ``background=true``. Delegations
+    from an orchestrator subagent (depth > 0) are always synchronous because
+    the child needs its workers' results within its own turn. The live path is
     ``run_agent._dispatch_delegate_task``; this lambda mirrors it for the rare
-    case the intercept is bypassed. Direct Python callers of ``delegate_task``
-    keep the historical synchronous default.
+    case the intercept is bypassed.
     """
     is_subagent = getattr(parent_agent, "_delegate_depth", 0) > 0
-    return not is_subagent
+    if is_subagent:
+        return False
+    return is_truthy_value(args.get("background"), default=False)
 
 
 _MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args"}

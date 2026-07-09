@@ -26,6 +26,7 @@ from tools.tts_tool import (
     DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH,
     DEFAULT_COMMAND_TTS_OUTPUT_FORMAT,
     DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS,
+    _command_tts_allows_long_text,
     _generate_command_tts,
     _get_command_tts_output_format,
     _get_command_tts_timeout,
@@ -216,6 +217,14 @@ class TestConfigGetters:
 
     def test_voice_compatible_default_off(self):
         assert _is_command_tts_voice_compatible({}) is False
+
+    def test_allow_long_text_boolean(self):
+        assert _command_tts_allows_long_text({"allow_long_text": True}) is True
+        assert _command_tts_allows_long_text({"allow_long_text": False}) is False
+
+    def test_allow_long_text_string_modes(self):
+        assert _command_tts_allows_long_text({"long_text_mode": "provider_chunked"}) is True
+        assert _command_tts_allows_long_text({"long_text_mode": "off"}) is False
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +498,43 @@ class TestTextToSpeechToolWithCommandProvider:
         # The response should not carry the command-provider error text.
         err = (data.get("error") or "").lower()
         assert "tts.providers.broken.command is not configured" not in err
+
+    def test_long_text_is_truncated_without_opt_in(self, tmp_path):
+        cfg = {
+            "provider": "py-copy",
+            "providers": {
+                "py-copy": {
+                    "type": "command",
+                    "command": _python_copy_command(),
+                    "output_format": "mp3",
+                    "max_text_length": 10,
+                },
+            },
+        }
+        out = tmp_path / "clip.mp3"
+        with patch("tools.tts_tool._load_tts_config", return_value=cfg):
+            data = json.loads(text_to_speech_tool(text="abcdefghij-END", output_path=str(out)))
+        assert data["success"] is True
+        assert out.read_text(encoding="utf-8") == "abcdefghij"
+
+    def test_long_text_passes_through_when_command_provider_allows_it(self, tmp_path):
+        cfg = {
+            "provider": "py-copy",
+            "providers": {
+                "py-copy": {
+                    "type": "command",
+                    "command": _python_copy_command(),
+                    "output_format": "mp3",
+                    "max_text_length": 10,
+                    "allow_long_text": True,
+                },
+            },
+        }
+        out = tmp_path / "clip.mp3"
+        with patch("tools.tts_tool._load_tts_config", return_value=cfg):
+            data = json.loads(text_to_speech_tool(text="abcdefghij-END", output_path=str(out)))
+        assert data["success"] is True
+        assert out.read_text(encoding="utf-8") == "abcdefghij-END"
 
 
 class TestCheckTtsRequirements:

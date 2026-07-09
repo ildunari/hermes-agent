@@ -397,6 +397,8 @@ class PluginContext:
         is_async: bool = False,
         description: str = "",
         emoji: str = "",
+        max_result_size_chars: int | float | None = None,
+        dynamic_schema_overrides: Callable | None = None,
         override: bool = False,
     ) -> None:
         """Register a tool in the global registry **and** track it as plugin-provided.
@@ -435,6 +437,8 @@ class PluginContext:
             is_async=is_async,
             description=description,
             emoji=emoji,
+            max_result_size_chars=max_result_size_chars,
+            dynamic_schema_overrides=dynamic_schema_overrides,
             override=override,
         )
         self._manager._plugin_tool_names.add(name)

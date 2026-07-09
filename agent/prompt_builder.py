@@ -143,9 +143,10 @@ HERMES_AGENT_HELP_GUIDANCE = (
     "it — or when you need to understand your own features, tools, or capabilities, "
     "the documentation at https://hermes-agent.nousresearch.com/docs is your "
     "authoritative reference and always holds the latest, most up-to-date "
-    "information. Load the `hermes-agent` skill with skill_view(name='hermes-agent') "
-    "for additional guidance and proven workflows, but treat the docs as the source "
-    "of truth when the two differ."
+    "information. Load the `hermes__hermes-agent` skill with "
+    "skill(action='view', name='hermes__hermes-agent') for additional guidance "
+    "and proven workflows, but treat the docs as the source of truth when the "
+    "two differ."
 )
 
 MEMORY_GUIDANCE = (
@@ -180,9 +181,9 @@ SESSION_SEARCH_GUIDANCE = (
 SKILLS_GUIDANCE = (
     "After completing a complex task (5+ tool calls), fixing a tricky error, "
     "or discovering a non-trivial workflow, save the approach as a "
-    "skill with skill_manage so you can reuse it next time.\n"
+    "skill with skill(action='manage', confirm=true, ...) so you can reuse it next time.\n"
     "When using a skill and finding it outdated, incomplete, or wrong, "
-    "patch it immediately with skill_manage(action='patch') — don't wait to be asked. "
+    "patch it immediately with skill(action='manage', manage_action='patch', confirm=true, ...) — don't wait to be asked. "
     "Skills that aren't maintained become liabilities."
 )
 
@@ -299,7 +300,15 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek", "qwopus")
+
+QWOPUS_TOOL_CALL_GUIDANCE = (
+    "# Qwopus tool-call format\n"
+    "When you need to call a tool, do not use <tool_code>, Python code, "
+    "markdown, prose, or placeholders. Output exactly one compact JSON object "
+    "and nothing else: {\"name\":\"tool_name\",\"arguments\":{...}}. "
+    "After Hermes returns the tool result, answer the user normally.\n"
+)
 
 # Universal "finish the job" guidance — applied to ALL models, not gated
 # by model family.  Addresses two cross-model failure modes:
@@ -1669,7 +1678,7 @@ def build_skills_system_prompt(
         result = (
             "## Skills (mandatory)\n"
             "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
+            "to your task, you MUST load it with skill(action='view', name=name) and follow its instructions. "
             "Err on the side of loading — it is always better to have context you don't need "
             "than to miss critical steps, pitfalls, or established workflows. "
             "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
@@ -1680,10 +1689,10 @@ def build_skills_system_prompt(
             "already know how to do, because the skill defines how it should be done here.\n"
             "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
             "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
-            "`hermes setup`) so you don't have to guess or invent workarounds.\n"
-            "If a skill has issues, fix it with skill_manage(action='patch').\n"
+            "skills, voice, gateway, plugins, or any feature — load the `hermes__hermes-agent` skill "
+            "first with `skill(action='view', name='hermes__hermes-agent')`. It points to the sharper "
+            "local Hermes skills and current commands, so you don't have to guess or invent workarounds.\n"
+            "If a skill has issues, fix it with skill(action='manage', manage_action='patch', confirm=true).\n"
             "After difficult/iterative tasks, offer to save as a skill. "
             "If a skill you loaded was missing steps, had wrong commands, or needed "
             "pitfalls you discovered, update it before finishing.\n"
@@ -1845,6 +1854,85 @@ def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
     except Exception as e:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
         return None
+
+
+def load_shared_user_md() -> Optional[str]:
+    """Load the canonical shared USER.md outside profile-scoped memories."""
+    try:
+        from hermes_cli.config import ensure_hermes_home
+        ensure_hermes_home()
+    except Exception as e:
+        logger.debug("Could not ensure HERMES_HOME before loading shared USER.md: %s", e)
+
+    hermes_home = get_hermes_home().resolve()
+    candidates = [
+        hermes_home / "shared" / "USER.md",
+        Path.home() / ".hermes" / "shared" / "USER.md",
+    ]
+    if hermes_home.parent.name == "profiles":
+        candidates.insert(1, hermes_home.parent.parent / "shared" / "USER.md")
+
+    seen: set[str] = set()
+    for user_path in candidates:
+        try:
+            resolved = user_path.resolve()
+        except Exception:
+            resolved = user_path
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not user_path.exists():
+            continue
+        try:
+            content = user_path.read_text(encoding="utf-8").strip()
+            if not content:
+                continue
+            content = _scan_context_content(content, str(user_path))
+            content = _truncate_content(content, "shared USER.md")
+            return "# Shared User Profile\n\n" + content
+        except Exception as e:
+            logger.debug("Could not read shared USER.md from %s: %s", user_path, e)
+    return None
+
+
+def load_local_context() -> Optional[str]:
+    """Load machine-local LOCAL_CONTEXT.md from HERMES_HOME or root ~/.hermes."""
+    try:
+        from hermes_cli.config import ensure_hermes_home
+        ensure_hermes_home()
+    except Exception as e:
+        logger.debug("Could not ensure HERMES_HOME before loading LOCAL_CONTEXT.md: %s", e)
+
+    hermes_home = get_hermes_home().resolve()
+    candidates = [
+        hermes_home / "LOCAL_CONTEXT.md",
+        Path.home() / ".hermes" / "LOCAL_CONTEXT.md",
+    ]
+    if hermes_home.parent.name == "profiles":
+        candidates.insert(1, hermes_home.parent.parent / "LOCAL_CONTEXT.md")
+
+    seen: set[str] = set()
+    for ctx_path in candidates:
+        try:
+            resolved = ctx_path.resolve()
+        except Exception:
+            resolved = ctx_path
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not ctx_path.exists():
+            continue
+        try:
+            content = ctx_path.read_text(encoding="utf-8").strip()
+            if not content:
+                continue
+            content = _scan_context_content(content, str(ctx_path))
+            return _truncate_content(content, "LOCAL_CONTEXT.md")
+        except Exception as e:
+            logger.debug("Could not read LOCAL_CONTEXT.md from %s: %s", ctx_path, e)
+    return None
 
 
 def _load_hermes_md(cwd_path: Path, context_length: Optional[int] = None) -> str:

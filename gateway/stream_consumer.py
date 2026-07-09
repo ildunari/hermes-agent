@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import queue
 import re
 import time
@@ -49,6 +50,22 @@ _NEW_SEGMENT = object()
 # Queue marker for a completed assistant commentary message emitted between
 # API/tool iterations (for example: "I'll inspect the repo first.").
 _COMMENTARY = object()
+
+
+@dataclass
+class StreamDeliveryStats:
+    """Diagnostics for one gateway response-stream consumer run."""
+
+    delta_count: int = 0
+    visible_update_count: int = 0
+    first_delta_ts: Optional[float] = None
+    first_visible_update_ts: Optional[float] = None
+    finalize_ts: Optional[float] = None
+
+    @property
+    def progressive_visible_updates(self) -> bool:
+        """True when the user saw at least one pre-final response update."""
+        return self.visible_update_count > 0
 
 
 @dataclass
@@ -175,7 +192,9 @@ class GatewayStreamConsumer:
         self._fallback_preserve_partial_messages = False
         self._flood_strikes = 0         # Consecutive flood-control edit failures
         self._current_edit_interval = self.cfg.edit_interval  # Adaptive backoff
+        self._completed = False
         self._final_response_sent = False
+        self._final_delivery_in_progress = False
         # Set when the final response content was sent to the user via
         # streaming, even if the final edit (cursor removal etc.)
         # subsequently failed.
@@ -214,6 +233,12 @@ class GatewayStreamConsumer:
         self._draft_failures = 0
         self._before_finalize_notified = False
 
+        # Diagnostics: these distinguish "the stream consumer delivered the
+        # final answer" from "the user saw progressive response text before
+        # the final answer."  Tool-progress HUD messages are counted in
+        # gateway/run.py separately; they never touch these counters.
+        self._delivery_stats = StreamDeliveryStats()
+
     def _metadata_for_send(
         self,
         *,
@@ -223,13 +248,12 @@ class GatewayStreamConsumer:
         """Return per-send metadata for stream-created messages.
 
         Mattermost treats notify-worthy sends as user-visible final content
-        when deciding whether a broken thread root may fall back flat.  Preview
+        when deciding whether a broken thread root may fall back flat. Preview
         and progress sends keep their original metadata and remain thread-strict.
 
-        ``expect_edits`` preserves the upstream Telegram streaming contract:
-        preview messages that may be edited later must stay on the editable
-        legacy send path, while fresh/fallback final sends can still use richer
-        final-message delivery.
+        ``expect_edits`` preserves Telegram streaming: preview messages that
+        may be edited later must stay on the editable legacy send path, while
+        fresh/fallback final sends can still use richer final-message delivery.
         """
         meta = dict(self.metadata) if self.metadata else {}
         if expect_edits:
@@ -249,15 +273,63 @@ class GatewayStreamConsumer:
         return self._final_response_sent
 
     @property
+    def completed(self) -> bool:
+        """True only when the stream finished its final delivery path."""
+        return self._completed
+
+    @property
+    def final_message_id(self) -> Optional[str]:
+        """Message id for the final visible assistant bubble, when known."""
+        if self._message_id == "__no_edit__":
+            return None
+        return self._message_id
+
+    @property
     def message_id(self) -> str | None:
         """The Discord/chat message ID of the last-sent or edited message."""
         return self._message_id
+
+    @property
+    def final_delivery_in_progress(self) -> bool:
+        """True while the consumer is awaiting the durable final send."""
+        return self._final_delivery_in_progress
 
     @property
     def final_content_delivered(self) -> bool:
         """True when the final response content reached the user, even if
         the subsequent cosmetic edit (cursor removal) failed."""
         return self._final_content_delivered
+
+    @property
+    def delivery_stats(self) -> StreamDeliveryStats:
+        """Diagnostic counters for response streaming visibility."""
+        return self._delivery_stats
+
+    def _record_delta(self) -> None:
+        stats = self._delivery_stats
+        stats.delta_count += 1
+        if stats.first_delta_ts is None:
+            stats.first_delta_ts = time.monotonic()
+
+    def _record_visible_response_update(self, *, is_turn_final: bool) -> None:
+        """Count successful visible assistant-response updates before turn final.
+
+        This intentionally excludes final delivery itself. Segment-boundary
+        preambles count even though they are sent with finalize=True, because
+        they are visible assistant text shown before tool progress and before
+        the turn-final answer.
+        """
+        if is_turn_final:
+            return
+        stats = self._delivery_stats
+        stats.visible_update_count += 1
+        if stats.first_visible_update_ts is None:
+            stats.first_visible_update_ts = time.monotonic()
+
+    def _record_finalize(self) -> None:
+        stats = self._delivery_stats
+        if stats.finalize_ts is None:
+            stats.finalize_ts = time.monotonic()
 
     async def _notify_before_finalize(self) -> None:
         """Run the pre-finalize hook exactly once, swallowing hook errors."""
@@ -358,7 +430,7 @@ class GatewayStreamConsumer:
             type(self)._draft_id_counter += 1
             self._draft_id = type(self)._draft_id_counter
 
-    def on_delta(self, text: str) -> None:
+    def on_delta(self, text: Optional[str]) -> None:
         """Thread-safe callback — called from the agent's worker thread.
 
         When *text* is ``None``, signals a tool boundary: the current message
@@ -366,6 +438,7 @@ class GatewayStreamConsumer:
         appears below any tool-progress messages the gateway sent in between.
         """
         if text:
+            self._record_delta()
             self._queue.put(text)
         elif text is None:
             self.on_segment_break()
@@ -559,6 +632,7 @@ class GatewayStreamConsumer:
                 "Stream consumer using native-draft transport (chat=%s draft_id=%s)",
                 self.chat_id, self._draft_id,
             )
+            await self._send_thinking_draft_frame()
 
         try:
             while True:
@@ -593,6 +667,7 @@ class GatewayStreamConsumer:
                 # tag is not lost.
                 if got_done:
                     self._flush_think_buffer()
+                    self._record_finalize()
 
                     # Intentional-silence suppression.  When the agent chose
                     # not to reply it emits a bare control marker (NO_REPLY /
@@ -669,6 +744,7 @@ class GatewayStreamConsumer:
                             new_id = await self._send_new_chunk(
                                 chunk,
                                 reply_to,
+                                count_visible_update=not got_done,
                                 final=got_done,
                             )
                             if new_id is not None and new_id != reply_to:
@@ -684,6 +760,7 @@ class GatewayStreamConsumer:
                             self._final_response_sent = chunks_delivered
                             if chunks_delivered:
                                 self._final_content_delivered = True
+                            self._completed = True
                             return
                         if got_segment_break:
                             self._message_id = None
@@ -739,16 +816,39 @@ class GatewayStreamConsumer:
                     # the next segment (tool progress, next chunk) creates a
                     # new message below it.  got_done has its own finalize
                     # path below so we don't finalize here for it.
-                    current_update_visible = await self._send_or_edit(
-                        display_text,
-                        finalize=(got_done or got_segment_break),
-                        # A segment-break finalize closes a preamble, not the
-                        # turn-final answer — only got_done marks delivered (#29346).
-                        is_turn_final=got_done,
-                    )
+                    # Do not stream/edit rich-card artifact content. Even a
+                    # cleaned preview duplicates prose when the final rich-card
+                    # delivery path sends text/card/text.
+                    if self._has_rich_card_fence_candidate(self._accumulated, platform=getattr(self.adapter, "platform", "generic")):
+                        current_update_visible = False
+                    else:
+                        current_update_visible = await self._send_or_edit(
+                            display_text,
+                            finalize=(got_done or got_segment_break),
+                            # A segment-break finalize closes a preamble, not the
+                            # turn-final answer — only got_done marks delivered (#29346).
+                            is_turn_final=got_done,
+                        )
                     self._last_edit_time = time.monotonic()
 
                 if got_done:
+                    self._record_finalize()
+                    # Rich card artifacts need final-response rendering and
+                    # ordered media delivery. Streaming chunks may contain an
+                    # incomplete fence, so do not finalize them here; let the
+                    # normal gateway final-send path render the complete answer.
+                    try:
+                        from gateway.rich_cards.artifacts import find_card_artifacts
+                        if self._accumulated and (
+                            find_card_artifacts(self._accumulated)
+                            or self._has_rich_card_fence_candidate(self._accumulated, platform=getattr(self.adapter, "platform", "generic"))
+                        ):
+                            self._final_response_sent = False
+                            self._final_content_delivered = False
+                            self._completed = True
+                            return
+                    except Exception:
+                        pass
                     if self._accumulated or self._message_id is not None or self._already_sent:
                         await self._notify_before_finalize()
                     # Final edit without cursor. If progressive editing failed
@@ -769,20 +869,21 @@ class GatewayStreamConsumer:
                         elif (
                             current_update_visible
                             and (
-                                not self._adapter_requires_finalize
+                                got_done
+                                or not self._adapter_requires_finalize
                                 or self._last_edit_overflowed
                             )
                         ):
-                            # Mid-stream edit above already delivered the
-                            # final accumulated content.  Skip the redundant
-                            # final edit for adapters that don't need an
-                            # explicit finalize signal, and for any adapter
-                            # when that edit split-and-delivered across
-                            # continuations: the split edit carried
-                            # finalize=True itself, and re-finalizing with
-                            # the full text would overflow-split again into
-                            # the adopted continuation, duplicating chunks
-                            # on screen.
+                            # The visible update above was invoked with
+                            # finalize=True when got_done is set, so even
+                            # adapters that require an explicit finalize
+                            # signal have already received it. Skip the
+                            # second identical final edit; Telegram rich
+                            # messages visibly twitch when we send that
+                            # duplicate up/down edit. Also skip for adapters
+                            # that don't need explicit finalization, and for
+                            # overflow splits where re-finalizing the full
+                            # text would duplicate chunks on screen.
                             self._final_response_sent = True
                             self._final_content_delivered = True
                         elif self._message_id:
@@ -807,6 +908,7 @@ class GatewayStreamConsumer:
                             self._final_response_sent = await self._send_or_edit(self._accumulated)
                             if self._final_response_sent:
                                 self._final_content_delivered = True
+                    self._completed = True
                     return
 
                 if commentary_text is not None:
@@ -878,7 +980,7 @@ class GatewayStreamConsumer:
                 self._final_response_sent = True
                 self._final_content_delivered = True
         except Exception as e:
-            logger.error("Stream consumer error: %s", e)
+            logger.error("Stream consumer error: %s", e, exc_info=True)
 
     # Strip MEDIA:<path> tags before display. Uses the shared anchored
     # MEDIA_TAG_CLEANUP_RE from gateway/platforms/base.py — only tags whose
@@ -887,6 +989,42 @@ class GatewayStreamConsumer:
     # Streaming and non-streaming paths share the same regex, so a tag is
     # treated identically whichever path delivered the text.
     _MEDIA_RE = MEDIA_TAG_CLEANUP_RE
+
+    @staticmethod
+    def _has_rich_card_fence_candidate(text: str, *, platform: str = "generic") -> bool:
+        """Return True once a stream appears to contain rich-card content."""
+        if not text:
+            return False
+        try:
+            from gateway.rich_cards.artifacts import find_card_artifacts
+            if find_card_artifacts(text):
+                return True
+            if GatewayStreamConsumer._markdown_table_auto_stream_enabled(platform):
+                from gateway.rich_cards.markdown_tables import has_markdown_table_candidate
+                if has_markdown_table_candidate(text):
+                    return True
+        except Exception:
+            pass
+        if "```" not in text and "~~~" not in text:
+            return False
+        for fence in ("```", "~~~"):
+            idx = text.rfind(fence)
+            if idx < 0 or text.find(fence, idx + len(fence)) >= 0:
+                continue
+            lines = text[idx + len(fence):].lstrip().splitlines()
+            info = lines[0].strip().lower() if lines else ""
+            prefixes = ("message-card", "card", "chart-card")
+            if info and (info in prefixes or (len(info) >= 3 and any(kind.startswith(info) for kind in prefixes))):
+                return True
+        return False
+
+    @staticmethod
+    def _markdown_table_auto_stream_enabled(platform: str = "generic") -> bool:
+        try:
+            from gateway.rich_cards.artifacts import markdown_table_auto_enabled
+            return markdown_table_auto_enabled(platform)
+        except Exception:
+            return os.getenv("HERMES_RICH_CARD_TABLE_AUTO", "").strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _clean_for_display(text: str) -> str:
@@ -899,13 +1037,32 @@ class GatewayStreamConsumer:
         stream finishes — we just need to hide the raw directives from the
         user.
         """
-        return _BasePlatformAdapter.strip_media_directives_for_display(text)
+        if "MEDIA:" not in text and "[[audio_as_voice]]" not in text and "```" not in text and "~~~" not in text:
+            return text
+        cleaned = text.replace("[[audio_as_voice]]", "")
+        cleaned = GatewayStreamConsumer._MEDIA_RE.sub("", cleaned)
+        # Hide complete or currently-streaming rich-card fences. Rendering runs
+        # only at finalization via the base gateway delivery path.
+        cleaned = re.sub(r"(?s)(```+|~~~+)\s*(?:message-card|card|chart-card)\b.*?(?:\1|\Z)", "", cleaned)
+        for fence in ("```", "~~~"):
+            idx = cleaned.rfind(fence)
+            if idx >= 0 and cleaned.find(fence, idx + len(fence)) < 0:
+                lines = cleaned[idx + len(fence):].lstrip().splitlines()
+                info = lines[0].strip().lower() if lines else ""
+                prefixes = ("message-card", "card", "chart-card")
+                if info and (info in prefixes or (len(info) >= 3 and any(kind.startswith(info) for kind in prefixes))):
+                    cleaned = cleaned[:idx]
+        # Collapse excessive blank lines left behind by removed tags
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        # Strip trailing whitespace/newlines but preserve leading content
+        return cleaned.rstrip()
 
     async def _send_new_chunk(
         self,
         text: str,
         reply_to_id: Optional[str],
         *,
+        count_visible_update: bool = False,
         final: bool = False,
     ) -> Optional[str]:
         """Send a new message chunk, optionally threaded to a previous message.
@@ -927,6 +1084,8 @@ class GatewayStreamConsumer:
                 self._track_preview_ids_from_result(result)
                 self._already_sent = True
                 self._last_sent_text = text
+                if count_visible_update:
+                    self._record_visible_response_update(is_turn_final=False)
                 # Fresh content bubble — close off any stale tool bubble
                 # above so the next tool starts a new bubble below.
                 self._notify_new_message()
@@ -1161,6 +1320,34 @@ class GatewayStreamConsumer:
             return False
         return True
 
+    async def _send_thinking_draft_frame(self) -> bool:
+        """Best-effort native Telegram RichBlockThinking preview.
+
+        Some adapters expose ``send_thinking_draft`` for Bot API 10.1's
+        ``<tg-thinking>`` draft-only block. Failure is non-fatal: normal draft
+        streaming will still start once answer text arrives.
+        """
+        if self._draft_id is None:
+            return False
+        send_thinking = getattr(self.adapter, "send_thinking_draft", None)
+        if not callable(send_thinking):
+            return False
+        try:
+            maybe_result = send_thinking(
+                chat_id=self.chat_id,
+                draft_id=self._draft_id,
+                content="Thinking…",
+                metadata=self.metadata,
+            )
+            result = await maybe_result if inspect.isawaitable(maybe_result) else maybe_result
+        except Exception as e:
+            logger.debug("send_thinking_draft raised; continuing without it: %s", e)
+            return False
+        if getattr(result, "success", False):
+            self._record_visible_response_update(is_turn_final=False)
+            return True
+        return False
+
     async def _send_draft_frame(self, text: str) -> bool:
         """Emit a single animated draft frame for the current accumulated text.
 
@@ -1199,6 +1386,7 @@ class GatewayStreamConsumer:
             return False
         # Frame delivered.  Track text for parity with edit-based no-op skip.
         self._last_sent_text = text
+        self._record_visible_response_update(is_turn_final=False)
         return True
 
     async def _flush_segment_tail_on_edit_failure(self) -> None:
@@ -1231,6 +1419,7 @@ class GatewayStreamConsumer:
             )
             if result.success:
                 self._already_sent = True
+                self._record_visible_response_update(is_turn_final=False)
         except Exception as e:
             logger.error("Segment-break tail flush error: %s", e)
 
@@ -1441,6 +1630,7 @@ class GatewayStreamConsumer:
             self._message_created_ts = None
         self._already_sent = True
         self._last_sent_text = text
+        self._record_visible_response_update(is_turn_final=is_turn_final)
         if is_turn_final:
             self._final_response_sent = True
         return True
@@ -1634,6 +1824,7 @@ class GatewayStreamConsumer:
                     )
                     if result.success:
                         self._already_sent = True
+                        self._record_visible_response_update(is_turn_final=is_turn_final)
                         # Record any continuation fragments an oversized edit
                         # split off, so fresh-final can clean them all up.
                         self._track_preview_ids_from_result(result)
@@ -1755,15 +1946,21 @@ class GatewayStreamConsumer:
             else:
                 # First message — send new, threaded to the original user message
                 # so it lands in the correct topic/thread.
-                result = await self.adapter.send(
-                    chat_id=self.chat_id,
-                    content=text,
-                    reply_to=self._initial_reply_to_id,
-                    metadata=self._metadata_for_send(
-                        final=finalize,
-                        expect_edits=True,
-                    ),
-                )
+                if finalize and is_turn_final:
+                    self._final_delivery_in_progress = True
+                try:
+                    result = await self.adapter.send(
+                        chat_id=self.chat_id,
+                        content=text,
+                        reply_to=self._initial_reply_to_id,
+                        metadata=self._metadata_for_send(
+                            final=finalize,
+                            expect_edits=not finalize,
+                        ),
+                    )
+                finally:
+                    if finalize and is_turn_final:
+                        self._final_delivery_in_progress = False
                 if result.success:
                     if result.message_id:
                         self._message_id = result.message_id
@@ -1778,6 +1975,7 @@ class GatewayStreamConsumer:
                         self._edit_supported = False
                     self._already_sent = True
                     self._last_sent_text = text
+                    self._record_visible_response_update(is_turn_final=is_turn_final)
                     if not result.message_id:
                         self._fallback_prefix = self._visible_prefix()
                         self._fallback_final_send = True

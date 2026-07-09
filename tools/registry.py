@@ -365,7 +365,7 @@ class ToolRegistry:
         description: str = "",
         emoji: str = "",
         max_result_size_chars: int | float | None = None,
-        dynamic_schema_overrides: Callable = None,
+        dynamic_schema_overrides: Callable | None = None,
         override: bool = False,
     ):
         """Register a tool.  Called at module-import time by each tool file.
@@ -446,6 +446,7 @@ class ToolRegistry:
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn
             self._generation += 1
+            invalidate_check_fn_cache()
 
     def deregister(self, name: str) -> None:
         """Remove a tool from the registry.
@@ -512,6 +513,7 @@ class ToolRegistry:
                     if target != entry.toolset
                 }
             self._generation += 1
+            invalidate_check_fn_cache()
         logger.debug("Deregistered tool: %s", name)
 
     # ------------------------------------------------------------------
@@ -558,6 +560,11 @@ class ToolRegistry:
                     overrides = entry.dynamic_schema_overrides()
                     if isinstance(overrides, dict):
                         schema_with_name.update(overrides)
+                        # Dynamic overrides can tune descriptions/parameters at
+                        # definition time, but must never advertise the tool as
+                        # a different function name than the registry entry the
+                        # dispatcher will execute.
+                        schema_with_name["name"] = entry.name
                 except Exception as exc:
                     logger.warning(
                         "dynamic_schema_overrides for tool %s raised %s; "

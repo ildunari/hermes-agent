@@ -509,6 +509,16 @@ def build_session_context_prompt(
         # token is configured.  Otherwise keep the stale-API disclaimer
         # honest so we never promise tools the agent lacks.
         if _discord_tools_loaded():
+            lines.append("")
+            lines.append(
+                "**Platform notes:** You are running inside Discord. "
+                "Hermes will render native Discord controls automatically for approval, "
+                "choice, update, and model-selection prompts. You can also use `discord_actions` "
+                "for reactions, polls, pins, message snapshots, forwarding, search, threads, "
+                "invites, and voice-channel status. Use normal text for normal answers. "
+                "Do not describe fake buttons/cards in prose; when a Discord-native action is "
+                "needed, call the available tool/control path and let the adapter render it."
+            )
             src = context.source
             id_lines = ["", "**Discord IDs (for the `discord` / `discord_admin` tools):**"]
             if src.guild_id:
@@ -552,6 +562,12 @@ def build_session_context_prompt(
             "If the user needs a detailed answer, give the short version first "
             "and offer to elaborate."
         )
+        if context.source.chat_type == "group":
+            lines.append(
+                "Observed group context may be included in addressed turns. "
+                "Treat it as background only, not as pending requests, unless "
+                "the current addressed message explicitly asks you to use it."
+            )
     elif context.source.platform == Platform.YUANBAO:
         lines.append("")
         lines.append(
@@ -658,6 +674,19 @@ class SessionEntry:
     platform: Optional[Platform] = None
     chat_type: str = "dm"
     
+    # Working directory binding for this chat/thread. When set, gateway sessions
+    # in this thread resolve project context and default tool cwd from here
+    # instead of the profile-wide messaging default.
+    cwd_override: Optional[str] = None
+
+    # Session/thread-scoped runtime overrides. These persist in sessions.json so
+    # gateway restarts and /clear keep the model/reasoning/personality chosen
+    # for a Telegram topic, Discord thread, or chat. Do not store API keys here;
+    # runtime credentials are resolved from the profile at use time.
+    model_override: Optional[Dict[str, Any]] = None
+    reasoning_override: Optional[Dict[str, Any]] = None
+    personality_override: Optional[Dict[str, Any]] = None
+
     # Token tracking
     input_tokens: int = 0
     output_tokens: int = 0
@@ -726,6 +755,10 @@ class SessionEntry:
             "display_name": self.display_name,
             "platform": self.platform.value if self.platform else None,
             "chat_type": self.chat_type,
+            "cwd_override": self.cwd_override,
+            "model_override": self.model_override,
+            "reasoning_override": self.reasoning_override,
+            "personality_override": self.personality_override,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
@@ -805,6 +838,10 @@ class SessionEntry:
             display_name=data.get("display_name"),
             platform=platform,
             chat_type=data.get("chat_type", "dm"),
+            cwd_override=data.get("cwd_override"),
+            model_override=sanitize_model_override(data.get("model_override")),
+            reasoning_override=data.get("reasoning_override"),
+            personality_override=data.get("personality_override"),
             input_tokens=data.get("input_tokens", 0),
             output_tokens=data.get("output_tokens", 0),
             cache_read_tokens=data.get("cache_read_tokens", 0),
@@ -822,7 +859,6 @@ class SessionEntry:
             was_auto_reset=data.get("was_auto_reset", False),
             auto_reset_reason=data.get("auto_reset_reason"),
             reset_had_activity=data.get("reset_had_activity", False),
-            model_override=sanitize_model_override(data.get("model_override")),
         )
 
 
@@ -842,6 +878,8 @@ def is_shared_multi_user_session(
     """
     if source.chat_type == "dm":
         return False
+    if source.platform == Platform.BLUEBUBBLES and source.chat_type == "group":
+        return True
     if source.thread_id:
         return not thread_sessions_per_user
     return not group_sessions_per_user
@@ -931,6 +969,25 @@ def build_session_key(
         if source.thread_id:
             return f"{ns}:{platform}:dm:{source.thread_id}"
         return f"{ns}:{platform}:dm"
+
+    # BlueBubbles iMessage groups should behave like shared conversations per
+    # routed profile: authorization still checks source.user_id, but guest
+    # contacts in the same group need the same observed group context.  Owner
+    # and guest profiles remain separated by the source chat_id_alt marker.
+    if source.platform == Platform.BLUEBUBBLES and source.chat_type == "group":
+        group_ns = _session_key_namespace(
+            str(source.chat_id_alt).split(":", 1)[1]
+            if str(source.chat_id_alt or "").startswith("hermes-profile:")
+            else "guest"
+            if str(source.user_id_alt or "").startswith("guest:")
+            else profile
+        )
+        group_key_parts = [group_ns, platform, source.chat_type]
+        if source.chat_id:
+            group_key_parts.append(source.chat_id)
+        if source.thread_id:
+            group_key_parts.append(source.thread_id)
+        return ":".join(group_key_parts)
 
     participant_id = source.user_id_alt or source.user_id
     if participant_id and source.platform == Platform.WHATSAPP:
@@ -1720,9 +1777,15 @@ class SessionStore:
 
         with self._lock:
             self._ensure_loaded_locked()
+            inherited_cwd_override = None
+            inherited_model_override = None
+            inherited_reasoning_override = None
 
             if session_key in self._entries and not force_new:
                 entry = self._entries[session_key]
+                inherited_cwd_override = entry.cwd_override
+                inherited_model_override = dict(entry.model_override) if entry.model_override else None
+                inherited_reasoning_override = dict(entry.reasoning_override) if entry.reasoning_override else None
                 self._heal_compression_tip_locked(
                     entry, existing_session_id, canonical_existing_session_id
                 )
@@ -1811,6 +1874,8 @@ class SessionStore:
                         reset_had_activity = entry.last_prompt_tokens > 0
                         db_end_session_id = entry.session_id
             else:
+                if session_key in self._entries:
+                    inherited_cwd_override = self._entries[session_key].cwd_override
                 was_auto_reset = False
                 auto_reset_reason = None
                 reset_had_activity = False
@@ -1838,6 +1903,9 @@ class SessionStore:
                 display_name=source.chat_name,
                 platform=source.platform,
                 chat_type=source.chat_type,
+                cwd_override=inherited_cwd_override,
+                model_override=inherited_model_override,
+                reasoning_override=inherited_reasoning_override,
                 was_auto_reset=was_auto_reset,
                 auto_reset_reason=auto_reset_reason,
                 reset_had_activity=reset_had_activity,
@@ -1898,27 +1966,49 @@ class SessionStore:
                     display_name=entry.display_name,
                 )
 
-    def set_model_override(
-        self, session_key: str, override: Optional[Dict[str, Any]]
-    ) -> None:
-        """Persist (or clear) the session-scoped /model override.
+    def get_session(self, session_key: str) -> Optional[SessionEntry]:
+        """Return the current session entry for a session key, if it exists."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            return self._entries.get(session_key)
 
-        Only non-secret keys (model/provider/base_url — see
-        ``sanitize_model_override``) are written; ``api_key``/``api_mode``
-        are re-resolved at rehydration time via the normal runtime provider
-        resolution.  Pass ``None`` (or a dict with no persistable values)
-        to clear the persisted override, e.g. on /new.
-        """
+    def set_session_cwd(self, session_key: str, cwd_override: Optional[str]) -> Optional[SessionEntry]:
+        """Persist a session-local working directory binding for a chat/thread."""
+        normalized = str(cwd_override).strip() if cwd_override else None
+        if normalized == "":
+            normalized = None
         with self._lock:
             self._ensure_loaded_locked()
             entry = self._entries.get(session_key)
             if entry is None:
-                return
-            cleaned = sanitize_model_override(override)
-            if entry.model_override == cleaned:
-                return
-            entry.model_override = cleaned
+                return None
+            entry.cwd_override = normalized
+            entry.updated_at = _now()
             self._save()
+            return entry
+
+    def set_session_model_override(
+        self,
+        session_key: str,
+        model_override: Optional[Dict[str, Any]],
+    ) -> Optional[SessionEntry]:
+        """Persist a session-local model/provider override without secrets."""
+        safe_override = sanitize_model_override(model_override)
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return None
+            entry.model_override = safe_override or None
+            entry.updated_at = _now()
+            self._save()
+            return entry
+
+    def set_model_override(
+        self, session_key: str, override: Optional[Dict[str, Any]]
+    ) -> None:
+        """Persist (or clear) the session-scoped /model override."""
+        self.set_session_model_override(session_key, override)
 
     def get_model_override(self, session_key: str) -> Optional[Dict[str, str]]:
         """Return the persisted /model override for *session_key*, if any."""
@@ -1928,6 +2018,38 @@ class SessionStore:
             if entry is None:
                 return None
             return dict(entry.model_override) if entry.model_override else None
+
+    def set_session_reasoning_override(
+        self,
+        session_key: str,
+        reasoning_override: Optional[Dict[str, Any]],
+    ) -> Optional[SessionEntry]:
+        """Persist a session-local reasoning override."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return None
+            entry.reasoning_override = dict(reasoning_override) if reasoning_override else None
+            entry.updated_at = _now()
+            self._save()
+            return entry
+
+    def set_session_personality_override(
+        self,
+        session_key: str,
+        personality_override: Optional[Dict[str, Any]],
+    ) -> Optional[SessionEntry]:
+        """Persist a session-local personality override."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return None
+            entry.personality_override = dict(personality_override) if personality_override else None
+            entry.updated_at = _now()
+            self._save()
+            return entry
 
     def suspend_session(self, session_key: str) -> bool:
         """Mark a session as suspended so it auto-resets on next access.
@@ -2086,7 +2208,13 @@ class SessionStore:
                 self._save()
         return count
 
-    def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
+    def reset_session(
+        self,
+        session_key: str,
+        display_name: Optional[str] = None,
+        *,
+        preserve_session_config: bool = False,
+    ) -> Optional[SessionEntry]:
         """Force reset a session, creating a new session ID."""
         db_end_session_id = None
         db_create_kwargs = None
@@ -2114,6 +2242,22 @@ class SessionStore:
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
                 is_fresh_reset=True,
+                cwd_override=old_entry.cwd_override,
+                model_override=(
+                    dict(old_entry.model_override)
+                    if preserve_session_config and old_entry.model_override
+                    else None
+                ),
+                reasoning_override=(
+                    dict(old_entry.reasoning_override)
+                    if preserve_session_config and old_entry.reasoning_override
+                    else None
+                ),
+                personality_override=(
+                    dict(old_entry.personality_override)
+                    if preserve_session_config and old_entry.personality_override
+                    else None
+                ),
             )
 
             self._entries[session_key] = new_entry
@@ -2184,6 +2328,7 @@ class SessionStore:
                 display_name=old_entry.display_name,
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
+                cwd_override=old_entry.cwd_override,
             )
 
             self._entries[session_key] = new_entry

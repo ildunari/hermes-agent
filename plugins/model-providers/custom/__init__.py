@@ -35,21 +35,25 @@ class CustomProfile(ProviderProfile):
             options["num_ctx"] = ollama_num_ctx
             extra_body["options"] = options
 
+        model = str(ctx.get("model") or "").lower()
+        base_url = str(ctx.get("base_url") or "").lower()
+        is_qwopus = "qwopus" in model or "100.93.10.54:8010" in base_url
+        tools_present = bool(ctx.get("tools_present"))
+
         # Reasoning / thinking control for custom OpenAI-compatible endpoints
-        # (GLM-5.2 on Volcengine ARK, vLLM, Ollama, llama.cpp, …).
+        # (GLM-5.2 on Volcengine ARK, vLLM, Ollama, llama.cpp, ...).
         #
-        #   - disabled  → extra_body.think = False (Ollama's thinking-off flag)
-        #   - enabled + effort set → TOP-LEVEL reasoning_effort string, the
-        #     format GLM-5.2/ARK and other OpenAI-compatible reasoning APIs
-        #     expect (GLM documents "high" and "max"; "max" is its default).
-        #   - enabled + no effort  → omit both, so the endpoint applies its own
-        #     server-side default (do NOT force a level the user didn't pick).
-        #
-        # We deliberately do NOT emit ``think=True`` on enable: it is an
-        # Ollama-only flag and thinking is already server-default-on for these
-        # backends, so forcing it risks a 400 on GLM/vLLM endpoints that don't
-        # recognize it. Mirrors the DeepSeek/Zai profile precedent.
-        if reasoning_config and isinstance(reasoning_config, dict):
+        # Qwopus/llama.cpp also needs explicit thinking disable for plain text
+        # turns; otherwise it can return reasoning_content with empty visible
+        # content. Do not disable it on tool turns: this model's
+        # OpenAI-compatible tool support is textual and works better when its
+        # reasoning/tool-call template is enabled.
+        if is_qwopus and not tools_present:
+            extra_body["think"] = False
+            extra_body["enable_thinking"] = False
+            extra_body["chat_template_kwargs"] = {"enable_thinking": False}
+            extra_body["reasoning"] = {"enabled": False}
+        elif reasoning_config and isinstance(reasoning_config, dict):
             _effort = (reasoning_config.get("effort") or "").strip().lower()
             _enabled = reasoning_config.get("enabled", True)
             if _effort == "none" or _enabled is False:

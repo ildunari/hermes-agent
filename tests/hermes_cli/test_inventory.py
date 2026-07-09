@@ -32,11 +32,12 @@ from hermes_cli.inventory import (
 # ─── load_picker_context ───────────────────────────────────────────────
 
 
-def _cfg(model=None, providers=None, custom_providers=None) -> dict:
+def _cfg(model=None, providers=None, custom_providers=None, model_picker=None) -> dict:
     return {
         "model": model if model is not None else {},
         "providers": providers if providers is not None else {},
         "custom_providers": custom_providers if custom_providers is not None else [],
+        "model_picker": model_picker if model_picker is not None else {},
     }
 
 
@@ -115,6 +116,14 @@ def test_load_picker_context_empty_config():
     assert ctx.current_base_url == ""
     assert ctx.user_providers == {}
     assert ctx.custom_providers == []
+    assert ctx.hidden_providers == ()
+
+
+def test_load_picker_context_reads_hidden_provider_policy():
+    cfg = _cfg(model_picker={"hidden_providers": ["anthropic", "google"]})
+    with patch("hermes_cli.config.load_config", return_value=cfg):
+        ctx = load_picker_context()
+    assert ctx.hidden_providers == ("anthropic", "google")
 
 
 # ─── with_overrides ────────────────────────────────────────────────────
@@ -376,6 +385,32 @@ def test_include_unconfigured_skips_already_present_slugs():
     or_rows = [r for r in payload["providers"] if r["slug"] == "openrouter"]
     assert len(or_rows) == 1
     assert or_rows[0]["models"] == ["m1"]  # the authenticated row, not skeleton
+
+
+def test_hidden_providers_filter_authenticated_and_skeleton_rows():
+    rows = [
+        {"slug": "anthropic", "name": "Anthropic", "models": ["claude-sonnet-4.6"],
+         "total_models": 1, "is_current": False, "is_user_defined": False,
+         "source": "built-in"},
+        {"slug": "openrouter", "name": "OpenRouter", "models": ["m1"],
+         "total_models": 1, "is_current": True, "is_user_defined": False,
+         "source": "built-in"},
+    ]
+    ctx = _empty_ctx(provider="openrouter")
+    ctx = ConfigContext(
+        current_provider=ctx.current_provider,
+        current_model=ctx.current_model,
+        current_base_url=ctx.current_base_url,
+        user_providers=ctx.user_providers,
+        custom_providers=ctx.custom_providers,
+        hidden_providers=("anthropic", "google"),
+    )
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx, include_unconfigured=True)
+    slugs = {row["slug"] for row in payload["providers"]}
+    assert "anthropic" not in slugs
+    assert "gemini" not in slugs  # hidden via the Google provider group alias
+    assert "openrouter" in slugs
 
 
 def test_explicit_only_filters_ambient_credentials_but_keeps_current_and_custom_rows():

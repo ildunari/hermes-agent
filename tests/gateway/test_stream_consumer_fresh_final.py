@@ -517,10 +517,13 @@ class TestGotDoneOverflowSplitNotRefinalized:
         assert consumer.final_content_delivered is True
 
     @pytest.mark.asyncio
-    async def test_non_split_finalize_edit_still_gets_explicit_refinalize(self):
-        """The narrow fix must not regress the requires-finalize contract:
-        a normal (non-split) got_done edit is still followed by the
-        explicit finalize edit (#25010 semantics unchanged)."""
+    async def test_non_split_finalize_edit_skips_duplicate_refinalize(self):
+        """A normal got_done edit already carries finalize=True.
+
+        Do not immediately send the same finalize edit again; Telegram rich
+        messages visibly twitch on that duplicate edit, and the adapter has
+        already received its explicit finalize signal.
+        """
         adapter = _make_adapter()
         adapter.REQUIRES_EDIT_FINALIZE = True
         adapter.edit_message = AsyncMock(return_value=SimpleNamespace(
@@ -537,7 +540,7 @@ class TestGotDoneOverflowSplitNotRefinalized:
             c for c in adapter.edit_message.call_args_list
             if c.kwargs.get("finalize")
         ]
-        assert len(finalize_edits) == 2
+        assert len(finalize_edits) == 1
         assert consumer.final_response_sent is True
 
 

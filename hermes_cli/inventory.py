@@ -52,6 +52,8 @@ class ConfigContext:
     current_base_url: str
     user_providers: dict
     custom_providers: list
+    hidden_providers: tuple[str, ...] = ()
+    visible_models: dict[str, tuple[str, ...]] | None = None
 
     def with_overrides(
         self,
@@ -96,12 +98,31 @@ def load_picker_context() -> ConfigContext:
         current_provider = ""
         current_base_url = ""
     raw = cfg.get("providers")
+    hidden: list[str] = []
+    visible: dict[str, tuple[str, ...]] = {}
+    for section_name in ("model_picker", "model_catalog"):
+        section = cfg.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        values = section.get("hidden_providers") or section.get("hide_providers") or []
+        if isinstance(values, str):
+            hidden.extend(part.strip() for part in values.split(","))
+        elif isinstance(values, (list, tuple, set)):
+            hidden.extend(str(part).strip() for part in values)
+    try:
+        from hermes_cli.model_switch import load_visible_model_policy
+
+        visible = load_visible_model_policy(cfg)
+    except Exception:
+        visible = {}
     return ConfigContext(
         current_provider=current_provider,
         current_model=current_model,
         current_base_url=current_base_url,
         user_providers=raw if isinstance(raw, dict) else {},
         custom_providers=get_compatible_custom_providers(cfg),
+        hidden_providers=tuple(part for part in hidden if part),
+        visible_models=visible,
     )
 
 
@@ -235,6 +256,10 @@ def build_models_payload(
 
     if include_unconfigured:
         rows = list(rows) + [r for r in _append_unconfigured_rows(rows, ctx) if str(r.get("slug", "")).lower() != "moa"]
+    if ctx.hidden_providers:
+        rows = _filter_hidden_providers(rows, ctx.hidden_providers)
+    if ctx.visible_models:
+        rows = _filter_visible_models(rows, ctx.visible_models)
     if picker_hints:
         _apply_picker_hints(rows)
     if canonical_order:
@@ -316,16 +341,46 @@ def _append_unconfigured_rows(rows: list[dict], ctx: ConfigContext) -> list[dict
     return extras
 
 
+def _expand_hidden_provider_slugs(hidden: tuple[str, ...]) -> set[str]:
+    from hermes_cli.model_switch import expand_hidden_provider_slugs
+
+    return expand_hidden_provider_slugs(hidden)
+
+
+def _filter_hidden_providers(rows: list[dict], hidden: tuple[str, ...]) -> list[dict]:
+    from hermes_cli.model_switch import filter_hidden_provider_rows
+
+    return filter_hidden_provider_rows(rows, hidden)
+
+
+def _filter_visible_models(rows: list[dict], visible: dict[str, tuple[str, ...]]) -> list[dict]:
+    from hermes_cli.model_switch import filter_visible_model_rows
+
+    return filter_visible_model_rows(rows, visible)
+
+
 def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list[dict]:
     """Keep only rows backed by explicit user configuration.
 
-    ``list_authenticated_providers`` intentionally discovers ambient / auto-
-    seeded credentials (for example GitHub CLI -> Copilot). Desktop chat model
+    ``list_authenticated_providers`` intentionally discovers ambient / auto-seeded
+    credentials (for example GitHub CLI -> Copilot). Desktop chat model
     pickers want the narrower subset the user explicitly configured for Hermes.
+
+    A provider declared under ``providers:`` is explicit even when its slug also
+    has a built-in discovery path. VibeProxy is the important example: the local
+    proxy can be auto-detected as reachable, but Kosta's curated Claude/Fable
+    allowlist lives in ``providers.vibeproxy`` and must survive explicit-only
+    filtering. MoA is also explicit when the profile has configured presets; it
+    is a virtual provider, but those presets are user-defined model choices.
     """
     from hermes_cli.auth import is_provider_explicitly_configured
 
     current_slug = str(ctx.current_provider or "").strip().lower()
+    configured_slugs = {
+        str(slug or "").strip().lower()
+        for slug in (ctx.user_providers or {}).keys()
+        if str(slug or "").strip()
+    }
     kept: list[dict] = []
     for row in rows:
         slug = str(row.get("slug", "")).strip().lower()
@@ -337,10 +392,12 @@ def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list
         if current_slug and slug == current_slug:
             kept.append(row)
             continue
+        if slug in configured_slugs:
+            kept.append(row)
+            continue
         if slug == "moa":
-            # MoA is a virtual routing mode, not an independently configured
-            # provider. Hide it from explicit-only pickers unless it is the
-            # current provider (handled above).
+            if row.get("models"):
+                kept.append(row)
             continue
         if is_provider_explicitly_configured(slug):
             kept.append(row)

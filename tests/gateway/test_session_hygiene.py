@@ -52,9 +52,10 @@ def _make_large_history_tokens(target_tokens: int) -> list:
 
 
 class HygieneCaptureAdapter(BasePlatformAdapter):
-    def __init__(self):
-        super().__init__(PlatformConfig(enabled=True, token="fake-token"), Platform.TELEGRAM)
+    def __init__(self, platform: Platform = Platform.TELEGRAM):
+        super().__init__(PlatformConfig(enabled=True, token="fake-token"), platform)
         self.sent = []
+        self.edits = []
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         return True
@@ -71,7 +72,18 @@ class HygieneCaptureAdapter(BasePlatformAdapter):
                 "metadata": metadata,
             }
         )
-        return SendResult(success=True, message_id="hygiene-1")
+        return SendResult(success=True, message_id=f"hygiene-{len(self.sent)}")
+
+    async def edit_message(self, chat_id, message_id, content, *, finalize=False) -> SendResult:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content": content,
+                "finalize": finalize,
+            }
+        )
+        return SendResult(success=True, message_id=message_id)
 
     async def get_chat_info(self, chat_id: str):
         return {"id": chat_id}
@@ -298,6 +310,32 @@ class TestTokenEstimation:
         assert tokens > threshold
 
 
+
+def test_compaction_status_policy_is_telegram_visible_bluebubbles_silent(monkeypatch):
+    gateway_run = importlib.import_module("gateway.run")
+    GatewayRunner = gateway_run.GatewayRunner
+    runner = object.__new__(GatewayRunner)
+    monkeypatch.setattr(GatewayRunner, "_load_display_config", staticmethod(lambda: {}))
+
+    assert runner._hygiene_compaction_status_enabled(SimpleNamespace(platform=Platform.TELEGRAM)) is True
+    assert runner._hygiene_compaction_status_enabled(SimpleNamespace(platform=Platform.BLUEBUBBLES)) is False
+
+
+def test_bluebubbles_suppresses_noisy_compaction_status_callback():
+    gateway_run = importlib.import_module("gateway.run")
+
+    assert gateway_run._prepare_gateway_status_message(
+        Platform.BLUEBUBBLES,
+        "compression",
+        "Compacting context — summarizing earlier conversation",
+    ) is None
+    assert gateway_run._prepare_gateway_status_message(
+        Platform.BLUEBUBBLES,
+        "status",
+        "normal useful status",
+    ) == "normal useful status"
+
+
 @pytest.mark.asyncio
 async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, tmp_path):
     fake_dotenv = types.ModuleType("dotenv")
@@ -387,9 +425,17 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
     result = await runner._handle_message(event)
 
     assert result == "ok"
-    # Compression warnings are no longer sent to users — compression
-    # happens silently with server-side logging only.
-    assert len(adapter.sent) == 0
+    # Telegram gets a visible auto-compaction status in the originating topic,
+    # then the same bubble is edited to the completion counter.
+    assert len(adapter.sent) == 1
+    assert "Compressing context" in adapter.sent[0]["content"]
+    assert adapter.sent[0]["chat_id"] == "-1001"
+    assert adapter.sent[0]["metadata"] == {"thread_id": "17585"}
+    assert len(adapter.edits) == 1
+    assert adapter.edits[0]["message_id"] == "hygiene-1"
+    assert adapter.edits[0]["finalize"] is True
+    assert "Context compressed" in adapter.edits[0]["content"]
+    assert "Messages: 6 → 1" in adapter.edits[0]["content"]
     assert FakeCompressAgent.last_instance is not None
     FakeCompressAgent.last_instance.shutdown_memory_provider.assert_called_once()
     FakeCompressAgent.last_instance.close.assert_called_once()

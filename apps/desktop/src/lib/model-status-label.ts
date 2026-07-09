@@ -1,3 +1,4 @@
+import { displayModelName as cleanModelName } from '@/lib/model-display-name'
 import { normalize } from '@/lib/text'
 
 const REASONING_LABELS: Record<string, string> = {
@@ -55,25 +56,13 @@ const VARIANT_TAGS: ReadonlyArray<readonly [RegExp, string]> = [
 
 const titleCase = (text: string): string => text.replace(/\b\w/g, char => char.toUpperCase()).trim()
 
-function prettifyBase(base: string): string {
-  if (/^claude-/i.test(base)) {
-    return titleCase(base.replace(/^claude-/i, '').replace(/-/g, ' '))
-  }
-
-  if (/^gpt-/i.test(base)) {
-    return base.replace(/^gpt-/i, 'GPT-')
-  }
-
-  if (/^gemini-/i.test(base)) {
-    return base.replace(/^gemini-/i, 'Gemini ').replace(/-/g, ' ')
-  }
-
-  return titleCase(base.replace(/-/g, ' '))
+function prettifyBase(base: string, options: { provider?: string } = {}): string {
+  return cleanModelName(base, options) || titleCase(base.replace(/-/g, ' '))
 }
 
 /** Split a model id into a clean display name plus an optional grayed variant
  *  tag, so distinct ids (e.g. `…-4.8` vs `…-4.8-fast`) don't collapse. */
-export function modelDisplayParts(model: string): { name: string; tag: string } {
+export function modelDisplayParts(model: string, options: { provider?: string } = {}): { name: string; tag: string } {
   let base = modelBaseId(model)
   let tag = ''
 
@@ -89,20 +78,20 @@ export function modelDisplayParts(model: string): { name: string; tag: string } 
   // Drop a trailing date-pin (`…-20251101`) — snapshot noise, not a name.
   base = base.replace(/-\d{8}$/, '')
 
-  return { name: prettifyBase(base) || model.trim() || 'No model', tag }
+  return { name: prettifyBase(base, options) || model.trim() || 'No model', tag }
 }
 
 /** Friendly one-line model name for menus and the status bar. */
-export function displayModelName(model: string): string {
-  return modelDisplayParts(model).name
+export function displayModelName(model: string, options: { provider?: string } = {}): string {
+  return modelDisplayParts(model, options).name
 }
 
 /** Status bar trigger label — model name plus the live session state (effort/fast). */
 export function formatModelStatusLabel(
   model: string,
-  options?: { fastMode?: boolean; reasoningEffort?: string }
+  options?: { fastMode?: boolean; provider?: string; reasoningEffort?: string }
 ): string {
-  const name = displayModelName(model)
+  const name = displayModelName(model, { provider: options?.provider })
 
   if (!model.trim()) {
     return name

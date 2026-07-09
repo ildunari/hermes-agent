@@ -42,6 +42,13 @@ from agent.transports.codex_event_projector import CodexEventProjector
 logger = logging.getLogger(__name__)
 
 
+# Codex Desktop/app-server can take longer than normal JSON-RPC requests to
+# start under load because it has to spin up the app-server process and create
+# a thread. Keep this above the old 30s request default so codex_subtask does
+# not fail before the worker receives its prompt on a slow start.
+_CODEX_APP_SERVER_STARTUP_TIMEOUT_SECONDS = 90.0
+
+
 # How many tailing stderr lines from the codex subprocess to attach to a
 # user-facing error when we don't have a more specific classification (OAuth,
 # wedge watchdog, etc.). Small enough to keep error messages legible, large
@@ -204,15 +211,23 @@ class CodexAppServerSession:
         cwd: Optional[str] = None,
         codex_bin: str = "codex",
         codex_home: Optional[str] = None,
+        codex_profile: Optional[str] = None,
+        codex_config_overrides: Optional[list[str]] = None,
+        codex_extra_args: Optional[list[str]] = None,
         permission_profile: Optional[str] = None,
         approval_callback: Optional[Callable[..., str]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
+        startup_timeout_seconds: float = _CODEX_APP_SERVER_STARTUP_TIMEOUT_SECONDS,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
-        self._codex_home = codex_home
+        # Default to Kosta's normal Codex home unless explicitly overridden.
+        self._codex_home = codex_home or os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+        self._codex_profile = codex_profile
+        self._codex_config_overrides = list(codex_config_overrides or [])
+        self._codex_extra_args = list(codex_extra_args or [])
         self._permission_profile = (
             permission_profile or _HERMES_TO_CODEX_PERMISSION_PROFILE.get(
                 os.environ.get("HERMES_TERMINAL_SECURITY_MODE", "auto"),
@@ -223,6 +238,7 @@ class CodexAppServerSession:
         self._on_event = on_event  # Display hook (kawaii spinner ticks etc.)
         self._routing = request_routing or _ServerRequestRouting()
         self._client_factory = client_factory or CodexAppServerClient
+        self._startup_timeout_seconds = float(startup_timeout_seconds or _CODEX_APP_SERVER_STARTUP_TIMEOUT_SECONDS)
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
@@ -245,12 +261,17 @@ class CodexAppServerSession:
             return self._thread_id
         if self._client is None:
             self._client = self._client_factory(
-                codex_bin=self._codex_bin, codex_home=self._codex_home
+                codex_bin=self._codex_bin,
+                codex_home=self._codex_home,
+                config_profile=self._codex_profile,
+                config_overrides=self._codex_config_overrides,
+                extra_args=self._codex_extra_args or None,
             )
         self._client.initialize(
             client_name="hermes",
             client_title="Hermes Agent",
             client_version=_get_hermes_version(),
+            timeout=self._startup_timeout_seconds,
         )
         # Permission selection is intentionally NOT sent on thread/start.
         # Two reasons (live-tested against codex 0.130.0):
@@ -268,7 +289,7 @@ class CodexAppServerSession:
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
         params: dict[str, Any] = {"cwd": self._cwd}
-        result = self._client.request("thread/start", params, timeout=15)
+        result = self._client.request("thread/start", params, timeout=self._startup_timeout_seconds)
         # Cross-fill thread.id/sessionId — different codex versions have
         # serialized this under either key. Mirrors openclaw beta.8's
         # tolerance fix so future codex drops/renames don't KeyError us

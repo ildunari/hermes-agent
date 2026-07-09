@@ -101,6 +101,7 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
             return {"final_response": "ok"}
 
     def fake_create_agent(**kwargs):
+        observed["reasoning_override"] = kwargs.get("reasoning_override")
         return FakeAgent(kwargs["session_id"])
 
     monkeypatch.setattr(adapter, "_create_agent", fake_create_agent)
@@ -110,6 +111,7 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
         conversation_history=[],
         session_id="request-session",
         gateway_session_key="request-key",
+        reasoning_override={"enabled": True, "effort": "high"},
     )
 
     assert result["session_id"] == "request-session"
@@ -120,7 +122,34 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
         "context_platform": "api_server",
         "context_session_key": "request-key",
         "child_session_id": "request-session",
+        "reasoning_override": {"enabled": True, "effort": "high"},
     }
+
+
+def test_api_server_model_routes_preserve_reasoning_effort(adapter):
+    routes = adapter._parse_model_routes(
+        {
+            "sonnet-high": {
+                "provider": "vibeproxy",
+                "model": "claude-sonnet-5",
+                "reasoning_effort": "high",
+            },
+            "sonnet-low": {
+                "provider": "vibeproxy",
+                "model": "claude-sonnet-5",
+                "reasoning": {"enabled": True, "effort": "low"},
+            },
+        }
+    )
+
+    assert routes["sonnet-high"]["reasoning_effort"] == "high"
+    assert adapter._reasoning_override_for_request({}, routes["sonnet-high"]) == {
+        "enabled": True,
+        "effort": "high",
+    }
+    assert adapter._reasoning_override_for_request(
+        {"reasoning": {"effort": "xhigh"}}, routes["sonnet-low"]
+    ) == {"enabled": True, "effort": "xhigh"}
 
 
 @pytest.mark.asyncio
@@ -252,6 +281,40 @@ async def test_session_chat_loads_history_and_preserves_session_headers(auth_ada
 
 
 @pytest.mark.asyncio
+async def test_session_chat_dispatches_auto_title_for_untitled_session(adapter, session_db):
+    session_id = session_db.create_session("untitled-chat", "api_server")
+    mock_run = AsyncMock(
+        return_value=(
+            {"final_response": "fresh answer", "session_id": session_id},
+            {"total_tokens": 3},
+        )
+    )
+    app = _create_session_app(adapter)
+
+    with (
+        patch.object(adapter, "_run_agent", mock_run),
+        patch("agent.title_generator.maybe_auto_title") as mock_title,
+    ):
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                f"/api/sessions/{session_id}/chat",
+                json={"message": "name this session"},
+            )
+            assert resp.status == 200
+
+    mock_title.assert_called_once()
+    db_arg, sid_arg, user_arg, assistant_arg, history_arg = mock_title.call_args.args
+    assert db_arg is session_db
+    assert sid_arg == session_id
+    assert user_arg == "name this session"
+    assert assistant_arg == "fresh answer"
+    assert history_arg[-2:] == [
+        {"role": "user", "content": "name this session"},
+        {"role": "assistant", "content": "fresh answer"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_session_chat_accepts_multimodal_message(auth_adapter, session_db):
     session_id = session_db.create_session("image-session", "api_server")
     image_payload = [
@@ -338,6 +401,39 @@ async def test_session_chat_stream_emits_lifecycle_events_and_keepalive_safe_sha
     assert "event: assistant.completed" in body
     assert "event: run.completed" in body
     assert "event: done" in body
+
+
+@pytest.mark.asyncio
+async def test_session_chat_stream_dispatches_auto_title(adapter, session_db):
+    session_id = session_db.create_session("untitled-stream", "api_server")
+
+    async def fake_run(**kwargs):
+        kwargs["stream_delta_callback"]("Hello")
+        return {"final_response": "Hello", "session_id": session_id}, {"total_tokens": 2}
+
+    app = _create_session_app(adapter)
+    with (
+        patch.object(adapter, "_run_agent", side_effect=fake_run),
+        patch("agent.title_generator.maybe_auto_title") as mock_title,
+    ):
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                f"/api/sessions/{session_id}/chat/stream",
+                json={"message": "stream title"},
+            )
+            assert resp.status == 200
+            await resp.text()
+
+    mock_title.assert_called_once()
+    db_arg, sid_arg, user_arg, assistant_arg, history_arg = mock_title.call_args.args
+    assert db_arg is session_db
+    assert sid_arg == session_id
+    assert user_arg == "stream title"
+    assert assistant_arg == "Hello"
+    assert history_arg[-2:] == [
+        {"role": "user", "content": "stream title"},
+        {"role": "assistant", "content": "Hello"},
+    ]
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,46 @@ sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
 sys.modules.setdefault("fal_client", types.SimpleNamespace())
 
 
+def test_codex_stream_recovers_when_sdk_terminal_response_has_null_output():
+    from agent.codex_runtime import run_codex_stream
+
+    class NullOutputCrashStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield SimpleNamespace(
+                type="response.output_text.delta",
+                delta="streamed answer",
+            )
+            raise TypeError("'NoneType' object is not iterable")
+
+        def get_final_response(self):  # pragma: no cover - iteration raises first
+            raise AssertionError("SDK parse failure should be recovered before final response")
+
+    class FakeResponses:
+        def stream(self, **kwargs):
+            return NullOutputCrashStream()
+
+    agent = SimpleNamespace(
+        _interrupt_requested=False,
+        _codex_stream_last_event_ts=None,
+        _codex_streamed_text_parts=[],
+        _touch_activity=lambda *a, **k: None,
+        _fire_stream_delta=lambda *a, **k: None,
+        _fire_reasoning_delta=lambda *a, **k: None,
+        _client_log_context=lambda: "test-context",
+    )
+    client = SimpleNamespace(responses=FakeResponses())
+
+    response = run_codex_stream(agent, {"model": "gpt-5.5", "input": "hi"}, client=client)
+
+    assert response.output[0].content[0].text == "streamed answer"
+
+
 def _make_codex_agent(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")

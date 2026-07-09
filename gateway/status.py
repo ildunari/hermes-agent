@@ -366,7 +366,9 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
         profile_lc = profile_name.lower()
         return (
             f"--profile {profile_lc}" in command_lc
+            or f"--profile={profile_lc}" in command_lc
             or f"-p {profile_lc}" in command_lc
+            or f"-p={profile_lc}" in command_lc
             or f"hermes_home={home_lc}" in command_lc
         )
 
@@ -375,7 +377,12 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
     # a non-matching explicit HERMES_HOME= on the argv. HERMES_HOME is usually
     # passed via the environment (not visible on the command line), so its mere
     # absence is not disqualifying — only a conflicting explicit value is.
-    if "--profile " in command_lc or " -p " in command_lc:
+    if (
+        "--profile " in command_lc
+        or "--profile=" in command_lc
+        or " -p " in command_lc
+        or " -p=" in command_lc
+    ):
         return False
     if "hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc:
         return False
@@ -804,6 +811,7 @@ def write_runtime_status(
     platform_state: Any = _UNSET,
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
+    platform_metadata: Any = _UNSET,
     served_profiles: Any = _UNSET,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
@@ -839,6 +847,17 @@ def write_runtime_status(
             platform_payload["error_code"] = error_code
         if error_message is not _UNSET:
             platform_payload["error_message"] = error_message
+        if platform_metadata is not _UNSET:
+            if platform_metadata is None:
+                platform_payload.pop("metadata", None)
+            elif isinstance(platform_metadata, dict):
+                metadata_payload = platform_payload.get("metadata")
+                if not isinstance(metadata_payload, dict):
+                    metadata_payload = {}
+                metadata_payload.update(platform_metadata)
+                platform_payload["metadata"] = metadata_payload
+            else:
+                platform_payload["metadata"] = platform_metadata
         platform_payload["updated_at"] = _utc_now_iso()
         payload["platforms"][platform] = platform_payload
 
@@ -928,11 +947,9 @@ def get_runtime_status_running_pid(
     OS process identity.
 
     ``expected_home`` scopes the OS-identity check to a specific profile's
-    HERMES_HOME.  Pass it when validating *another* profile's state file (the
-    dashboard enumerating every profile): a stale record whose PID the OS has
-    recycled onto a different profile's live gateway must not be reported
-    running for the dead profile.  Omit it (the default) for the active
-    profile, where any live gateway command line is acceptable.
+    HERMES_HOME.  Pass it whenever the caller knows which profile/home the
+    runtime file belongs to.  A stale record whose PID now belongs to a
+    different profile's live gateway must not make this profile look running.
     """
     payload = runtime if runtime is not None else read_runtime_status()
     if not isinstance(payload, dict):
@@ -1449,9 +1466,10 @@ def get_running_pid(
     resolved_pid_path = pid_path or _get_pid_path()
     resolved_lock_path = _get_gateway_lock_path(resolved_pid_path)
     lock_active = is_gateway_runtime_lock_active(resolved_lock_path)
+    expected_home = resolved_pid_path.parent
     if not lock_active:
         if pid_path is None:
-            runtime_pid = get_runtime_status_running_pid()
+            runtime_pid = get_runtime_status_running_pid(expected_home=expected_home)
             if runtime_pid is not None:
                 return runtime_pid
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
@@ -1461,6 +1479,8 @@ def get_running_pid(
     fallback_record = _read_gateway_lock_record(resolved_lock_path)
 
     for record in (primary_record, fallback_record):
+        if record is None:
+            continue
         pid = _pid_from_record(record)
         if pid is None:
             continue
@@ -1473,12 +1493,12 @@ def get_running_pid(
         if recorded_start is not None and current_start is not None and current_start != recorded_start:
             continue
 
-        if _record_matches_live_gateway_pid(record, pid):
+        if _record_matches_live_gateway_pid(record, pid, expected_home=expected_home):
             return pid
 
     _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
     if pid_path is None:
-        runtime_pid = get_runtime_status_running_pid()
+        runtime_pid = get_runtime_status_running_pid(expected_home=expected_home)
         if runtime_pid is not None:
             return runtime_pid
     return None

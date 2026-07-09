@@ -46,8 +46,10 @@ Env vars::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from agent.web_search_provider import WebSearchProvider
@@ -108,6 +110,18 @@ class _FirecrawlProxy:
 
 
 Firecrawl = _FirecrawlProxy()
+
+
+def _make_extract_scrape_options(**kwargs: Any) -> Any:
+    """Build Firecrawl v2 ``ScrapeOptions`` for extract(scrape_options=...)."""
+    try:
+        from firecrawl.v2.types import ScrapeOptions  # noqa: WPS433 — lazy SDK type import
+
+        return ScrapeOptions(**kwargs)
+    except ImportError:
+        # Keep tests/fallback environments usable even if an older SDK is
+        # installed; the normal dependency path uses the v2 Pydantic model.
+        return SimpleNamespace(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -428,8 +442,12 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
         re-checked against website-access policy.
 
         Accepted kwargs (others ignored for forward compat):
-          - ``format``: ``"markdown"`` or ``"html"``; default is both
-            (request both, return markdown when available).
+          - ``format``: backward-compatible alias for ``mode``.
+          - ``mode``: ``markdown``/``html`` scrape formats, plus Firecrawl
+            modes ``summary``/``links``/``answer``/``json``.
+          - ``question``: prompt used by ``answer`` mode.
+          - ``only_main_content`` / ``wait_for``: forwarded to scrape.
+          - ``schema``: JSON schema used by ``json`` mode.
 
         Returns the legacy per-URL list-of-results shape. Per-URL failures
         (timeout, SSRF block, scrape error, policy block) become items
@@ -441,11 +459,79 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
             return [{"url": u, "error": "Interrupted", "title": ""} for u in urls]
 
         format = kwargs.get("format")
+        mode = str(kwargs.get("mode") or format or "markdown").lower()
+        question = kwargs.get("question")
+        only_main_content = kwargs.get("only_main_content")
+        wait_for = kwargs.get("wait_for")
+        schema = kwargs.get("schema")
+
+        if mode == "answer" and not question:
+            return [
+                {"url": u, "title": "", "content": "", "error": "question is required for mode=answer"}
+                for u in urls
+            ]
+
+        if mode in {"answer", "json"}:
+            results: List[Dict[str, Any]] = []
+            for url in urls:
+                blocked = check_website_access(url)
+                if blocked:
+                    results.append(
+                        {
+                            "url": url,
+                            "title": "",
+                            "content": "",
+                            "error": blocked["message"],
+                            "blocked_by_policy": {
+                                "host": blocked["host"],
+                                "rule": blocked["rule"],
+                                "source": blocked["source"],
+                            },
+                        }
+                    )
+                    continue
+                try:
+                    extract_kwargs: Dict[str, Any] = {"urls": [url]}
+                    if mode == "answer":
+                        extract_kwargs["prompt"] = str(question)
+                    if schema is not None:
+                        extract_kwargs["schema"] = schema
+                    if only_main_content is not None or wait_for is not None:
+                        scrape_options: Dict[str, Any] = {}
+                        if only_main_content is not None:
+                            scrape_options["only_main_content"] = only_main_content
+                        if wait_for is not None:
+                            scrape_options["wait_for"] = wait_for
+                        extract_kwargs["scrape_options"] = _make_extract_scrape_options(**scrape_options)
+                    extract_result = await asyncio.wait_for(
+                        asyncio.to_thread(_get_firecrawl_client().extract, **extract_kwargs),
+                        timeout=60,
+                    )
+                    payload = _to_plain_object(extract_result)
+                    data = payload.get("data", payload) if isinstance(payload, dict) else payload
+                    content = data
+                    if mode == "answer" and isinstance(data, dict):
+                        content = data.get("answer") or data.get("content") or data.get("result") or data
+                    results.append(
+                        {
+                            "url": url,
+                            "title": "",
+                            "content": content if isinstance(content, str) else json.dumps(content, ensure_ascii=False),
+                            "raw_content": content,
+                            "metadata": {"mode": mode},
+                        }
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    results.append({"url": url, "title": "", "content": "", "raw_content": "", "error": str(exc)})
+            return results
+
         formats: List[str] = []
-        if format == "markdown":
+        if mode == "markdown":
             formats = ["markdown"]
-        elif format == "html":
+        elif mode == "html":
             formats = ["html"]
+        elif mode in {"summary", "links"}:
+            formats = [mode]
         else:
             formats = ["markdown", "html"]
 
@@ -491,6 +577,13 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                             _get_firecrawl_client().scrape,
                             url=url,
                             formats=formats,
+                            **{
+                                k: v for k, v in {
+                                    "only_main_content": only_main_content,
+                                    "wait_for": wait_for,
+                                }.items()
+                                if v is not None
+                            },
                         ),
                         timeout=60,
                     )
@@ -513,6 +606,8 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                 metadata = scrape_payload.get("metadata", {})
                 content_markdown = scrape_payload.get("markdown")
                 content_html = scrape_payload.get("html")
+                content_summary = scrape_payload.get("summary")
+                content_links = scrape_payload.get("links")
 
                 # Ensure metadata is a dict (SDK may return a typed object)
                 if not isinstance(metadata, dict):
@@ -571,7 +666,11 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                     continue
 
                 # Choose markdown vs html according to the requested format
-                if format == "markdown" or (format is None and content_markdown):
+                if mode == "summary":
+                    chosen_content = content_summary or ""
+                elif mode == "links":
+                    chosen_content = json.dumps(content_links or [], ensure_ascii=False)
+                elif mode == "markdown" or (format is None and content_markdown):
                     chosen_content = content_markdown
                 else:
                     chosen_content = content_html or content_markdown or ""

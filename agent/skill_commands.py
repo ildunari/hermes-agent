@@ -374,12 +374,28 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     cmd_name = _SKILL_MULTI_HYPHEN.sub('-', cmd_name).strip('-')
                     if not cmd_name:
                         continue
-                    _skill_commands[f"/{cmd_name}"] = {
+                    metadata = frontmatter.get("metadata") if isinstance(frontmatter.get("metadata"), dict) else {}
+                    hermes_meta = metadata.get("hermes") if isinstance(metadata.get("hermes"), dict) else {}
+                    try:
+                        command_priority = int(hermes_meta.get("command_priority", 0) or 0)
+                    except (TypeError, ValueError):
+                        command_priority = 0
+                    info = {
                         "name": name,
                         "description": description or f"Invoke the {name} skill",
                         "skill_md_path": str(skill_md),
                         "skill_dir": str(skill_md.parent),
+                        "command_priority": command_priority,
                     }
+                    _skill_commands[f"/{cmd_name}"] = info
+                    raw_aliases = hermes_meta.get("command_aliases", ()) if isinstance(hermes_meta, dict) else ()
+                    if isinstance(raw_aliases, str):
+                        raw_aliases = (raw_aliases,)
+                    if isinstance(raw_aliases, (list, tuple, set)):
+                        for raw_alias in raw_aliases:
+                            alias_name = _normalize_skill_command_slug(str(raw_alias))
+                            if alias_name and alias_name != cmd_name:
+                                _skill_commands.setdefault(f"/{alias_name}", info)
                 except Exception:
                     continue
     except Exception:
@@ -467,23 +483,51 @@ def reload_skills() -> Dict[str, Any]:
     }
 
 
+def _normalize_skill_command_slug(value: str) -> str:
+    """Normalize a skill command or alias to the slash-command slug form."""
+    slug = (value or "").strip().lower().lstrip("/").replace("_", "-").replace(" ", "-")
+    slug = _SKILL_INVALID_CHARS.sub("", slug)
+    return _SKILL_MULTI_HYPHEN.sub("-", slug).strip("-")
+
+
 def resolve_skill_command_key(command: str) -> Optional[str]:
     """Resolve a user-typed /command to its canonical skill_cmds key.
 
-    Skills are always stored with hyphens — ``scan_skill_commands`` normalizes
-    spaces and underscores to hyphens when building the key. Hyphens and
-    underscores are treated interchangeably in user input: this matches
-    ``_check_unavailable_skill`` and accommodates Telegram bot-command names
-    (which disallow hyphens, so ``/claude-code`` is registered as
+    Skills are stored by frontmatter ``name``. Also accept the installed
+    directory basename as an alias, so curated Skillshare paths such as
+    ``hermes__moss-samantha-voiceover`` can still be invoked as
+    ``/moss-samantha-voiceover`` when the canonical command is shorter
+    (``/moss``).
+
+    Hyphens and underscores are treated interchangeably in user input: this
+    matches ``_check_unavailable_skill`` and accommodates Telegram bot-command
+    names (which disallow hyphens, so ``/claude-code`` is registered as
     ``/claude_code`` and comes back in the underscored form).
 
-    Returns the matching ``/slug`` key from ``get_skill_commands()`` or
-    ``None`` if no match.
+    Returns the matching canonical ``/slug`` key from ``get_skill_commands()``
+    or ``None`` if no match.
     """
-    if not command:
+    requested = _normalize_skill_command_slug(command)
+    if not requested:
         return None
-    cmd_key = f"/{command.replace('_', '-')}"
-    return cmd_key if cmd_key in get_skill_commands() else None
+
+    commands = get_skill_commands()
+    cmd_key = f"/{requested}"
+    if cmd_key in commands:
+        return cmd_key
+
+    for canonical_key, info in commands.items():
+        skill_dir = str((info or {}).get("skill_dir") or "")
+        if not skill_dir:
+            continue
+        dir_alias = _normalize_skill_command_slug(Path(skill_dir).name)
+        aliases = {dir_alias}
+        if dir_alias.startswith("hermes-"):
+            aliases.add(dir_alias[len("hermes-"):])
+        if requested in aliases:
+            return canonical_key
+
+    return None
 
 
 def build_skill_invocation_message(

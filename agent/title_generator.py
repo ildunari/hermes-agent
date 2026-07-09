@@ -1,12 +1,13 @@
-"""Auto-generate short session titles from the first user/assistant exchange.
+"""Auto-generate short session titles from the early conversation transcript.
 
-Runs asynchronously after the first response is delivered so it never
-adds latency to the user-facing reply.
+Runs asynchronously after a response is delivered so it never adds latency to
+the user-facing reply.
 """
 
 import logging
+import re
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from agent.auxiliary_client import call_llm
 
@@ -19,19 +20,225 @@ logger = logging.getLogger(__name__)
 FailureCallback = Callable[[str, BaseException], None]
 TitleCallback = Callable[[str], None]
 
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[\w']+", (text or "").casefold())
+
+
+def _content_text(content: Any) -> str:
+    """Return human-visible text from persisted chat content."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text)
+                continue
+            image_url = item.get("image_url")
+            if image_url:
+                parts.append("[image]")
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return text
+        if content.get("image_url"):
+            return "[image]"
+    return ""
+
+
+def _first_user_text(conversation_history: list | None) -> str:
+    for message in conversation_history or []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = _content_text(message.get("content"))
+        if content:
+            return content
+    return ""
+
+
+def _user_texts(conversation_history: list | None, user_message: Any) -> list[str]:
+    texts: list[str] = []
+    for message in conversation_history or []:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = _content_text(message.get("content"))
+        if text:
+            texts.append(text)
+    current = _content_text(user_message)
+    if current:
+        texts.append(current)
+    return texts
+
+
+def _trim_snippet(text: str, limit: int) -> str:
+    clean = " ".join((text or "").split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _title_transcript_context(
+    user_message: Any,
+    assistant_response: str,
+    conversation_history: list | None = None,
+    *,
+    max_messages: int = 16,
+    per_message_chars: int = 1200,
+    max_chars: int = 12000,
+) -> str:
+    """Build a compact early transcript for title generation.
+
+    The titler may run again during the first few turns after a bad/empty title.
+    Use the real early transcript rather than only the latest user/assistant
+    pair, otherwise vague openers like "What's going on?" become permanent
+    titles even after the session's topic is obvious.
+    """
+    raw_messages = list(conversation_history or [])
+    if not raw_messages:
+        raw_messages = [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": assistant_response},
+        ]
+
+    entries: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for message in raw_messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        # Assistant messages that contain tool_calls are usually planning /
+        # progress preambles ("I'll inspect...") rather than the substantive
+        # answer. Tool *results* are role=tool and already excluded. Skipping
+        # these preambles keeps early tool-heavy turns from crowding out the
+        # user's actual task and the final assistant answer.
+        if role == "assistant" and message.get("tool_calls"):
+            continue
+        text = _trim_snippet(_content_text(message.get("content")), per_message_chars)
+        if not text:
+            continue
+        key = (str(role), text)
+        if key in seen:
+            continue
+        seen.add(key)
+        label = "User" if role == "user" else "Assistant"
+        entries.append(f"{label}: {text}")
+        if len(entries) >= max_messages:
+            break
+
+    context = "\n\n".join(entries)
+    if len(context) > max_chars:
+        context = context[: max(0, max_chars - 1)].rstrip() + "…"
+    return context
+
+
+_GENERIC_PROMPT_FRAGMENT_TITLES = {
+    "can you",
+    "can you check",
+    "help me",
+    "what going",
+    "what's going",
+    "what is going",
+}
+
+
+def _title_words_in_prompt_window(title_words: list[str], prompt_words: list[str]) -> bool:
+    if not title_words or not prompt_words or title_words[0] != prompt_words[0]:
+        return False
+    pos = 0
+    for word in prompt_words:
+        if pos < len(title_words) and word == title_words[pos]:
+            pos += 1
+    return pos == len(title_words)
+
+
+def _is_prompt_fragment_title(title: str, *candidate_prompts: str) -> bool:
+    """Return True when a title is just a first-prompt fragment.
+
+    Auto-title sometimes runs after an uninformative first assistant turn
+    (for example a progress update) and the auxiliary model parrots the user's
+    opening words: "Can you check if...". Those titles are not user intent and
+    should be replaceable by a better early-turn title. Real manual titles like
+    "Hermes cleanup" should continue to be preserved.
+    """
+    clean_title = " ".join((title or "").split())
+    title_casefold = clean_title.casefold()
+    title_words = _words(clean_title)
+    if len(title_words) < 2:
+        return False
+
+    if len(clean_title) < 8 and title_casefold not in _GENERIC_PROMPT_FRAGMENT_TITLES:
+        return False
+    if len(clean_title) > 80:
+        return False
+
+    for prompt in candidate_prompts:
+        clean_prompt = " ".join((prompt or "").split())
+        if not clean_prompt:
+            continue
+
+        if clean_prompt.casefold().startswith(title_casefold):
+            return True
+
+        prompt_words = _words(clean_prompt)[:16]
+        if _title_words_in_prompt_window(title_words, prompt_words):
+            return True
+
+    return False
+
+_TITLE_PROMPT_CORE = (
+    "Generate a short, specific session label (3-6 words) for this early conversation transcript. "
+    "The label appears in a sidebar/history list, so optimize for helping the user recognize which "
+    "session this is next week. Describe the concrete thing being worked on: object + action, bug, "
+    "decision, or outcome. Prefer plain user-facing words over internal implementation jargon. "
+    "If the opening user message is vague, infer the real work from later turns. Do NOT derive the "
+    "label from generic opening words such as 'what going', 'can you check', 'help me', or "
+    "'goal implement'. Avoid vague labels such as 'Dynamic Tool Summary Automation', "
+    "'Hermes Pre-Prompt Memory Injection', 'Casual Greeting to Kosta', or "
+    "'Carlos Extraction and Setup Review'; write what the user would actually look for instead. "
+)
+
 _TITLE_PROMPT = (
-    "Generate a short, descriptive title (3-7 words) for a conversation that starts with the "
-    "following exchange. The title should capture the main topic or intent. "
-    "Write the title in the same language the user is writing in. "
-    "Return ONLY the title text, nothing else. No quotes, no punctuation at the end, no prefixes."
+    _TITLE_PROMPT_CORE
+    + "Write the label in the same language the user is writing in. "
+    + "Return ONLY the label text, nothing else. No quotes, no punctuation at the end, no prefixes."
 )
 
 _TITLE_PROMPT_PINNED_LANGUAGE = (
-    "Generate a short, descriptive title (3-7 words) for a conversation that starts with the "
-    "following exchange. The title should capture the main topic or intent. "
-    "Write the title in {language}. "
-    "Return ONLY the title text, nothing else. No quotes, no punctuation at the end, no prefixes."
+    _TITLE_PROMPT_CORE
+    + "Write the label in {language}. "
+    + "Return ONLY the label text, nothing else. No quotes, no punctuation at the end, no prefixes."
 )
+
+_TITLE_JARGON_REWRITES = (
+    (re.compile(r"\bpre[- ]prompt\s+memory\s+injection\b", re.I), "memory prompt setup"),
+    (re.compile(r"\bdynamic\s+tool\s+summary\s+automation\b", re.I), "tool summary job"),
+    (re.compile(r"\bcasual\s+greeting\s+to\s+[^,;:]+", re.I), "quick greeting"),
+    (re.compile(r"\bextraction\s+and\s+setup\s+review\b", re.I), "setup review"),
+)
+
+
+def _clean_generated_title(title: str) -> str:
+    """Normalize common LLM title shapes into user-readable list labels."""
+    clean = " ".join((title or "").split()).strip('"\'')
+    lower = clean.lower()
+    for prefix in ("title:", "label:", "session label:"):
+        if lower.startswith(prefix):
+            clean = clean[len(prefix):].strip()
+            lower = clean.lower()
+            break
+    for pattern, replacement in _TITLE_JARGON_REWRITES:
+        clean = pattern.sub(replacement, clean)
+    return clean.strip(" .!?;:—-")
 
 
 def _title_language() -> str:
@@ -49,13 +256,14 @@ def _title_language() -> str:
 
 
 def generate_title(
-    user_message: str,
+    user_message: Any,
     assistant_response: str,
     timeout: Optional[float] = None,
     failure_callback: Optional[FailureCallback] = None,
     main_runtime: dict = None,
+    conversation_history: list | None = None,
 ) -> Optional[str]:
-    """Generate a session title from the first exchange.
+    """Generate a session title from the compact early transcript.
 
     Uses the main runtime's model when available, falling back to the
     auxiliary LLM client (cheapest/fastest available model).
@@ -66,16 +274,18 @@ def generate_title(
     ``AIAgent._emit_auxiliary_failure`` so the user sees a warning instead
     of silently accumulating untitled sessions.
     """
-    # Truncate long messages to keep the request small
-    user_snippet = user_message[:500] if user_message else ""
-    assistant_snippet = assistant_response[:500] if assistant_response else ""
+    transcript_context = _title_transcript_context(
+        user_message,
+        assistant_response,
+        conversation_history,
+    )
 
     language = _title_language()
     prompt = _TITLE_PROMPT_PINNED_LANGUAGE.format(language=language) if language else _TITLE_PROMPT
 
     messages = [
         {"role": "system", "content": prompt},
-        {"role": "user", "content": f"User: {user_snippet}\n\nAssistant: {assistant_snippet}"},
+        {"role": "user", "content": f"Transcript:\n{transcript_context}"},
     ]
 
     try:
@@ -96,13 +306,15 @@ def generate_title(
         # are handled, not just a single literal <think> pair.
         from agent.agent_runtime_helpers import strip_think_blocks
         title = strip_think_blocks(None, content).strip()
-        # Clean up: remove quotes, trailing punctuation, prefixes like "Title: "
-        title = title.strip('"\'')
-        if title.lower().startswith("title:"):
-            title = title[6:].strip()
+        # Clean up: remove quotes, trailing punctuation, prefixes like "Title: ",
+        # and common internal-jargon labels that are hard to scan in session lists.
+        title = _clean_generated_title(title)
         # Enforce reasonable length
         if len(title) > 80:
             title = title[:77] + "..."
+        if _is_prompt_fragment_title(title, *_user_texts(conversation_history, user_message)):
+            logger.debug("Rejected prompt-fragment session title: %s", title)
+            return None
         return title if title else None
     except Exception as e:
         # Log at WARNING so this shows up in agent.log without debug mode.
@@ -120,8 +332,9 @@ def generate_title(
 def auto_title_session(
     session_db,
     session_id: str,
-    user_message: str,
+    user_message: Any,
     assistant_response: str,
+    conversation_history: list | None = None,
     failure_callback: Optional[FailureCallback] = None,
     main_runtime: dict = None,
     title_callback: Optional[TitleCallback] = None,
@@ -137,16 +350,26 @@ def auto_title_session(
     if not session_db or not session_id:
         return
 
-    # Check if title already exists (user may have set one via /title before first response)
+    # Preserve real titles (especially /title and /new <title>), but let the
+    # early retry window replace the common bad auto-title shape where the title
+    # is merely a fragment of the first user prompt.
     try:
         existing = session_db.get_session_title(session_id)
-        if existing:
+        if existing and not _is_prompt_fragment_title(
+            existing,
+            _first_user_text(conversation_history),
+            user_message,
+        ):
             return
     except Exception:
         return
 
     title = generate_title(
-        user_message, assistant_response, failure_callback=failure_callback, main_runtime=main_runtime
+        user_message,
+        assistant_response,
+        failure_callback=failure_callback,
+        main_runtime=main_runtime,
+        conversation_history=conversation_history,
     )
     if not title:
         return
@@ -166,7 +389,7 @@ def auto_title_session(
 def maybe_auto_title(
     session_db,
     session_id: str,
-    user_message: str,
+    user_message: Any,
     assistant_response: str,
     conversation_history: list,
     failure_callback: Optional[FailureCallback] = None,
@@ -182,18 +405,20 @@ def maybe_auto_title(
     if not session_db or not session_id or not user_message or not assistant_response:
         return
 
-    # Count user messages in history to detect first exchange.
-    # conversation_history includes the exchange that just happened,
-    # so for a first exchange we expect exactly 1 user message
-    # (or 2 counting system). Be generous: generate on first 2 exchanges.
+    # Count user messages in history to detect early exchanges.
+    # conversation_history includes the exchange that just happened. Be
+    # generous enough to survive a transient auxiliary-provider failure: keep
+    # retrying while the session is still young and untitled, but do not keep
+    # firing on long-running sessions.
     user_msg_count = sum(1 for m in (conversation_history or []) if m.get("role") == "user")
-    if user_msg_count > 2:
+    if user_msg_count > 4:
         return
 
     thread = threading.Thread(
         target=auto_title_session,
         args=(session_db, session_id, user_message, assistant_response),
         kwargs={
+            "conversation_history": conversation_history,
             "failure_callback": failure_callback,
             "main_runtime": main_runtime,
             "title_callback": title_callback,

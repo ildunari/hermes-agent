@@ -69,7 +69,14 @@ def get_provider_profile(name: str) -> ProviderProfile | None:
     """
     if not _discovered:
         _discover_providers()
-    canonical = _ALIASES.get(name, name)
+    lookup = (name or "").strip()
+    # Custom providers are configured as ``custom:<name>`` in config.yaml and
+    # slash commands, but they share the built-in custom/OpenAI-compatible
+    # request-profile quirks. Keep the suffix for runtime routing elsewhere;
+    # collapse only the provider-profile lookup.
+    if lookup.lower().startswith("custom:"):
+        lookup = "custom"
+    canonical = _ALIASES.get(lookup, lookup)
     return _REGISTRY.get(canonical)
 
 

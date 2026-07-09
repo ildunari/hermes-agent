@@ -2563,7 +2563,9 @@ class GatewaySlashCommandsMixin:
             max_file_size_mb=cp_cfg.get("max_file_size_mb", 10),
         )
 
-        cwd = os.getenv("TERMINAL_CWD", str(Path.home()))
+        session_entry = self.session_store.get_or_create_session(event.source)
+        cwd = self._session_cwd_for_entry(session_entry)
+        self._bind_task_cwd(session_entry.session_id, cwd)
         arg = event.get_command_args().strip()
 
         if not arg:
@@ -3853,6 +3855,53 @@ class GatewaySlashCommandsMixin:
         key = "gateway.branch.branched_one" if msg_count == 1 else "gateway.branch.branched_many"
         return t(key, title=branch_title, count=msg_count, parent=parent_session_id, new=new_session_id)
 
+    async def _handle_billing_command(self, event: MessageEvent) -> str:
+        """Handle /billing -- messaging-safe Nous billing overview.
+
+        Gateway surfaces cannot run the interactive terminal billing modal, so
+        this renders the read-only overview and portal deep-link. Mutating billing
+        actions still happen in the portal or terminal UI.
+        """
+        from agent.billing_view import build_billing_state, format_money
+
+        state = await asyncio.to_thread(build_billing_state)
+        if not state.logged_in:
+            if state.error:
+                return f"💳 Couldn't load billing: {state.error}"
+            return "💳 Not logged into Nous Portal. Run `hermes portal` to log in, then /billing."
+
+        lines: list[str] = ["💳 **Usage credits**"]
+        cap = state.monthly_cap
+        if cap is not None and cap.limit_usd is not None:
+            spent = format_money(cap.spent_this_month_usd)
+            limit = format_money(cap.limit_usd)
+            ceiling = " (default ceiling)" if cap.is_default_ceiling else ""
+            lines.append(f"Monthly spend: {spent} of {limit}{ceiling}")
+        lines.append(f"Balance: {format_money(state.balance_usd)}")
+
+        ar = state.auto_reload
+        if ar is not None:
+            if ar.enabled:
+                lines.append(
+                    f"Auto-reload: on — below {format_money(ar.threshold_usd)} "
+                    f"→ reload to {format_money(ar.reload_to_usd)}"
+                )
+            else:
+                lines.append("Auto-reload: off")
+
+        if state.org_name:
+            role = (state.role or "").title()
+            lines.append(f"Org: {state.org_name}{f' · {role}' if role else ''}")
+        if not state.is_admin:
+            lines.append("Billing actions require an org admin/owner.")
+        elif not state.cli_billing_enabled:
+            lines.append("Terminal billing is turned off for this org.")
+        elif state.card is None:
+            lines.append("No saved card for terminal charges yet — set one up on the portal first.")
+        if state.portal_url:
+            lines.append(f"Manage on portal: {state.portal_url}")
+        return "\n".join(lines)
+
     async def _handle_credits_command(self, event: MessageEvent) -> str:
         """Handle /credits -- show Nous credit balance and the top-up handoff.
 
@@ -4518,7 +4567,19 @@ class GatewaySlashCommandsMixin:
         if is_managed():
             return f"✗ {format_managed_message('update Hermes Agent')}"
 
-        project_root = Path(__file__).parent.parent.resolve()
+        import sys as _sys
+        module_file = getattr(_sys.modules.get(__name__), "__file__", __file__)
+        try:
+            spec_origin = getattr(__spec__, "origin", None)
+            # The /update handler moved from gateway.run into this mixin. Tests
+            # and compatibility wrappers may still patch gateway.run.__file__;
+            # honor that when this module itself was not patched.
+            if spec_origin and Path(module_file).resolve() == Path(spec_origin).resolve():
+                from gateway import run as _gateway_run_mod
+                module_file = getattr(_gateway_run_mod, "__file__", module_file)
+        except Exception:
+            module_file = getattr(_sys.modules.get(__name__), "__file__", __file__)
+        project_root = Path(module_file).parent.parent.resolve()
         git_dir = project_root / '.git'
 
         if not git_dir.exists():

@@ -62,3 +62,41 @@ def test_vision_base_url_override_keeps_explicit_provider():
     assert model == "glm-4v"
     assert mock_resolve.call_args.args[0] == "zai"
     assert mock_resolve.call_args.kwargs["explicit_base_url"] == "https://open.bigmodel.cn/api/paas/v4"
+
+
+def test_codex_vision_replaces_foreign_model_hint_with_configured_codex_model(monkeypatch):
+    """A stale GLM model hint must not be sent to the ChatGPT/Codex endpoint."""
+    from agent.auxiliary_client import resolve_vision_provider_client
+
+    monkeypatch.setattr(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        lambda *args, **kwargs: ("openai-codex", "glm-5v-turbo", None, None, None),
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._get_auxiliary_task_config",
+        lambda task: {"provider": "openai-codex", "model": "gpt-5.5"} if task == "vision" else {},
+    )
+    monkeypatch.setattr(
+        "agent.auxiliary_client._read_codex_access_token",
+        lambda: "codex-test-token",
+    )
+
+    provider, client, model = resolve_vision_provider_client()
+
+    assert provider == "openai-codex"
+    assert client is not None
+    assert model == "gpt-5.5"
+
+
+def test_codex_vision_refuses_foreign_model_when_no_safe_replacement(monkeypatch):
+    """If no Codex-safe model exists, fail closed instead of sending GLM to Codex."""
+    from agent.auxiliary_client import resolve_provider_client
+
+    monkeypatch.setattr("agent.auxiliary_client._get_auxiliary_task_config", lambda task: {})
+    monkeypatch.setattr("agent.auxiliary_client._read_main_model", lambda: "glm-5v-turbo")
+    monkeypatch.setattr("agent.auxiliary_client._read_codex_access_token", lambda: "codex-test-token")
+
+    client, model = resolve_provider_client("openai-codex", "glm-5v-turbo", task="vision")
+
+    assert client is None
+    assert model is None

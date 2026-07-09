@@ -37,7 +37,7 @@ import tempfile
 import time
 import uuid
 import textwrap
-from collections import deque
+from collections import OrderedDict, deque
 from urllib.parse import unquote, urlparse
 from contextlib import contextmanager
 from pathlib import Path
@@ -3714,16 +3714,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self.console = Console()
         self.config = CLI_CONFIG
         self.compact = compact if compact is not None else CLI_CONFIG["display"].get("compact", False)
-        # tool_progress: "off", "new", "all", "verbose" (from config.yaml display section)
+        # tool_progress: "off", "new", "all", "compact", "verbose" (from config.yaml display section)
         # YAML 1.1 parses bare `off` as boolean False — normalise to string.
         _raw_tp = CLI_CONFIG["display"].get("tool_progress", "all")
-        self.tool_progress_mode = "off" if _raw_tp is False else str(_raw_tp)
+        self.tool_progress_mode = "off" if _raw_tp is False else str(_raw_tp).strip().lower()
+        if self.tool_progress_mode not in {"off", "new", "all", "compact", "verbose"}:
+            self.tool_progress_mode = "all"
         # resume_display: "full" (show history) | "minimal" (one-liner only)
         self.resume_display = CLI_CONFIG["display"].get("resume_display", "full")
         # bell_on_complete: play terminal bell (\a) when agent finishes a response
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
         # show_reasoning: display model thinking/reasoning before the response
         self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", True)
+        # reasoning_style: compact live status row behavior when reasoning is hidden
+        _reasoning_style = str(CLI_CONFIG["display"].get("reasoning_style", "hidden") or "hidden").strip().lower()
+        self.reasoning_style = "status" if _reasoning_style == "status" else "hidden"
         # reasoning_full: when reasoning display is on, print the post-response
         # recap box uncollapsed instead of clamping to the first 10 lines.
         self.reasoning_full = CLI_CONFIG["display"].get("reasoning_full", False)
@@ -4082,6 +4087,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self._tool_start_time: float = 0.0  # monotonic timestamp when current tool started (for live elapsed)
         self._pending_tool_info: dict = {}  # function_name -> list of (preview, args) for stacked scrollback
         self._last_scrollback_tool: str = ""  # last tool name printed to scrollback (for "new" dedup)
+        _compact_layout = str(CLI_CONFIG["display"].get("compact_progress_layout", "multi_line") or "multi_line").strip().lower()
+        self._compact_progress_layout = "single_line" if _compact_layout == "single_line" else "multi_line"
+        self._compact_progress_counts = OrderedDict()
+        self._compact_thinking_seen = False
+        self._last_compact_progress_text = ""
+        self._compact_progress_scrollback_printed = False
         self._command_running = False
         self._command_status = ""
         # Petdex mascot (opt-in via display.pet). The base CLI mirrors the TUI's
@@ -4755,26 +4766,86 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
     def _spinner_widget_height(self, width: Optional[int] = None) -> int:
         """Return the visible height for the spinner/status text line above the status bar."""
-        spinner_line = self._render_spinner_text()
+        spinner_line = self._get_spinner_display_text()
         if not spinner_line:
             return 0
         if self._use_minimal_tui_chrome(width=width):
             return 0
         width = width or self._get_tui_terminal_width()
+        rendered = self._get_spinner_display_text()
+        if not rendered:
+            return 0
         if width and width > 10:
             import math
-            text_width = self._status_bar_display_width(spinner_line)
-            return max(1, math.ceil(text_width / width))
+            total = 0
+            for line in rendered.splitlines() or [rendered]:
+                total += max(1, math.ceil(self._status_bar_display_width(line) / width))
+            return total
         return 1
+
+    def _reset_compact_progress_state(self, clear_spinner: bool = False) -> None:
+        if clear_spinner:
+            self._print_compact_progress_scrollback_once()
+        self._compact_progress_counts = OrderedDict()
+        self._compact_thinking_seen = False
+        if clear_spinner:
+            self._spinner_text = ""
+            self._last_compact_progress_text = ""
+            self._compact_progress_scrollback_printed = False
+
+    def _set_compact_spinner_text(self) -> None:
+        from agent.display import render_compact_progress_summary
+
+        self._spinner_text = render_compact_progress_summary(
+            self._compact_progress_counts,
+            self._compact_progress_layout,
+        )
+        self._last_compact_progress_text = self._spinner_text
+        self._compact_progress_scrollback_printed = False
+        self._tool_start_time = 0.0
+
+    def _print_compact_progress_scrollback_once(self) -> None:
+        if self.tool_progress_mode != "compact":
+            return
+        if str(self.config.get("display", {}).get("progress_cleanup", "keep") or "keep").strip().lower() != "keep":
+            return
+        if self._compact_progress_scrollback_printed:
+            return
+        text = (self._last_compact_progress_text or self._spinner_text or "").strip()
+        if not text:
+            return
+        # A thinking-only row adds noise; keep the transcript marker only when
+        # the agent actually used tools, matching the Telegram compact HUD's value.
+        if not any(key != "thinking" for key in self._compact_progress_counts):
+            return
+        try:
+            for line in text.splitlines():
+                _cprint(f"  {line}")
+            self._compact_progress_scrollback_printed = True
+        except Exception:
+            pass
 
     def _render_spinner_text(self) -> str:
         """Return the live spinner/status text exactly as rendered in the TUI."""
-        txt = getattr(self, "_spinner_text", "")
+        return self._get_spinner_display_text()
+
+    def _ensure_compact_thinking_row(self) -> None:
+        if self._compact_thinking_seen:
+            return
+        self._compact_progress_counts["thinking"] = self._compact_progress_counts.get("thinking", 0) + 1
+        self._compact_thinking_seen = True
+
+    def _get_spinner_display_text(self) -> str:
+        txt = self._spinner_text
         if not txt:
             return ""
-        t0 = getattr(self, "_tool_start_time", 0) or 0
+        if getattr(self, "tool_progress_mode", "normal") == "compact":
+            return "\n".join(f"  {line}" for line in txt.splitlines())
+
+        t0 = getattr(self, "_tool_start_time", 0.0)
         if t0 > 0:
-            elapsed = time.monotonic() - t0
+            import time as _time
+            elapsed = _time.monotonic() - t0
             if elapsed >= 60:
                 _m, _s = int(elapsed // 60), int(elapsed % 60)
                 # Fixed-width timer to avoid status-line wrap jitter while
@@ -5349,6 +5420,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         """Called by agent when thinking starts/stops. Updates TUI spinner."""
         if not text:
             self._flush_reasoning_preview(force=True)
+        if self.tool_progress_mode == "compact":
+            if text and self.reasoning_style == "status":
+                self._ensure_compact_thinking_row()
+                self._set_compact_spinner_text()
+            self._tool_start_time = 0.0
+            self._invalidate()
+            return
         self._spinner_text = text or ""
         self._tool_start_time = 0.0  # clear tool timer when switching to thinking
         self._invalidate()
@@ -10989,6 +11067,44 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         elif event_type and event_type.startswith("reasoning"):
             self._pet_reasoning = True
 
+        if self.tool_progress_mode == "compact":
+            if event_type in ("_thinking", "reasoning.available"):
+                if self.reasoning_style == "status":
+                    self._ensure_compact_thinking_row()
+                    self._set_compact_spinner_text()
+                    self._invalidate()
+                return
+            if event_type == "tool.completed":
+                self._tool_start_time = 0.0
+                self._invalidate()
+                return
+            if event_type != "tool.started":
+                return
+            if function_name and not function_name.startswith("_"):
+                from agent.display import group_compact_progress_tool
+
+                if self.reasoning_style == "status" and not self._compact_thinking_seen:
+                    self._ensure_compact_thinking_row()
+                group_name = group_compact_progress_tool(function_name, function_args)
+                self._compact_progress_counts[group_name] = self._compact_progress_counts.get(group_name, 0) + 1
+                self._set_compact_spinner_text()
+                self._invalidate()
+
+            if not self._voice_mode:
+                return
+            if not function_name or function_name.startswith("_"):
+                return
+            try:
+                from tools.voice_mode import play_beep
+                threading.Thread(
+                    target=play_beep,
+                    kwargs={"frequency": 1200, "duration": 0.06, "count": 1},
+                    daemon=True,
+                ).start()
+            except Exception:
+                pass
+            return
+
         if event_type == "tool.completed":
             self._tool_start_time = 0.0
             # Print stacked scrollback line for "new" / "all" / "verbose" modes.
@@ -12206,6 +12322,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         print(flush=True)
         
         try:
+            # Each direct chat() turn should start with a fresh compact HUD state,
+            # just like the interactive process loop does.
+            self._reset_compact_progress_state(clear_spinner=True)
             # Run the conversation with interrupt monitoring
             result = None
 
@@ -12745,6 +12864,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             print(f"Error: {e}")
             return None
         finally:
+            self._reset_compact_progress_state(clear_spinner=True)
             # Ensure streaming TTS resources are cleaned up even on error.
             # Normal path sends the sentinel at line ~3568; this is a safety
             # net for exception paths that skip it.  Duplicate sentinels are
@@ -15272,7 +15392,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         self.chat(user_input, images=submit_images or None)
                     finally:
                         self._agent_running = False
-                        self._spinner_text = ""
+                        self._reset_compact_progress_state(clear_spinner=True)
                         self._tool_start_time = 0.0
                         self._pending_tool_info.clear()
                         self._last_scrollback_tool = ""
