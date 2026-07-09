@@ -7,7 +7,7 @@ if (process.platform !== 'darwin') process.exit(0)
 
 const desktopRoot = path.resolve(import.meta.dirname, '..')
 const appPath = path.join(desktopRoot, 'release', 'mac-arm64', 'Hermes.app')
-const entitlements = path.join(desktopRoot, 'build', 'entitlements.mac.plist')
+const entitlements = path.join(desktopRoot, 'electron', 'entitlements.mac.plist')
 const keychain = path.join(os.homedir(), 'Library', 'Keychains', 'hermes-developer-id-signing.keychain-db')
 const identity = '3A22F53A48A189F4A8766CACE00192860CC37F8F'
 

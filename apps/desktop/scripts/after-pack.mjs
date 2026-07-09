@@ -77,7 +77,7 @@ function localSignMacApp(context) {
 
   const productName = context.packager?.appInfo?.productFilename || 'Hermes'
   const appPath = path.join(context.appOutDir, `${productName}.app`)
-  const entitlements = path.resolve(import.meta.dirname, '..', 'build', 'entitlements.mac.plist')
+  const entitlements = path.resolve(import.meta.dirname, '..', 'electron', 'entitlements.mac.plist')
   if (!fs.existsSync(appPath) || !fs.existsSync(entitlements)) return
 
   execFileSync('/usr/bin/codesign', [
