@@ -70,6 +70,70 @@ def test_restart_scope_targets_are_unique():
         assert len(keys) == len(set(keys))
 
 
+def test_restart_scope_resolves_required_gateway_gui_alternate(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway", required=True)
+    calls = []
+
+    def fake_run(cmd, *, timeout=30):
+        calls.append(cmd)
+
+        class Proc:
+            stdout = ""
+            stderr = ""
+            returncode = 0
+
+        joined = "/".join(cmd)
+        if cmd[:2] == ["/bin/launchctl", "print"] and "user/" in joined:
+            Proc.returncode = 1
+        elif cmd[:2] == ["/bin/launchctl", "print"] and "gui/" in joined:
+            Proc.returncode = 0
+        elif cmd[:3] == ["/bin/launchctl", "kickstart", "-k"]:
+            assert cmd[-1].startswith("gui/")
+            Proc.returncode = 0
+        return Proc()
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (target,))
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": ()})
+    monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_webui_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    assert restart_surfaces.restart_scope("hermes", delay=0) == 0
+    assert any("gui/" in "/".join(cmd) for cmd in calls)
+
+
+def test_restart_scope_fails_when_verify_port_missing(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway", required=True)
+
+    def fake_run(cmd, *, timeout=30):
+        class Proc:
+            stdout = ""
+            stderr = ""
+            returncode = 0
+
+        if cmd[:2] == ["bash", "-lc"] and "lsof" in cmd[-1]:
+            Proc.returncode = 1
+            Proc.stdout = ""
+        return Proc()
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (target,))
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": (9119,)})
+    monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_webui_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    assert restart_surfaces.restart_scope("hermes", delay=0) == 1
+    assert "port 9119 is not listening" in (tmp_path / "restart.log").read_text()
+
+
 def test_describe_plan_names_canonical_command_and_scope_summary():
     plan = describe_plan("gateways", uid=503)
     assert "Canonical command: /restart-gateways" in plan

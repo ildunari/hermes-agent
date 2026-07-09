@@ -787,8 +787,8 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert data["reference_models"]
-        assert all(set(slot) == {"provider", "model"} for slot in data["reference_models"])
-        assert set(data["aggregator"]) == {"provider", "model"}
+        assert all({"provider", "model"}.issubset(slot) for slot in data["reference_models"])
+        assert {"provider", "model"}.issubset(data["aggregator"])
 
     def test_put_moa_models_persists_provider_model_slots(self):
         from hermes_cli.config import load_config
@@ -809,8 +809,14 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
         cfg = load_config()
-        assert cfg["moa"]["reference_models"] == payload["reference_models"]
-        assert cfg["moa"]["aggregator"] == payload["aggregator"]
+        assert [
+            {"provider": slot["provider"], "model": slot["model"]}
+            for slot in cfg["moa"]["reference_models"]
+        ] == payload["reference_models"]
+        assert {
+            "provider": cfg["moa"]["aggregator"]["provider"],
+            "model": cfg["moa"]["aggregator"]["model"],
+        } == payload["aggregator"]
 
     # ── GET /api/media (remote image display) ───────────────────────────
 

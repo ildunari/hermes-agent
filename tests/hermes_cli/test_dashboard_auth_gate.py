@@ -3,6 +3,9 @@
 Phase 0 — establish a baseline pin on the current (pre-OAuth) behavior so
 later phases can prove they didn't break loopback mode.
 """
+from types import SimpleNamespace
+from typing import Any, cast
+
 import pytest
 
 # Phase 5 / Phase 6: these tests mutate ``web_server.app.state.auth_required``
@@ -23,12 +26,15 @@ def client_loopback():
     # loopback aliases when bound_host is loopback.
     prev_host = getattr(web_server.app.state, "bound_host", None)
     prev_port = getattr(web_server.app.state, "bound_port", None)
+    prev_allowed_hosts = getattr(web_server.app.state, "dashboard_allowed_hosts", None)
     web_server.app.state.bound_host = "127.0.0.1"
     web_server.app.state.bound_port = 9119
+    web_server.app.state.dashboard_allowed_hosts = frozenset()
     client = TestClient(web_server.app, base_url="http://127.0.0.1:9119")
     yield client
     web_server.app.state.bound_host = prev_host
     web_server.app.state.bound_port = prev_port
+    web_server.app.state.dashboard_allowed_hosts = prev_allowed_hosts
 
 
 def test_loopback_status_is_public(client_loopback):
@@ -75,6 +81,94 @@ def test_loopback_host_header_validation_still_enforced(client_loopback):
     """DNS-rebinding protection: a foreign Host header is rejected."""
     r = client_loopback.get("/api/status", headers={"Host": "evil.test"})
     assert r.status_code == 400
+
+
+def test_loopback_configured_allowed_host_is_accepted(client_loopback):
+    """Trusted reverse-proxy hostnames can be allowlisted exactly."""
+    web_server.app.state.dashboard_allowed_hosts = frozenset({
+        "macstudio.tailf7342a.ts.net",
+        "100.69.228.58",
+    })
+    r = client_loopback.get(
+        "/api/status",
+        headers={"Host": "macstudio.tailf7342a.ts.net:9119"},
+    )
+    assert r.status_code == 200
+
+    r = client_loopback.get("/api/status", headers={"Host": "100.69.228.58:9119"})
+    assert r.status_code == 200
+
+    r = client_loopback.get("/api/status", headers={"Host": "evil.test"})
+    assert r.status_code == 400
+
+
+def test_dashboard_allowed_hosts_normalize_full_urls(monkeypatch):
+    """Operators may paste full Tailscale URLs; only the host is trusted."""
+    monkeypatch.setattr(
+        web_server,
+        "load_config",
+        lambda: {
+            "dashboard": {
+                "allowed_hosts": [
+                    "https://macstudio.tailf7342a.ts.net:9119/",
+                    "100.69.228.58:9119",
+                    "*",
+                ],
+                "public_url": "https://hermes.example.test/webui",
+            }
+        },
+    )
+    assert web_server._configured_dashboard_allowed_hosts() == frozenset({
+        "macstudio.tailf7342a.ts.net",
+        "100.69.228.58",
+        "hermes.example.test",
+    })
+
+
+def test_dashboard_allowed_hosts_accept_config_set_json_string(monkeypatch):
+    """`hermes config set` stores list-looking values as strings today."""
+    monkeypatch.setattr(
+        web_server,
+        "load_config",
+        lambda: {
+            "dashboard": {
+                "allowed_hosts": '["macstudio.tailf7342a.ts.net", "100.69.228.58", "fd7a:115c:a1e0::ba35:e43a"]'
+            }
+        },
+    )
+    assert web_server._configured_dashboard_allowed_hosts() == frozenset({
+        "macstudio.tailf7342a.ts.net",
+        "100.69.228.58",
+        "fd7a:115c:a1e0::ba35:e43a",
+    })
+
+
+def test_websocket_host_origin_uses_configured_allowed_hosts():
+    """WebSocket upgrades need the same allowlist as HTTP middleware."""
+    prev_host = getattr(web_server.app.state, "bound_host", None)
+    prev_allowed_hosts = getattr(web_server.app.state, "dashboard_allowed_hosts", None)
+    web_server.app.state.bound_host = "127.0.0.1"
+    web_server.app.state.dashboard_allowed_hosts = frozenset({"macstudio.tailf7342a.ts.net"})
+    try:
+        ws = SimpleNamespace(headers={
+            "host": "macstudio.tailf7342a.ts.net:9119",
+            "origin": "https://macstudio.tailf7342a.ts.net:9119",
+        })
+        assert web_server._ws_host_origin_reason(cast(Any, ws)) is None
+
+        ws = SimpleNamespace(headers={
+            "host": "macstudio.tailf7342a.ts.net:9119",
+            "origin": "https://evil.test",
+        })
+        reason = web_server._ws_host_origin_reason(cast(Any, ws))
+        assert reason and reason.startswith("origin_mismatch")
+
+        ws = SimpleNamespace(headers={"host": "evil.test"})
+        reason = web_server._ws_host_origin_reason(cast(Any, ws))
+        assert reason and reason.startswith("host_mismatch")
+    finally:
+        web_server.app.state.bound_host = prev_host
+        web_server.app.state.dashboard_allowed_hosts = prev_allowed_hosts
 
 
 # ---------------------------------------------------------------------------

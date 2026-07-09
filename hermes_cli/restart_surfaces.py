@@ -493,6 +493,85 @@ def _write_completion_marker(marker_path: str | None, scope: str, exit_code: int
         _append_log(f"completion marker failed: {exc}")
 
 
+def _alternate_launchd_service(service: str) -> str | None:
+    """Return the user/gui twin for profile LaunchAgents, if applicable."""
+    if service.startswith("user/"):
+        rest = service[len("user/"):]
+        uid, _, label = rest.partition("/")
+        if uid and label:
+            return f"gui/{uid}/{label}"
+    if service.startswith("gui/"):
+        rest = service[len("gui/"):]
+        uid, _, label = rest.partition("/")
+        if uid and label:
+            return f"user/{uid}/{label}"
+    return None
+
+
+def _resolve_loaded_service(service: str) -> tuple[str, subprocess.CompletedProcess[str]]:
+    """Resolve a launchd service, trying the user/gui twin when needed."""
+    result = _launchctl_print(service)
+    if result.returncode == 0:
+        return service, result
+    alternate = _alternate_launchd_service(service)
+    if alternate:
+        alt_result = _launchctl_print(alternate)
+        if alt_result.returncode == 0:
+            _append_log(f"{service} not loaded; using loaded alternate {alternate}")
+            return alternate, alt_result
+    return service, result
+
+
+def _verify_listen_port(port: int) -> str | None:
+    result = _run(["bash", "-lc", f"lsof -nP -iTCP:{port} -sTCP:LISTEN >/dev/null"], timeout=10)
+    if result.returncode != 0:
+        return f"port {port} is not listening"
+    return None
+
+
+def _verify_http_url(url: str, expected: tuple[int, ...] = (200, 401)) -> str | None:
+    quoted = shlex.quote(url)
+    tests = " || ".join(f'[ "$code" = "{int(code)}" ]' for code in expected)
+    script = (
+        f"code=$(curl -sk --max-time 5 -o /dev/null -w '%{{http_code}}' {quoted} || true); "
+        f"if {tests}; then exit 0; fi; echo $code; exit 1"
+    )
+    result = _run(["bash", "-lc", script], timeout=8)
+    if result.returncode != 0:
+        observed = (result.stdout or result.stderr or "?").strip()
+        return f"HTTP probe {url} returned {observed or 'non-2xx'}"
+    return None
+
+
+def _verify_scope_health(scope: str) -> list[str]:
+    failures: list[str] = []
+    ports = VERIFY_PORTS.get(scope, ())
+    if not ports:
+        return failures
+    for port in ports:  # listener smoke
+        failure = _verify_listen_port(port)
+        if failure:
+            failures.append(failure)
+    if scope == "hermes":
+        probes = (
+            "http://127.0.0.1:8787/health",
+            "http://127.0.0.1:9119/",
+            "http://127.0.0.1:9120/",
+            "https://macstudio.tailf7342a.ts.net:9119/",
+        )
+    else:
+        probes = (
+            "http://127.0.0.1:9119/",
+            "http://127.0.0.1:9120/",
+            "https://macstudio.tailf7342a.ts.net:9119/",
+        )
+    for url in probes:
+        failure = _verify_http_url(url)
+        if failure:
+            failures.append(failure)
+    return failures
+
+
 def restart_scope(
     scope: str,
     *,
@@ -535,10 +614,10 @@ def restart_scope(
         return 1
 
     for target in targets:
-        service = target.service_name(uid)
-        before = _launchctl_print(service)
+        requested_service = target.service_name(uid)
+        service, before = _resolve_loaded_service(requested_service)
         if before.returncode != 0:
-            msg = f"{service} is not loaded"
+            msg = f"{requested_service} is not loaded"
             _append_log(msg)
             if target.required:
                 failures.append(msg)
@@ -558,8 +637,10 @@ def restart_scope(
             if target.required:
                 failures.append(msg)
 
-    for port in VERIFY_PORTS.get(normalized, ()):
-        _run(["bash", "-lc", f"lsof -nP -iTCP:{port} -sTCP:LISTEN >/dev/null"], timeout=10)
+    health_failures = _verify_scope_health(normalized)
+    for failure in health_failures:
+        _append_log(f"restart verification failed: {failure}")
+    failures.extend(health_failures)
 
     if failures:
         _append_log("restart completed with required failures: " + "; ".join(failures))

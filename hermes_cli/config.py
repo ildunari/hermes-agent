@@ -2036,6 +2036,14 @@ DEFAULT_CONFIG = {
         # falls through to request reconstruction rather than breaking
         # the login flow.
         "public_url": "",
+        # Exact extra Host header values accepted by the dashboard's
+        # DNS-rebinding guard. Use this for trusted reverse proxies that
+        # expose a loopback-bound dashboard under a stable hostname, e.g.
+        # Tailscale Serve forwarding
+        # ``https://macstudio.tailnet.ts.net:9119`` to ``127.0.0.1:9119``.
+        # Entries may be bare hostnames, IPs, host:port values, or full URLs;
+        # only the hostname/IP is used. Wildcards are intentionally ignored.
+        "allowed_hosts": [],
     },
 
     # Privacy settings

@@ -30,6 +30,7 @@ import {
   Eye,
   FolderOpen,
   FileText,
+  Gauge,
   Globe,
   Heart,
   KeyRound,
@@ -70,6 +71,7 @@ import { ProfileProvider } from "@/contexts/ProfileProvider";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { ProfileScopeBanner } from "@/components/ProfileScopeBanner";
+import { ProviderUsagePanel } from "@/components/ProviderUsagePanel";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import type { SystemAction } from "@/contexts/system-actions-context";
 import ConfigPage from "@/pages/ConfigPage";
@@ -352,6 +354,7 @@ export default function App() {
   const { manifests, loading: pluginsLoading } = usePlugins();
   const { theme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [usagePanelOpen, setUsagePanelOpen] = useState(false);
   const closeMobile = useCallback(() => setMobileOpen(false), []);
 
   const [collapsed, setCollapsed] = useState(() => {
@@ -668,6 +671,15 @@ export default function App() {
               tooltipWarmRef={tooltipWarmRef}
             />
 
+            <SidebarProviderUsageButton
+              collapsed={isDesktopCollapsed}
+              onClick={() => {
+                setUsagePanelOpen(true);
+                closeMobile();
+              }}
+              tooltipWarmRef={tooltipWarmRef}
+            />
+
             <div
               className={cn(
                 "flex shrink-0 items-center gap-2",
@@ -785,6 +797,10 @@ export default function App() {
       </div>
 
       <PluginSlot name="overlay" />
+      <ProviderUsagePanel
+        open={usagePanelOpen}
+        onClose={() => setUsagePanelOpen(false)}
+      />
     </div>
     </ProfileProvider>
   );
@@ -803,6 +819,66 @@ export default function App() {
 function ProfileKeyedRoutes({ children }: { children: ReactNode }) {
   const { profile } = useProfileScope();
   return <div key={profile || "__own__"} className="contents">{children}</div>;
+}
+
+function SidebarProviderUsageButton({
+  collapsed,
+  onClick,
+  tooltipWarmRef,
+}: {
+  collapsed: boolean;
+  onClick: () => void;
+  tooltipWarmRef: TooltipWarmRef;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const [tooltipAnchor, setTooltipAnchor] = useState<HTMLElement | null>(null);
+  const showTooltip = (event: MouseEvent<HTMLElement> | FocusEvent<HTMLElement>) => {
+    setHovered(true);
+    setTooltipAnchor(event.currentTarget);
+  };
+  const hideTooltip = () => {
+    setHovered(false);
+    setTooltipAnchor(null);
+  };
+
+  return (
+    <div
+      className="shrink-0 border-t border-current/10 py-1"
+      onMouseEnter={collapsed ? showTooltip : undefined}
+      onMouseLeave={collapsed ? hideTooltip : undefined}
+    >
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={collapsed ? "Provider Usage" : undefined}
+        onFocus={collapsed ? showTooltip : undefined}
+        onBlur={collapsed ? hideTooltip : undefined}
+        className={cn(
+          "group/provider relative flex w-full items-center gap-3 px-5 py-2.5 text-left",
+          "font-sans text-display text-xs tracking-[0.1em] whitespace-nowrap",
+          "text-text-secondary transition-colors hover:text-midground",
+          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
+        )}
+      >
+        <Gauge className="h-3.5 w-3.5 shrink-0" />
+        <span
+          className={cn(
+            "truncate transition-opacity duration-300",
+            collapsed ? "lg:opacity-0" : "lg:opacity-100",
+          )}
+        >
+          Provider Usage
+        </span>
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-y-0.5 left-1.5 right-1.5 bg-midground opacity-0 transition-opacity duration-200 group-hover/provider:opacity-5"
+        />
+      </button>
+      {collapsed && hovered && tooltipAnchor && (
+        <SidebarTooltip anchor={tooltipAnchor} label="Provider Usage" warmRef={tooltipWarmRef} />
+      )}
+    </div>
+  );
 }
 
 function SidebarNavLink({
