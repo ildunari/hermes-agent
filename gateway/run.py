@@ -1710,6 +1710,70 @@ os.environ["HERMES_QUIET"] = "1"
 # Enable interactive exec approval for dangerous commands on messaging platforms
 os.environ["HERMES_EXEC_ASK"] = "1"
 
+
+def _render_compact_tool_progress(tool_counts: "OrderedDict[str, int]", layout: str = "multi_line") -> str:
+    """Backward-compatible gateway wrapper for compact progress rendering."""
+    from agent.display import render_compact_tool_progress
+
+    return render_compact_tool_progress(tool_counts, layout)
+
+
+def _render_compact_progress_with_todo_card(
+    tool_counts: "OrderedDict[str, int]",
+    layout: str = "multi_line",
+    todo_args: dict | None = None,
+) -> str:
+    """Render compact progress, replacing the generic todo bucket with task details."""
+    from agent.display import render_compact_progress_summary, render_todo_checklist_progress
+
+    todos = todo_args.get("todos") if isinstance(todo_args, dict) else None
+    if not isinstance(todos, list) or not todos:
+        return render_compact_progress_summary(tool_counts, layout)
+    non_task_counts = OrderedDict((k, v) for k, v in tool_counts.items() if k != "tasks")
+    todo_card = render_todo_checklist_progress(todo_args)
+    if not non_task_counts:
+        return todo_card
+    separator = " · " if layout == "single_line" else "\n"
+    return f"{render_compact_progress_summary(non_task_counts, layout)}{separator}{todo_card}"
+
+
+def _update_compact_tool_progress(
+    tool_counts: "OrderedDict[str, int]",
+    tool_name: str | None,
+    args: dict | None = None,
+    layout: str = "multi_line",
+    todo_args: dict | None = None,
+) -> str:
+    """Increment the compact HUD bucket for a tool call and render the summary."""
+    from agent.display import group_compact_progress_tool
+
+    bucket = group_compact_progress_tool(tool_name, args)
+    tool_counts[bucket] = tool_counts.get(bucket, 0) + 1
+    if bucket == "tasks" and isinstance(args, dict) and isinstance(args.get("todos"), list):
+        todo_args = args
+    return _render_compact_progress_with_todo_card(tool_counts, layout, todo_args)
+
+
+def _tool_progress_cycle_modes() -> list[str]:
+    """Ordered /verbose cycle modes for CLI/gateway cycling.
+
+    The underlying ``tool_progress`` setting still supports ``new`` when set
+    explicitly in config, but `/verbose` should cycle through the long-standing
+    user-facing modes shared by Telegram, Discord, and the terminal CLI.
+    """
+    return ["off", "all", "compact", "verbose"]
+
+
+def _tool_progress_descriptions() -> dict[str, str]:
+    """Human-readable descriptions for tool-progress modes."""
+    return {
+        "off": "⚙️ Tool progress: **OFF** — no tool activity shown.",
+        "all": "⚙️ Tool progress: **ALL** — every tool call shown (preview length: `display.tool_preview_length`, default 40).",
+        "compact": "⚙️ Tool progress: **COMPACT** — one live HUD with per-tool counts, no raw args.",
+        "verbose": "⚙️ Tool progress: **VERBOSE** — every tool call with full arguments.",
+    }
+
+
 # Set terminal working directory for messaging platforms.
 # config.yaml terminal.cwd is the canonical source (bridged to TERMINAL_CWD
 # by the config bridge above).  Placeholder values are resolved per-backend —
@@ -9226,8 +9290,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.info("Ignoring /start platform ping for active session %s", _quick_key)
                 return ""
 
-            if _cmd_def_inner and _cmd_def_inner.name == "restart":
-                return await self._handle_restart_command(event)
+            if _cmd_def_inner and _cmd_def_inner.name in {
+                "restart",
+                "restart-gateways",
+                "restart-hermes",
+            }:
+                if _cmd_def_inner.name == "restart":
+                    return await self._handle_restart_command(event)
+                return await self._handle_detached_surface_restart_command(
+                    event,
+                    _cmd_def_inner.name,
+                )
 
             # /stop must hard-kill the session when an agent is running.
             # A soft interrupt (agent.interrupt()) doesn't help when the agent
@@ -9731,7 +9804,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "restart":
             return await self._handle_restart_command(event)
-        
+
+        if canonical in ("restart-gateways", "restart-hermes"):
+            return await self._handle_detached_surface_restart_command(event, canonical)
+
         if canonical == "stop":
             return await self._handle_stop_command(event)
         
@@ -12410,9 +12486,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if key == prefix or key.startswith(prefix + ":"):
                 matches.append(key)
         return matches
+    async def _handle_detached_surface_restart_command(
+        self,
+        event: MessageEvent,
+        canonical: str,
+    ) -> str:
+        """Queue cross-surface restart work outside the receiving gateway."""
+        from hermes_cli.restart_surfaces import enqueue_detached_restart
 
-
-
+        scope = "gateways" if canonical == "restart-gateways" else "hermes"
+        args = event.get_command_args().split()
+        dry_run = any(
+            arg.lower() in {"--dry-run", "dry-run", "smoke", "test", "plan"}
+            for arg in args
+        )
+        notify_origin = None
+        if event.source and event.source.platform and event.source.chat_id:
+            notify_origin = {
+                "platform": event.source.platform.value,
+                "chat_id": event.source.chat_id,
+            }
+            if event.source.thread_id:
+                notify_origin["thread_id"] = event.source.thread_id
+        return enqueue_detached_restart(
+            scope,
+            delay=1.0,
+            dry_run=dry_run,
+            notify_origin=notify_origin,
+        )
 
     def _is_stale_restart_redelivery(self, event: MessageEvent) -> bool:
         """Return True if this /restart is a Telegram re-delivery we already handled.
@@ -12758,6 +12859,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Regular message
         if hasattr(raw, "guild") and raw.guild:
             return raw.guild.id
+        return None
+
+    def _get_live_voice_reply_guild(self, source: SessionSource) -> Optional[int]:
+        """Return the connected Discord VC for text-mode live voice replies."""
+        if getattr(source.platform, "value", source.platform) != "discord":
+            return None
+        if self._voice_mode.get(self._voice_key(source.platform, source.chat_id), "off") != "all":
+            return None
+        adapter = self.adapters.get(source.platform)
+        if not adapter or not hasattr(adapter, "is_in_voice_channel"):
+            return None
+        for guild_id, text_channel_id in (getattr(adapter, "_voice_text_channels", {}) or {}).items():
+            if str(text_channel_id) == str(source.chat_id) and adapter.is_in_voice_channel(int(guild_id)):
+                return int(guild_id)
         return None
 
 
@@ -17099,6 +17214,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             except Exception as _ack_err:
                 logger.debug("voice ack schedule failed: %s", _ack_err)
+        compact_tool_counts = OrderedDict()  # Grouped compact HUD counters
+        compact_todo_args: list[dict | None] = [None]
 
         # Auto-cleanup of temporary progress bubbles (Telegram + any adapter
         # that implements ``delete_message``). When enabled via
@@ -17204,6 +17321,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return
             except Exception:
                 pass
+
+            # Compact mode: keep a single grouped ×N HUD instead of raw tool names.
+            if progress_mode == "compact":
+                layout = str(
+                    resolve_display_setting(
+                        user_config,
+                        platform_key,
+                        "compact_progress_layout",
+                        "multi_line",
+                    )
+                    or "multi_line"
+                )
+                summary = _update_compact_tool_progress(
+                    compact_tool_counts,
+                    tool_name,
+                    args,
+                    layout,
+                    compact_todo_args[0],
+                )
+                if tool_name == "todo" and isinstance(args, dict) and isinstance(args.get("todos"), list):
+                    compact_todo_args[0] = args
+                progress_queue.put(("__compact__", summary))
+                return
 
             # "new" mode: only report when tool changes
             if progress_mode == "new" and tool_name == last_tool[0]:
@@ -17591,6 +17731,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if progress_lines:
                             progress_lines[-1] = f"{base_msg} (×{count + 1})"
                         msg = progress_lines[-1] if progress_lines else base_msg
+                    elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__compact__":
+                        # Compact HUD replaces the whole progress body with grouped ×N counts.
+                        msg = str(raw[1] if len(raw) > 1 else "")
+                        progress_lines = [msg]
                     elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
                         # Content bubble just landed on the platform — close off
                         # the current tool-progress bubble so the next tool
@@ -17752,6 +17896,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        voice_reply_consumer_holder = [None]
+        voice_reply_generation_holder = [0]
+        live_voice_guild = self._get_live_voice_reply_guild(source)
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
@@ -18005,6 +18152,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
+
+            if live_voice_guild is not None and _status_adapter is not None:
+                try:
+                    from plugins.platforms.discord.adapter import DiscordVoiceReplyStreamer
+                    streamer = DiscordVoiceReplyStreamer(_status_adapter, live_voice_guild)
+                    streamer.generation = _status_adapter.register_live_voice_streamer(live_voice_guild, streamer)
+                    voice_reply_consumer_holder[0] = streamer
+                    voice_reply_generation_holder[0] = streamer.generation
+                    prior_delta = _stream_delta_cb
+                    def _stream_delta_cb(text: str) -> None:
+                        if _run_still_current():
+                            if prior_delta: prior_delta(text)
+                            streamer.on_delta(text)
+                except Exception as exc:
+                    logger.debug("Could not set up live Discord voice streaming: %s", exc)
 
             def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
                 if not _run_still_current():
@@ -18803,6 +18965,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Signal the stream consumer that the agent is done
             if _stream_consumer is not None:
                 _stream_consumer.finish()
+            if voice_reply_consumer_holder[0] is not None:
+                voice_reply_consumer_holder[0].finish()
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
@@ -19091,6 +19255,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 await asyncio.sleep(0.05)
 
         stream_task = asyncio.create_task(_start_stream_consumer())
+        async def _start_voice_reply_consumer():
+            for _ in range(200):
+                if voice_reply_consumer_holder[0] is not None:
+                    await voice_reply_consumer_holder[0].run()
+                    return
+                await asyncio.sleep(0.05)
+        voice_reply_task = asyncio.create_task(_start_voice_reply_consumer()) if live_voice_guild is not None else None
         
         # Track this agent as running for this session (for interrupt support)
         # We do this in a callback after the agent is created
@@ -19878,6 +20049,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             await stream_task
                         except asyncio.CancelledError:
                             pass
+            if voice_reply_task:
+                streamer = voice_reply_consumer_holder[0]
+                if streamer is None:
+                    voice_reply_task.cancel()
+                else:
+                    streamer.finish()
+                try:
+                    await asyncio.wait_for(voice_reply_task, timeout=8.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    voice_reply_task.cancel()
+                    try:
+                        await voice_reply_task
+                    except asyncio.CancelledError:
+                        pass
+                if live_voice_guild is not None:
+                    adapter = self.adapters.get(source.platform)
+                    if adapter and hasattr(adapter, "clear_live_voice_streamer"):
+                        await adapter.clear_live_voice_streamer(live_voice_guild, generation=voice_reply_generation_holder[0] or None)
             
             # Clean up tracking
             tracking_task.cancel()

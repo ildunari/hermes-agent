@@ -148,7 +148,17 @@ def _wants_tui_early(argv: "list[str] | None" = None) -> bool:
     """Earliest TUI decision, usable before argparse/config imports.
 
     Precedence: explicit ``--cli`` wins (forces classic REPL), then
-    ``--tui``/``HERMES_TUI=1``, then ``display.interface`` in config.
+    explicit ``--tui``/``HERMES_TUI=1``, then a real-TTY gate (a
+    non-interactive stdio can't host the Ink UI, so ambient config never
+    boots it there), then ``display.interface`` in config.
+
+    The TTY gate is load-bearing for headless spawners — kanban workers,
+    cron jobs, pipes run ``hermes … chat -q`` with stdio on a pipe. This
+    is the earliest launch decision (it runs before ``cmd_chat`` /
+    ``_resolve_use_tui``), so a ``display.interface: tui`` default used to
+    boot the TUI here — whose no-TTY bail-out exits 0 without doing the
+    task → "protocol violation" on every attempt. An explicit ``--tui``
+    still reaches the informative bail-out.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -156,6 +166,11 @@ def _wants_tui_early(argv: "list[str] | None" = None) -> bool:
         return False
     if os.environ.get("HERMES_TUI") == "1" or "--tui" in argv:
         return True
+    try:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+    except Exception:
+        return False
     return _config_default_interface_early() == "tui"
 
 
@@ -401,6 +416,7 @@ def _apply_profile_override() -> None:
         "-t", "--toolsets",
         "-r", "--resume",
         "-s", "--skills",
+        "--usage-file",
     }
     optional_value_flags = {"-c", "--continue"}
     i = 0
@@ -2194,16 +2210,34 @@ def _resolve_use_tui(args) -> bool:
 
     Precedence (highest first):
       1. ``--cli`` flag         → always classic REPL
-      2. ``--tui`` flag / ``HERMES_TUI=1`` → always TUI
-      3. ``display.interface`` config value ("cli" | "tui")
-      4. default → classic REPL
+      2. ``--tui`` flag         → always TUI (explicit ask)
+      3. no TTY                 → always classic (ambient prefs don't apply)
+      4. ``HERMES_TUI=1`` env   → TUI
+      5. ``display.interface`` config value ("cli" | "tui")
+      6. default → classic REPL
 
     Explicit flags always win over config so muscle memory and scripts keep
     working regardless of the configured default.
+
+    The TTY gate (3) is load-bearing: ambient TUI preferences (env var or
+    config default) must never hijack a NON-interactive invocation. Kanban
+    workers, cron jobs, and pipelines run ``hermes … chat -q`` with stdout
+    on a pipe; booting the Ink TUI there hits its no-TTY bail-out, which
+    prints a resume hint and exits 0 — a kanban worker then dies with
+    "exited cleanly without calling kanban_complete — protocol violation"
+    on every attempt (found dogfooding the desktop kanban board). A user
+    who *explicitly* passes ``--tui`` still gets the informative bail-out.
     """
     if getattr(args, "cli", False):
         return False
-    if getattr(args, "tui", False) or os.environ.get("HERMES_TUI") == "1":
+    if getattr(args, "tui", False):
+        return True
+    try:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+    except Exception:
+        return False
+    if os.environ.get("HERMES_TUI") == "1":
         return True
     try:
         from hermes_cli.config import load_config
@@ -12415,6 +12449,10 @@ def cmd_dashboard(args):
         remaining = sorted({*remaining_registry, *remaining_scanned})
         sys.exit(1 if remaining else 0)
 
+    # `serve` is the headless backend: no UI build, no SPA mount, neutral
+    # ready sentinel. Resolve it once and preserve it through profile re-exec.
+    _headless_backend = getattr(args, "headless_backend", False)
+
     # ── Unified profile launch routing ────────────────────────────────
     # The dashboard is a MACHINE management surface: it can read/write any
     # profile via the per-request ?profile= scoping. Running one dashboard
@@ -12460,7 +12498,8 @@ def cmd_dashboard(args):
         reexec_argv = [
             sys.executable, "-m", "hermes_cli.main",
             "-p", "default",
-            "dashboard",
+            # Preserve the lean serve path across profile re-exec.
+            "serve" if _headless_backend else "dashboard",
             "--port", str(args.port),
             "--host", args.host,
             "--open-profile", _launch_profile,
@@ -12531,7 +12570,11 @@ def cmd_dashboard(args):
     # backend is the desktop's primary entrypoint and needs the same.
     _sync_bundled_skills_quietly()
 
-    if "HERMES_WEB_DIST" not in os.environ and not getattr(args, "skip_build", False):
+    if _headless_backend:
+        # Do not build or mount the dashboard SPA for the headless backend,
+        # even when a stale web_dist exists from an earlier dashboard build.
+        os.environ["HERMES_SERVE_HEADLESS"] = "1"
+    elif "HERMES_WEB_DIST" not in os.environ and not getattr(args, "skip_build", False):
         if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
             sys.exit(1)
     elif getattr(args, "skip_build", False):
@@ -12621,6 +12664,7 @@ def cmd_dashboard(args):
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
         initial_profile=getattr(args, "open_profile", "") or "",
+        headless=_headless_backend,
         register_instance=lambda actual_port: _write_dashboard_pid_record_for_bound_port(
             args, actual_port
         ),
@@ -12751,6 +12795,7 @@ _TOP_LEVEL_VALUE_FLAGS = frozenset(
         "-t", "--toolsets",
         "-r", "--resume",
         "-s", "--skills",
+        "--usage-file",
         # ``-c / --continue`` is nargs='?' (optional value). Treat it as
         # value-taking: if the next token is a subcommand-looking word
         # the user almost certainly meant it as the session name, and
@@ -12984,6 +13029,7 @@ def _try_termux_fast_cli_launch() -> bool:
                 model=getattr(args, "model", None),
                 provider=getattr(args, "provider", None),
                 toolsets=getattr(args, "toolsets", None),
+                usage_file=getattr(args, "usage_file", None),
             )
         )
 
@@ -15087,6 +15133,7 @@ def main():
                 model=getattr(args, "model", None),
                 provider=getattr(args, "provider", None),
                 toolsets=getattr(args, "toolsets", None),
+                usage_file=getattr(args, "usage_file", None),
             )
         )
 

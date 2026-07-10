@@ -17,6 +17,7 @@ Key design decisions:
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -122,7 +123,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # Cap on user-controlled FTS5 query input before regex/sanitizer processing.
 # Search queries do not need to be arbitrarily large, and bounding them keeps
@@ -166,14 +167,51 @@ _last_init_error_lock = threading.Lock()
 _wal_fallback_warned_paths: set[str] = set()
 _wal_fallback_warned_lock = threading.Lock()
 
-_FTS_TRIGGERS = (
+_FTS_BASE_TRIGGERS = (
     "messages_fts_insert",
     "messages_fts_delete",
     "messages_fts_update",
+)
+
+_FTS_TRIGRAM_TRIGGERS = (
     "messages_fts_trigram_insert",
     "messages_fts_trigram_delete",
     "messages_fts_trigram_update",
 )
+
+_FTS_TRIGGERS = _FTS_BASE_TRIGGERS + _FTS_TRIGRAM_TRIGGERS
+
+
+def _truthy_config_value(value: Any) -> bool:
+    """Parse config/env booleans without treating "false" as truthy."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _config_disables_fts_trigram() -> bool:
+    """Return the config-backed trigram disable flag.
+
+    ``sessions.disable_fts_trigram`` is the documented surface. The env var is
+    kept as a process-transport fallback for entry points that set it before
+    importing storage code.
+    """
+    env_value = os.getenv("HERMES_DISABLE_FTS_TRIGRAM")
+    if env_value is not None:
+        return _truthy_config_value(env_value)
+    try:
+        from hermes_cli.config import load_config
+
+        sessions_cfg = (load_config().get("sessions") or {})
+        if isinstance(sessions_cfg, dict):
+            return _truthy_config_value(sessions_cfg.get("disable_fts_trigram"))
+    except Exception as exc:
+        logger.debug("Could not read sessions.disable_fts_trigram: %s", exc)
+    return False
 
 
 def _set_last_init_error(msg: Optional[str]) -> None:
@@ -715,6 +753,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at REAL NOT NULL,
     ended_at REAL,
     end_reason TEXT,
+    last_active REAL,
     message_count INTEGER DEFAULT 0,
     tool_call_count INTEGER DEFAULT 0,
     input_tokens INTEGER DEFAULT 0,
@@ -810,6 +849,59 @@ CREATE INDEX IF NOT EXISTS idx_sessions_gateway_peer
     ON sessions(source, user_id, chat_id, chat_type, thread_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
     ON sessions(handoff_state, started_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_last_active
+    ON sessions(last_active DESC, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_session_active_id
+    ON messages(session_id, active, id DESC);
+"""
+
+LAST_ACTIVE_REPAIR_TRIGGER_SQL = """
+CREATE TRIGGER IF NOT EXISTS messages_last_active_timestamp_update
+AFTER UPDATE OF timestamp ON messages
+BEGIN
+    UPDATE sessions
+    SET last_active = (
+        WITH RECURSIVE chain(cur_id) AS (
+            SELECT sessions.id
+            UNION ALL
+            SELECT child.id
+            FROM chain c
+            JOIN sessions parent ON parent.id = c.cur_id
+            JOIN sessions child ON child.parent_session_id = c.cur_id
+            WHERE parent.end_reason = 'compression'
+              AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+              AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+              AND COALESCE(child.source, '') != 'tool'
+        )
+        SELECT MAX(COALESCE(
+            (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = chain.cur_id),
+            (SELECT ss.started_at FROM sessions ss WHERE ss.id = chain.cur_id)
+        ))
+        FROM chain
+    )
+    WHERE id IN (
+        WITH RECURSIVE affected(id) AS (
+            SELECT NEW.session_id
+            UNION
+            SELECT parent.id
+            FROM affected a
+            JOIN sessions child ON child.id = a.id
+            JOIN sessions parent ON parent.id = child.parent_session_id
+            WHERE parent.end_reason = 'compression'
+              AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+              AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+              AND COALESCE(child.source, '') != 'tool'
+        )
+        SELECT id FROM affected
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS sessions_last_active_started_at_update
+AFTER UPDATE OF started_at ON sessions
+WHEN OLD.last_active IS NULL OR OLD.last_active = OLD.started_at
+BEGIN
+    UPDATE sessions SET last_active = NEW.started_at WHERE id = NEW.id;
+END;
 """
 
 FTS_SQL = """
@@ -908,8 +1000,10 @@ class SessionDB:
         self._lock = threading.Lock()
         self._write_count = 0
         self._fts_enabled = False
+        self._fts_trigram_disabled = _config_disables_fts_trigram()
         self._trigram_available = False
         self._fts_unavailable_warned = False
+        self._has_sessions_last_active = True
         self._conn = None
         try:
             if read_only:
@@ -929,6 +1023,9 @@ class SessionDB:
                     isolation_level=None,
                 )
                 self._conn.row_factory = sqlite3.Row
+                self._has_sessions_last_active = self._table_has_column(
+                    self._conn, "sessions", "last_active"
+                )
                 return
 
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1051,6 +1148,22 @@ class SessionDB:
             return False
 
     @staticmethod
+    def _table_has_column(
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+    ) -> bool:
+        try:
+            rows = conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+        except sqlite3.OperationalError:
+            return False
+        for row in rows:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            if name == column_name:
+                return True
+        return False
+
+    @staticmethod
     def _drop_fts_triggers(cursor: sqlite3.Cursor) -> None:
         for trigger in _FTS_TRIGGERS:
             try:
@@ -1059,12 +1172,64 @@ class SessionDB:
                 pass
 
     @staticmethod
-    def _fts_trigger_count(cursor: sqlite3.Cursor) -> int:
-        placeholders = ",".join("?" for _ in _FTS_TRIGGERS)
+    def _drop_fts_trigram_objects(cursor: sqlite3.Cursor) -> bool:
+        """Drop trigram FTS objects only. Returns true when anything existed."""
+        placeholders = ",".join("?" for _ in _FTS_TRIGRAM_TRIGGERS)
+        trigger_count = cursor.execute(
+            f"SELECT COUNT(*) FROM sqlite_master "
+            f"WHERE type = 'trigger' AND name IN ({placeholders})",
+            _FTS_TRIGRAM_TRIGGERS,
+        ).fetchone()[0]
+        table_count = cursor.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'messages_fts_trigram'"
+        ).fetchone()[0]
+        for trigger in _FTS_TRIGRAM_TRIGGERS:
+            try:
+                cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            except sqlite3.OperationalError:
+                pass
+        try:
+            cursor.execute("DROP TABLE IF EXISTS messages_fts_trigram")
+        except sqlite3.OperationalError as exc:
+            if not table_count or not SessionDB._is_fts5_unavailable_error(exc):
+                raise
+            # If this SQLite runtime cannot load the FTS5 module, dropping an
+            # existing virtual table can fail before SQLite reaches the shadow
+            # tables. Disabled mode still needs the heavyweight trigram schema
+            # gone, so use the same writable-schema escape hatch as the state.db
+            # repair path, scoped only to messages_fts_trigram* objects.
+            conn = cursor.connection
+            try:
+                conn.execute("PRAGMA writable_schema=ON")
+                conn.execute(
+                    "DELETE FROM sqlite_master "
+                    "WHERE name = 'messages_fts_trigram' "
+                    "OR name LIKE 'messages_fts_trigram_%' "
+                    "OR tbl_name = 'messages_fts_trigram'"
+                )
+                conn.execute("PRAGMA writable_schema=OFF")
+                conn.commit()
+                conn.execute("VACUUM")
+            finally:
+                try:
+                    conn.execute("PRAGMA writable_schema=OFF")
+                except sqlite3.OperationalError:
+                    pass
+        return bool(trigger_count or table_count)
+
+    @staticmethod
+    def _fts_trigger_count(
+        cursor: sqlite3.Cursor,
+        *,
+        include_trigram: bool = True,
+    ) -> int:
+        triggers = _FTS_TRIGGERS if include_trigram else _FTS_BASE_TRIGGERS
+        placeholders = ",".join("?" for _ in triggers)
         row = cursor.execute(
             f"SELECT COUNT(*) FROM sqlite_master "
             f"WHERE type = 'trigger' AND name IN ({placeholders})",
-            _FTS_TRIGGERS,
+            triggers,
         ).fetchone()
         return int(row[0] if not isinstance(row, sqlite3.Row) else row[0])
 
@@ -1342,6 +1507,181 @@ class SessionDB:
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
 
+    @staticmethod
+    def _backfill_session_last_active(cursor: sqlite3.Cursor) -> None:
+        """Populate sessions.last_active from message timestamps and compression chains."""
+        cursor.execute(
+            """
+            WITH RECURSIVE chain(root_id, cur_id) AS (
+                SELECT id, id FROM sessions
+                UNION ALL
+                SELECT c.root_id, child.id
+                FROM chain c
+                JOIN sessions parent ON parent.id = c.cur_id
+                JOIN sessions child ON child.parent_session_id = c.cur_id
+                WHERE parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+            ),
+            activity AS (
+                SELECT
+                    c.root_id AS id,
+                    MAX(COALESCE(
+                        (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = c.cur_id),
+                        s.started_at
+                    )) AS last_active
+                FROM chain c
+                JOIN sessions s ON s.id = c.cur_id
+                GROUP BY c.root_id
+            )
+            UPDATE sessions
+            SET last_active = activity.last_active
+            FROM activity
+            WHERE sessions.id = activity.id
+              AND (
+                  sessions.last_active IS NULL
+                  OR sessions.last_active != activity.last_active
+              )
+            """
+        )
+
+    @staticmethod
+    def _touch_session_last_active(
+        conn: sqlite3.Connection,
+        session_id: str,
+        timestamp: float,
+    ) -> None:
+        """Advance a session and its compression ancestors to *timestamp*."""
+        conn.execute(
+            """
+            UPDATE sessions
+            SET last_active = CASE
+                WHEN last_active IS NULL OR last_active < ? THEN ?
+                ELSE last_active
+            END
+            WHERE id = ?
+            """,
+            (timestamp, timestamp, session_id),
+        )
+        conn.execute(
+            """
+            WITH RECURSIVE ancestors(id) AS (
+                SELECT parent.id
+                FROM sessions child
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE child.id = ?
+                  AND parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+                UNION
+                SELECT parent.id
+                FROM ancestors a
+                JOIN sessions child ON child.id = a.id
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+            )
+            UPDATE sessions
+            SET last_active = CASE
+                WHEN last_active IS NULL OR last_active < ? THEN ?
+                ELSE last_active
+            END
+            WHERE id IN (SELECT id FROM ancestors)
+            """,
+            (session_id, timestamp, timestamp),
+        )
+
+    @staticmethod
+    def _refresh_session_last_active(
+        conn: sqlite3.Connection,
+        session_id: str,
+    ) -> None:
+        """Recompute exact last_active for a session and compression ancestors."""
+        conn.execute(
+            """
+            WITH RECURSIVE affected(id) AS (
+                SELECT ?
+                UNION
+                SELECT parent.id
+                FROM affected a
+                JOIN sessions child ON child.id = a.id
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+            ),
+            chain(root_id, cur_id) AS (
+                SELECT id, id FROM affected
+                UNION ALL
+                SELECT c.root_id, child.id
+                FROM chain c
+                JOIN sessions parent ON parent.id = c.cur_id
+                JOIN sessions child ON child.parent_session_id = c.cur_id
+                WHERE parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+            ),
+            activity AS (
+                SELECT
+                    c.root_id AS id,
+                    MAX(COALESCE(
+                        (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = c.cur_id),
+                        s.started_at
+                    )) AS last_active
+                FROM chain c
+                JOIN sessions s ON s.id = c.cur_id
+                GROUP BY c.root_id
+            )
+            UPDATE sessions
+            SET last_active = (SELECT activity.last_active FROM activity WHERE activity.id = sessions.id)
+            WHERE id IN (SELECT id FROM affected)
+            """,
+            (session_id,),
+        )
+
+    @staticmethod
+    def _compression_ancestor_ids(
+        conn: sqlite3.Connection,
+        session_ids: List[str],
+    ) -> List[str]:
+        """Return compression ancestors of the given sessions before mutation."""
+        ids = [sid for sid in session_ids if sid]
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"""
+            WITH RECURSIVE ancestors(id) AS (
+                SELECT parent.id
+                FROM sessions child
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE child.id IN ({placeholders})
+                  AND parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+                UNION
+                SELECT parent.id
+                FROM ancestors a
+                JOIN sessions child ON child.id = a.id
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE parent.end_reason = 'compression'
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
+                  AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
+                  AND COALESCE(child.source, '') != 'tool'
+            )
+            SELECT DISTINCT id FROM ancestors
+            """,
+            ids,
+        ).fetchall()
+        return [row["id"] if isinstance(row, sqlite3.Row) else row[0] for row in rows]
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1382,6 +1722,7 @@ class SessionDB:
         # Deferred indexes that reference the reconciler-added ``active``
         # column (idx_messages_session_active) — same ordering constraint.
         cursor.executescript(DEFERRED_INDEX_SQL)
+        cursor.executescript(LAST_ACTIVE_REPAIR_TRIGGER_SQL)
 
         # Heal NULL ``active`` rows unconditionally on every startup.
         # On real-world DBs the reconciler-added ``active`` column can lack
@@ -1402,6 +1743,12 @@ class SessionDB:
 
         fts5_available = self._sqlite_supports_fts5(cursor)
         fts_migrations_complete = True
+        if self._fts_trigram_disabled:
+            if self._drop_fts_trigram_objects(cursor):
+                logger.info(
+                    "Dropped disabled messages_fts_trigram index for %s",
+                    self.db_path,
+                )
         if not fts5_available:
             # Existing FTS triggers can still fire on messages INSERT/UPDATE
             # even though the current sqlite runtime cannot read the virtual
@@ -1416,6 +1763,9 @@ class SessionDB:
         cursor.execute("SELECT version FROM schema_version LIMIT 1")
         row = cursor.fetchone()
         if row is None:
+            self._execute_write(
+                lambda conn: self._backfill_session_last_active(conn.cursor())
+            )
             cursor.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
                 (SCHEMA_VERSION,),
@@ -1426,7 +1776,11 @@ class SessionDB:
             # backfills, index changes tied to a specific version step) stay
             # in a version-gated chain. Column additions are handled by
             # _reconcile_columns() above and no longer need entries here.
-            if current_version < 10 and SCHEMA_VERSION == 10:
+            if (
+                current_version < 10
+                and SCHEMA_VERSION == 10
+                and not self._fts_trigram_disabled
+            ):
                 # v10: trigram FTS5 table for CJK/substring search. The
                 # virtual table + triggers are created unconditionally via
                 # FTS_TRIGRAM_SQL below, but existing rows need a one-time
@@ -1463,7 +1817,12 @@ class SessionDB:
                 # FTS_TRIGRAM_SQL, then backfill every message row. Fixes #16751.
                 if fts5_available:
                     self._drop_fts_triggers(cursor)
-                    for _tbl in ("messages_fts", "messages_fts_trigram"):
+                    _fts_tables = ["messages_fts"]
+                    if not self._fts_trigram_disabled:
+                        _fts_tables.append("messages_fts_trigram")
+                    else:
+                        self._drop_fts_trigram_objects(cursor)
+                    for _tbl in _fts_tables:
                         try:
                             cursor.execute(f"DROP TABLE IF EXISTS {_tbl}")
                         except sqlite3.OperationalError as exc:
@@ -1494,18 +1853,20 @@ class SessionDB:
                                 "COALESCE(tool_calls, '') "
                                 "FROM messages"
                             )
-                        trigram_ok = self._ensure_fts_schema(
-                            cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
-                        )
-                        if trigram_ok:
-                            cursor.execute(
-                                "INSERT INTO messages_fts_trigram(rowid, content) "
-                                "SELECT id, "
-                                "COALESCE(content, '') || ' ' || "
-                                "COALESCE(tool_name, '') || ' ' || "
-                                "COALESCE(tool_calls, '') "
-                                "FROM messages"
+                        trigram_ok = False
+                        if not self._fts_trigram_disabled:
+                            trigram_ok = self._ensure_fts_schema(
+                                cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
                             )
+                            if trigram_ok:
+                                cursor.execute(
+                                    "INSERT INTO messages_fts_trigram(rowid, content) "
+                                    "SELECT id, "
+                                    "COALESCE(content, '') || ' ' || "
+                                    "COALESCE(tool_name, '') || ' ' || "
+                                    "COALESCE(tool_calls, '') "
+                                    "FROM messages"
+                                )
                         if not base_fts_ok:
                             fts_migrations_complete = False
                         # Track trigram availability for CJK LIKE fallback.
@@ -1553,6 +1914,10 @@ class SessionDB:
                     # means consumers fall back to sessions.json for those
                     # rows until the gateway rewrites them.
                     logger.debug("v18 gateway metadata backfill skipped: %s", exc)
+            if current_version < 20:
+                self._execute_write(
+                    lambda conn: self._backfill_session_last_active(conn.cursor())
+                )
             if current_version < SCHEMA_VERSION and fts_migrations_complete:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -1572,16 +1937,29 @@ class SessionDB:
             # FTS5 setup. Run the DDL even when the virtual table exists so
             # CREATE TRIGGER IF NOT EXISTS repairs trigger-only degradation from
             # an earlier no-FTS5 runtime.
-            triggers_need_repair = self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)
+            expected_triggers = len(
+                _FTS_BASE_TRIGGERS
+                if self._fts_trigram_disabled
+                else _FTS_TRIGGERS
+            )
+            triggers_need_repair = (
+                self._fts_trigger_count(
+                    cursor,
+                    include_trigram=not self._fts_trigram_disabled,
+                )
+                < expected_triggers
+            )
             self._fts_enabled = self._ensure_fts_schema(cursor, "messages_fts", FTS_SQL)
 
             # Trigram FTS5 for CJK/substring search. This is optional relative
             # to the main FTS table; if it cannot be created, CJK search falls
             # back to LIKE.
             if self._fts_enabled:
-                trigram_enabled = self._ensure_fts_schema(
-                    cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
-                )
+                trigram_enabled = False
+                if not self._fts_trigram_disabled:
+                    trigram_enabled = self._ensure_fts_schema(
+                        cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
+                    )
                 self._trigram_available = trigram_enabled
                 if triggers_need_repair:
                     self._rebuild_fts_indexes(
@@ -1629,12 +2007,14 @@ class SessionDB:
         no chat/thread to compare).
         """
         def _do(conn):
+            now = time.time()
             conn.execute(
                 """INSERT INTO sessions (
                    id, source, user_id, session_key, chat_id, chat_type, thread_id,
-                   model, model_config, system_prompt, parent_session_id, cwd, started_at
+                   model, model_config, system_prompt, parent_session_id, cwd, started_at,
+                   last_active
                 )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        model = COALESCE(sessions.model, excluded.model),
                        model_config = COALESCE(sessions.model_config, excluded.model_config),
@@ -1644,7 +2024,8 @@ class SessionDB:
                        chat_type = COALESCE(sessions.chat_type, excluded.chat_type),
                        thread_id = COALESCE(sessions.thread_id, excluded.thread_id),
                        parent_session_id = COALESCE(sessions.parent_session_id, excluded.parent_session_id),
-                       cwd = COALESCE(sessions.cwd, excluded.cwd)""",
+                       cwd = COALESCE(sessions.cwd, excluded.cwd),
+                       last_active = COALESCE(sessions.last_active, excluded.last_active)""",
                 (
                     session_id,
                     source,
@@ -1658,9 +2039,11 @@ class SessionDB:
                     system_prompt,
                     parent_session_id,
                     cwd,
-                    time.time(),
+                    now,
+                    now,
                 ),
             )
+            self._refresh_session_last_active(conn, session_id)
         self._execute_write(_do)
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
@@ -2021,20 +2404,38 @@ class SessionDB:
         intentionally need to re-end a closed session with a new reason.
         """
         def _do(conn):
-            conn.execute(
+            row = conn.execute(
+                "SELECT end_reason FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            previous_reason = row["end_reason"] if row is not None else None
+            result = conn.execute(
                 "UPDATE sessions SET ended_at = ?, end_reason = ? "
                 "WHERE id = ? AND ended_at IS NULL",
                 (time.time(), end_reason, session_id),
             )
+            if (
+                result.rowcount
+                and end_reason == "compression"
+                and previous_reason != "compression"
+            ):
+                self._refresh_session_last_active(conn, session_id)
         self._execute_write(_do)
 
     def reopen_session(self, session_id: str) -> None:
         """Clear ended_at/end_reason so a session can be resumed."""
         def _do(conn):
-            conn.execute(
+            row = conn.execute(
+                "SELECT end_reason FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            previous_reason = row["end_reason"] if row is not None else None
+            result = conn.execute(
                 "UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ?",
                 (session_id,),
             )
+            if result.rowcount and previous_reason == "compression":
+                self._refresh_session_last_active(conn, session_id)
         self._execute_write(_do)
 
     def update_session_cwd(
@@ -2957,17 +3358,27 @@ class SessionDB:
     _session_compact_cols_sql: Optional[str] = None
 
     @classmethod
-    def _compact_session_cols(cls) -> str:
+    def _compact_session_cols(cls, include_last_active: bool = True) -> str:
         """SELECT list for compact_rows: every ``sessions`` column declared in
         SCHEMA_SQL except the ``system_prompt`` blob, aliased with the ``s``
-        prefix used by list_sessions_rich/_get_session_rich_row queries."""
+        prefix used by list_sessions_rich/_get_session_rich_row queries.
+
+        Read-only legacy databases can predate ``sessions.last_active``. Exclude
+        that physical column there so the query-level fallback can provide the
+        same public ``last_active`` field without attempting a migration.
+        """
         if cls._session_compact_cols_sql is None:
             declared = cls._parse_schema_columns(SCHEMA_SQL)["sessions"]
             cls._session_compact_cols_sql = ", ".join(
                 f"s.{name}" for name in declared
                 if name not in cls._SESSION_COMPACT_EXCLUDED
             )
-        return cls._session_compact_cols_sql
+        if include_last_active:
+            return cls._session_compact_cols_sql
+        return ", ".join(
+            column for column in cls._session_compact_cols_sql.split(", ")
+            if column != "s.last_active"
+        )
 
     def distinct_session_cwds(self, include_archived: bool = False) -> List[Dict[str, Any]]:
         """Distinct non-empty session cwds with usage stats, for repo discovery.
@@ -3033,11 +3444,10 @@ class SessionDB:
 
         Pass ``order_by_last_active=True`` to sort by most-recent activity
         instead of original conversation start time. For compression chains,
-        the "most-recent activity" is taken from the live tip (not the root),
-        so an old conversation that was compressed and continued recently
-        surfaces in the correct slot. Ordering is computed at SQL level via
-        a recursive CTE that walks compression-continuation edges, so LIMIT
-        and OFFSET still apply efficiently.
+        the root row's denormalized ``last_active`` is kept in sync with the
+        live tip, so an old conversation that was compressed and continued
+        recently surfaces in the correct slot without walking every chain
+        before LIMIT.
 
         ``search_query`` matches case-insensitive substrings against each
         surfaced row's title and id (and, like ``id_query``, every title/id in
@@ -3092,6 +3502,15 @@ class SessionDB:
             where_clauses.append("s.archived = 0")
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        has_last_active = getattr(self, "_has_sessions_last_active", True)
+        fallback_last_active_select = """
+                    ,
+                    COALESCE(
+                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
+                        s.started_at
+                    ) AS last_active
+        """
+        last_active_select = "" if has_last_active else fallback_last_active_select
 
         # Optional session-id filter, pushed into SQL so callers (Desktop
         # session-id search) don't have to fetch every row and filter in
@@ -3103,7 +3522,9 @@ class SessionDB:
         # pass id_query=None.
         id_needle = (id_query or "").strip().lower()
         search_needle = (search_query or "").strip().lower()
-        if order_by_last_active:
+        if order_by_last_active and (not has_last_active or id_needle or search_needle):
+            # Legacy read-only DBs and filtered searches retain the recursive
+            # fallback; writable unfiltered recents use the indexed branch below.
             # Compute effective_last_active by walking each surfaced session's
             # compression-continuation chain forward in SQL and taking the MAX
             # timestamp across the chain. This lets us ORDER BY + LIMIT at SQL
@@ -3167,7 +3588,7 @@ class SessionDB:
                 outer_where = (
                     f"{where_sql} AND {combined}" if where_sql else f"WHERE {combined}"
                 )
-            _sel = self._compact_session_cols() if compact_rows else "s.*"
+            _sel = self._compact_session_cols(include_last_active=has_last_active) if compact_rows else "s.*"
             query = f"""
                 WITH RECURSIVE chain(root_id, cur_id) AS (
                     SELECT s.id, s.id FROM sessions s {where_sql}
@@ -3213,8 +3634,8 @@ class SessionDB:
             # WHERE params apply twice (CTE seed + outer select); the id filter
             # only applies to the outer select.
             params = params + params + id_params + [limit, offset]
-        else:
-            _sel = self._compact_session_cols() if compact_rows else "s.*"
+        elif order_by_last_active:
+            _sel = self._compact_session_cols(include_last_active=has_last_active) if compact_rows else "s.*"
             query = f"""
                 SELECT {_sel},
                     COALESCE(
@@ -3223,14 +3644,28 @@ class SessionDB:
                          WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
                          ORDER BY m.timestamp, m.id LIMIT 1),
                         ''
-                    ) AS _preview_raw,
-                    COALESCE(
-                        (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
-                        s.started_at
-                    ) AS last_active
+                    ) AS _preview_raw
                 FROM sessions s
                 {where_sql}
-                ORDER BY s.started_at DESC
+                ORDER BY s.last_active DESC, s.started_at DESC, s.id DESC
+                LIMIT ? OFFSET ?
+            """
+            params.extend([limit, offset])
+        else:
+            _sel = self._compact_session_cols(include_last_active=has_last_active) if compact_rows else "s.*"
+            query = f"""
+                SELECT {_sel},
+                    COALESCE(
+                        (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
+                         FROM messages m
+                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                         ORDER BY m.timestamp, m.id LIMIT 1),
+                        ''
+                    ) AS _preview_raw
+                    {last_active_select}
+                FROM sessions s
+                {where_sql}
+                ORDER BY s.started_at DESC, s.id DESC
                 LIMIT ? OFFSET ?
             """
             params.extend([limit, offset])
@@ -3361,7 +3796,16 @@ class SessionDB:
         Pass ``compact_rows=True`` to omit the ``system_prompt`` blob (see
         ``list_sessions_rich`` for details).
         """
-        _sel = self._compact_session_cols() if compact_rows else "s.*"
+        has_last_active = getattr(self, "_has_sessions_last_active", True)
+        _sel = self._compact_session_cols(include_last_active=has_last_active) if compact_rows else "s.*"
+        last_active_select = ""
+        if not has_last_active:
+            last_active_select = """
+                , COALESCE(
+                    (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
+                    s.started_at
+                ) AS last_active
+            """
         query = f"""
             SELECT {_sel},
                 COALESCE(
@@ -3370,11 +3814,8 @@ class SessionDB:
                      WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
                      ORDER BY m.timestamp, m.id LIMIT 1),
                     ''
-                ) AS _preview_raw,
-                COALESCE(
-                    (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
-                    s.started_at
-                ) AS last_active
+                ) AS _preview_raw
+                {last_active_select}
             FROM sessions s
             WHERE s.id = ?
         """
@@ -3543,6 +3984,7 @@ class SessionDB:
                     "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
                     (session_id,),
                 )
+            self._touch_session_last_active(conn, session_id, message_timestamp)
             return msg_id
 
         return self._execute_write(_do)
@@ -3626,6 +4068,7 @@ class SessionDB:
                 tool_calls_total += (
                     len(tool_calls) if isinstance(tool_calls, list) else 1
                 )
+            self._touch_session_last_active(conn, session_id, message_timestamp)
             now_ts = max(now_ts + 1e-6, message_timestamp + 1e-6)
         return inserted, tool_calls_total
 
@@ -3674,6 +4117,7 @@ class SessionDB:
                 "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
                 (total_messages, total_tool_calls, session_id),
             )
+            self._refresh_session_last_active(conn, session_id)
 
         self._execute_write(_do)
 
@@ -4086,6 +4530,7 @@ class SessionDB:
         session_id: str,
         include_ancestors: bool = False,
         include_inactive: bool = False,
+        tail_limit: int | None = None,
     ) -> List[Dict[str, Any]]:
         """
         Load messages in the OpenAI conversation format (role + content dicts).
@@ -4094,30 +4539,50 @@ class SessionDB:
         By default only active messages are returned. Pass
         ``include_inactive=True`` to load soft-deleted (rewound) rows
         as well. See :meth:`rewind_to_message`.
+        Pass ``tail_limit`` to load only the last N active rows from the final
+        lineage-combined ordering. The default full-history load is unchanged.
         """
         session_ids = [session_id]
         if include_ancestors:
             session_ids = self._session_lineage_root_to_tip(session_id)
+        if tail_limit is not None:
+            tail_limit = int(tail_limit)
+            if tail_limit <= 0:
+                return []
 
         active_clause = "" if include_inactive else " AND active = 1"
         with self._lock:
             placeholders = ",".join("?" for _ in session_ids)
-            rows = self._conn.execute(
-                "SELECT role, content, tool_call_id, tool_calls, tool_name, "
+            select_cols = (
+                "role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp "
-                f"FROM messages WHERE session_id IN ({placeholders})"
-                # Order by AUTOINCREMENT id (true insertion order), NOT timestamp:
-                # append_message stamps rows with time.time(), which is not
-                # monotonic (WSL2, NTP steps, VM/laptop sleep resume). A later
-                # row can carry an earlier timestamp than its predecessor, and
-                # ORDER BY timestamp would then sort an assistant tool_calls row
-                # after its tool response, breaking tool-call/response adjacency
-                # and triggering an HTTP 400 on replay. This matches get_messages
-                # — see c03acca50 for the original fix.
-                f"{active_clause} ORDER BY id",
-                tuple(session_ids),
-            ).fetchall()
+                "codex_reasoning_items, codex_message_items, platform_message_id, "
+                "observed, timestamp"
+            )
+            # Order by AUTOINCREMENT id (true insertion order), NOT timestamp:
+            # append_message stamps rows with time.time(), which is not
+            # monotonic (WSL2, NTP steps, VM/laptop sleep resume). A later
+            # row can carry an earlier timestamp than its predecessor, and
+            # ORDER BY timestamp would then sort an assistant tool_calls row
+            # after its tool response, breaking tool-call/response adjacency
+            # and triggering an HTTP 400 on replay. This matches get_messages
+            # — see c03acca50 for the original fix.
+            if tail_limit is None:
+                rows = self._conn.execute(
+                    f"SELECT {select_cols} "
+                    f"FROM messages WHERE session_id IN ({placeholders})"
+                    f"{active_clause} ORDER BY id",
+                    tuple(session_ids),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    f"SELECT {select_cols} FROM ("
+                    f"SELECT {select_cols}, id "
+                    f"FROM messages WHERE session_id IN ({placeholders})"
+                    f"{active_clause} ORDER BY id DESC LIMIT ?"
+                    ") ORDER BY id",
+                    (*session_ids, tail_limit),
+                ).fetchall()
 
         messages = []
         for row in rows:
@@ -5168,7 +5633,11 @@ class SessionDB:
             )
             if cursor.fetchone()[0] == 0:
                 return False
+            affected_ancestors = set(self._compression_ancestor_ids(conn, [session_id]))
             removed_delegate_ids.extend(_delete_delegate_children(conn, [session_id]))
+            affected_ancestors.update(
+                self._compression_ancestor_ids(conn, removed_delegate_ids)
+            )
             # Orphan remaining child sessions (branches, etc.) so FK is satisfied.
             conn.execute(
                 "UPDATE sessions SET parent_session_id = NULL "
@@ -5177,6 +5646,8 @@ class SessionDB:
             )
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            for ancestor_id in affected_ancestors:
+                self._refresh_session_last_active(conn, ancestor_id)
             return True
 
         deleted = self._execute_write(_do)
@@ -5206,6 +5677,7 @@ class SessionDB:
         flushed. Returns True if the session was deleted.
         """
         def _do(conn):
+            affected_ancestors = set(self._compression_ancestor_ids(conn, [session_id]))
             cursor = conn.execute(
                 """
                 DELETE FROM sessions
@@ -5221,7 +5693,11 @@ class SessionDB:
                 """,
                 (session_id,),
             )
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+            if deleted:
+                for ancestor_id in affected_ancestors:
+                    self._refresh_session_last_active(conn, ancestor_id)
+            return deleted
 
         deleted = self._execute_write(_do)
         if deleted:
@@ -5282,7 +5758,11 @@ class SessionDB:
                 return 0
 
             existing_placeholders = ",".join("?" * len(existing))
+            affected_ancestors = set(self._compression_ancestor_ids(conn, existing))
             removed_delegate_ids.extend(_delete_delegate_children(conn, existing))
+            affected_ancestors.update(
+                self._compression_ancestor_ids(conn, removed_delegate_ids)
+            )
             # Orphan remaining children whose parent is in the kill list so the
             # FK constraint stays satisfied. Pin children whose parent
             # is itself in the kill list rather than NULL-ing parents
@@ -5301,6 +5781,8 @@ class SessionDB:
                 f"DELETE FROM sessions WHERE id IN ({existing_placeholders})",
                 existing,
             )
+            for ancestor_id in affected_ancestors:
+                self._refresh_session_last_active(conn, ancestor_id)
             removed_ids.extend(existing)
             return len(existing)
 
@@ -5379,6 +5861,9 @@ class SessionDB:
             if not session_ids:
                 return 0
 
+            affected_ancestors = set(
+                self._compression_ancestor_ids(conn, list(session_ids))
+            )
             placeholders = ",".join("?" * len(session_ids))
             conn.execute(
                 f"UPDATE sessions SET parent_session_id = NULL "
@@ -5396,6 +5881,8 @@ class SessionDB:
                 )
                 conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
                 removed_ids.append(sid)
+            for ancestor_id in affected_ancestors:
+                self._refresh_session_last_active(conn, ancestor_id)
             return len(session_ids)
 
         count = self._execute_write(_do)
@@ -5632,6 +6119,9 @@ class SessionDB:
 
             # Orphan any sessions whose parent is about to be deleted
             placeholders = ",".join("?" * len(session_ids))
+            affected_ancestors = set(
+                self._compression_ancestor_ids(conn, list(session_ids))
+            )
             conn.execute(
                 f"UPDATE sessions SET parent_session_id = NULL "
                 f"WHERE parent_session_id IN ({placeholders})",
@@ -5642,6 +6132,8 @@ class SessionDB:
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
                 conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
                 removed_ids.append(sid)
+            for ancestor_id in affected_ancestors:
+                self._refresh_session_last_active(conn, ancestor_id)
             return len(session_ids)
 
         count = self._execute_write(_do)

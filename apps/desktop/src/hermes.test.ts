@@ -7,6 +7,7 @@ import {
   getHermesConfig,
   getHermesConfigDefaults,
   getProfiles,
+  getProfileSessionsSnapshot,
   getSessionMessages,
   getStatus,
   listAllProfileSessions,
@@ -59,6 +60,19 @@ describe('Hermes REST session helpers', () => {
         path:
           '/api/profiles/sessions?limit=50&offset=0&min_messages=1&archived=exclude&order=recent&profile=all' +
           '&exclude_sources=subagent%2Ctool%2Csmoke-test%2Ctelegram%2Cdiscord%2Cslack%2Cmattermost%2Cmatrix%2Csignal%2Cwhatsapp%2Cbluebubbles%2Chomeassistant%2Cemail%2Csms%2Cwebhook%2Cweixin%2Cwecom%2Cqqbot%2Cyuanbao%2Cdingtalk%2Cfeishu',
+        timeoutMs: 60_000
+      })
+    )
+  })
+
+  it('uses one bounded all-profile snapshot request for sidebar slices', async () => {
+    await getProfileSessionsSnapshot(50, 20, 30, 'worker', ['cron', 'telegram'], ['cron', 'cli'])
+
+    expect(api).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path:
+          '/api/profiles/sessions/snapshot?recents_limit=50&cron_limit=20&messaging_limit=30&profile=worker' +
+          '&recents_exclude_sources=cron%2Ctelegram&messaging_exclude_sources=cron%2Ccli',
         timeoutMs: 60_000
       })
     )

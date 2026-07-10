@@ -77,8 +77,8 @@ def _build_codex_gpt5_autoraise_notice(autoraise: Dict[str, Any]) -> str:
     include the exact opt-back-out command.
     """
     model = str(autoraise.get("model") or "gpt-5.4/5.5").strip().lower().rsplit("/", 1)[-1]
-    # gpt-5.3-codex-spark has a native 128K window; the gpt-5.4/5.5 family is
-    # capped at 272K by the Codex OAuth backend.
+    # gpt-5.3-codex-spark has a native 128K window; the gpt-5.4/5.5/5.6 family
+    # is capped at 272K by the Codex OAuth backend.
     cap = "128K" if model.startswith("gpt-5.3-codex-spark") else "272K"
     from_pct = int(round(autoraise["from"] * 100))
     to_pct = int(round(autoraise["to"] * 100))
@@ -1766,6 +1766,11 @@ def init_agent(
 
     if _selected_engine is not None:
         agent.context_compressor = _selected_engine
+        # External engines own compaction policy: the host compression
+        # threshold (including the Codex gpt-5.x autoraise above) only
+        # configures the built-in ContextCompressor and never reaches the
+        # plugin, so an autoraise notice here would describe an inactive change.
+        agent._compression_threshold_autoraised = None
         # Resolve context_length for plugin engines — mirrors switch_model() path
         from agent.model_metadata import get_model_context_length
         _plugin_ctx_len = get_model_context_length(

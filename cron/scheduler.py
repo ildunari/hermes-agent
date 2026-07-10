@@ -168,10 +168,6 @@ def _cron_job_needs_memory_provider(job: dict) -> bool:
     return "mem0" in haystack or "memory harvest" in haystack
 
 
-class CronPromptInjectionBlocked(Exception):
-    """Raised by _build_job_prompt when the fully-assembled prompt trips the injection scanner."""
-
-
 def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
     """Toolsets disabled for a cron-spawned agent.
 

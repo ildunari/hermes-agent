@@ -1133,6 +1133,86 @@ class TestWebServerEndpoints:
         resp = self.client.patch("/api/sessions/no-fields", json={})
         assert resp.status_code == 400
 
+    def test_profiles_sessions_uses_database_target_enumerator(self, monkeypatch):
+        """All-profile reads discover DB homes without heavyweight metadata."""
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+        default_db = SessionDB()
+        worker_db = SessionDB(db_path=worker_home / "state.db")
+        try:
+            default_db.create_session(session_id="default-enumerator", source="cli")
+            default_db.append_message("default-enumerator", role="user", content="default")
+            worker_db.create_session(session_id="worker-enumerator", source="cli")
+            worker_db.append_message("worker-enumerator", role="user", content="worker")
+        finally:
+            default_db.close()
+            worker_db.close()
+
+        monkeypatch.setattr(
+            profiles_mod,
+            "list_profiles",
+            lambda: pytest.fail("session aggregation must not load full profile metadata"),
+        )
+        response = self.client.get("/api/profiles/sessions?limit=20&min_messages=1")
+
+        assert response.status_code == 200
+        rows = {row["id"]: row["profile"] for row in response.json()["sessions"]}
+        assert rows["default-enumerator"] == "default"
+        assert rows["worker-enumerator"] == "worker"
+
+    def test_profiles_sessions_snapshot_opens_each_db_once(self, monkeypatch):
+        """The sidebar snapshot shares one read-only DB open across its slices."""
+        import hermes_state
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+        default_db = SessionDB()
+        worker_db = SessionDB(db_path=worker_home / "state.db")
+        try:
+            for db, prefix in ((default_db, "default"), (worker_db, "worker")):
+                for source in ("cli", "cron", "telegram"):
+                    session_id = f"{prefix}-{source}-snapshot"
+                    db.create_session(session_id=session_id, source=source)
+                    db.append_message(session_id, role="user", content=source)
+        finally:
+            default_db.close()
+            worker_db.close()
+
+        real_session_db = hermes_state.SessionDB
+        opens = []
+
+        def counted_session_db(*args, **kwargs):
+            if kwargs.get("read_only"):
+                opens.append(kwargs.get("db_path"))
+            return real_session_db(*args, **kwargs)
+
+        monkeypatch.setattr(hermes_state, "SessionDB", counted_session_db)
+        response = self.client.get(
+            "/api/profiles/sessions/snapshot?recents_limit=20&cron_limit=20&messaging_limit=20"
+            "&recents_exclude_sources=cron%2Ctelegram&messaging_exclude_sources=cron%2Ccli"
+        )
+
+        assert response.status_code == 200
+        snapshot = response.json()
+        assert len(opens) == 2
+        assert {row["id"] for row in snapshot["recents"]["sessions"]} == {
+            "default-cli-snapshot", "worker-cli-snapshot"
+        }
+        assert {row["id"] for row in snapshot["cron"]["sessions"]} == {
+            "default-cron-snapshot", "worker-cron-snapshot"
+        }
+        assert {row["id"] for row in snapshot["messaging"]["sessions"]} == {
+            "default-telegram-snapshot", "worker-telegram-snapshot"
+        }
+        for slice_ in snapshot.values():
+            assert slice_["total"] == 2
+            assert slice_["errors"] == []
+
     def test_profiles_sessions_tags_default_profile(self):
         """The cross-profile aggregator returns the default profile's rows
         tagged profile="default" (single-profile parity with /api/sessions)."""
@@ -1543,19 +1623,28 @@ class TestWebServerEndpoints:
         assert resp.json() == {"available": False, "voices": []}
 
     def test_speak_text_returns_base64_data_url(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+        import tools.tts_text_formatter as tts_text_formatter
         import tools.tts_tool as tts_tool
 
         audio_file = tmp_path / "speech.mp3"
         audio_file.write_bytes(b"ID3fake-audio-bytes")
+        seen = {}
 
         def fake_tts(text):
+            seen["text"] = text
             return json.dumps({
                 "success": True,
                 "file_path": str(audio_file),
                 "provider": "test",
             })
 
+        def formatter_must_not_run(*_args, **_kwargs):
+            raise AssertionError("disabled spoken formatter must not be called")
+
         monkeypatch.setattr(tts_tool, "text_to_speech_tool", fake_tts)
+        monkeypatch.setattr(tts_text_formatter, "prepare_spoken_text", formatter_must_not_run)
+        monkeypatch.setattr(web_server, "load_config", lambda: {"tts": {"spoken_formatter": {"enabled": False}}})
 
         resp = self.client.post("/api/audio/speak", json={"text": "hello there"})
         assert resp.status_code == 200
@@ -1564,8 +1653,53 @@ class TestWebServerEndpoints:
         assert body["mime_type"] == "audio/mpeg"
         assert body["data_url"].startswith("data:audio/mpeg;base64,")
         assert body["provider"] == "test"
+        assert seen["text"] == "hello there"
         # The handler streams the bytes back and removes the temp file.
         assert not audio_file.exists()
+
+    def test_speak_text_uses_spoken_formatter_only_when_enabled(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+        import tools.tts_text_formatter as tts_text_formatter
+        import tools.tts_tool as tts_tool
+
+        audio_file = tmp_path / "speech.wav"
+        audio_file.write_bytes(b"RIFFfake-audio-bytes")
+        seen = {}
+
+        def fake_formatter(text, **kwargs):
+            seen["formatter"] = {"text": text, **kwargs}
+            return "formatted for speech"
+
+        def fake_tts(text):
+            seen["tts"] = text
+            return json.dumps({
+                "success": True,
+                "file_path": str(audio_file),
+                "provider": "test",
+            })
+
+        monkeypatch.setattr(
+            web_server,
+            "load_config",
+            lambda: {"tts": {"spoken_formatter": {"enabled": True, "timeout": "8.5"}}},
+        )
+        monkeypatch.setattr(tts_text_formatter, "prepare_spoken_text", fake_formatter)
+        monkeypatch.setattr(tts_tool, "text_to_speech_tool", fake_tts)
+
+        resp = self.client.post(
+            "/api/audio/speak",
+            json={"text": "raw markdown", "source": "read-aloud", "rewrite": "auto"},
+        )
+
+        assert resp.status_code == 200
+        assert seen["formatter"] == {
+            "text": "raw markdown",
+            "source": "read-aloud",
+            "rewrite": "auto",
+            "timeout": 8.5,
+            "model_enabled": True,
+        }
+        assert seen["tts"] == "formatted for speech"
 
     def test_speak_text_requires_nonempty_text(self):
         resp = self.client.post("/api/audio/speak", json={"text": "   "})

@@ -203,6 +203,13 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding')
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 app.commandLine.appendSwitch('disable-background-timer-throttling')
 
+// Read-aloud synthesizes audio asynchronously after the user clicks its menu
+// action. Chromium's transient user activation can expire before the returned
+// data URL reaches HTMLAudioElement.play(), incorrectly treating that playback
+// as autoplay. Desktop is the trusted local shell, so permit its own audio UI
+// to complete that user-initiated flow without a second gesture.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+
 const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 
 // Build-time install stamp -- the git ref this .exe was built against.
