@@ -46,7 +46,12 @@ def _validate_policy(section: dict[str, Any]) -> None:
     if "authoritative" in section and not isinstance(section["authoritative"], bool):
         raise ValueError("authoritative must be a boolean")
 
-    for name in ("hidden_providers", "hide_providers"):
+    for name in (
+        "hidden_providers",
+        "hide_providers",
+        "pinned_providers",
+        "show_providers",
+    ):
         if name in section:
             _validate_string_list_field(name, section[name])
 

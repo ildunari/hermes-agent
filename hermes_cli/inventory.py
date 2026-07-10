@@ -53,6 +53,7 @@ class ConfigContext:
     user_providers: dict
     custom_providers: list
     hidden_providers: tuple[str, ...] = ()
+    pinned_providers: tuple[str, ...] = ()
     visible_models: dict[str, tuple[str, ...]] | None = None
     hidden_models: dict[str, tuple[str, ...]] | None = None
     provider_labels: dict[str, str] | None = None
@@ -107,18 +108,21 @@ def load_picker_context() -> ConfigContext:
             load_hidden_provider_policy,
             load_model_label_policy,
             load_model_picker_policy,
+            load_pinned_provider_policy,
             load_provider_label_policy,
             load_visible_model_policy,
         )
 
         policy = load_model_picker_policy(cfg)
         hidden = load_hidden_provider_policy(cfg, policy=policy)
+        pinned = load_pinned_provider_policy(cfg, policy=policy)
         visible = load_visible_model_policy(cfg, policy=policy)
         hidden_models = load_hidden_model_policy(cfg, policy=policy)
         provider_labels = load_provider_label_policy(cfg, policy=policy)
         model_labels = load_model_label_policy(cfg, policy=policy)
     except Exception:
         hidden = ()
+        pinned = ()
         visible = {}
         hidden_models = {}
         provider_labels = {}
@@ -130,6 +134,7 @@ def load_picker_context() -> ConfigContext:
         user_providers=raw if isinstance(raw, dict) else {},
         custom_providers=get_compatible_custom_providers(cfg),
         hidden_providers=hidden,
+        pinned_providers=pinned,
         visible_models=visible,
         hidden_models=hidden_models,
         provider_labels=provider_labels,
@@ -219,6 +224,8 @@ def build_models_payload(
 
     if explicit_only:
         rows = _filter_explicit_provider_rows(rows, ctx)
+    if ctx.pinned_providers:
+        rows = _append_pinned_provider_rows(rows, ctx.pinned_providers, ctx)
 
     # --- Deduplicate: remove models from aggregators that overlap with
     # user-defined providers.  When a local proxy (e.g. litellm-proxy)
@@ -354,6 +361,37 @@ def _append_unconfigured_rows(rows: list[dict], ctx: ConfigContext) -> list[dict
             }
         )
     return extras
+
+
+def _append_pinned_provider_rows(
+    rows: list[dict], pinned: tuple[str, ...], ctx: ConfigContext
+) -> list[dict]:
+    """Add display-only canonical rows requested by the shared picker policy."""
+    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_LABELS, _PROVIDER_MODELS
+
+    out = list(rows)
+    seen = {str(row.get("slug", "")).lower() for row in out}
+    canonical = {entry.slug.lower(): entry for entry in CANONICAL_PROVIDERS}
+    current = (ctx.current_provider or "").lower()
+    for raw_slug in pinned:
+        slug = str(raw_slug or "").strip().lower()
+        if not slug or slug in seen or slug not in canonical:
+            continue
+        entry = canonical[slug]
+        models = list(_PROVIDER_MODELS.get(slug, ()))
+        out.append(
+            {
+                "slug": entry.slug,
+                "name": _PROVIDER_LABELS.get(entry.slug, entry.label),
+                "is_current": slug == current,
+                "is_user_defined": False,
+                "models": models,
+                "total_models": len(models),
+                "source": "shared-picker-policy",
+            }
+        )
+        seen.add(slug)
+    return out
 
 
 def _expand_hidden_provider_slugs(hidden: tuple[str, ...]) -> set[str]:

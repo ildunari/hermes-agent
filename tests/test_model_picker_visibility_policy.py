@@ -160,6 +160,35 @@ def test_gateway_picker_uses_one_policy_snapshot_for_models_and_labels(monkeypat
     ]
 
 
+def test_shared_policy_can_pin_unconfigured_providers_in_explicit_picker(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.list_authenticated_providers",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr("hermes_cli.inventory._moa_provider_row", lambda _current="": None)
+
+    payload = build_models_payload(
+        ConfigContext(
+            current_provider="",
+            current_model="",
+            current_base_url="",
+            user_providers={},
+            custom_providers=[],
+            pinned_providers=("deepseek", "zai"),
+            hidden_models={
+                "deepseek": ("deepseek-chat", "deepseek-reasoner"),
+                "zai": ("glm-5.1", "glm-5", "glm-5-turbo", "glm-4.7", "glm-4.5", "glm-4.5-flash"),
+            },
+        ),
+        explicit_only=True,
+    )
+    by_slug = {row["slug"]: row for row in payload["providers"]}
+
+    assert by_slug["deepseek"]["models"] == ["deepseek-v4-pro", "deepseek-v4-flash"]
+    assert by_slug["zai"]["models"] == ["glm-5.2", "glm-5v-turbo"]
+    assert by_slug["deepseek"]["source"] == "shared-picker-policy"
+
+
 def test_explicit_only_keeps_configured_vibeproxy_and_moa_presets(monkeypatch):
     """Desktop chat pickers use explicit_only=True.
 

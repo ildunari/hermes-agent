@@ -119,6 +119,23 @@ def load_hidden_provider_policy(
     return string_list(section.get("hidden_providers") or section.get("hide_providers"))
 
 
+def load_pinned_provider_policy(
+    config: dict | None = None, *, policy: dict | None = None
+) -> tuple[str, ...]:
+    """Read providers that remain visible without profile-local credentials."""
+    if config is None and policy is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            config = {}
+    from hermes_cli.model_picker_policy import string_list
+
+    section = policy if policy is not None else load_model_picker_policy(config)
+    return string_list(section.get("pinned_providers") or section.get("show_providers"))
+
+
 def load_visible_model_policy(
     config: dict | None = None, *, policy: dict | None = None
 ) -> dict[str, tuple[str, ...]]:
