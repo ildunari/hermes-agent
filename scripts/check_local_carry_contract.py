@@ -38,6 +38,7 @@ CHECKS = (
             "3A22F53A48A189F4A8766CACE00192860CC37F8F",
             "HERMES_OP_SHIM",
             "HERMES_SIGNING_PASSWORD_SERVICE",
+            "serviceAccountToken",
             "set-key-partition-list",
             "apple-tool:,apple:,codesign:",
             "refusing to produce an ad-hoc local build",
