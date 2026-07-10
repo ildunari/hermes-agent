@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from tools.vision_tools import (
     _detect_video_mime_type,
     _prepare_video_for_analysis,
+    _video_analysis_limits,
     _video_to_base64_data_url,
     _handle_video_analyze,
-    _MAX_VIDEO_BASE64_BYTES,
     video_analyze_tool,
     VIDEO_ANALYZE_SCHEMA,
 )
@@ -37,17 +37,17 @@ class TestDetectVideoMimeType:
     def test_mov(self, tmp_path):
         p = tmp_path / "clip.mov"
         p.write_bytes(b"\x00" * 10)
-        assert _detect_video_mime_type(p) == "video/mov"
+        assert _detect_video_mime_type(p) == "video/quicktime"
 
-    def test_avi_fallback_mp4(self, tmp_path):
+    def test_avi_mime(self, tmp_path):
         p = tmp_path / "clip.avi"
         p.write_bytes(b"\x00" * 10)
-        assert _detect_video_mime_type(p) == "video/mp4"
+        assert _detect_video_mime_type(p) == "video/x-msvideo"
 
-    def test_mkv_fallback_mp4(self, tmp_path):
+    def test_mkv_mime(self, tmp_path):
         p = tmp_path / "clip.mkv"
         p.write_bytes(b"\x00" * 10)
-        assert _detect_video_mime_type(p) == "video/mp4"
+        assert _detect_video_mime_type(p) == "video/x-matroska"
 
     def test_mpeg(self, tmp_path):
         p = tmp_path / "clip.mpeg"
@@ -166,6 +166,23 @@ class TestHandleVideoAnalyze:
             assert args[2] == "google/gemini-flash"
 
 
+class TestVideoAnalysisLimits:
+    def test_non_finite_values_fall_back_to_safe_defaults(self):
+        config = {
+            "video_analysis": {
+                "max_input_mb": float("nan"),
+                "compression_target_mb": float("inf"),
+                "max_download_mb": float("-inf"),
+            }
+        }
+        with patch("hermes_cli.config.load_config", return_value=config):
+            assert _video_analysis_limits() == (
+                100 * 1024 * 1024,
+                96 * 1024 * 1024,
+                2 * 1024 * 1024 * 1024,
+            )
+
+
 # ---------------------------------------------------------------------------
 # video_analyze_tool — integration-style tests with mocked LLM
 # ---------------------------------------------------------------------------
@@ -173,6 +190,21 @@ class TestHandleVideoAnalyze:
 
 class TestVideoAnalyzeTool:
     """Core video analysis function tests."""
+
+    def setup_method(self):
+        self._upload_patcher = patch(
+            "tools.vision_tools._upload_video_to_gemini",
+            new=AsyncMock(return_value=("https://files.example/video", "files/test-video")),
+        )
+        self._delete_patcher = patch(
+            "tools.vision_tools._delete_gemini_file", new=AsyncMock()
+        )
+        self.mock_upload = self._upload_patcher.start()
+        self.mock_delete = self._delete_patcher.start()
+
+    def teardown_method(self):
+        self._delete_patcher.stop()
+        self._upload_patcher.stop()
 
     def _run(self, coro):
         return asyncio.get_event_loop().run_until_complete(coro)
@@ -307,20 +339,21 @@ class TestVideoAnalyzeTool:
         assert data["success"] is False
         assert "unsupported video format" in data["analysis"].lower()
 
-    def test_video_too_large(self, tmp_path, monkeypatch):
-        """Video exceeding max size is rejected."""
-        video = tmp_path / "huge.mp4"
-        # Don't actually write 50MB — mock the stat
+    def test_video_uses_files_api_without_base64_allocation(self, tmp_path):
+        video = tmp_path / "large-enough-to-matter.mp4"
         video.write_bytes(b"\x00" * 100)
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "OK"
 
-        # Patch the base64 encoding to return something huge
-        with patch("tools.vision_tools._video_to_base64_data_url") as mock_encode:
-            mock_encode.return_value = "data:video/mp4;base64," + "A" * (_MAX_VIDEO_BASE64_BYTES + 1)
+        with patch("tools.vision_tools._video_to_base64_data_url") as inline_encode, \
+             patch("tools.vision_tools.async_call_llm", new_callable=AsyncMock, return_value=mock_response), \
+             patch("tools.vision_tools.extract_content_or_reasoning", return_value="OK"):
             result = self._run(video_analyze_tool(str(video), "What?"))
 
-        data = json.loads(result)
-        assert data["success"] is False
-        assert "too large" in data["analysis"].lower()
+        assert json.loads(result)["success"] is True
+        inline_encode.assert_not_called()
+        self.mock_upload.assert_awaited_once()
 
     def test_interrupt_check(self, tmp_path):
         """Tool respects interrupt flag."""
@@ -373,7 +406,7 @@ class TestVideoAnalyzeTool:
         assert data["success"] is True
 
     def test_api_message_format(self, tmp_path):
-        """Verify the message sent to LLM uses video_url content type."""
+        """Verify Gemini Files references are sent without inline base64 copies."""
         video = tmp_path / "test.mp4"
         video.write_bytes(b"\x00" * 100)
 
@@ -395,9 +428,35 @@ class TestVideoAnalyzeTool:
         content = messages[0]["content"]
         assert len(content) == 2
         assert content[0]["type"] == "text"
-        assert content[1]["type"] == "video_url"
-        assert "video_url" in content[1]
-        assert content[1]["video_url"]["url"].startswith("data:video/mp4;base64,")
+        assert content[1]["type"] == "video_file"
+        assert content[1]["video_file"] == {
+            "uri": "https://files.example/video",
+            "mime_type": "video/mp4",
+        }
+        self.mock_upload.assert_awaited_once_with(video, "video/mp4")
+        self.mock_delete.assert_awaited_once_with("files/test-video")
+
+
+class TestVideoAuxiliaryRouting:
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_rejects_non_gemini_provider_before_dispatch(self):
+        from agent.auxiliary_client import async_call_llm
+
+        with patch("agent.auxiliary_client._get_cached_client") as get_client:
+            try:
+                self._run(async_call_llm(
+                    task="video",
+                    provider="xai-oauth",
+                    model="grok-4.5",
+                    messages=[{"role": "user", "content": "video"}],
+                ))
+            except RuntimeError as exc:
+                assert "requires auxiliary.video.provider: gemini" in str(exc)
+            else:
+                raise AssertionError("xAI video route should have been rejected")
+        get_client.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

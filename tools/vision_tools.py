@@ -34,6 +34,7 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -1584,9 +1585,9 @@ registry.register(
 _VIDEO_MIME_TYPES = {
     ".mp4": "video/mp4",
     ".webm": "video/webm",
-    ".mov": "video/mov",
-    ".avi": "video/mp4",
-    ".mkv": "video/mp4",
+    ".mov": "video/quicktime",
+    ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska",
     ".mpeg": "video/mpeg",
     ".mpg": "video/mpeg",
 }
@@ -1619,7 +1620,17 @@ def _video_analysis_limits() -> tuple[int, int, int]:
     except Exception:
         pass
 
-    max_bytes = int(max(1.0, min(max_mb, 1024.0)) * 1024 * 1024)
+    defaults = (
+        _DEFAULT_MAX_VIDEO_INPUT_BYTES / mib,
+        _DEFAULT_VIDEO_COMPRESSION_TARGET_BYTES / mib,
+        _DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES / mib,
+    )
+    values = []
+    for value, fallback in zip((max_mb, target_mb, download_mb), defaults):
+        values.append(value if math.isfinite(value) and value > 0 else fallback)
+    max_mb, target_mb, download_mb = values
+
+    max_bytes = int(min(max_mb, 1024.0) * 1024 * 1024)
     target_bytes = int(max(1.0, min(target_mb, max_mb)) * 1024 * 1024)
     if target_bytes >= max_bytes:
         target_bytes = max(1, int(max_bytes * 0.96))
@@ -1639,7 +1650,7 @@ def _run_video_command(command: list[str], *, timeout: float = 1800.0) -> subpro
 
 
 def _probe_video_budget(source: Path) -> tuple[float, int]:
-    """Return duration and the summed declared audio bitrate."""
+    """Return duration and audio-stream count for a high-quality AAC budget."""
     probe = _run_video_command([
         "ffprobe", "-v", "error", "-show_entries",
         "format=duration:stream=codec_type,bit_rate", "-of", "json", str(source),
@@ -1649,34 +1660,25 @@ def _probe_video_budget(source: Path) -> tuple[float, int]:
     if duration <= 0:
         raise ValueError("Video duration is missing or zero; cannot calculate a safe compression budget")
     audio_streams = [s for s in payload.get("streams", []) if s.get("codec_type") == "audio"]
-    audio_bitrate = 0
-    for stream in audio_streams:
-        try:
-            audio_bitrate += max(0, int(stream.get("bit_rate") or 0))
-        except (TypeError, ValueError):
-            pass
-    # Reserve a high-quality allowance when the container does not declare it.
-    if audio_streams and not audio_bitrate:
-        audio_bitrate = 256_000 * len(audio_streams)
-    return duration, audio_bitrate
+    return duration, len(audio_streams)
 
 
-def _video_encode_base(source: Path, *, copy_audio: bool = True) -> list[str]:
-    audio_args = ["-c:a", "copy"] if copy_audio else ["-c:a", "aac", "-b:a", "256k"]
+def _video_encode_base(source: Path) -> list[str]:
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
         "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0", "-map_chapters", "0",
         "-c:v", "libx264", "-preset", "slow", "-pix_fmt", "yuv420p",
-        *audio_args, "-movflags", "+faststart",
+        "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart",
     ]
 
 
 def _compress_video_for_analysis(source: Path, target_bytes: int) -> Path:
     """Create a high-quality MP4 derivative without modifying ``source``.
 
-    A visually near-lossless CRF 18 encode is attempted first.  Only when that
-    still exceeds the target do we use two-pass size-constrained encoding.
-    Resolution, frame rate, chapters, metadata, and all audio tracks are kept.
+    Two-pass H.264 spends the available size budget efficiently while bounding
+    output growth. Resolution, frame rate, chapters, metadata, and all audio
+    tracks are kept; audio is normalized to high-quality 256 kbps AAC so source
+    codecs such as PCM/Opus cannot make the MP4 mux or size budget fail.
     """
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         raise RuntimeError("ffmpeg and ffprobe are required to compress videos over the analysis limit")
@@ -1686,20 +1688,8 @@ def _compress_video_for_analysis(source: Path, target_bytes: int) -> Path:
     output = output_dir / f"analysis_{uuid.uuid4().hex}.mp4"
     passlog = Path(tempfile.gettempdir()) / f"hermes-video-{uuid.uuid4().hex}"
     try:
-        try:
-            _run_video_command(_video_encode_base(source) + ["-crf", "18", str(output)])
-        except subprocess.CalledProcessError:
-            # Containers such as MKV/WebM may carry audio codecs MP4 cannot
-            # copy. Preserve audio content with a high-quality AAC fallback.
-            output.unlink(missing_ok=True)
-            _run_video_command(
-                _video_encode_base(source, copy_audio=False) + ["-crf", "18", str(output)]
-            )
-        if output.is_file() and output.stat().st_size <= target_bytes:
-            return output
-
-        output.unlink(missing_ok=True)
-        duration, audio_bitrate = _probe_video_budget(source)
+        duration, audio_count = _probe_video_budget(source)
+        audio_bitrate = 256_000 * audio_count
         total_bitrate = int((target_bytes * 8 * 0.97) / duration)
         video_bitrate = total_bitrate - audio_bitrate
         if video_bitrate < 100_000:
@@ -1707,22 +1697,24 @@ def _compress_video_for_analysis(source: Path, target_bytes: int) -> Path:
                 "The video's duration/audio tracks leave too little bitrate to preserve useful visual detail"
             )
 
-        first_pass = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
-            "-map", "0:v:0", "-c:v", "libx264", "-preset", "slow", "-pix_fmt", "yuv420p",
-            "-b:v", str(video_bitrate), "-pass", "1", "-passlogfile", str(passlog),
-            "-an", "-f", "null", os.devnull,
-        ]
-        _run_video_command(first_pass)
-        try:
-            _run_video_command(_video_encode_base(source) + [
-                "-b:v", str(video_bitrate), "-pass", "2", "-passlogfile", str(passlog), str(output),
-            ])
-        except subprocess.CalledProcessError:
+        def encode_at_bitrate(bitrate: int) -> None:
             output.unlink(missing_ok=True)
-            _run_video_command(_video_encode_base(source, copy_audio=False) + [
-                "-b:v", str(video_bitrate), "-pass", "2", "-passlogfile", str(passlog), str(output),
+            _run_video_command([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+                "-map", "0:v:0", "-c:v", "libx264", "-preset", "slow", "-pix_fmt", "yuv420p",
+                "-b:v", str(bitrate), "-pass", "1", "-passlogfile", str(passlog),
+                "-an", "-f", "null", os.devnull,
             ])
+            _run_video_command(_video_encode_base(source) + [
+                "-b:v", str(bitrate), "-pass", "2", "-passlogfile", str(passlog), str(output),
+            ])
+
+        encode_at_bitrate(video_bitrate)
+        if output.stat().st_size > target_bytes:
+            adjusted = int(video_bitrate * (target_bytes / output.stat().st_size) * 0.97)
+            if adjusted < 100_000:
+                raise ValueError("Video cannot fit the configured target with useful visual bitrate")
+            encode_at_bitrate(adjusted)
         return output
     except Exception:
         output.unlink(missing_ok=True)
@@ -1737,7 +1729,19 @@ async def _prepare_video_for_analysis(source: Path) -> tuple[Path, bool]:
     max_bytes, target_bytes, _ = _video_analysis_limits()
     if source.stat().st_size <= max_bytes:
         return source, False
-    prepared = await asyncio.to_thread(_compress_video_for_analysis, source, target_bytes)
+    work = asyncio.create_task(
+        asyncio.to_thread(_compress_video_for_analysis, source, target_bytes)
+    )
+    try:
+        prepared = await asyncio.shield(work)
+    except asyncio.CancelledError:
+        # to_thread cannot kill subprocess.run. Wait for the bounded encode so
+        # the source remains present, then remove any orphan derivative.
+        try:
+            orphan = await work
+            orphan.unlink(missing_ok=True)
+        finally:
+            raise
     if not prepared.is_file() or prepared.stat().st_size > target_bytes:
         prepared.unlink(missing_ok=True)
         raise ValueError(
@@ -1753,11 +1757,106 @@ def _detect_video_mime_type(video_path: Path) -> Optional[str]:
 
 
 def _video_to_base64_data_url(video_path: Path, mime_type: Optional[str] = None) -> str:
-    """Convert a video file to a base64-encoded data URL."""
+    """Legacy inline encoder retained for small-payload compatibility tests."""
     data = video_path.read_bytes()
     encoded = base64.b64encode(data).decode("ascii")
     mime = mime_type or _VIDEO_MIME_TYPES.get(video_path.suffix.lower(), "video/mp4")
     return f"data:{mime};base64,{encoded}"
+
+
+async def _upload_video_to_gemini(video_path: Path, mime_type: str) -> tuple[str, str]:
+    """Stream a video to Gemini Files and wait until it is ready."""
+    api_key = str(os.getenv("GOOGLE_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("GOOGLE_API_KEY is required for Gemini video analysis")
+
+    size = video_path.stat().st_size
+    headers = {
+        "x-goog-api-key": api_key,
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": str(size),
+        "X-Goog-Upload-Header-Content-Type": mime_type,
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+        start = await client.post(
+            "https://generativelanguage.googleapis.com/upload/v1beta/files",
+            headers=headers,
+            json={"file": {"display_name": video_path.name}},
+        )
+        start.raise_for_status()
+        upload_url = start.headers.get("x-goog-upload-url")
+        if not upload_url:
+            raise RuntimeError("Gemini Files did not return a resumable upload URL")
+
+        async def chunks():
+            with video_path.open("rb") as handle:
+                while True:
+                    chunk = await asyncio.to_thread(handle.read, 1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        uploaded = await client.post(
+            upload_url,
+            headers={
+                "Content-Length": str(size),
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize",
+            },
+            content=chunks(),
+        )
+        uploaded.raise_for_status()
+        payload = uploaded.json()
+        file_info = payload.get("file") if isinstance(payload, dict) else None
+        if not isinstance(file_info, dict):
+            raise RuntimeError("Gemini Files returned no file metadata")
+        name = str(file_info.get("name") or "")
+        uri = str(file_info.get("uri") or "")
+        if not name or not uri:
+            if name:
+                await _delete_gemini_file(name)
+            raise RuntimeError("Gemini Files response is missing name or URI")
+
+        deadline = asyncio.get_running_loop().time() + 600
+        while True:
+            state = str(file_info.get("state") or "").upper()
+            if state == "ACTIVE":
+                return uri, name
+            if state == "FAILED":
+                await _delete_gemini_file(name)
+                raise RuntimeError("Gemini failed while processing the uploaded video")
+            if asyncio.get_running_loop().time() >= deadline:
+                await _delete_gemini_file(name)
+                raise TimeoutError("Timed out waiting for Gemini to process the video")
+            await asyncio.sleep(2)
+            try:
+                status = await client.get(
+                    f"https://generativelanguage.googleapis.com/v1beta/{name}",
+                    headers={"x-goog-api-key": api_key},
+                )
+                status.raise_for_status()
+                file_info = status.json()
+            except Exception:
+                await _delete_gemini_file(name)
+                raise
+
+
+async def _delete_gemini_file(file_name: str) -> None:
+    api_key = str(os.getenv("GOOGLE_API_KEY") or "").strip()
+    if not api_key or not file_name:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.delete(
+                f"https://generativelanguage.googleapis.com/v1beta/{file_name}",
+                headers={"x-goog-api-key": api_key},
+            )
+            if response.status_code not in {200, 204, 404}:
+                logger.warning("Gemini Files cleanup returned HTTP %s", response.status_code)
+    except Exception:
+        logger.warning("Failed to clean up Gemini uploaded video", exc_info=True)
 
 
 async def _download_video(video_url: str, destination: Path, max_retries: int = 3) -> Path:
@@ -1820,7 +1919,14 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
 
             return destination
         except Exception as e:
+            destination.unlink(missing_ok=True)
             last_error = e
+            retryable = isinstance(e, (httpx.TimeoutException, httpx.TransportError))
+            if isinstance(e, httpx.HTTPStatusError):
+                status = e.response.status_code
+                retryable = status in {408, 429} or 500 <= status < 600
+            if isinstance(e, (ValueError, PermissionError)) or not retryable:
+                raise
             if attempt < max_retries - 1:
                 wait_time = 2 ** (attempt + 1)
                 logger.warning("Video download failed (attempt %s/%s): %s", attempt + 1, max_retries, str(e)[:50])
@@ -1864,6 +1970,7 @@ async def video_analyze_tool(
     should_cleanup = True
     source_video_path = None
     source_cleanup = False
+    gemini_file_name = ""
 
     try:
         from tools.interrupt import is_interrupted
@@ -1918,17 +2025,11 @@ async def video_analyze_tool(
         if video_size_bytes > _VIDEO_SIZE_WARN_BYTES:
             logger.warning("Video is %.1f MB — may be slow or rejected", video_size_mb)
 
-        video_data_url = _video_to_base64_data_url(temp_video_path, mime_type=detected_mime)
-        data_size_mb = len(video_data_url) / (1024 * 1024)
-
-        if len(video_data_url) > _MAX_VIDEO_BASE64_BYTES:
-            raise ValueError(
-                f"Video too large for API: base64 payload is {data_size_mb:.1f} MB "
-                f"(limit {_MAX_VIDEO_BASE64_BYTES / (1024 * 1024):.0f} MB). "
-                f"Compress or trim the video and retry."
-            )
-
+        file_uri, gemini_file_name = await _upload_video_to_gemini(
+            temp_video_path, detected_mime
+        )
         debug_call_data["video_size_bytes"] = video_size_bytes
+        debug_call_data["delivery"] = "gemini_files"
 
         messages = [
             {
@@ -1939,9 +2040,10 @@ async def video_analyze_tool(
                         "text": user_prompt,
                     },
                     {
-                        "type": "video_url",
-                        "video_url": {
-                            "url": video_data_url,
+                        "type": "video_file",
+                        "video_file": {
+                            "uri": file_uri,
+                            "mime_type": detected_mime,
                         },
                     },
                 ],
@@ -2046,6 +2148,8 @@ async def video_analyze_tool(
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     finally:
+        if gemini_file_name:
+            await _delete_gemini_file(gemini_file_name)
         if should_cleanup and temp_video_path and temp_video_path.exists():
             try:
                 temp_video_path.unlink()

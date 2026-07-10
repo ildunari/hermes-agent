@@ -7385,6 +7385,33 @@ async def async_call_llm(
                 f"Run: hermes setup"
             )
         resolved_provider = effective_provider or resolved_provider
+    elif task == "video":
+        video_provider = _normalize_aux_provider(resolved_provider)
+        if video_provider != "gemini":
+            raise RuntimeError(
+                "Video analysis requires auxiliary.video.provider: gemini. "
+                "Arbitrary-file video input is not supported by the configured "
+                f"provider ({resolved_provider or 'auto'})."
+            )
+        client, final_model = _get_cached_client(
+            "gemini",
+            resolved_model,
+            async_mode=True,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            api_mode=resolved_api_mode,
+        )
+        try:
+            from agent.gemini_native_adapter import GeminiNativeClient
+            is_native_gemini = isinstance(client, GeminiNativeClient)
+        except ImportError:
+            is_native_gemini = False
+        if client is None or not is_native_gemini:
+            raise RuntimeError(
+                "No native Gemini client is configured for video analysis. "
+                "Set auxiliary.video.provider to gemini and configure GOOGLE_API_KEY."
+            )
+        resolved_provider = "gemini"
     else:
         client, final_model = _get_cached_client(
             resolved_provider,

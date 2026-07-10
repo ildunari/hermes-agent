@@ -209,6 +209,12 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
             text = item.get("text")
             if isinstance(text, str) and text:
                 parts.append({"text": text})
+        elif ptype == "video_file":
+            ref = item.get("video_file") or {}
+            uri = ref.get("uri", "") if isinstance(ref, dict) else ""
+            mime = ref.get("mime_type", "") if isinstance(ref, dict) else ""
+            if isinstance(uri, str) and uri and isinstance(mime, str) and mime:
+                parts.append({"fileData": {"mimeType": mime, "fileUri": uri}})
         elif ptype in {"image_url", "video_url"}:
             field = "video_url" if ptype == "video_url" else "image_url"
             ref = item.get(field) or {}

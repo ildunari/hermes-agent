@@ -206,7 +206,7 @@ video_analysis:
   max_download_mb: 2048      # separate safety ceiling for remote sources
 ```
 
-Compression preserves resolution, frame rate, metadata, chapters, and audio tracks. It first tries a visually near-lossless CRF 18 encode and only uses two-pass size-constrained encoding when necessary. Temporary downloads, derivatives, and two-pass logs are removed after the tool call.
+Compression preserves resolution, frame rate, metadata, chapters, and audio-track count. It uses bounded two-pass H.264 encoding to spend the available visual bitrate efficiently, normalizes compressed derivatives to high-quality AAC for container compatibility, and retries once with a corrected bitrate if mux overhead overshoots the target. Videos are streamed through the Gemini Files API rather than duplicated into large in-memory base64 payloads. Temporary downloads, derivatives, remote Gemini files, and two-pass logs are removed after the tool call.
 
 ## `video_gen` toolset
 
