@@ -2914,6 +2914,10 @@ class DiscordAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     def _get_voice_turn_state(self, guild_id: int) -> Dict[str, Any]:
+        # Tests and lightweight adapter constructions may bypass __init__.
+        # Keep the live-turn state lazy so existing mixer-only paths remain safe.
+        if not hasattr(self, "_voice_turn_states"):
+            self._voice_turn_states = {}
         state = self._voice_turn_states.setdefault(guild_id, {"generation": 0, "streamer": None,
             "barge_in_latched": False, "ambient_busy": False, "ambient_generation": 0,
             "busy_last_touch": 0.0, "watchdog_task": None})
