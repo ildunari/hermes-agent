@@ -20,6 +20,23 @@ const SIGNING_COMMAND_TIMEOUT_MS = 20_000
 
 let didTryUnlockSigningKeychains = false
 
+function serviceAccountToken() {
+  const existing = process.env.OP_SERVICE_ACCOUNT_TOKEN?.trim()
+  if (existing) return existing
+
+  const homes = [process.env.HERMES_HOME, path.join(os.homedir(), '.hermes')].filter(Boolean)
+  for (const home of homes) {
+    const bootstrap = path.join(home, '.op.env')
+    if (!fs.existsSync(bootstrap)) continue
+    for (const line of fs.readFileSync(bootstrap, 'utf8').split(/\r?\n/)) {
+      if (!line.startsWith('OP_SERVICE_ACCOUNT_TOKEN=')) continue
+      const token = line.slice('OP_SERVICE_ACCOUNT_TOKEN='.length).trim()
+      if (token) return token
+    }
+  }
+  return ''
+}
+
 function unlockHermesSigningKeychains() {
   if (didTryUnlockSigningKeychains || process.platform !== 'darwin') return
   didTryUnlockSigningKeychains = true
@@ -31,26 +48,36 @@ function unlockHermesSigningKeychains() {
     throw new Error('Hermes signing keychain is missing; refusing interactive codesign fallback')
   }
 
-  // MacBook/Mini keep this machine-local password in login.keychain with
-  // /usr/bin/security trusted. Studio falls back to the service-account op shim.
-  const localPassword = spawnSync(
-    '/usr/bin/security',
-    ['find-generic-password', '-s', HERMES_SIGNING_PASSWORD_SERVICE, '-w'],
-    { encoding: 'utf8', timeout: SIGNING_COMMAND_TIMEOUT_MS },
-  )
-  let password = localPassword.status === 0 ? localPassword.stdout.trim() : ''
-
+  // Prefer Hermes' upstream 1Password service-account bootstrap on every Mac.
+  // The machine-local login-keychain item remains only as an offline fallback.
+  const token = serviceAccountToken()
   const opCommand = fs.existsSync(HERMES_OP_SHIM) ? HERMES_OP_SHIM : 'op'
-  const op = password ? null : spawnSync(
+  const op = token ? spawnSync(
     opCommand,
     ['item', 'get', HERMES_DEVELOPER_ID_KEYCHAIN_ITEM, '--vault', 'CLI', '--reveal', '--fields', 'password'],
-    { encoding: 'utf8', timeout: SIGNING_COMMAND_TIMEOUT_MS },
-  )
-  if (!password && (op?.error || op?.status !== 0)) {
+    {
+      encoding: 'utf8',
+      timeout: SIGNING_COMMAND_TIMEOUT_MS,
+      env: {
+        HOME: process.env.HOME || os.homedir(),
+        PATH: process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin',
+        OP_SERVICE_ACCOUNT_TOKEN: token,
+      },
+    },
+  ) : null
+  let password = op?.status === 0 ? op.stdout.trim() : ''
+
+  if (!password) {
+    const localPassword = spawnSync(
+      '/usr/bin/security',
+      ['find-generic-password', '-s', HERMES_SIGNING_PASSWORD_SERVICE, '-w'],
+      { encoding: 'utf8', timeout: SIGNING_COMMAND_TIMEOUT_MS },
+    )
+    password = localPassword.status === 0 ? localPassword.stdout.trim() : ''
+  }
+  if (!password) {
     throw new Error('Unable to read the Hermes signing-keychain password non-interactively')
   }
-  if (!password) password = op?.stdout.trim() || ''
-  if (!password) throw new Error('Hermes signing-keychain password is empty')
 
   for (const keychain of keychains) {
     const unlock = spawnSync('/usr/bin/security', ['unlock-keychain', '-p', password, keychain], {
