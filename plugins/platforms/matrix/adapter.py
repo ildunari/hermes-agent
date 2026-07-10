@@ -2060,17 +2060,19 @@ class MatrixAdapter(BasePlatformAdapter):
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
-        flat_choices: list[tuple[str, str, str, str]] = []
+        flat_choices: list[tuple[str, str, str, str, str]] = []
         for provider in providers or []:
             provider_slug = str(provider.get("slug") or "")
             provider_name = str(provider.get("name") or provider_slug)
             models = provider.get("models") or []
+            model_labels = provider.get("model_labels") or {}
             for model_id in models:
                 if len(flat_choices) >= len(_MATRIX_MODEL_PICKER_REACTIONS):
                     break
                 flat_choices.append((
                     _MATRIX_MODEL_PICKER_REACTIONS[len(flat_choices)],
                     str(model_id),
+                    str(model_labels.get(model_id) or model_id),
                     provider_slug,
                     provider_name,
                 ))
@@ -2098,9 +2100,9 @@ class MatrixAdapter(BasePlatformAdapter):
             "React to choose a model:",
         ]
         choices: dict[str, tuple[str, str]] = {}
-        for emoji, model_id, provider_slug, provider_name in flat_choices:
+        for emoji, model_id, model_label, provider_slug, provider_name in flat_choices:
             choices[emoji] = (model_id, provider_slug)
-            lines.append(f"{emoji} `{model_id}` — {provider_name}")
+            lines.append(f"{emoji} `{model_label}` — {provider_name}")
 
         result = await self.send(chat_id, "\n".join(lines), metadata=metadata)
         if not result.success or not result.message_id:

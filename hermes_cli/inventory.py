@@ -54,6 +54,9 @@ class ConfigContext:
     custom_providers: list
     hidden_providers: tuple[str, ...] = ()
     visible_models: dict[str, tuple[str, ...]] | None = None
+    hidden_models: dict[str, tuple[str, ...]] | None = None
+    provider_labels: dict[str, str] | None = None
+    model_labels: dict[str, dict[str, str]] | None = None
 
     def with_overrides(
         self,
@@ -98,31 +101,39 @@ def load_picker_context() -> ConfigContext:
         current_provider = ""
         current_base_url = ""
     raw = cfg.get("providers")
-    hidden: list[str] = []
-    visible: dict[str, tuple[str, ...]] = {}
-    for section_name in ("model_picker", "model_catalog"):
-        section = cfg.get(section_name)
-        if not isinstance(section, dict):
-            continue
-        values = section.get("hidden_providers") or section.get("hide_providers") or []
-        if isinstance(values, str):
-            hidden.extend(part.strip() for part in values.split(","))
-        elif isinstance(values, (list, tuple, set)):
-            hidden.extend(str(part).strip() for part in values)
     try:
-        from hermes_cli.model_switch import load_visible_model_policy
+        from hermes_cli.model_switch import (
+            load_hidden_model_policy,
+            load_hidden_provider_policy,
+            load_model_label_policy,
+            load_model_picker_policy,
+            load_provider_label_policy,
+            load_visible_model_policy,
+        )
 
-        visible = load_visible_model_policy(cfg)
+        policy = load_model_picker_policy(cfg)
+        hidden = load_hidden_provider_policy(cfg, policy=policy)
+        visible = load_visible_model_policy(cfg, policy=policy)
+        hidden_models = load_hidden_model_policy(cfg, policy=policy)
+        provider_labels = load_provider_label_policy(cfg, policy=policy)
+        model_labels = load_model_label_policy(cfg, policy=policy)
     except Exception:
+        hidden = ()
         visible = {}
+        hidden_models = {}
+        provider_labels = {}
+        model_labels = {}
     return ConfigContext(
         current_provider=current_provider,
         current_model=current_model,
         current_base_url=current_base_url,
         user_providers=raw if isinstance(raw, dict) else {},
         custom_providers=get_compatible_custom_providers(cfg),
-        hidden_providers=tuple(part for part in hidden if part),
+        hidden_providers=hidden,
         visible_models=visible,
+        hidden_models=hidden_models,
+        provider_labels=provider_labels,
+        model_labels=model_labels,
     )
 
 
@@ -258,8 +269,12 @@ def build_models_payload(
         rows = list(rows) + [r for r in _append_unconfigured_rows(rows, ctx) if str(r.get("slug", "")).lower() != "moa"]
     if ctx.hidden_providers:
         rows = _filter_hidden_providers(rows, ctx.hidden_providers)
+    if ctx.hidden_models:
+        rows = _filter_hidden_models(rows, ctx.hidden_models)
     if ctx.visible_models:
         rows = _filter_visible_models(rows, ctx.visible_models)
+    if ctx.provider_labels or ctx.model_labels:
+        rows = _apply_picker_labels(rows, ctx.provider_labels, ctx.model_labels)
     if picker_hints:
         _apply_picker_hints(rows)
     if canonical_order:
@@ -353,10 +368,30 @@ def _filter_hidden_providers(rows: list[dict], hidden: tuple[str, ...]) -> list[
     return filter_hidden_provider_rows(rows, hidden)
 
 
-def _filter_visible_models(rows: list[dict], visible: dict[str, tuple[str, ...]]) -> list[dict]:
+def _filter_visible_models(
+    rows: list[dict], visible: dict[str, tuple[str, ...]]
+) -> list[dict]:
     from hermes_cli.model_switch import filter_visible_model_rows
 
     return filter_visible_model_rows(rows, visible)
+
+
+def _filter_hidden_models(
+    rows: list[dict], hidden: dict[str, tuple[str, ...]]
+) -> list[dict]:
+    from hermes_cli.model_switch import filter_hidden_model_rows
+
+    return filter_hidden_model_rows(rows, hidden)
+
+
+def _apply_picker_labels(
+    rows: list[dict],
+    provider_labels: dict[str, str] | None,
+    model_labels: dict[str, dict[str, str]] | None,
+) -> list[dict]:
+    from hermes_cli.model_switch import apply_model_picker_labels
+
+    return apply_model_picker_labels(rows, provider_labels, model_labels)
 
 
 def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list[dict]:

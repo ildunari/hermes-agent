@@ -247,6 +247,8 @@ export interface ModelPricing {
 export interface ModelOptionProvider {
   is_current?: boolean
   models?: string[]
+  /** Display-only labels keyed by the real route model ID. */
+  model_labels?: Record<string, string>
   name: string
   slug: string
   total_models?: number

@@ -26,7 +26,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   'qwen-oauth': 'Qwen OAuth Portal',
   stepfun: 'StepFun Step Plan',
   'tencent-tokenhub': 'Tencent TokenHub',
-  vibeproxy: 'VibeProxy',
+  vibeproxy: 'CLI Proxy',
   xai: 'xAI API',
   'xai-oauth': 'xAI',
   zai: 'zAI'
@@ -111,7 +111,13 @@ function collapseVersionTokens(words: string[], provider?: string): string[] {
 }
 
 export function displayProviderName(provider: string, fallback?: string): string {
-  const raw = (provider || fallback || '').trim()
+  const explicitLabel = (fallback || '').trim()
+
+  if (explicitLabel) {
+    return explicitLabel
+  }
+
+  const raw = provider.trim()
   const normalized = raw.toLowerCase()
 
   if (!raw) {
@@ -123,13 +129,12 @@ export function displayProviderName(provider: string, fallback?: string): string
   }
 
   const withoutCustom = normalized.startsWith('custom:') ? raw.slice('custom:'.length) : raw
-  const cleaned = withoutCustom.replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim()
+  const cleaned = withoutCustom
+    .replace(/[._-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 
-  return cleaned
-    .split(' ')
-    .filter(Boolean)
-    .map(titleWord)
-    .join(' ')
+  return cleaned.split(' ').filter(Boolean).map(titleWord).join(' ')
 }
 
 export function displayModelName(model: string, options: { provider?: string } = {}): string {
@@ -141,7 +146,10 @@ export function displayModelName(model: string, options: { provider?: string } =
 
   const visible = raw.includes('/') ? raw.split('/').filter(Boolean).pop() || raw : raw
   const withoutDatePin = visible.replace(/[-._]\d{8}$/, '')
-  const cleaned = withoutDatePin.replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim()
+  const cleaned = withoutDatePin
+    .replace(/[._-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
   const words = collapseVersionTokens(cleaned.split(' '), options.provider).filter(Boolean)
 
   // Claude model IDs are already shown under a Claude/VibeProxy provider row.
@@ -154,5 +162,7 @@ export function displayModelName(model: string, options: { provider?: string } =
 }
 
 export function displayProviderModel(provider: string, model: string, providerFallback?: string): string {
-  return [displayProviderName(provider, providerFallback), displayModelName(model, { provider })].filter(Boolean).join(' · ')
+  return [displayProviderName(provider, providerFallback), displayModelName(model, { provider })]
+    .filter(Boolean)
+    .join(' · ')
 }

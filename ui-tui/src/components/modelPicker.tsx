@@ -19,7 +19,10 @@ type Stage = 'provider' | 'key' | 'model' | 'disconnect'
 
 type ProviderRow = { name: string; provider: ModelOptionProvider }
 
-export function providerIndexAfterClearingFilter(providerRows: ProviderRow[], provider: ModelOptionProvider | undefined) {
+export function providerIndexAfterClearingFilter(
+  providerRows: ProviderRow[],
+  provider: ModelOptionProvider | undefined
+) {
   if (!provider) {
     return -1
   }
@@ -117,7 +120,8 @@ export function ModelPicker({
     return fuzzyRank(
       providerRows,
       filter,
-      row => `${row.name} ${row.provider.slug} ${(row.provider.models ?? []).join(' ')}`
+      row =>
+        `${row.name} ${row.provider.slug} ${(row.provider.models ?? []).join(' ')} ${Object.values(row.provider.model_labels ?? {}).join(' ')}`
     ).map(r => r.item)
   }, [providerRows, filter, stage])
 
@@ -129,8 +133,11 @@ export function ModelPicker({
       return allModels
     }
 
-    return fuzzyRank(allModels, filter, m => m).map(r => r.item)
-  }, [allModels, filter, stage])
+    return fuzzyRank(allModels, filter, m => {
+      const label = provider?.model_labels?.[m]
+      return label ? `${label} ${m}` : m
+    }).map(r => r.item)
+  }, [allModels, filter, provider, stage])
 
   const models = filteredModels
 
@@ -670,7 +677,7 @@ export function ModelPicker({
             wrap="truncate-end"
           >
             {prefix}
-            {idx + 1}. {row}
+            {idx + 1}. {provider?.model_labels?.[row] ?? row}
           </Text>
         )
       })}

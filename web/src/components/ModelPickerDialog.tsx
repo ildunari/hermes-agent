@@ -36,6 +36,7 @@ interface ModelOptionProvider {
   name: string;
   slug: string;
   models?: string[];
+  model_labels?: Record<string, string>;
   total_models?: number;
   is_current?: boolean;
   warning?: string;
@@ -221,7 +222,7 @@ export function ModelPickerDialog(props: Props) {
       fuzzyRank(
         providers,
         trimmedQuery,
-        (p) => `${p.name} ${p.slug} ${(p.models ?? []).join(" ")}`,
+        (p) => `${p.name} ${p.slug} ${(p.models ?? []).join(" ")} ${Object.values(p.model_labels ?? {}).join(" ")}`,
       ).map((r) => r.item),
     [providers, trimmedQuery],
   );
@@ -230,11 +231,15 @@ export function ModelPickerDialog(props: Props) {
   // list can highlight why each entry matched.
   const filteredModels = useMemo(
     () =>
-      fuzzyRank(models, trimmedQuery, (m) => m).map((r) => ({
+      fuzzyRank(models, trimmedQuery, (m) => {
+        const label = selectedProvider?.model_labels?.[m];
+        return label ? `${label} ${m}` : m;
+      }).map((r) => ({
         model: r.item,
-        positions: r.positions,
+        label: selectedProvider?.model_labels?.[r.item] ?? r.item,
+        positions: selectedProvider?.model_labels?.[r.item] ? [] : r.positions,
       })),
-    [models, trimmedQuery],
+    [models, selectedProvider, trimmedQuery],
   );
 
   const canConfirm = !!selectedProvider && !!selectedModel && !applying;
@@ -548,7 +553,7 @@ function ModelColumn({
   onConfirm,
 }: {
   provider: ModelOptionProvider | null;
-  models: { model: string; positions: number[] }[];
+  models: { model: string; label: string; positions: number[] }[];
   allModels: string[];
   selectedModel: string;
   currentModel: string;
@@ -581,7 +586,7 @@ function ModelColumn({
             : "no models listed for this provider"}
         </div>
       ) : (
-        models.map(({ model: m, positions }) => {
+        models.map(({ model: m, label, positions }) => {
           const active = m === selectedModel;
           const isCurrent =
             m === currentModel && provider.slug === currentProviderSlug;
@@ -598,7 +603,7 @@ function ModelColumn({
                 className={`h-3 w-3 shrink-0 ${active ? "text-primary" : "text-transparent"}`}
               />
               <span className="flex-1 truncate">
-                <HighlightedText text={m} positions={positions} />
+                <HighlightedText text={label} positions={positions} />
               </span>
               {isCurrent && <CurrentTag />}
             </ListItem>

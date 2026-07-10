@@ -238,7 +238,10 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
         <div className="max-h-[max(150px,30dvh)] overflow-y-auto py-0.5">
           {groups.map(group => (
             <DropdownMenuGroup className="py-0.5" key={group.provider.slug}>
-              <DropdownMenuLabel className={dropdownMenuSectionLabel} title={group.provider.name || group.provider.slug}>
+              <DropdownMenuLabel
+                className={dropdownMenuSectionLabel}
+                title={group.provider.name || group.provider.slug}
+              >
                 {displayProviderName(group.provider.slug, group.provider.name)}
               </DropdownMenuLabel>
               {group.families.map(family => {
@@ -251,7 +254,8 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
                     : null
 
                 const isCurrent = activeId !== null
-                const name = modelDisplayParts(family.id, { provider: group.provider.slug }).name
+                const configuredLabel = group.provider.model_labels?.[family.id]
+                const name = configuredLabel ?? modelDisplayParts(family.id, { provider: group.provider.slug }).name
                 // Capabilities are looked up against the active/base id; the
                 // -fast variant carries the same param support as its base.
                 const caps = group.provider.capabilities?.[family.id]
@@ -402,7 +406,7 @@ function groupModels(
     }
 
     const matches = (family: ModelFamily) =>
-      `${family.id} ${family.fastId ?? ''} ${provider.name} ${provider.slug} ${displayModelName(family.id, { provider: provider.slug })} ${displayProviderName(provider.slug, provider.name)}`
+      `${family.id} ${family.fastId ?? ''} ${provider.model_labels?.[family.id] ?? ''} ${family.fastId ? (provider.model_labels?.[family.fastId] ?? '') : ''} ${provider.name} ${provider.slug} ${displayModelName(family.id, { provider: provider.slug })} ${displayProviderName(provider.slug, provider.name)}`
         .toLowerCase()
         .includes(q)
 
@@ -440,7 +444,9 @@ function groupModels(
   // Stable, logical group order: alphabetical by provider name. (The backend
   // floats the current provider first, which would reshuffle on every switch.)
   groups.sort((a, b) =>
-    displayProviderName(a.provider.slug, a.provider.name).localeCompare(displayProviderName(b.provider.slug, b.provider.name))
+    displayProviderName(a.provider.slug, a.provider.name).localeCompare(
+      displayProviderName(b.provider.slug, b.provider.name)
+    )
   )
 
   return groups
