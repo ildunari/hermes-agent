@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react'
 
-import { getCronJobs, listAllProfileSessions, type SessionInfo } from '@/hermes'
+import { getCronJobs, getProfileSessionsSnapshot, listAllProfileSessions, type SessionInfo } from '@/hermes'
 import {
   isMessagingSource,
   LOCAL_SESSION_SOURCE_IDS,
@@ -31,11 +31,9 @@ import {
 
 import { sameCronSignature } from '../../desktop-controller-utils'
 
-// The recents list is local-only: cron rows have their own section, and each
-// messaging platform (telegram, discord, …) is fetched separately into its own
-// self-managed sidebar section (refreshMessagingSessions). Excluding both here
-// keeps "Load more" paging through interactive local chats instead of
-// interleaving gateway threads that bury them.
+// The recents list is local-only: cron rows and messaging platform rows have
+// independent sidebar sections. The coalesced snapshot preserves those slices
+// without letting gateway threads bury interactive local chats during paging.
 const SIDEBAR_EXCLUDED_SOURCES = ['cron', 'subagent', 'tool', ...MESSAGING_SESSION_SOURCE_IDS]
 // The messaging slice is the inverse: drop cron + every local source so only
 // external-platform conversations remain, then split per platform in the UI.
@@ -77,26 +75,8 @@ interface UseSessionListActionsArgs {
 export function useSessionListActions({ profileScope }: UseSessionListActionsArgs) {
   const refreshSessionsRequestRef = useRef(0)
 
-  // Cron-job sessions as their own list (latest N). Independent of the recents
-  // page so the two never compete for slots. Cheap + bounded. Kept (even though
-  // the sidebar now lists cron *jobs*, not run sessions) so a pinned cron run
-  // still resolves into the Pinned section via sessionByAnyId.
-  const refreshCronSessions = useCallback(async () => {
-    try {
-      const { sessions } = await listAllProfileSessions(CRON_SECTION_LIMIT, 1, 'exclude', 'recent', 'all', {
-        source: 'cron'
-      })
-
-      setCronSessions(prev => (sameCronSignature(prev, sessions) ? prev : sessions))
-    } catch {
-      // Non-fatal: the cron section just stays empty/stale.
-    }
-  }, [])
-
-  // Messaging-platform sessions as their own slice, fetched separately from
-  // local recents so each platform renders a self-managed section and never
-  // competes with local chats for the recents page budget. One combined fetch
-  // seeds every platform; the sidebar splits the rows per source.
+  // Messaging-platform sessions are also refreshed on their own interval, so
+  // platform sections can update between the coalesced sidebar snapshots.
   const refreshMessagingSessions = useCallback(async () => {
     try {
       const result = await listAllProfileSessions(MESSAGING_SECTION_LIMIT, 1, 'exclude', 'recent', 'all', {
@@ -160,27 +140,32 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
     try {
       const limit = $sessionsLimit.get()
 
-      // Require at least one message so abandoned/empty "Untitled" drafts (one
-      // was created per TUI/desktop launch before the lazy-create fix) don't
-      // clutter the sidebar.
-      // Unified cross-profile list (served read-only off each profile's
-      // state.db; no per-profile backend is spawned). Single-profile users get
-      // the same rows tagged profile="default". Cron sessions are excluded here
-      // and fetched separately (refreshCronSessions) so the scheduler's
-      // always-newest rows can't consume the recents page budget.
-      // Scope the fetch to the active profile (not always 'all') so a profile
-      // with few recent sessions isn't windowed out of the cross-profile
-      // recency page — the empty-history-on-profile-switch bug.
+      // One bounded backend snapshot opens every profile DB once, then returns
+      // the independent recents, cron, and messaging slices. Keep the scoped
+      // recents view so a sparse active profile cannot be windowed out by the
+      // global recency page; cron and messaging remain all-profile sections.
       const sessionProfile = profileScope === ALL_PROFILES ? 'all' : profileScope
-
-      const result = await listAllProfileSessions(limit, 1, 'exclude', 'recent', sessionProfile, {
-        excludeSources: SIDEBAR_EXCLUDED_SOURCES
-      })
+      const snapshot = await getProfileSessionsSnapshot(
+        limit,
+        CRON_SECTION_LIMIT,
+        MESSAGING_SECTION_LIMIT,
+        sessionProfile,
+        SIDEBAR_EXCLUDED_SOURCES,
+        MESSAGING_EXCLUDED_SOURCES
+      )
 
       if (refreshSessionsRequestRef.current === requestId) {
-        setSessions(prev => mergeSessionPage(prev, result.sessions, sessionsToKeep()))
-        setSessionsTotal(typeof result.total === 'number' ? result.total : result.sessions.length)
-        setSessionProfileTotals(result.profile_totals ?? {})
+        const { recents, cron, messaging } = snapshot
+        setSessions(prev => mergeSessionPage(prev, recents.sessions, sessionsToKeep()))
+        setSessionsTotal(typeof recents.total === 'number' ? recents.total : recents.sessions.length)
+        setSessionProfileTotals(recents.profile_totals ?? {})
+        setCronSessions(prev => (sameCronSignature(prev, cron.sessions) ? prev : cron.sessions))
+
+        // Drop any non-messaging custom source that the broad SQL exclusion did
+        // not catch; those rows belong in local recents, not platform sections.
+        const messagingRows = messaging.sessions.filter(session => isMessagingSource(session.source))
+        setMessagingSessions(prev => (sameCronSignature(prev, messagingRows) ? prev : messagingRows))
+        setMessagingTruncated(messaging.sessions.length >= MESSAGING_SECTION_LIMIT)
       }
     } finally {
       if (refreshSessionsRequestRef.current === requestId) {
@@ -188,10 +173,8 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       }
     }
 
-    void refreshCronSessions()
     void refreshCronJobs()
-    void refreshMessagingSessions()
-  }, [profileScope, refreshCronSessions, refreshCronJobs, refreshMessagingSessions])
+  }, [profileScope, refreshCronJobs])
 
   const loadMoreSessions = useCallback(async () => {
     bumpSessionsLimit()

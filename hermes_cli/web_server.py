@@ -4015,6 +4015,131 @@ def get_sessions(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+def _profile_session_targets(profile: str = "all") -> List[Tuple[str, Path]]:
+    """Resolve database-only profile targets without loading profile metadata."""
+    from hermes_cli import profiles as profiles_mod
+
+    if profile and profile != "all":
+        name, home = _cron_profile_home(profile)
+        return [(name, home)]
+    try:
+        targets = profiles_mod.list_profile_db_targets()
+    except Exception:
+        _log.exception("Profile database-target enumeration failed")
+        targets = []
+    return targets or [("default", profiles_mod.get_profile_dir("default"))]
+
+
+def _profile_session_query(
+    limit: int,
+    offset: int,
+    min_messages: int,
+    archived: str,
+    order: str,
+    source: Optional[str] = None,
+    exclude_sources: Optional[str] = None,
+    full: bool = False,
+    target_profile: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Describe one bounded aggregate slice for ``_read_profile_sessions``."""
+    return {
+        "limit": limit,
+        "offset": offset,
+        "min_messages": max(0, min_messages),
+        "archived_only": archived == "only",
+        "include_archived": archived == "include",
+        "order": order,
+        "source": source or None,
+        "exclude_sources": [s.strip() for s in (exclude_sources or "").split(",") if s.strip()],
+        "full": full,
+        "target_profile": target_profile,
+    }
+
+
+def _read_profile_sessions(
+    targets: List[Tuple[str, Path]], queries: Dict[str, Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """Read aggregate slices while opening each profile DB at most once."""
+    from hermes_state import SessionDB
+
+    results: Dict[str, Dict[str, Any]] = {
+        key: {"sessions": [], "total": 0, "profile_totals": {}, "errors": []}
+        for key in queries
+    }
+    now = time.time()
+    for name, home in targets:
+        applicable = {
+            key: query for key, query in queries.items()
+            if query["target_profile"] in (None, name)
+        }
+        if not applicable:
+            continue
+        db_path = Path(home) / "state.db"
+        if not db_path.exists():
+            continue
+        try:
+            # Cross-profile aggregation is read-only and never initializes or
+            # migrates another profile's live database.
+            db = SessionDB(db_path=db_path, read_only=True)
+        except Exception as exc:
+            for key in applicable:
+                results[key]["errors"].append({"profile": name, "error": str(exc)})
+            continue
+        try:
+            for key, query in applicable.items():
+                try:
+                    per_profile = min(max(query["limit"] + query["offset"], query["limit"]), 500)
+                    rows = db.list_sessions_rich(
+                        source=query["source"],
+                        exclude_sources=query["exclude_sources"] or None,
+                        limit=per_profile,
+                        offset=0,
+                        min_message_count=query["min_messages"],
+                        include_archived=query["include_archived"],
+                        archived_only=query["archived_only"],
+                        order_by_last_active=query["order"] == "recent",
+                        compact_rows=not query["full"],
+                    )
+                    profile_total = db.session_count(
+                        source=query["source"],
+                        exclude_sources=query["exclude_sources"] or None,
+                        min_message_count=query["min_messages"],
+                        include_archived=query["include_archived"],
+                        archived_only=query["archived_only"],
+                        exclude_children=True,
+                    )
+                    result = results[key]
+                    result["total"] += profile_total
+                    result["profile_totals"][name] = profile_total
+                    for session in rows:
+                        session["profile"] = name
+                        session["is_default_profile"] = name == "default"
+                        session["is_active"] = (
+                            session.get("ended_at") is None
+                            and (now - session.get("last_active", session.get("started_at", 0))) < 300
+                        )
+                        session["archived"] = bool(session.get("archived"))
+                        result["sessions"].append(session)
+                except Exception as exc:
+                    results[key]["errors"].append({"profile": name, "error": str(exc)})
+        finally:
+            db.close()
+
+    for key, query in queries.items():
+        result = results[key]
+        sort_key = "last_active" if query["order"] == "recent" else "started_at"
+        result["sessions"].sort(
+            key=lambda session: session.get(sort_key) or session.get("started_at") or 0,
+            reverse=True,
+        )
+        result["sessions"] = result["sessions"][query["offset"]:query["offset"] + query["limit"]]
+        if not query["full"]:
+            _strip_session_list_rows(result["sessions"])
+        result["limit"] = query["limit"]
+        result["offset"] = query["offset"]
+    return results
+
+
 @app.get("/api/profiles/sessions")
 def get_profiles_sessions(
     limit: int = 20,
@@ -4023,123 +4148,48 @@ def get_profiles_sessions(
     archived: str = "exclude",
     order: str = "recent",
     profile: str = "all",
-    source: str = None,
-    exclude_sources: str = None,
+    source: Optional[str] = None,
+    exclude_sources: Optional[str] = None,
     full: bool = False,
 ):
-    """Unified, read-only session list aggregated across ALL profiles.
-
-    Intentionally process-light: this opens each profile's ``state.db`` directly
-    from disk — it does NOT spawn a dashboard backend per profile. Each returned
-    session is tagged with its owning ``profile`` so the desktop renders one
-    browsable list and only spins up a profile's backend when the user actually
-    interacts (sends a message). A user with a single (default) profile gets the
-    same rows as ``/api/sessions``, just tagged ``profile="default"``.
-
-    Rows omit ``system_prompt``/``model_config`` unless ``full=1`` — same
-    list projection as ``/api/sessions``.
-    """
+    """Unified, read-only session list aggregated across profile databases."""
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(status_code=400, detail="archived must be one of: exclude, only, include")
     if order not in ("created", "recent"):
         raise HTTPException(status_code=400, detail="order must be one of: created, recent")
+    query = _profile_session_query(
+        limit, offset, min_messages, archived, order, source, exclude_sources, full
+    )
+    return _read_profile_sessions(_profile_session_targets(profile), {"sessions": query})["sessions"]
 
-    from hermes_state import SessionDB
-    from hermes_cli import profiles as profiles_mod
 
-    targets: List[Tuple[str, Path]] = []
-    if profile and profile != "all":
-        name, home = _cron_profile_home(profile)
-        targets.append((name, home))
-    else:
-        try:
-            infos = profiles_mod.list_profiles()
-            targets = [(info.name, info.path) for info in infos]
-        except Exception:
-            _log.exception("GET /api/profiles/sessions: list_profiles failed")
-            targets = []
-        if not targets:
-            targets.append(("default", profiles_mod.get_profile_dir("default")))
-
-    min_message_count = max(0, min_messages)
-    archived_only = archived == "only"
-    include_archived = archived == "include"
-    # Source scoping (see /api/sessions): recents pass exclude_sources=cron,
-    # the cron-jobs section passes source=cron — two independent lists so
-    # newest cron sessions can't starve the recents page.
-    source_filter = source or None
-    exclude_list = [s for s in (exclude_sources or "").split(",") if s.strip()]
-    # Over-fetch per profile so the merged+sorted window is correct for the
-    # requested page. Capped so a huge profile can't blow up the response.
-    per_profile = min(max(limit + offset, limit), 500)
-
-    merged: List[Dict[str, Any]] = []
-    total = 0
-    profile_totals: Dict[str, int] = {}
-    errors: List[Dict[str, str]] = []
-    now = time.time()
-    for name, home in targets:
-        db_path = Path(home) / "state.db"
-        if not db_path.exists():
-            continue
-        try:
-            # Read-only: this loop runs on every sidebar refresh, so it must
-            # never DDL/write-lock another profile's live DB (see SessionDB
-            # read_only docstring).
-            db = SessionDB(db_path=db_path, read_only=True)
-        except Exception as exc:
-            errors.append({"profile": name, "error": str(exc)})
-            continue
-        try:
-            rows = db.list_sessions_rich(
-                source=source_filter,
-                exclude_sources=exclude_list or None,
-                limit=per_profile,
-                offset=0,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                order_by_last_active=order == "recent",
-                # Same SQL-level blob skip as /api/sessions (see above).
-                compact_rows=not full,
-            )
-            profile_total = db.session_count(
-                source=source_filter,
-                exclude_sources=exclude_list or None,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                exclude_children=True,
-            )
-            total += profile_total
-            profile_totals[name] = profile_total
-            for s in rows:
-                s["profile"] = name
-                s["is_default_profile"] = name == "default"
-                s["is_active"] = (
-                    s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0))) < 300
-                )
-                s["archived"] = bool(s.get("archived"))
-                merged.append(s)
-        except Exception as exc:
-            errors.append({"profile": name, "error": str(exc)})
-        finally:
-            db.close()
-
-    sort_key = "last_active" if order == "recent" else "started_at"
-    merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
-    window = merged[offset:offset + limit]
-    if not full:
-        _strip_session_list_rows(window)
-    return {
-        "sessions": window,
-        "total": total,
-        "profile_totals": profile_totals,
-        "limit": limit,
-        "offset": offset,
-        "errors": errors,
+@app.get("/api/profiles/sessions/snapshot")
+def get_profiles_sessions_snapshot(
+    recents_limit: int = 40,
+    cron_limit: int = 20,
+    messaging_limit: int = 40,
+    profile: str = "all",
+    recents_exclude_sources: Optional[str] = None,
+    messaging_exclude_sources: Optional[str] = None,
+):
+    """Return sidebar recents, cron, and messaging from one DB-open pass."""
+    recents_limit = min(max(recents_limit, 1), 500)
+    cron_limit = min(max(cron_limit, 1), 500)
+    messaging_limit = min(max(messaging_limit, 1), 500)
+    recents_profile = None if profile == "all" else _cron_profile_home(profile)[0]
+    queries = {
+        "recents": _profile_session_query(
+            recents_limit, 0, 1, "exclude", "recent",
+            exclude_sources=recents_exclude_sources,
+            target_profile=recents_profile,
+        ),
+        "cron": _profile_session_query(cron_limit, 0, 1, "exclude", "recent", source="cron"),
+        "messaging": _profile_session_query(
+            messaging_limit, 0, 1, "exclude", "recent",
+            exclude_sources=messaging_exclude_sources,
+        ),
     }
+    return _read_profile_sessions(_profile_session_targets(), queries)
 
 
 @app.get("/api/sessions/search")

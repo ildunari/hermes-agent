@@ -946,6 +946,29 @@ def list_profiles() -> List[ProfileInfo]:
     return profiles
 
 
+def list_profile_db_targets() -> List[Tuple[str, Path]]:
+    """Return profile homes that may contain a session ``state.db``.
+
+    This intentionally does only directory enumeration. Session aggregation
+    needs database targets, not the full profile metadata assembled by
+    :func:`list_profiles`; in particular it must not parse every ``config.yaml``
+    or probe every profile gateway on a sidebar refresh.
+    """
+    targets: List[Tuple[str, Path]] = [("default", _get_default_hermes_home())]
+    profiles_root = _get_profiles_root()
+    if not profiles_root.is_dir():
+        return targets
+
+    for entry in sorted(profiles_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        if name == "default" or not _PROFILE_ID_RE.match(name):
+            continue
+        targets.append((name, entry))
+    return targets
+
+
 def profiles_to_serve(multiplex: bool) -> List[Tuple[str, Path]]:
     """Return the ``(profile_name, hermes_home)`` pairs a gateway should serve.
 

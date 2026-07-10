@@ -239,6 +239,36 @@ export interface SessionSourceFilter {
 
 export const WEBUI_VISIBLE_SESSION_SOURCE_IDS = ['api_server', 'cli', 'codex', 'desktop', 'gateway', 'local', 'tui'] as const
 
+export interface ProfileSessionsSnapshot {
+  cron: PaginatedSessions
+  messaging: PaginatedSessions
+  recents: PaginatedSessions
+}
+
+export async function getProfileSessionsSnapshot(
+  recentsLimit: number,
+  cronLimit: number,
+  messagingLimit: number,
+  profile: 'all' | (string & {}) = 'all',
+  recentsExcludeSources: string[] = [],
+  messagingExcludeSources: string[] = []
+): Promise<ProfileSessionsSnapshot> {
+  const recentsExcludeParam = recentsExcludeSources.length
+    ? `&recents_exclude_sources=${encodeURIComponent(recentsExcludeSources.join(','))}`
+    : ''
+  const messagingExcludeParam = messagingExcludeSources.length
+    ? `&messaging_exclude_sources=${encodeURIComponent(messagingExcludeSources.join(','))}`
+    : ''
+
+  return window.hermesDesktop.api<ProfileSessionsSnapshot>({
+    path:
+      `/api/profiles/sessions/snapshot?recents_limit=${recentsLimit}&cron_limit=${cronLimit}` +
+      `&messaging_limit=${messagingLimit}&profile=${encodeURIComponent(profile)}` +
+      `${recentsExcludeParam}${messagingExcludeParam}`,
+    timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
+  })
+}
+
 export async function listAllProfileSessions(
   limit = 40,
   minMessages = 0,

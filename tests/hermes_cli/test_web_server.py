@@ -1133,6 +1133,86 @@ class TestWebServerEndpoints:
         resp = self.client.patch("/api/sessions/no-fields", json={})
         assert resp.status_code == 400
 
+    def test_profiles_sessions_uses_database_target_enumerator(self, monkeypatch):
+        """All-profile reads discover DB homes without heavyweight metadata."""
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+        default_db = SessionDB()
+        worker_db = SessionDB(db_path=worker_home / "state.db")
+        try:
+            default_db.create_session(session_id="default-enumerator", source="cli")
+            default_db.append_message("default-enumerator", role="user", content="default")
+            worker_db.create_session(session_id="worker-enumerator", source="cli")
+            worker_db.append_message("worker-enumerator", role="user", content="worker")
+        finally:
+            default_db.close()
+            worker_db.close()
+
+        monkeypatch.setattr(
+            profiles_mod,
+            "list_profiles",
+            lambda: pytest.fail("session aggregation must not load full profile metadata"),
+        )
+        response = self.client.get("/api/profiles/sessions?limit=20&min_messages=1")
+
+        assert response.status_code == 200
+        rows = {row["id"]: row["profile"] for row in response.json()["sessions"]}
+        assert rows["default-enumerator"] == "default"
+        assert rows["worker-enumerator"] == "worker"
+
+    def test_profiles_sessions_snapshot_opens_each_db_once(self, monkeypatch):
+        """The sidebar snapshot shares one read-only DB open across its slices."""
+        import hermes_state
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+        default_db = SessionDB()
+        worker_db = SessionDB(db_path=worker_home / "state.db")
+        try:
+            for db, prefix in ((default_db, "default"), (worker_db, "worker")):
+                for source in ("cli", "cron", "telegram"):
+                    session_id = f"{prefix}-{source}-snapshot"
+                    db.create_session(session_id=session_id, source=source)
+                    db.append_message(session_id, role="user", content=source)
+        finally:
+            default_db.close()
+            worker_db.close()
+
+        real_session_db = hermes_state.SessionDB
+        opens = []
+
+        def counted_session_db(*args, **kwargs):
+            if kwargs.get("read_only"):
+                opens.append(kwargs.get("db_path"))
+            return real_session_db(*args, **kwargs)
+
+        monkeypatch.setattr(hermes_state, "SessionDB", counted_session_db)
+        response = self.client.get(
+            "/api/profiles/sessions/snapshot?recents_limit=20&cron_limit=20&messaging_limit=20"
+            "&recents_exclude_sources=cron%2Ctelegram&messaging_exclude_sources=cron%2Ccli"
+        )
+
+        assert response.status_code == 200
+        snapshot = response.json()
+        assert len(opens) == 2
+        assert {row["id"] for row in snapshot["recents"]["sessions"]} == {
+            "default-cli-snapshot", "worker-cli-snapshot"
+        }
+        assert {row["id"] for row in snapshot["cron"]["sessions"]} == {
+            "default-cron-snapshot", "worker-cron-snapshot"
+        }
+        assert {row["id"] for row in snapshot["messaging"]["sessions"]} == {
+            "default-telegram-snapshot", "worker-telegram-snapshot"
+        }
+        for slice_ in snapshot.values():
+            assert slice_["total"] == 2
+            assert slice_["errors"] == []
+
     def test_profiles_sessions_tags_default_profile(self):
         """The cross-profile aggregator returns the default profile's rows
         tagged profile="default" (single-profile parity with /api/sessions)."""
