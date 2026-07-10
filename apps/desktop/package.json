@@ -44,8 +44,7 @@
     "fmt": "prettier --write 'src/**/*.{ts,tsx}' 'electron/**/*.ts' 'vite.config.ts'",
     "fix": "npm run lint:fix && npm run fmt",
     "test:ui": "vitest run --environment jsdom",
-    "preview": "node scripts/assert-root-install.mjs && vite preview --host 127.0.0.1 --port 4174",
-    "postbuilder": "node scripts/sign-packed-mac.mjs"
+    "preview": "node scripts/assert-root-install.mjs && vite preview --host 127.0.0.1 --port 4174"
   },
   "dependencies": {
     "@assistant-ui/react": "^0.12.28",
