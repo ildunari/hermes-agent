@@ -5666,6 +5666,7 @@ class SessionDB:
         flushed. Returns True if the session was deleted.
         """
         def _do(conn):
+            affected_ancestors = set(self._compression_ancestor_ids(conn, [session_id]))
             cursor = conn.execute(
                 """
                 DELETE FROM sessions
@@ -5681,7 +5682,11 @@ class SessionDB:
                 """,
                 (session_id,),
             )
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+            if deleted:
+                for ancestor_id in affected_ancestors:
+                    self._refresh_session_last_active(conn, ancestor_id)
+            return deleted
 
         deleted = self._execute_write(_do)
         if deleted:
@@ -5845,6 +5850,9 @@ class SessionDB:
             if not session_ids:
                 return 0
 
+            affected_ancestors = set(
+                self._compression_ancestor_ids(conn, list(session_ids))
+            )
             placeholders = ",".join("?" * len(session_ids))
             conn.execute(
                 f"UPDATE sessions SET parent_session_id = NULL "
@@ -5862,6 +5870,8 @@ class SessionDB:
                 )
                 conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
                 removed_ids.append(sid)
+            for ancestor_id in affected_ancestors:
+                self._refresh_session_last_active(conn, ancestor_id)
             return len(session_ids)
 
         count = self._execute_write(_do)
