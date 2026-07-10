@@ -1,11 +1,20 @@
 """Tests for Bug #12905 fixes in agent/anthropic_adapter.py — macOS Keychain support."""
 
 import json
+import os
+import threading
+import time
 from unittest.mock import patch, MagicMock
 
 
+import pytest
+
 from agent.anthropic_adapter import (
+    _claude_oauth_refresh_lock,
+    _OAUTH_REFRESH_THREAD_LOCK,
     _read_claude_code_credentials_from_keychain,
+    _read_claude_code_recovery_credentials,
+    _write_claude_code_credentials,
     read_claude_code_credentials,
     _refresh_oauth_token,
 )
@@ -422,4 +431,126 @@ class TestRefreshOAuthTokenAdoptsFreshCredential:
 
         assert _refresh_oauth_token({"refreshToken": "caller-refresh", "expiresAt": 1}) == "newly-minted"
         assert "user:inference" in captured["write"]["kwargs"]["scopes"]
+
+    def test_concurrent_refreshers_post_single_use_token_once(self, tmp_path, monkeypatch):
+        """The waiter adopts the winner's token after acquiring the lock."""
+        monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+        state = {
+            "creds": {
+                "accessToken": "expired",
+                "refreshToken": "single-use-refresh",
+                "expiresAt": 1,
+            },
+            "posts": 0,
+        }
+
+        def _read():
+            return dict(state["creds"])
+
+        def _refresh(refresh_token, **kwargs):
+            assert refresh_token == "single-use-refresh"
+            state["posts"] += 1
+            time.sleep(0.1)
+            return {
+                "access_token": "fresh-token",
+                "refresh_token": "rotated-refresh",
+                "expires_at_ms": self._FRESH,
+            }
+
+        def _write(access_token, refresh_token, expires_at_ms, **kwargs):
+            state["creds"] = {
+                "accessToken": access_token,
+                "refreshToken": refresh_token,
+                "expiresAt": expires_at_ms,
+            }
+
+        monkeypatch.setattr("agent.anthropic_adapter.read_claude_code_credentials", _read)
+        monkeypatch.setattr("agent.anthropic_adapter.refresh_anthropic_oauth_pure", _refresh)
+        monkeypatch.setattr("agent.anthropic_adapter._write_claude_code_credentials", _write)
+
+        barrier = threading.Barrier(3)
+        results = []
+
+        def _worker():
+            barrier.wait()
+            results.append(_refresh_oauth_token(dict(state["creds"])))
+
+        threads = [threading.Thread(target=_worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        assert sorted(results) == ["fresh-token", "fresh-token"]
+        assert state["posts"] == 1
+
+    def test_adopts_claude_token_rotated_during_failed_post(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+        expired = {
+            "accessToken": "expired",
+            "refreshToken": "stale-refresh",
+            "expiresAt": 1,
+        }
+        fresh = {
+            "accessToken": "claude-won-race",
+            "refreshToken": "rotated-refresh",
+            "expiresAt": self._FRESH,
+        }
+        reads = iter([expired, fresh])
+        monkeypatch.setattr(
+            "agent.anthropic_adapter.read_claude_code_credentials",
+            lambda: dict(next(reads)),
+        )
+
+        def _failed_post(*args, **kwargs):
+            raise RuntimeError("invalid_grant")
+
+        monkeypatch.setattr(
+            "agent.anthropic_adapter.refresh_anthropic_oauth_pure", _failed_post
+        )
+
+        assert _refresh_oauth_token(expired) == "claude-won-race"
+
+    def test_in_process_lock_wait_is_bounded(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+        assert _OAUTH_REFRESH_THREAD_LOCK.acquire(timeout=0.1)
+        try:
+            with pytest.raises(TimeoutError):
+                with _claude_oauth_refresh_lock(timeout_seconds=0.01):
+                    pass
+        finally:
+            _OAUTH_REFRESH_THREAD_LOCK.release()
+
+
+def test_write_repairs_malformed_canonical_credentials(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+    canonical = tmp_path / ".claude" / ".credentials.json"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("{broken", encoding="utf-8")
+
+    _write_claude_code_credentials("fresh-access", "fresh-refresh", 4_000_000_000_000)
+
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    assert payload["claudeAiOauth"]["refreshToken"] == "fresh-refresh"
+
+
+def test_write_preserves_rotated_chain_in_recovery_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+    canonical = tmp_path / ".claude" / ".credentials.json"
+    real_replace = os.replace
+
+    def _replace_with_canonical_failure(source, destination):
+        if destination == canonical:
+            raise OSError("canonical unavailable")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("agent.anthropic_adapter.os.replace", _replace_with_canonical_failure)
+
+    _write_claude_code_credentials("fresh-access", "fresh-refresh", 4_000_000_000_000)
+
+    recovered = _read_claude_code_recovery_credentials()
+    assert recovered is not None
+    assert recovered["accessToken"] == "fresh-access"
+    assert recovered["refreshToken"] == "fresh-refresh"
 

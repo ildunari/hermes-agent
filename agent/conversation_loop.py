@@ -2199,6 +2199,46 @@ def run_conversation(
                     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
                     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
 
+                    # Diagnose actual invalidation from provider usage deltas,
+                    # not guessed causes. Observation only: this never mutates
+                    # the prompt or request payload.
+                    if getattr(agent, "_use_prompt_caching", False):
+                        from agent.prompt_caching import detect_cache_invalidation
+
+                        _current_cache_usage = {
+                            "input": aggregator_usage.input_tokens,
+                            "cache_read": aggregator_usage.cache_read_tokens,
+                            "cache_write": aggregator_usage.cache_write_tokens,
+                        }
+                        _current_cache_route = (
+                            agent.provider,
+                            agent.model,
+                            agent.base_url,
+                            agent.api_mode,
+                            getattr(agent, "_use_native_cache_layout", False),
+                        )
+                        _same_cache_route = (
+                            getattr(agent, "_last_prompt_cache_route", None)
+                            == _current_cache_route
+                        )
+                        if _same_cache_route and detect_cache_invalidation(
+                            getattr(agent, "_last_prompt_cache_usage", None), _current_cache_usage
+                        ):
+                            logger.warning(
+                                "Prompt cache invalidated: model=%s provider=%s input=%d cache_write=%d",
+                                agent.model,
+                                agent.provider or "unknown",
+                                aggregator_usage.input_tokens,
+                                aggregator_usage.cache_write_tokens,
+                            )
+                            if agent.verbose_logging and not agent.quiet_mode:
+                                agent._vprint(
+                                    f"{agent.log_prefix}⚠ Prompt cache rebuilt after a warm-cache turn "
+                                    f"({aggregator_usage.cache_write_tokens:,} tokens written)"
+                                )
+                        agent._last_prompt_cache_usage = _current_cache_usage
+                        agent._last_prompt_cache_route = _current_cache_route
+
                     # Log API call details for debugging/observability
                     _cache_pct = ""
                     if canonical_usage.cache_read_tokens and prompt_tokens:

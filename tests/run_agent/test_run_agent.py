@@ -1031,6 +1031,41 @@ class TestInit:
 
             assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
+    def test_prompt_caching_vibeproxy_tool_schema_uses_mixed_stable_ttl(self):
+        """Mixed mode keeps the stable tool schema at 1h."""
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "sample_tool",
+                "description": "stable schema",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("hermes_cli.config.load_config", return_value={"prompt_caching": {"cache_ttl": "mixed"}}),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                provider="vibeproxy",
+                model="claude-sonnet-5",
+                base_url="http://127.0.0.1:8485/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            a.tools = [tool]
+
+            kwargs = a._build_api_kwargs([
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "rolling user"},
+            ])
+
+            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+            assert getattr(a, "_cache_ttl") == "mixed"
+
     def test_prompt_caching_vibeproxy_tool_schema_keeps_total_breakpoints_at_four(self):
         """Adding a tool breakpoint should trim messages to Claude's four-breakpoint cap."""
         tool = {

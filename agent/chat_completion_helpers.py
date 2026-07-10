@@ -907,7 +907,9 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         tools_for_api = _copy.deepcopy(tools_for_api)
         if isinstance(tools_for_api, list) and isinstance(tools_for_api[-1], dict):
             tool_cache_marker = {"type": "ephemeral"}
-            if getattr(agent, "_cache_ttl", "5m") == "1h":
+            # Tools are part of the stable prefix, so mixed mode gives them the
+            # same 1h tier as the system prompt while message markers stay 5m.
+            if getattr(agent, "_cache_ttl", "5m") in {"1h", "mixed"}:
                 tool_cache_marker["ttl"] = "1h"
             tools_for_api[-1]["cache_control"] = tool_cache_marker
             api_messages = _limit_message_cache_markers_for_tool_breakpoint(api_messages)

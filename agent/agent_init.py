@@ -583,8 +583,9 @@ def init_agent(
     agent._use_prompt_caching, agent._use_native_cache_layout = (
         agent._anthropic_prompt_cache_policy()
     )
-    # Anthropic supports "5m" (default) and "1h" cache TTL tiers. Read from
-    # config.yaml under prompt_caching.cache_ttl; unknown values keep "5m".
+    # Anthropic supports "5m" and "1h" cache TTL tiers. ``mixed`` uses 1h for
+    # the stable system/tool prefix and 5m for the rolling message tail. Read
+    # from config.yaml under prompt_caching.cache_ttl; unknown values keep 5m.
     # 1h tier costs 2x on write vs 1.25x for 5m, but amortizes across long
     # sessions with >5-minute pauses between turns (#14971).
     agent._cache_ttl = "5m"
@@ -593,7 +594,7 @@ def init_agent(
 
         _pc_cfg = _load_pc_cfg().get("prompt_caching", {}) or {}
         _ttl = _pc_cfg.get("cache_ttl", "5m")
-        if _ttl in {"5m", "1h"}:
+        if _ttl in {"5m", "1h", "mixed"}:
             agent._cache_ttl = _ttl
     except Exception:
         pass
@@ -1940,6 +1941,10 @@ def init_agent(
     agent.session_output_tokens = 0
     agent.session_cache_read_tokens = 0
     agent.session_cache_write_tokens = 0
+    # Per-call cache telemetry used only to detect a demonstrated warm→cold
+    # transition. It never participates in prompt construction.
+    agent._last_prompt_cache_usage = None
+    agent._last_prompt_cache_route = None
     agent.session_reasoning_tokens = 0
     agent.session_estimated_cost_usd = 0.0
     agent.session_cost_status = "unknown"

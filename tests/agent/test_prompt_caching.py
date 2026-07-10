@@ -5,6 +5,7 @@ from agent.prompt_caching import (
     _apply_cache_marker,
     _can_carry_marker,
     apply_anthropic_cache_control,
+    detect_cache_invalidation,
 )
 
 
@@ -175,6 +176,21 @@ class TestApplyAnthropicCacheControl:
         assert isinstance(sys_content, list)
         assert sys_content[0]["cache_control"]["ttl"] == "1h"
 
+    def test_mixed_ttl_keeps_stable_system_1h_and_rolling_tail_5m(self):
+        msgs = [
+            {"role": "system", "content": "Stable system"},
+            {"role": "user", "content": "Rolling user turn"},
+            {"role": "assistant", "content": "Rolling assistant turn"},
+        ]
+        result = apply_anthropic_cache_control(msgs, cache_ttl="mixed")
+
+        assert result[0]["content"][0]["cache_control"] == {
+            "type": "ephemeral",
+            "ttl": "1h",
+        }
+        assert result[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        assert result[2]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
     def test_max_4_breakpoints(self):
         msgs = [
             {"role": "system", "content": "System"},
@@ -223,3 +239,27 @@ class TestApplyAnthropicCacheControl:
         assert isinstance(result[1]["content"], list)
         assert result[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
         assert "cache_control" not in result[1]
+
+
+class TestCacheInvalidationDetection:
+    def test_detects_observed_warm_to_cold_rebuild(self):
+        assert detect_cache_invalidation(
+            {"cache_read": 40_000, "cache_write": 0, "input": 500},
+            {"cache_read": 0, "cache_write": 40_500, "input": 500},
+        ) is True
+
+    def test_ignores_first_call_and_normal_warm_turns(self):
+        assert detect_cache_invalidation(
+            None,
+            {"cache_read": 0, "cache_write": 40_500, "input": 500},
+        ) is False
+        assert detect_cache_invalidation(
+            {"cache_read": 40_000},
+            {"cache_read": 41_000, "cache_write": 0, "input": 500},
+        ) is False
+
+    def test_ignores_small_prefix_noise(self):
+        assert detect_cache_invalidation(
+            {"cache_read": 1_000},
+            {"cache_read": 0, "cache_write": 1_000, "input": 500},
+        ) is False

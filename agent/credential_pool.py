@@ -965,6 +965,20 @@ class CredentialPool:
                 self._mark_exhausted(entry, None)
             return None
 
+        # Claude Code refresh tokens are also single-use. Serialize every
+        # Hermes path that can consume them through the same lock used by the
+        # direct adapter, then re-sync only after acquiring it.
+        if self.provider == "anthropic" and entry.source == "claude_code":
+            from agent.anthropic_adapter import _claude_oauth_refresh_lock
+
+            with _claude_oauth_refresh_lock():
+                synced = self._sync_anthropic_entry_from_credentials_file(entry)
+                if synced is not entry:
+                    entry = synced
+                    if not self._entry_needs_refresh(entry):
+                        return entry
+                return self._refresh_entry_impl(entry, force=force)
+
         # Codex OAuth refresh tokens are single-use.  The sync→POST→write-back
         # sequence below must run atomically across Hermes processes: otherwise
         # two processes can both adopt the same on-disk token, both POST it, and
@@ -1074,6 +1088,11 @@ class CredentialPool:
             # has a newer token pair and retry once.
             if self.provider == "anthropic" and entry.source == "claude_code":
                 synced = self._sync_anthropic_entry_from_credentials_file(entry)
+                if not self._entry_needs_refresh(synced):
+                    # Claude Code won the race and persisted a valid token.
+                    # Adopt it; never immediately consume its rotated token.
+                    logger.debug("Credentials file has valid token, using without refresh")
+                    return synced
                 if synced.refresh_token != entry.refresh_token:
                     logger.debug("Retrying refresh with synced token from credentials file")
                     try:
@@ -1105,10 +1124,6 @@ class CredentialPool:
                         return updated
                     except Exception as retry_exc:
                         logger.debug("Retry refresh also failed: %s", retry_exc)
-                elif not self._entry_needs_refresh(synced):
-                    # Credentials file had a valid (non-expired) token — use it directly
-                    logger.debug("Credentials file has valid token, using without refresh")
-                    return synced
             # For xai-oauth: same race as nous — another process may have
             # consumed the refresh token between our proactive sync and the
             # HTTP call.  Re-check auth.json and adopt the fresh tokens if

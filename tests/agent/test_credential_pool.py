@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
+from dataclasses import replace
 import json
 import time
 from datetime import datetime, timezone
@@ -3282,3 +3284,51 @@ def test_sync_anthropic_entry_clears_all_error_fields(tmp_path, monkeypatch):
     assert synced.last_error_reason is None
     assert synced.last_error_message is None
     assert synced.last_error_reset_at is None
+
+
+def test_claude_code_pool_refresh_adopts_fresh_token_inside_shared_lock(monkeypatch):
+    from agent.credential_pool import (
+        AUTH_TYPE_OAUTH,
+        CredentialPool,
+        PooledCredential,
+    )
+
+    stale = PooledCredential(
+        provider="anthropic",
+        id="claude-code",
+        label="Claude Code",
+        auth_type=AUTH_TYPE_OAUTH,
+        priority=0,
+        source="claude_code",
+        access_token="stale-access",
+        refresh_token="stale-refresh",
+        expires_at_ms=1,
+    )
+    fresh = replace(
+        stale,
+        access_token="fresh-access",
+        refresh_token="fresh-refresh",
+        expires_at_ms=9_999_999_999_000,
+    )
+    pool = CredentialPool("anthropic", [stale])
+    events = []
+
+    @contextmanager
+    def _lock():
+        events.append("enter")
+        yield
+        events.append("exit")
+
+    monkeypatch.setattr("agent.anthropic_adapter._claude_oauth_refresh_lock", _lock)
+    monkeypatch.setattr(
+        pool, "_sync_anthropic_entry_from_credentials_file", lambda entry: fresh
+    )
+    monkeypatch.setattr(pool, "_entry_needs_refresh", lambda entry: False)
+    monkeypatch.setattr(
+        pool,
+        "_refresh_entry_impl",
+        lambda *args, **kwargs: pytest.fail("fresh token must be adopted without POST"),
+    )
+
+    assert pool._refresh_entry(stale, force=True) is fresh
+    assert events == ["enter", "exit"]
