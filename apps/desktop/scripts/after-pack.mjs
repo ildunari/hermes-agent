@@ -14,6 +14,7 @@ import { stampExeIdentity } from './set-exe-identity.mjs'
 
 const HERMES_DEVELOPER_ID_SIGNING_IDENTITY = '3A22F53A48A189F4A8766CACE00192860CC37F8F'
 const HERMES_DEVELOPER_ID_KEYCHAIN_ITEM = 'Hermes Developer ID Signing Keychain'
+const HERMES_SIGNING_PASSWORD_SERVICE = 'Hermes Developer ID Signing Keychain Password'
 const HERMES_OP_SHIM = path.join(os.homedir(), '.local', 'bin', 'op')
 const SIGNING_COMMAND_TIMEOUT_MS = 20_000
 
@@ -30,16 +31,25 @@ function unlockHermesSigningKeychains() {
     throw new Error('Hermes signing keychain is missing; refusing interactive codesign fallback')
   }
 
+  // MacBook/Mini keep this machine-local password in login.keychain with
+  // /usr/bin/security trusted. Studio falls back to the service-account op shim.
+  const localPassword = spawnSync(
+    '/usr/bin/security',
+    ['find-generic-password', '-s', HERMES_SIGNING_PASSWORD_SERVICE, '-w'],
+    { encoding: 'utf8', timeout: SIGNING_COMMAND_TIMEOUT_MS },
+  )
+  let password = localPassword.status === 0 ? localPassword.stdout.trim() : ''
+
   const opCommand = fs.existsSync(HERMES_OP_SHIM) ? HERMES_OP_SHIM : 'op'
-  const op = spawnSync(
+  const op = password ? null : spawnSync(
     opCommand,
     ['item', 'get', HERMES_DEVELOPER_ID_KEYCHAIN_ITEM, '--vault', 'CLI', '--reveal', '--fields', 'password'],
     { encoding: 'utf8', timeout: SIGNING_COMMAND_TIMEOUT_MS },
   )
-  if (op.error || op.status !== 0) {
+  if (!password && (op?.error || op?.status !== 0)) {
     throw new Error('Unable to read the Hermes signing-keychain password non-interactively')
   }
-  const password = op.stdout.trim()
+  if (!password) password = op?.stdout.trim() || ''
   if (!password) throw new Error('Hermes signing-keychain password is empty')
 
   for (const keychain of keychains) {
