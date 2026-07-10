@@ -2,12 +2,15 @@
 
 import asyncio
 import json
+import httpx
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
 from tools.vision_tools import (
     _detect_video_mime_type,
+    _gemini_video_api_key,
     _prepare_video_for_analysis,
+    _redact_video_source,
     _video_analysis_limits,
     _video_to_base64_data_url,
     _handle_video_analyze,
@@ -167,6 +170,19 @@ class TestHandleVideoAnalyze:
 
 
 class TestVideoAnalysisLimits:
+    def test_gemini_api_key_alias_is_supported(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.setenv("GEMINI_API_KEY", "alias-key")
+        assert _gemini_video_api_key() == "alias-key"
+
+    def test_signed_url_is_redacted_for_logs(self):
+        redacted = _redact_video_source(
+            "https://user:pass@cdn.example/video.mp4?token=SUPERSECRET#frag"
+        )
+        assert redacted == "https://cdn.example/video.mp4"
+        assert "SUPERSECRET" not in redacted
+        assert "user" not in redacted
+
     def test_non_finite_values_fall_back_to_safe_defaults(self):
         config = {
             "video_analysis": {
@@ -433,8 +449,8 @@ class TestVideoAnalyzeTool:
             "uri": "https://files.example/video",
             "mime_type": "video/mp4",
         }
-        self.mock_upload.assert_awaited_once_with(video, "video/mp4")
-        self.mock_delete.assert_awaited_once_with("files/test-video")
+        self.mock_upload.assert_awaited_once_with(video, "video/mp4", "")
+        self.mock_delete.assert_awaited_once_with("files/test-video", "")
 
 
 class TestVideoAuxiliaryRouting:
@@ -457,6 +473,34 @@ class TestVideoAuxiliaryRouting:
             else:
                 raise AssertionError("xAI video route should have been rejected")
         get_client.assert_not_called()
+
+
+    def test_native_gemini_failure_never_enters_generic_fallback(self):
+        from agent.auxiliary_client import async_call_llm
+        from agent.gemini_native_adapter import AsyncGeminiNativeClient, GeminiNativeClient
+
+        client = AsyncGeminiNativeClient(GeminiNativeClient(api_key="test-key"))
+        client.chat.completions.create = AsyncMock(
+            side_effect=httpx.ConnectError("offline")
+        )
+        with patch("agent.auxiliary_client._get_cached_client", return_value=(client, "gemini-3.5-flash")), \
+             patch("agent.auxiliary_client._try_configured_fallback_chain") as configured_fb, \
+             patch("agent.auxiliary_client._try_main_agent_model_fallback") as main_fb, \
+             patch("agent.auxiliary_client._try_payment_fallback") as payment_fb:
+            try:
+                self._run(async_call_llm(
+                    task="video",
+                    provider="gemini",
+                    model="gemini-3.5-flash",
+                    messages=[{"role": "user", "content": "video"}],
+                ))
+            except httpx.ConnectError:
+                pass
+            else:
+                raise AssertionError("native Gemini failure should be returned directly")
+        configured_fb.assert_not_called()
+        main_fb.assert_not_called()
+        payment_fb.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -7704,6 +7704,11 @@ async def async_call_llm(
                     else:
                         raise
 
+        if task == "video":
+            # Gemini Files references are provider-specific. Never leak them to
+            # a generic fallback that may ignore, reject, or mishandle video.
+            raise first_err
+
         # ── Payment / connection / rate-limit fallback (mirrors sync call_llm) ──
         # Auth error fallback (#21165): a 401 that survived the refresh path
         # falls back in auto mode just like the sync call_llm() path. Auth is

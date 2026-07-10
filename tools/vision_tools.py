@@ -42,7 +42,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 import httpx
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
 from agent.image_normalization import (
@@ -1601,6 +1601,18 @@ _MAX_VIDEO_BASE64_BYTES = 140 * 1024 * 1024
 _VIDEO_SIZE_WARN_BYTES = 80 * 1024 * 1024
 
 
+def _redact_video_source(source: str) -> str:
+    """Strip URL userinfo, query credentials, and fragments before logging."""
+    try:
+        parsed = urlsplit(str(source))
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return str(source)
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except Exception:
+        return "<redacted-video-source>"
+
+
 def _video_analysis_limits() -> tuple[int, int, int]:
     """Return (input limit, compression target, download limit) in bytes."""
     mib = 1024 * 1024
@@ -1764,11 +1776,24 @@ def _video_to_base64_data_url(video_path: Path, mime_type: Optional[str] = None)
     return f"data:{mime};base64,{encoded}"
 
 
-async def _upload_video_to_gemini(video_path: Path, mime_type: str) -> tuple[str, str]:
+def _gemini_video_api_key() -> str:
+    key = str(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
+    if key:
+        return key
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        return str(cfg_get(load_config(), "auxiliary", "video", "api_key", default="") or "").strip()
+    except Exception:
+        return ""
+
+
+async def _upload_video_to_gemini(
+    video_path: Path, mime_type: str, api_key: Optional[str] = None
+) -> tuple[str, str]:
     """Stream a video to Gemini Files and wait until it is ready."""
-    api_key = str(os.getenv("GOOGLE_API_KEY") or "").strip()
+    api_key = str(api_key or _gemini_video_api_key()).strip()
     if not api_key:
-        raise RuntimeError("GOOGLE_API_KEY is required for Gemini video analysis")
+        raise RuntimeError("A Gemini API credential is required for video analysis")
 
     size = video_path.stat().st_size
     headers = {
@@ -1816,35 +1841,39 @@ async def _upload_video_to_gemini(video_path: Path, mime_type: str) -> tuple[str
         uri = str(file_info.get("uri") or "")
         if not name or not uri:
             if name:
-                await _delete_gemini_file(name)
+                await _delete_gemini_file(name, api_key)
             raise RuntimeError("Gemini Files response is missing name or URI")
 
         deadline = asyncio.get_running_loop().time() + 600
-        while True:
-            state = str(file_info.get("state") or "").upper()
-            if state == "ACTIVE":
-                return uri, name
-            if state == "FAILED":
-                await _delete_gemini_file(name)
-                raise RuntimeError("Gemini failed while processing the uploaded video")
-            if asyncio.get_running_loop().time() >= deadline:
-                await _delete_gemini_file(name)
-                raise TimeoutError("Timed out waiting for Gemini to process the video")
-            await asyncio.sleep(2)
-            try:
+        try:
+            while True:
+                if not isinstance(file_info, dict):
+                    raise RuntimeError("Gemini Files returned malformed processing metadata")
+                state = str(file_info.get("state") or "").upper()
+                if state == "ACTIVE":
+                    return uri, name
+                if state == "FAILED":
+                    raise RuntimeError("Gemini failed while processing the uploaded video")
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise TimeoutError("Timed out waiting for Gemini to process the video")
+                await asyncio.sleep(2)
                 status = await client.get(
                     f"https://generativelanguage.googleapis.com/v1beta/{name}",
                     headers={"x-goog-api-key": api_key},
                 )
                 status.raise_for_status()
                 file_info = status.json()
-            except Exception:
-                await _delete_gemini_file(name)
-                raise
+        except BaseException:
+            cleanup = asyncio.create_task(_delete_gemini_file(name, api_key))
+            try:
+                await asyncio.shield(cleanup)
+            except BaseException:
+                pass
+            raise
 
 
-async def _delete_gemini_file(file_name: str) -> None:
-    api_key = str(os.getenv("GOOGLE_API_KEY") or "").strip()
+async def _delete_gemini_file(file_name: str, api_key: Optional[str] = None) -> None:
+    api_key = str(api_key or _gemini_video_api_key()).strip()
     if not api_key or not file_name:
         return
     try:
@@ -1925,23 +1954,32 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
             if isinstance(e, httpx.HTTPStatusError):
                 status = e.response.status_code
                 retryable = status in {408, 429} or 500 <= status < 600
-            if isinstance(e, (ValueError, PermissionError)) or not retryable:
+                safe_detail = f"HTTP {status}"
+            else:
+                safe_detail = type(e).__name__
+            if isinstance(e, (ValueError, PermissionError)):
                 raise
+            if not retryable:
+                raise RuntimeError(f"Video download failed ({safe_detail})") from None
             if attempt < max_retries - 1:
                 wait_time = 2 ** (attempt + 1)
-                logger.warning("Video download failed (attempt %s/%s): %s", attempt + 1, max_retries, str(e)[:50])
+                logger.warning("Video download failed (attempt %s/%s): %s", attempt + 1, max_retries, safe_detail)
                 await asyncio.sleep(wait_time)
             else:
                 logger.error(
                     "Video download failed after %s attempts: %s",
-                    max_retries, str(e)[:100], exc_info=True,
+                    max_retries, safe_detail,
                 )
 
     if last_error is None:
         raise RuntimeError(
             f"_download_video exited retry loop without attempting (max_retries={max_retries})"
         )
-    raise last_error
+    if isinstance(last_error, httpx.HTTPStatusError):
+        detail = f"HTTP {last_error.response.status_code}"
+    else:
+        detail = type(last_error).__name__
+    raise RuntimeError(f"Video download failed after {max_retries} attempts ({detail})") from None
 
 
 async def video_analyze_tool(
@@ -1953,9 +1991,10 @@ async def video_analyze_tool(
     if not isinstance(user_prompt, str):
         user_prompt = str(user_prompt) if user_prompt is not None else ""
     _hydrate_vision_env()
+    safe_video_source = _redact_video_source(video_url)
     debug_call_data = {
         "parameters": {
-            "video_url": video_url,
+            "video_url": safe_video_source,
             "user_prompt": user_prompt[:200] + "..." if len(user_prompt) > 200 else user_prompt,
             "model": model,
         },
@@ -1971,13 +2010,14 @@ async def video_analyze_tool(
     source_video_path = None
     source_cleanup = False
     gemini_file_name = ""
+    gemini_api_key = ""
 
     try:
         from tools.interrupt import is_interrupted
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
-        logger.info("Analyzing video: %s", video_url[:60])
+        logger.info("Analyzing video: %s", safe_video_source[:60])
         logger.info("User prompt: %s", user_prompt[:100])
 
         # Resolve local path vs remote URL
@@ -2025,8 +2065,9 @@ async def video_analyze_tool(
         if video_size_bytes > _VIDEO_SIZE_WARN_BYTES:
             logger.warning("Video is %.1f MB — may be slow or rejected", video_size_mb)
 
+        gemini_api_key = _gemini_video_api_key()
         file_uri, gemini_file_name = await _upload_video_to_gemini(
-            temp_video_path, detected_mime
+            temp_video_path, detected_mime, gemini_api_key
         )
         debug_call_data["video_size_bytes"] = video_size_bytes
         debug_call_data["delivery"] = "gemini_files"
@@ -2149,7 +2190,7 @@ async def video_analyze_tool(
 
     finally:
         if gemini_file_name:
-            await _delete_gemini_file(gemini_file_name)
+            await _delete_gemini_file(gemini_file_name, gemini_api_key)
         if should_cleanup and temp_video_path and temp_video_path.exists():
             try:
                 temp_video_path.unlink()
