@@ -5437,6 +5437,23 @@ def _desktop_macos_relaunchable_fixup(desktop_dir: Path) -> None:
     if not codesign:
         return
     try:
+        # Preserve an already-valid real identity applied by the afterPack hook.
+        # The relaunch fixup exists only for unsigned/ad-hoc local bundles and
+        # must never replace a Developer ID signature with a fresh ad-hoc one.
+        signature = subprocess.run(
+            [codesign, "-dv", "--verbose=4", str(app)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        signature_details = f"{signature.stdout or ''}\n{signature.stderr or ''}"
+        has_stable_team = (
+            signature.returncode == 0
+            and "TeamIdentifier=" in signature_details
+            and "TeamIdentifier=not set" not in signature_details
+        )
+        if has_stable_team:
+            return
         subprocess.run(["xattr", "-cr", str(app)], check=False)
         subprocess.run([codesign, "--force", "--deep", "--sign", "-", str(app)], check=False)
     except Exception as exc:
