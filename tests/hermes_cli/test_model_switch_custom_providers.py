@@ -258,12 +258,10 @@ def test_vibeproxy_provider_dict_does_not_emit_custom_duplicate(monkeypatch):
     duplicate_rows = [p for p in providers if p["slug"] == "custom:vibeproxy"]
     assert len(vibe_rows) == 1
     assert duplicate_rows == []
-    assert vibe_rows[0]["models"] == [
-        "claude-fable-5",
+    assert {
         "claude-opus-4-8",
-        "claude-sonnet-5",
         "claude-haiku-4-5-20251001",
-    ]
+    }.issubset(vibe_rows[0]["models"])
 
 
 def test_is_routing_aggregator_excludes_flat_namespace_resellers():

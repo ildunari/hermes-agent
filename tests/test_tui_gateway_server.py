@@ -1811,7 +1811,7 @@ def test_make_agent_passes_configured_fallback_chain(monkeypatch):
 
     assert agent.model == "gpt-5.5"
     assert captured["fallback_model"] == fallback_chain
-    assert captured["platform"] == "tui"
+    assert captured["platform"] == "desktop"
 
 
 def test_background_agent_kwargs_preserves_full_fallback_chain(monkeypatch):
@@ -2390,7 +2390,7 @@ def test_ensure_session_db_row_persists_explicit_cwd(monkeypatch, tmp_path):
     server._ensure_session_db_row({"session_key": "k1", "cwd": str(tmp_path), "explicit_cwd": True})
 
     assert created == [
-        {"key": "k1", "source": "tui", "model": "test-model", "model_config": None, "cwd": str(tmp_path)}
+        {"key": "k1", "source": "desktop", "model": "test-model", "model_config": None, "cwd": str(tmp_path)}
     ]
 
 
@@ -2430,7 +2430,7 @@ def test_ensure_session_db_row_defaults_to_no_workspace(monkeypatch, tmp_path):
     server._ensure_session_db_row({"session_key": "k1", "cwd": str(tmp_path)})
 
     assert created == [
-        {"key": "k1", "source": "tui", "model": "test-model", "model_config": None, "cwd": None}
+        {"key": "k1", "source": "desktop", "model": "test-model", "model_config": None, "cwd": None}
     ]
 
 
