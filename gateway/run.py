@@ -12861,6 +12861,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return raw.guild.id
         return None
 
+    def _get_live_voice_reply_guild(self, source: SessionSource) -> Optional[int]:
+        """Return the connected Discord VC for text-mode live voice replies."""
+        if getattr(source.platform, "value", source.platform) != "discord":
+            return None
+        if self._voice_mode.get(self._voice_key(source.platform, source.chat_id), "off") != "all":
+            return None
+        adapter = self.adapters.get(source.platform)
+        if not adapter or not hasattr(adapter, "is_in_voice_channel"):
+            return None
+        for guild_id, text_channel_id in (getattr(adapter, "_voice_text_channels", {}) or {}).items():
+            if str(text_channel_id) == str(source.chat_id) and adapter.is_in_voice_channel(int(guild_id)):
+                return int(guild_id)
+        return None
+
 
     async def _handle_voice_channel_join(self, event: MessageEvent) -> str:
         """Join the user's current Discord voice channel."""
@@ -17882,6 +17896,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        voice_reply_consumer_holder = [None]
+        voice_reply_generation_holder = [0]
+        live_voice_guild = self._get_live_voice_reply_guild(source)
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
@@ -18135,6 +18152,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
+
+            if live_voice_guild is not None and _status_adapter is not None:
+                try:
+                    from plugins.platforms.discord.adapter import DiscordVoiceReplyStreamer
+                    streamer = DiscordVoiceReplyStreamer(_status_adapter, live_voice_guild)
+                    streamer.generation = _status_adapter.register_live_voice_streamer(live_voice_guild, streamer)
+                    voice_reply_consumer_holder[0] = streamer
+                    voice_reply_generation_holder[0] = streamer.generation
+                    prior_delta = _stream_delta_cb
+                    def _stream_delta_cb(text: str) -> None:
+                        if _run_still_current():
+                            if prior_delta: prior_delta(text)
+                            streamer.on_delta(text)
+                except Exception as exc:
+                    logger.debug("Could not set up live Discord voice streaming: %s", exc)
 
             def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
                 if not _run_still_current():
@@ -18933,6 +18965,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Signal the stream consumer that the agent is done
             if _stream_consumer is not None:
                 _stream_consumer.finish()
+            if voice_reply_consumer_holder[0] is not None:
+                voice_reply_consumer_holder[0].finish()
             
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
@@ -19221,6 +19255,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 await asyncio.sleep(0.05)
 
         stream_task = asyncio.create_task(_start_stream_consumer())
+        async def _start_voice_reply_consumer():
+            for _ in range(200):
+                if voice_reply_consumer_holder[0] is not None:
+                    await voice_reply_consumer_holder[0].run()
+                    return
+                await asyncio.sleep(0.05)
+        voice_reply_task = asyncio.create_task(_start_voice_reply_consumer()) if live_voice_guild is not None else None
         
         # Track this agent as running for this session (for interrupt support)
         # We do this in a callback after the agent is created
@@ -20008,6 +20049,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             await stream_task
                         except asyncio.CancelledError:
                             pass
+            if voice_reply_task:
+                streamer = voice_reply_consumer_holder[0]
+                if streamer is None:
+                    voice_reply_task.cancel()
+                else:
+                    streamer.finish()
+                try:
+                    await asyncio.wait_for(voice_reply_task, timeout=8.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    voice_reply_task.cancel()
+                    try:
+                        await voice_reply_task
+                    except asyncio.CancelledError:
+                        pass
+                if live_voice_guild is not None:
+                    adapter = self.adapters.get(source.platform)
+                    if adapter and hasattr(adapter, "clear_live_voice_streamer"):
+                        await adapter.clear_live_voice_streamer(live_voice_guild, generation=voice_reply_generation_holder[0] or None)
             
             # Clean up tracking
             tracking_task.cancel()

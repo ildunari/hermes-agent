@@ -15,14 +15,17 @@ import inspect
 import json
 import logging
 import os
+import queue
 import re
 import struct
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from collections import defaultdict
 from contextlib import suppress
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -352,6 +355,13 @@ def _discord_ready_timeout_seconds() -> float:
             )
     return 30.0
 
+def _pcm_rms(pcm: bytes) -> int:
+    """RMS for signed little-endian 16-bit PCM without removed ``audioop``."""
+    if len(pcm) < 2:
+        return 0
+    samples = memoryview(pcm).cast("h")
+    return int((sum(sample * sample for sample in samples) / len(samples)) ** 0.5)
+
 
 class VoiceReceiver:
     """Captures and decodes voice audio from a Discord voice channel.
@@ -367,7 +377,15 @@ class VoiceReceiver:
     SAMPLE_RATE = 48000        # Discord native rate
     CHANNELS = 2               # Discord sends stereo
 
-    def __init__(self, voice_client, allowed_user_ids: set = None):
+    def __init__(
+        self,
+        voice_client,
+        allowed_user_ids: set = None,
+        *,
+        barge_in_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        callback_loop: Optional[asyncio.AbstractEventLoop] = None,
+        barge_in_config: Optional[Dict[str, Any]] = None,
+    ):
         self._vc = voice_client
         self._allowed_user_ids = allowed_user_ids or set()
         self._running = False
@@ -388,8 +406,23 @@ class VoiceReceiver:
         # Opus decoder per SSRC (each user needs own decoder state)
         self._decoders: Dict[int, object] = {}
 
-        # Pause flag: don't capture while bot is playing TTS
-        self._paused = False
+        # During normal playback capture is blocked to prevent echo. A live
+        # streamed reply uses playback_monitor instead, which only evaluates
+        # authorized, sustained speech for barge-in and never transcribes it.
+        self._mode = "capture"  # capture | playback_monitor | blocked
+        self._monitor_generation = 0
+        self._barge_in_callback = barge_in_callback
+        self._callback_loop = callback_loop
+        self._barge_candidate_start: Dict[int, float] = {}
+        self._barge_candidate_last: Dict[int, float] = {}
+        self._barge_candidate_bytes: Dict[int, int] = {}
+        self._barge_latched_generation = 0
+        cfg = barge_in_config or {}
+        self._barge_in_enabled = bool(cfg.get("enabled", True))
+        self._barge_in_min_ms = int(cfg.get("min_ms", 350))
+        self._barge_in_min_pcm_ms = int(cfg.get("min_pcm_ms", 250))
+        self._barge_in_min_rms = int(cfg.get("min_rms", 900))
+        self._barge_in_grace_ms = int(cfg.get("grace_ms", 250))
 
         # Debug logging counter (instance-level to avoid cross-instance races)
         self._packet_debug_count = 0
@@ -425,10 +458,90 @@ class VoiceReceiver:
         logger.info("VoiceReceiver stopped")
 
     def pause(self):
-        self._paused = True
+        self._mode = "blocked"
 
     def resume(self):
-        self._paused = False
+        self._mode = "capture"
+        self._monitor_generation = 0
+        self._reset_barge_candidates()
+
+    def enter_playback_monitor(self, generation: int) -> None:
+        self._mode = "playback_monitor"
+        self._monitor_generation = int(generation or 0)
+        self._barge_latched_generation = 0
+        self._reset_barge_candidates()
+
+    def exit_playback_monitor(self, generation: Optional[int] = None) -> None:
+        if generation is None or self._monitor_generation == int(generation):
+            self.resume()
+
+    def _reset_barge_candidates(self) -> None:
+        self._barge_candidate_start.clear()
+        self._barge_candidate_last.clear()
+        self._barge_candidate_bytes.clear()
+
+    def _is_allowed_user(self, user_id: int) -> bool:
+        return not self._allowed_user_ids or str(user_id) in self._allowed_user_ids
+
+    def _dispatch_barge_in(self, payload: Dict[str, Any]) -> None:
+        callback = self._barge_in_callback
+        if callback is None:
+            return
+        if self._callback_loop is not None:
+            try:
+                self._callback_loop.call_soon_threadsafe(callback, payload)
+                return
+            except Exception:
+                pass
+        try:
+            callback(payload)
+        except Exception:
+            logger.debug("Discord voice barge-in callback failed", exc_info=True)
+
+    def _observe_playback_monitor_pcm(
+        self, ssrc: int, pcm: bytes, *, now: Optional[float] = None,
+        user_id: Optional[int] = None, rms_value: Optional[int] = None,
+    ) -> bool:
+        if self._mode != "playback_monitor" or not self._barge_in_enabled or self._monitor_generation <= 0:
+            return False
+        uid = int(user_id or 0)
+        if not uid:
+            with self._lock:
+                uid = int(self._ssrc_to_user.get(ssrc, 0) or 0)
+        if not uid:
+            uid = int(self._infer_user_for_ssrc(ssrc) or 0)
+        if not uid or not self._is_allowed_user(uid):
+            self._barge_candidate_start.pop(ssrc, None)
+            self._barge_candidate_last.pop(ssrc, None)
+            self._barge_candidate_bytes.pop(ssrc, None)
+            return False
+        now = float(now if now is not None else time.monotonic())
+        rms = int(rms_value if rms_value is not None else _pcm_rms(pcm))
+        if rms < self._barge_in_min_rms:
+            if now - self._barge_candidate_last.get(ssrc, now) > self._barge_in_grace_ms / 1000:
+                self._barge_candidate_start.pop(ssrc, None)
+                self._barge_candidate_last.pop(ssrc, None)
+                self._barge_candidate_bytes.pop(ssrc, None)
+            return False
+        last_seen = self._barge_candidate_last.get(ssrc)
+        if last_seen is None or now - last_seen > self._barge_in_grace_ms / 1000:
+            self._barge_candidate_start[ssrc] = now
+            self._barge_candidate_bytes[ssrc] = 0
+        self._barge_candidate_last[ssrc] = now
+        self._barge_candidate_bytes[ssrc] = self._barge_candidate_bytes.get(ssrc, 0) + len(pcm)
+        duration_ms = (now - self._barge_candidate_start.get(ssrc, now)) * 1000
+        pcm_ms = self._barge_candidate_bytes[ssrc] / (self.SAMPLE_RATE * self.CHANNELS * 2) * 1000
+        if duration_ms < self._barge_in_min_ms or pcm_ms < self._barge_in_min_pcm_ms:
+            return False
+        if self._barge_latched_generation == self._monitor_generation:
+            return True
+        self._barge_latched_generation = self._monitor_generation
+        self._mode = "capture"
+        generation = self._monitor_generation
+        self._reset_barge_candidates()
+        self._dispatch_barge_in({"generation": generation, "user_id": uid, "ssrc": ssrc,
+                                 "rms": rms, "duration_ms": duration_ms, "pcm_ms": pcm_ms})
+        return True
 
     # ------------------------------------------------------------------
     # SSRC -> user_id mapping via SPEAKING opcode hook
@@ -476,7 +589,7 @@ class VoiceReceiver:
     # ------------------------------------------------------------------
 
     def _on_packet(self, data: bytes):
-        if not self._running or self._paused:
+        if not self._running or self._mode == "blocked":
             return
 
         # Log first few raw packets for debugging
@@ -602,9 +715,15 @@ class VoiceReceiver:
             if ssrc not in self._decoders:
                 self._decoders[ssrc] = discord.opus.Decoder()
             pcm = self._decoders[ssrc].decode(decrypted)
+            packet_now = time.monotonic()
             with self._lock:
-                self._buffers[ssrc].extend(pcm)
-                self._last_packet_time[ssrc] = time.monotonic()
+                current_user_id = int(self._ssrc_to_user.get(ssrc, 0) or 0)
+                if self._mode == "capture":
+                    self._buffers[ssrc].extend(pcm)
+                    self._last_packet_time[ssrc] = packet_now
+            self._observe_playback_monitor_pcm(
+                ssrc, pcm, now=packet_now, user_id=current_user_id,
+            )
         except Exception as e:
             with self._lock:
                 self._decoders.pop(ssrc, None)
@@ -792,6 +911,104 @@ def _read_discord_prompt_timeout() -> int:
     return seconds
 
 
+_VOICE_STREAM_DONE = object()
+_VOICE_STREAM_SEGMENT = object()
+
+
+class DiscordVoiceReplyStreamer:
+    """Turn streamed model deltas into ordered sentence-level VC speech."""
+
+    def __init__(self, adapter: Any, guild_id: int, *, generation: int = 0,
+                 output_dir: Optional[str] = None, min_sentence_len: int = 10,
+                 long_flush_len: int = 100, poll_interval: float = 0.05):
+        self.adapter, self.guild_id, self.generation = adapter, int(guild_id), int(generation or 0)
+        self.output_dir = output_dir or os.path.join(tempfile.gettempdir(), "hermes_voice")
+        self.min_sentence_len, self.long_flush_len, self.poll_interval = min_sentence_len, long_flush_len, poll_interval
+        self._queue, self._buffer = queue.Queue(), ""
+        self._ever_sent = False
+        self._done_event, self._abort_event = threading.Event(), threading.Event()
+        self._spoken_sentences: list[str] = []
+
+    @property
+    def ever_sent(self) -> bool:
+        return self._ever_sent
+
+    def on_delta(self, text: Optional[str]) -> None:
+        if not self._abort_event.is_set():
+            self._queue.put(text if text else _VOICE_STREAM_SEGMENT)
+
+    def finish(self) -> None:
+        self._queue.put(_VOICE_STREAM_DONE)
+
+    def abort(self) -> None:
+        self._abort_event.set()
+        self.finish()
+
+    def _extract_ready_chunks(self, buffer: str, *, flush_remainder: bool) -> tuple[list[str], str]:
+        from tools.tts_tool import _SENTENCE_BOUNDARY_RE
+        ready, remaining = [], buffer
+        while (match := _SENTENCE_BOUNDARY_RE.search(remaining)) is not None:
+            sentence, remaining = remaining[:match.end()], remaining[match.end():]
+            if len(sentence.strip()) < self.min_sentence_len:
+                remaining = sentence + remaining
+                break
+            ready.append(sentence.strip())
+        if flush_remainder and remaining.strip():
+            ready.append(remaining.strip())
+            remaining = ""
+        return ready, remaining
+
+    async def run(self) -> None:
+        try:
+            while True:
+                done = segment = drained = False
+                while True:
+                    try:
+                        item = self._queue.get_nowait(); drained = True
+                    except queue.Empty:
+                        break
+                    if item is _VOICE_STREAM_DONE:
+                        done = True; break
+                    if item is _VOICE_STREAM_SEGMENT:
+                        segment = True; break
+                    if self._buffer and self._buffer[-1:] in ".!?" and item[:1] and not item[:1].isspace():
+                        self._buffer += " "
+                    self._buffer += item
+                chunks, self._buffer = self._extract_ready_chunks(self._buffer, flush_remainder=done or segment)
+                if not chunks and len(self._buffer) >= self.long_flush_len:
+                    chunks, self._buffer = [self._buffer], ""
+                for chunk in chunks:
+                    await self._play_chunk(chunk)
+                if done:
+                    return
+                if not drained:
+                    await asyncio.sleep(self.poll_interval)
+        finally:
+            self._done_event.set()
+
+    async def _play_chunk(self, sentence: str) -> None:
+        from tools.tts_tool import _strip_markdown_for_tts, text_to_speech_tool
+        cleaned = _strip_markdown_for_tts(sentence).strip()
+        normalized = cleaned.lower().rstrip(".!,")
+        if not cleaned or self._abort_event.is_set() or any(s.lower().rstrip(".!,") == normalized for s in self._spoken_sentences):
+            return
+        self._spoken_sentences.append(cleaned)
+        requested = actual = None
+        try:
+            Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+            requested = os.path.join(self.output_dir, f"voice_stream_{uuid.uuid4().hex[:12]}.ogg")
+            result = json.loads(await asyncio.to_thread(text_to_speech_tool, text=cleaned[:4000], output_path=requested))
+            actual = result.get("file_path", requested)
+            if result.get("success") and actual and os.path.isfile(actual) and not self._abort_event.is_set():
+                self._ever_sent = bool(await self.adapter.play_in_voice_channel(
+                    self.guild_id, actual, generation=self.generation, kind="speech", volume=1.0)) or self._ever_sent
+        except Exception:
+            logger.warning("Discord live voice chunk failed", exc_info=True)
+        finally:
+            for path in {requested, actual} - {None}:
+                with suppress(OSError): os.unlink(path)
+
+
 class DiscordAdapter(BasePlatformAdapter):
     """
     Discord bot adapter.
@@ -849,6 +1066,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._voice_mixers: Dict[int, Any] = {}  # guild_id -> VoiceMixer
         self._ambient_pcm_cache: Optional[bytes] = None  # decoded ambient bed
         self._voice_fx_cfg: Dict[str, Any] = self._load_voice_fx_config()
+        self._voice_turn_states: Dict[int, Dict[str, Any]] = {}
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
@@ -2695,6 +2913,72 @@ class DiscordAdapter(BasePlatformAdapter):
     # Voice channel methods (join / leave / play)
     # ------------------------------------------------------------------
 
+    def _get_voice_turn_state(self, guild_id: int) -> Dict[str, Any]:
+        state = self._voice_turn_states.setdefault(guild_id, {"generation": 0, "streamer": None,
+            "barge_in_latched": False, "ambient_busy": False, "ambient_generation": 0,
+            "busy_last_touch": 0.0, "watchdog_task": None})
+        return state
+
+    def register_live_voice_streamer(self, guild_id: int, streamer: Any) -> int:
+        state = self._get_voice_turn_state(guild_id)
+        if state.get("streamer") and state["streamer"] is not streamer:
+            state["streamer"].abort()
+            mixer = self._voice_mixers.get(guild_id)
+            if mixer is not None:
+                mixer.stop_speech()
+            elif (vc := self._voice_clients.get(guild_id)) and vc.is_connected() and vc.is_playing():
+                vc.stop()
+        if receiver := self._voice_receivers.get(guild_id): receiver.resume()
+        state.update(generation=int(state["generation"]) + 1, streamer=streamer, barge_in_latched=False,
+                     ambient_busy=False)
+        return state["generation"]
+
+    async def clear_live_voice_streamer(self, guild_id: int, generation: Optional[int] = None) -> None:
+        state = self._get_voice_turn_state(guild_id)
+        if generation is None or int(generation) == int(state["generation"]): state["streamer"] = None
+
+    async def _handle_barge_in_event(self, guild_id: int, payload: Dict[str, Any]) -> None:
+        state = self._get_voice_turn_state(guild_id)
+        if int(payload.get("generation", 0)) != int(state["generation"]) or state["barge_in_latched"]: return
+        state["barge_in_latched"] = True
+        if state.get("streamer"): state["streamer"].abort()
+        mixer = self._voice_mixers.get(guild_id)
+        if mixer is not None: mixer.stop_speech()
+        elif (vc := self._voice_clients.get(guild_id)) and vc.is_connected() and vc.is_playing(): vc.stop()
+
+    def _schedule_barge_in(self, guild_id: int, payload: Dict[str, Any]) -> None:
+        asyncio.get_running_loop().create_task(self._handle_barge_in_event(guild_id, payload))
+
+    async def start_busy_voice(self, guild_id: int, *, asset_path: str, generation: int,
+                               volume: float = 0.18, watchdog_seconds: float = 20.0) -> None:
+        state = self._get_voice_turn_state(guild_id)
+        if int(generation) != int(state["generation"]) or not os.path.isfile(asset_path): return
+        state.update(ambient_busy=True, ambient_generation=generation, busy_last_touch=time.monotonic())
+        if watchdog_seconds > 0:
+            if task := state.get("watchdog_task"): task.cancel()
+            state["watchdog_task"] = asyncio.create_task(self._busy_voice_watchdog(guild_id, generation, watchdog_seconds))
+
+    async def touch_busy_voice(self, guild_id: int, *, generation: int) -> None:
+        state = self._get_voice_turn_state(guild_id)
+        if int(generation) == int(state["generation"]) and state["ambient_busy"]: state["busy_last_touch"] = time.monotonic()
+
+    async def stop_busy_voice(self, guild_id: int, *, generation: Optional[int] = None) -> None:
+        state = self._get_voice_turn_state(guild_id)
+        if generation is not None and int(generation) != int(state["generation"]): return
+        state["ambient_busy"] = False
+        if task := state.get("watchdog_task"): task.cancel()
+        state["watchdog_task"] = None
+
+    async def _busy_voice_watchdog(self, guild_id: int, generation: int, seconds: float) -> None:
+        try:
+            while True:
+                await asyncio.sleep(min(1.0, seconds))
+                state = self._get_voice_turn_state(guild_id)
+                if not state["ambient_busy"] or int(state["generation"]) != int(generation): return
+                if time.monotonic() - state["busy_last_touch"] > seconds:
+                    await self.stop_busy_voice(guild_id, generation=generation); return
+        except asyncio.CancelledError: return
+
     def _load_voice_fx_config(self) -> Dict[str, Any]:
         """Read voice mixer / ambient / ack settings from config.yaml.
 
@@ -2872,7 +3156,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Start voice receiver (Phase 2: listen to users)
             try:
-                receiver = VoiceReceiver(vc, allowed_user_ids=self._allowed_user_ids)
+                receiver = VoiceReceiver(
+                    vc, allowed_user_ids=self._allowed_user_ids,
+                    barge_in_callback=lambda payload, gid=guild_id: self._schedule_barge_in(gid, payload),
+                    callback_loop=asyncio.get_running_loop(),
+                )
                 receiver.start()
                 self._voice_receivers[guild_id] = receiver
                 self._voice_listen_tasks[guild_id] = asyncio.ensure_future(
@@ -2920,11 +3208,17 @@ class DiscordAdapter(BasePlatformAdapter):
                 task.cancel()
             self._voice_text_channels.pop(guild_id, None)
             self._voice_sources.pop(guild_id, None)
+            if state := self._voice_turn_states.pop(guild_id, None):
+                if task := state.get("watchdog_task"):
+                    task.cancel()
 
     # Maximum seconds to wait for voice playback before giving up
     PLAYBACK_TIMEOUT = 120
 
-    async def play_in_voice_channel(self, guild_id: int, audio_path: str) -> bool:
+    async def play_in_voice_channel(
+        self, guild_id: int, audio_path: str, *, generation: Optional[int] = None,
+        kind: str = "speech", volume: float = 1.0,
+    ) -> bool:
         """Play an audio file in the connected voice channel.
 
         When the continuous mixer is installed for this guild, the clip is
@@ -2934,6 +3228,9 @@ class DiscordAdapter(BasePlatformAdapter):
         """
         vc = self._voice_clients.get(guild_id)
         if not vc or not vc.is_connected():
+            return False
+        state = self._get_voice_turn_state(guild_id)
+        if generation is not None and int(generation) != int(state["generation"]):
             return False
 
         # ── Mixer path (overlap + ducking) ──────────────────────────────
@@ -2945,20 +3242,26 @@ class DiscordAdapter(BasePlatformAdapter):
                 from .voice_mixer import decode_to_pcm
             pcm = await asyncio.to_thread(decode_to_pcm, audio_path)
             if pcm:
-                speech_gain = float(self._voice_fx_cfg.get("speech_gain", 1.0))
-                mixer.play_speech(pcm, gain=speech_gain)
-                # Block until the speech child drains so callers serialise
-                # replies (mirrors legacy semantics) but the ambient keeps
-                # playing underneath the whole time.
-                wait_start = time.monotonic()
-                while mixer.speech_active:
-                    if time.monotonic() - wait_start > self.PLAYBACK_TIMEOUT:
-                        logger.warning("Mixer speech playback timed out after %ds", self.PLAYBACK_TIMEOUT)
-                        mixer.stop_speech()
-                        break
-                    await asyncio.sleep(0.05)
-                self._reset_voice_timeout(guild_id)
-                return True
+                receiver = self._voice_receivers.get(guild_id)
+                if receiver and generation is not None and kind == "speech":
+                    receiver.enter_playback_monitor(generation)
+                try:
+                    mixer.play_speech(pcm, gain=float(self._voice_fx_cfg.get("speech_gain", 1.0)) * volume)
+                    wait_start = time.monotonic()
+                    while mixer.speech_active:
+                        if generation is not None and int(generation) != int(state["generation"]):
+                            mixer.stop_speech()
+                            return False
+                        if time.monotonic() - wait_start > self.PLAYBACK_TIMEOUT:
+                            logger.warning("Mixer speech playback timed out after %ds", self.PLAYBACK_TIMEOUT)
+                            mixer.stop_speech()
+                            break
+                        await asyncio.sleep(0.05)
+                    self._reset_voice_timeout(guild_id)
+                    return True
+                finally:
+                    if receiver and generation is not None and kind == "speech":
+                        receiver.exit_playback_monitor(generation)
             logger.warning("Mixer decode failed for %s; falling back to legacy playback", audio_path)
 
         # ── Legacy one-shot path (no mixer) ─────────────────────────────
