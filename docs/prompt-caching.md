@@ -44,16 +44,19 @@ prompt_caching:
 
 Supported policies:
 
-- `5m` (default): system, tools, and rolling messages use the five-minute tier.
+- `5m`: system, tools, and rolling messages use the five-minute tier.
 - `1h`: every explicit breakpoint uses the one-hour tier.
-- `mixed`: stable system and tool-schema breakpoints use one hour; rolling
-  message breakpoints use five minutes.
+- `mixed` (default for native Anthropic and local CLIProxy Claude): stable
+  system and tool-schema breakpoints use one hour; rolling message breakpoints
+  use five minutes.
 
 `mixed` borrows OMP's useful split-retention idea without copying its provider
 fingerprinting. It reduces repeated writes of the large stable prefix after
 short pauses while avoiding the higher one-hour write multiplier on every new
-conversation-tail breakpoint. It is opt-in because not every third-party
-Anthropic-compatible endpoint supports the one-hour tier.
+conversation-tail breakpoint. Routes whose one-hour support is not guaranteed
+(OpenRouter, MiniMax, GLM, Qwen, Kimi, and other third-party endpoints) safely
+downgrade the default to `5m`; an explicit `1h` setting remains an advanced
+user override.
 
 Anthropic requires longer-lived breakpoints to precede shorter-lived ones.
 Hermes naturally satisfies that order: tools and system precede messages on the

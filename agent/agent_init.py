@@ -585,7 +585,9 @@ def init_agent(
     )
     # Anthropic supports "5m" and "1h" cache TTL tiers. ``mixed`` uses 1h for
     # the stable system/tool prefix and 5m for the rolling message tail. Read
-    # from config.yaml under prompt_caching.cache_ttl; unknown values keep 5m.
+    # from config.yaml under prompt_caching.cache_ttl. Mixed is the default
+    # only for native Anthropic and the local CLIProxy Claude route; other
+    # providers retain 5m because their 1h-tier support is not guaranteed.
     # 1h tier costs 2x on write vs 1.25x for 5m, but amortizes across long
     # sessions with >5-minute pauses between turns (#14971).
     agent._cache_ttl = "5m"
@@ -593,9 +595,22 @@ def init_agent(
         from hermes_cli.config import load_config as _load_pc_cfg
 
         _pc_cfg = _load_pc_cfg().get("prompt_caching", {}) or {}
-        _ttl = _pc_cfg.get("cache_ttl", "5m")
+        _ttl = _pc_cfg.get("cache_ttl", "mixed")
         if _ttl in {"5m", "1h", "mixed"}:
             agent._cache_ttl = _ttl
+        if agent._cache_ttl == "mixed":
+            _provider = (agent.provider or "").lower()
+            _model = (agent.model or "").lower()
+            _is_cliproxy_claude = _provider == "vibeproxy" and any(
+                family in _model
+                for family in ("claude", "opus", "sonnet", "haiku", "mythos", "fable")
+            )
+            _is_native_anthropic = _provider == "anthropic" or (
+                agent.api_mode == "anthropic_messages"
+                and "api.anthropic.com" in (agent.base_url or "").lower()
+            )
+            if not (_is_cliproxy_claude or _is_native_anthropic):
+                agent._cache_ttl = "5m"
     except Exception:
         pass
 

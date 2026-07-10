@@ -993,7 +993,7 @@ class TestInit:
                 {"role": "user", "content": "stable user"},
             ])
 
-            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
             assert "cache_control" not in tool
             assert "cache_control" not in a.tools[-1]
 
@@ -1031,8 +1031,8 @@ class TestInit:
 
             assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
-    def test_prompt_caching_vibeproxy_tool_schema_uses_mixed_stable_ttl(self):
-        """Mixed mode keeps the stable tool schema at 1h."""
+    def test_prompt_caching_vibeproxy_tool_schema_defaults_to_mixed_stable_ttl(self):
+        """CLIProxy Claude defaults its stable tool schema to 1h."""
         tool = {
             "type": "function",
             "function": {
@@ -1045,7 +1045,7 @@ class TestInit:
             patch("run_agent.get_tool_definitions", return_value=[]),
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("run_agent.OpenAI"),
-            patch("hermes_cli.config.load_config", return_value={"prompt_caching": {"cache_ttl": "mixed"}}),
+            patch("hermes_cli.config.load_config", return_value={}),
         ):
             a = AIAgent(
                 api_key="test-key-1234567890",
@@ -1106,7 +1106,7 @@ class TestInit:
             assert "cache_control" in json.dumps(kwargs["messages"][0])
             assert "cache_control" in json.dumps(kwargs["messages"][2])
             assert "cache_control" in json.dumps(kwargs["messages"][3])
-            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
     def test_prompt_caching_vibeproxy_non_claude_stays_disabled(self):
         """The VibeProxy opt-in is Claude-scoped, not a blanket localhost cache policy."""
@@ -1149,6 +1149,7 @@ class TestInit:
             patch("run_agent.get_tool_definitions", return_value=[]),
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("agent.anthropic_adapter._anthropic_sdk"),
+            patch("hermes_cli.config.load_config", return_value={}),
         ):
             a = AIAgent(
                 api_key="test-key-1234567890",
@@ -1159,6 +1160,7 @@ class TestInit:
             )
             assert a.api_mode == "anthropic_messages"
             assert a._use_prompt_caching is True
+            assert getattr(a, "_cache_ttl") == "mixed"
 
     def test_prompt_caching_cache_ttl_defaults_without_config(self):
         """cache_ttl stays 5m when prompt_caching is absent from config."""

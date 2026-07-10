@@ -1496,7 +1496,7 @@ DEFAULT_CONFIG = {
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).
     # cache_ttl: "5m", "1h", or "mixed" (1h stable prefix + 5m rolling tail).
     "prompt_caching": {
-        "cache_ttl": "5m",
+        "cache_ttl": "mixed",
     },
 
     # OpenRouter-specific settings.
