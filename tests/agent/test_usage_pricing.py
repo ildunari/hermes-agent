@@ -39,6 +39,40 @@ def test_normalize_usage_openai_subtracts_cached_prompt_tokens():
     assert normalized.output_tokens == 700
 
 
+def test_normalize_usage_responses_reads_current_cache_write_tokens():
+    usage = SimpleNamespace(
+        input_tokens=3000,
+        output_tokens=700,
+        input_tokens_details=SimpleNamespace(
+            cached_tokens=1800,
+            cache_write_tokens=400,
+        ),
+    )
+
+    normalized = normalize_usage(usage, provider="openai", api_mode="codex_responses")
+
+    assert normalized.input_tokens == 800
+    assert normalized.cache_read_tokens == 1800
+    assert normalized.cache_write_tokens == 400
+
+
+def test_normalize_usage_responses_keeps_legacy_cache_creation_fallback():
+    usage = SimpleNamespace(
+        input_tokens=3000,
+        output_tokens=700,
+        input_tokens_details=SimpleNamespace(
+            cached_tokens=1800,
+            cache_creation_tokens=400,
+        ),
+    )
+
+    normalized = normalize_usage(usage, provider="openai", api_mode="codex_responses")
+
+    assert normalized.input_tokens == 800
+    assert normalized.cache_read_tokens == 1800
+    assert normalized.cache_write_tokens == 400
+
+
 def test_normalize_usage_openai_reads_top_level_anthropic_cache_fields():
     """Some OpenAI-compatible proxies (OpenRouter, Cline) expose
     Anthropic-style cache token counts at the top level of the usage object when

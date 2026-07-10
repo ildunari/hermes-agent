@@ -129,6 +129,26 @@ Hermes already had stronger endpoint-aware marker placement, legal-carrier
 checks, canonical-history immutability, deterministic fallback tool-call IDs,
 and provider-normalized cache accounting. Those implementations were kept.
 
+## GPT, Codex, and Grok routes
+
+Hermes does not apply Anthropic `cache_control` markers to GPT or Grok. Those
+providers use automatic prefix caching plus routing hints:
+
+- OpenAI/Codex Responses and xAI Responses use a content-addressed
+  `prompt_cache_key` derived from stable instructions and sorted tool schemas.
+- Codex subscription app-server caching remains owned by Codex; Hermes preserves
+  the app-server thread instead of injecting unsupported request fields.
+- xAI OAuth also receives `x-grok-conv-id`; OpenRouter Grok uses documented
+  sticky `session_id` routing. Grok caching is automatic.
+- Responses usage reads `input_tokens_details.cached_tokens` and the current
+  GPT-5.6 `cache_write_tokens` field, with legacy `cache_creation_tokens` kept
+  only as a compatibility fallback.
+
+Provider-specific retention or breakpoint fields are not sent through generic
+OpenAI-compatible proxies without a verified compatibility contract. This
+avoids turning a cache optimization into request failures on subscription
+routes.
+
 ## OMP behavior intentionally not copied
 
 The audit rejected mechanisms that are brittle, private, or mismatched with
