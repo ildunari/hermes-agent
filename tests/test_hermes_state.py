@@ -2863,6 +2863,43 @@ class TestSchemaInit:
 
         assert db_path.read_bytes() == before
 
+    def test_read_only_legacy_db_compact_rows_uses_last_active_fallback_without_writes(self, tmp_path):
+        """Compact cross-profile aggregation must not select a missing legacy column."""
+        db_path = tmp_path / "legacy-read-only-compact.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(SCHEMA_SQL.replace("    last_active REAL,\n", ""))
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version VALUES (19)")
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
+            ("old", "cli", 100.0),
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
+            ("new", "cli", 110.0),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            ("old", "user", "most recent", 300.0),
+        )
+        conn.commit()
+        conn.close()
+        before = db_path.read_bytes()
+
+        readonly = SessionDB(db_path=db_path, read_only=True)
+        try:
+            assert readonly._has_sessions_last_active is False
+            rows = readonly.list_sessions_rich(
+                compact_rows=True, order_by_last_active=True
+            )
+            assert [row["id"] for row in rows] == ["old", "new"]
+            assert [row["last_active"] for row in rows] == [300.0, 110.0]
+            assert all("system_prompt" not in row for row in rows)
+        finally:
+            readonly.close()
+
+        assert db_path.read_bytes() == before
+
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
         cursor = db._conn.execute("PRAGMA table_info(sessions)")

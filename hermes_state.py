@@ -3358,17 +3358,27 @@ class SessionDB:
     _session_compact_cols_sql: Optional[str] = None
 
     @classmethod
-    def _compact_session_cols(cls) -> str:
+    def _compact_session_cols(cls, include_last_active: bool = True) -> str:
         """SELECT list for compact_rows: every ``sessions`` column declared in
         SCHEMA_SQL except the ``system_prompt`` blob, aliased with the ``s``
-        prefix used by list_sessions_rich/_get_session_rich_row queries."""
+        prefix used by list_sessions_rich/_get_session_rich_row queries.
+
+        Read-only legacy databases can predate ``sessions.last_active``. Exclude
+        that physical column there so the query-level fallback can provide the
+        same public ``last_active`` field without attempting a migration.
+        """
         if cls._session_compact_cols_sql is None:
             declared = cls._parse_schema_columns(SCHEMA_SQL)["sessions"]
             cls._session_compact_cols_sql = ", ".join(
                 f"s.{name}" for name in declared
                 if name not in cls._SESSION_COMPACT_EXCLUDED
             )
-        return cls._session_compact_cols_sql
+        if include_last_active:
+            return cls._session_compact_cols_sql
+        return ", ".join(
+            column for column in cls._session_compact_cols_sql.split(", ")
+            if column != "s.last_active"
+        )
 
     def distinct_session_cwds(self, include_archived: bool = False) -> List[Dict[str, Any]]:
         """Distinct non-empty session cwds with usage stats, for repo discovery.
@@ -3578,7 +3588,7 @@ class SessionDB:
                 outer_where = (
                     f"{where_sql} AND {combined}" if where_sql else f"WHERE {combined}"
                 )
-            _sel = self._compact_session_cols() if compact_rows else "s.*"
+            _sel = self._compact_session_cols(include_last_active=has_last_active) if compact_rows else "s.*"
             query = f"""
                 WITH RECURSIVE chain(root_id, cur_id) AS (
                     SELECT s.id, s.id FROM sessions s {where_sql}
@@ -3625,7 +3635,7 @@ class SessionDB:
             # only applies to the outer select.
             params = params + params + id_params + [limit, offset]
         elif order_by_last_active:
-            _sel = self._compact_session_cols() if compact_rows else "s.*"
+            _sel = self._compact_session_cols(include_last_active=has_last_active) if compact_rows else "s.*"
             query = f"""
                 SELECT {_sel},
                     COALESCE(
@@ -3642,7 +3652,7 @@ class SessionDB:
             """
             params.extend([limit, offset])
         else:
-            _sel = self._compact_session_cols() if compact_rows else "s.*"
+            _sel = self._compact_session_cols(include_last_active=has_last_active) if compact_rows else "s.*"
             query = f"""
                 SELECT {_sel},
                     COALESCE(
@@ -3786,9 +3796,10 @@ class SessionDB:
         Pass ``compact_rows=True`` to omit the ``system_prompt`` blob (see
         ``list_sessions_rich`` for details).
         """
-        _sel = self._compact_session_cols() if compact_rows else "s.*"
+        has_last_active = getattr(self, "_has_sessions_last_active", True)
+        _sel = self._compact_session_cols(include_last_active=has_last_active) if compact_rows else "s.*"
         last_active_select = ""
-        if not getattr(self, "_has_sessions_last_active", True):
+        if not has_last_active:
             last_active_select = """
                 , COALESCE(
                     (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
