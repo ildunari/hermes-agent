@@ -2173,7 +2173,13 @@ class TestDelegateHeartbeat(unittest.TestCase):
 
         parent = _make_mock_parent()
         touch_calls = []
-        parent._touch_activity = lambda desc: touch_calls.append(desc)
+        heartbeat_seen = threading.Event()
+
+        def record_touch(desc):
+            touch_calls.append(desc)
+            heartbeat_seen.set()
+
+        parent._touch_activity = record_touch
 
         child = MagicMock()
         child.get_activity_summary.return_value = {
@@ -2184,7 +2190,7 @@ class TestDelegateHeartbeat(unittest.TestCase):
         }
 
         def slow_run(**kwargs):
-            time.sleep(0.15)
+            heartbeat_seen.wait(timeout=2.0)
             return {"final_response": "done", "completed": True, "api_calls": 5}
 
         child.run_conversation.side_effect = slow_run
