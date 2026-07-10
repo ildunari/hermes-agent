@@ -7404,8 +7404,8 @@ async def async_call_llm(
             api_mode=resolved_api_mode,
         )
         try:
-            from agent.gemini_native_adapter import GeminiNativeClient
-            is_native_gemini = isinstance(client, GeminiNativeClient)
+            from agent.gemini_native_adapter import AsyncGeminiNativeClient, GeminiNativeClient
+            is_native_gemini = isinstance(client, (GeminiNativeClient, AsyncGeminiNativeClient))
         except ImportError:
             is_native_gemini = False
         if client is None or not is_native_gemini:
