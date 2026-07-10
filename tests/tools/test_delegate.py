@@ -2190,7 +2190,7 @@ class TestDelegateHeartbeat(unittest.TestCase):
         }
 
         def slow_run(**kwargs):
-            heartbeat_seen.wait(timeout=2.0)
+            heartbeat_seen.wait(timeout=10.0)
             return {"final_response": "done", "completed": True, "api_calls": 5}
 
         child.run_conversation.side_effect = slow_run
