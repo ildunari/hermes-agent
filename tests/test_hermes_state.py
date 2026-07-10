@@ -2785,6 +2785,84 @@ class TestSchemaInit:
         version = cursor.fetchone()[0]
         assert version == SCHEMA_VERSION
 
+    @pytest.mark.parametrize("legacy_version", [17, 19])
+    def test_last_active_migration_backfills_and_indexes_legacy_db(self, tmp_path, legacy_version):
+        """Writable pre-v20 databases gain indexed chain activity without changing
+        their existing message history.
+        """
+        db_path = tmp_path / f"legacy-v{legacy_version}.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(SCHEMA_SQL.replace("    last_active REAL,\n", ""))
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version VALUES (?)", (legacy_version,))
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at, end_reason) VALUES (?, ?, ?, ?)",
+            ("root", "cli", 100.0, "compression"),
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, source, parent_session_id, started_at) VALUES (?, ?, ?, ?)",
+            ("tip", "cli", "root", 110.0),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            ("tip", "user", "fresh continuation", 200.0),
+        )
+        conn.commit()
+        conn.close()
+
+        migrated = SessionDB(db_path=db_path)
+        try:
+            columns = {
+                row[1] for row in migrated._conn.execute("PRAGMA table_info(sessions)")
+            }
+            assert "last_active" in columns
+            assert migrated._conn.execute(
+                "SELECT version FROM schema_version"
+            ).fetchone()[0] == SCHEMA_VERSION
+            assert migrated._conn.execute(
+                "SELECT last_active FROM sessions WHERE id = 'root'"
+            ).fetchone()[0] == 200.0
+            indexes = {
+                row[1] for row in migrated._conn.execute("PRAGMA index_list(sessions)")
+            }
+            assert "idx_sessions_last_active" in indexes
+        finally:
+            migrated.close()
+
+    def test_read_only_legacy_db_uses_last_active_fallback_without_writes(self, tmp_path):
+        """Cross-profile aggregation must not migrate a v19 DB it only reads."""
+        db_path = tmp_path / "legacy-read-only.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(SCHEMA_SQL.replace("    last_active REAL,\n", ""))
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version VALUES (19)")
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
+            ("old", "cli", 100.0),
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
+            ("new", "cli", 110.0),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            ("old", "user", "most recent", 300.0),
+        )
+        conn.commit()
+        conn.close()
+        before = db_path.read_bytes()
+
+        readonly = SessionDB(db_path=db_path, read_only=True)
+        try:
+            assert readonly._has_sessions_last_active is False
+            assert [row["id"] for row in readonly.list_sessions_rich(
+                order_by_last_active=True
+            )] == ["old", "new"]
+        finally:
+            readonly.close()
+
+        assert db_path.read_bytes() == before
+
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
         cursor = db._conn.execute("PRAGMA table_info(sessions)")
