@@ -188,7 +188,25 @@ Opt-in toolset (not loaded in the default `hermes-cli` set). Add via `--toolsets
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `video_analyze` | Analyze video content from a URL or file path — captions, scene breakdowns, key timestamps, and visual descriptions. | — |
+| `video_analyze` | Analyze video content from a URL or file path — captions, scene breakdowns, key timestamps, and visual descriptions. Files at or below the configured input limit are sent unchanged. Larger files are transcoded to a temporary high-quality MP4 derivative; the original is never modified. | `ffmpeg` + `ffprobe` only when compression is needed |
+
+Video analysis has its own auxiliary route, independent of image analysis:
+
+```yaml
+auxiliary:
+  video:
+    provider: gemini
+    model: gemini-3.5-flash
+    timeout: 600
+    temperature: 0.1
+
+video_analysis:
+  max_input_mb: 100          # inclusive; files at exactly 100 MiB are unchanged
+  compression_target_mb: 96  # headroom for container/base64 overhead
+  max_download_mb: 2048      # separate safety ceiling for remote sources
+```
+
+Compression preserves resolution, frame rate, metadata, chapters, and audio tracks. It first tries a visually near-lossless CRF 18 encode and only uses two-pass size-constrained encoding when necessary. Temporary downloads, derivatives, and two-pass logs are removed after the tool call.
 
 ## `video_gen` toolset
 

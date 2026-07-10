@@ -35,12 +35,15 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
-from agent.auxiliary_client import async_call_llm
+from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
 from agent.image_normalization import (
     convert_heic_to_jpeg_for_vision,
     detect_image_mime_type,
@@ -1588,8 +1591,159 @@ _VIDEO_MIME_TYPES = {
     ".mpg": "video/mpeg",
 }
 
-_MAX_VIDEO_BASE64_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
-_VIDEO_SIZE_WARN_BYTES = 20 * 1024 * 1024
+_DEFAULT_MAX_VIDEO_INPUT_BYTES = 100 * 1024 * 1024
+_DEFAULT_VIDEO_COMPRESSION_TARGET_BYTES = 96 * 1024 * 1024
+_DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+# Base64 expands by 4/3.  This cap admits an unmodified 100 MiB source plus
+# the data-URL prefix, while still bounding the request assembled in memory.
+_MAX_VIDEO_BASE64_BYTES = 140 * 1024 * 1024
+_VIDEO_SIZE_WARN_BYTES = 80 * 1024 * 1024
+
+
+def _video_analysis_limits() -> tuple[int, int, int]:
+    """Return (input limit, compression target, download limit) in bytes."""
+    mib = 1024 * 1024
+    max_mb = _DEFAULT_MAX_VIDEO_INPUT_BYTES / mib
+    target_mb = _DEFAULT_VIDEO_COMPRESSION_TARGET_BYTES / mib
+    download_mb = _DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES / mib
+    try:
+        from hermes_cli.config import cfg_get, load_config
+
+        cfg = load_config()
+        section = cfg_get(cfg, "video_analysis", default={}) or {}
+        max_mb = float(section.get("max_input_mb", max_mb))
+        target_mb = float(section.get("compression_target_mb", target_mb))
+        download_mb = float(section.get("max_download_mb", download_mb))
+    except (TypeError, ValueError):
+        pass
+    except Exception:
+        pass
+
+    max_bytes = int(max(1.0, min(max_mb, 1024.0)) * 1024 * 1024)
+    target_bytes = int(max(1.0, min(target_mb, max_mb)) * 1024 * 1024)
+    if target_bytes >= max_bytes:
+        target_bytes = max(1, int(max_bytes * 0.96))
+    download_bytes = int(max(max_mb, min(download_mb, 16384.0)) * 1024 * 1024)
+    return max_bytes, target_bytes, download_bytes
+
+
+def _run_video_command(command: list[str], *, timeout: float = 1800.0) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+
+
+def _probe_video_budget(source: Path) -> tuple[float, int]:
+    """Return duration and the summed declared audio bitrate."""
+    probe = _run_video_command([
+        "ffprobe", "-v", "error", "-show_entries",
+        "format=duration:stream=codec_type,bit_rate", "-of", "json", str(source),
+    ], timeout=120.0)
+    payload = json.loads(probe.stdout or "{}")
+    duration = float((payload.get("format") or {}).get("duration") or 0)
+    if duration <= 0:
+        raise ValueError("Video duration is missing or zero; cannot calculate a safe compression budget")
+    audio_streams = [s for s in payload.get("streams", []) if s.get("codec_type") == "audio"]
+    audio_bitrate = 0
+    for stream in audio_streams:
+        try:
+            audio_bitrate += max(0, int(stream.get("bit_rate") or 0))
+        except (TypeError, ValueError):
+            pass
+    # Reserve a high-quality allowance when the container does not declare it.
+    if audio_streams and not audio_bitrate:
+        audio_bitrate = 256_000 * len(audio_streams)
+    return duration, audio_bitrate
+
+
+def _video_encode_base(source: Path, *, copy_audio: bool = True) -> list[str]:
+    audio_args = ["-c:a", "copy"] if copy_audio else ["-c:a", "aac", "-b:a", "256k"]
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+        "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0", "-map_chapters", "0",
+        "-c:v", "libx264", "-preset", "slow", "-pix_fmt", "yuv420p",
+        *audio_args, "-movflags", "+faststart",
+    ]
+
+
+def _compress_video_for_analysis(source: Path, target_bytes: int) -> Path:
+    """Create a high-quality MP4 derivative without modifying ``source``.
+
+    A visually near-lossless CRF 18 encode is attempted first.  Only when that
+    still exceeds the target do we use two-pass size-constrained encoding.
+    Resolution, frame rate, chapters, metadata, and all audio tracks are kept.
+    """
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise RuntimeError("ffmpeg and ffprobe are required to compress videos over the analysis limit")
+
+    output_dir = get_hermes_dir("cache/video", "compressed_video_files")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"analysis_{uuid.uuid4().hex}.mp4"
+    passlog = Path(tempfile.gettempdir()) / f"hermes-video-{uuid.uuid4().hex}"
+    try:
+        try:
+            _run_video_command(_video_encode_base(source) + ["-crf", "18", str(output)])
+        except subprocess.CalledProcessError:
+            # Containers such as MKV/WebM may carry audio codecs MP4 cannot
+            # copy. Preserve audio content with a high-quality AAC fallback.
+            output.unlink(missing_ok=True)
+            _run_video_command(
+                _video_encode_base(source, copy_audio=False) + ["-crf", "18", str(output)]
+            )
+        if output.is_file() and output.stat().st_size <= target_bytes:
+            return output
+
+        output.unlink(missing_ok=True)
+        duration, audio_bitrate = _probe_video_budget(source)
+        total_bitrate = int((target_bytes * 8 * 0.97) / duration)
+        video_bitrate = total_bitrate - audio_bitrate
+        if video_bitrate < 100_000:
+            raise ValueError(
+                "The video's duration/audio tracks leave too little bitrate to preserve useful visual detail"
+            )
+
+        first_pass = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+            "-map", "0:v:0", "-c:v", "libx264", "-preset", "slow", "-pix_fmt", "yuv420p",
+            "-b:v", str(video_bitrate), "-pass", "1", "-passlogfile", str(passlog),
+            "-an", "-f", "null", os.devnull,
+        ]
+        _run_video_command(first_pass)
+        try:
+            _run_video_command(_video_encode_base(source) + [
+                "-b:v", str(video_bitrate), "-pass", "2", "-passlogfile", str(passlog), str(output),
+            ])
+        except subprocess.CalledProcessError:
+            output.unlink(missing_ok=True)
+            _run_video_command(_video_encode_base(source, copy_audio=False) + [
+                "-b:v", str(video_bitrate), "-pass", "2", "-passlogfile", str(passlog), str(output),
+            ])
+        return output
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
+    finally:
+        for artifact in Path(tempfile.gettempdir()).glob(passlog.name + "*"):
+            artifact.unlink(missing_ok=True)
+
+
+async def _prepare_video_for_analysis(source: Path) -> tuple[Path, bool]:
+    """Return a provider-ready path and whether the returned path is temporary."""
+    max_bytes, target_bytes, _ = _video_analysis_limits()
+    if source.stat().st_size <= max_bytes:
+        return source, False
+    prepared = await asyncio.to_thread(_compress_video_for_analysis, source, target_bytes)
+    if not prepared.is_file() or prepared.stat().st_size > target_bytes:
+        prepared.unlink(missing_ok=True)
+        raise ValueError(
+            f"Video could not be reduced below {target_bytes / (1024 * 1024):.0f} MiB without replacing the original"
+        )
+    return prepared, True
 
 
 def _detect_video_mime_type(video_path: Path) -> Optional[str]:
@@ -1632,32 +1786,37 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
                 follow_redirects=True,
                 event_hooks={"response": [_ssrf_redirect_guard]},
             ) as client:
-                response = await client.get(
+                _, _, max_download_bytes = _video_analysis_limits()
+                async with client.stream(
+                    "GET",
                     video_url,
                     headers={
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         "Accept": "video/*,*/*;q=0.8",
                     },
-                )
-                response.raise_for_status()
+                ) as response:
+                    response.raise_for_status()
 
-                cl = response.headers.get("content-length")
-                if cl and int(cl) > _MAX_VIDEO_BASE64_BYTES:
-                    raise ValueError(
-                        f"Video too large ({int(cl)} bytes, max {_MAX_VIDEO_BASE64_BYTES})"
-                    )
+                    cl = response.headers.get("content-length")
+                    if cl and int(cl) > max_download_bytes:
+                        raise ValueError(
+                            f"Remote video is too large to download safely ({int(cl)} bytes, max {max_download_bytes})"
+                        )
 
-                final_url = str(response.url)
-                blocked = check_website_access(final_url)
-                if blocked:
-                    raise PermissionError(blocked["message"])
+                    final_url = str(response.url)
+                    blocked = check_website_access(final_url)
+                    if blocked:
+                        raise PermissionError(blocked["message"])
 
-                body = response.content
-                if len(body) > _MAX_VIDEO_BASE64_BYTES:
-                    raise ValueError(
-                        f"Video too large ({len(body)} bytes, max {_MAX_VIDEO_BASE64_BYTES})"
-                    )
-                destination.write_bytes(body)
+                    downloaded = 0
+                    with destination.open("wb") as output:
+                        async for chunk in response.aiter_bytes():
+                            downloaded += len(chunk)
+                            if downloaded > max_download_bytes:
+                                raise ValueError(
+                                    f"Remote video exceeded the safe download limit ({max_download_bytes} bytes)"
+                                )
+                            output.write(chunk)
 
             return destination
         except Exception as e:
@@ -1703,6 +1862,8 @@ async def video_analyze_tool(
 
     temp_video_path = None
     should_cleanup = True
+    source_video_path = None
+    source_cleanup = False
 
     try:
         from tools.interrupt import is_interrupted
@@ -1737,9 +1898,15 @@ async def video_analyze_tool(
                 "Invalid video source. Provide an HTTP/HTTPS URL or a valid local file path."
             )
 
+        source_video_path = temp_video_path
+        source_cleanup = should_cleanup
+        prepared_video_path, prepared_cleanup = await _prepare_video_for_analysis(source_video_path)
+        temp_video_path = prepared_video_path
+        should_cleanup = prepared_cleanup
+
         video_size_bytes = temp_video_path.stat().st_size
         video_size_mb = video_size_bytes / (1024 * 1024)
-        logger.info("Video ready (%.1f MB)", video_size_mb)
+        logger.info("Video ready for analysis (%.1f MB)", video_size_mb)
 
         detected_mime = _detect_video_mime_type(temp_video_path)
         if not detected_mime:
@@ -1786,18 +1953,18 @@ async def video_analyze_tool(
         try:
             from hermes_cli.config import cfg_get, load_config
             _cfg = load_config()
-            _vision_cfg = cfg_get(_cfg, "auxiliary", "vision", default={})
-            _vt = _vision_cfg.get("timeout")
+            _video_cfg = cfg_get(_cfg, "auxiliary", "video", default={}) or {}
+            _vt = _video_cfg.get("timeout")
             if _vt is not None:
                 vision_timeout = max(float(_vt), 180.0)
-            _vtemp = _vision_cfg.get("temperature")
+            _vtemp = _video_cfg.get("temperature")
             if _vtemp is not None:
                 vision_temperature = float(_vtemp)
         except Exception:
             pass
 
         call_kwargs = {
-            "task": "vision",
+            "task": "video",
             "messages": messages,
             "temperature": vision_temperature,
             "max_tokens": 4000,
@@ -1807,12 +1974,12 @@ async def video_analyze_tool(
             call_kwargs["model"] = model
 
         response = await async_call_llm(**call_kwargs)
-        analysis = ((response.choices[0].message.content or "").strip())
+        analysis = (extract_content_or_reasoning(response) or "").strip()
 
         if not analysis:
             logger.warning("Empty visible video response, retrying once")
             response = await async_call_llm(**call_kwargs)
-            analysis = ((response.choices[0].message.content or "").strip())
+            analysis = (extract_content_or_reasoning(response) or "").strip()
 
         analysis_length = len(analysis) if analysis else 0
         logger.info("Video analysis completed (%s characters)", analysis_length)
@@ -1887,6 +2054,19 @@ async def video_analyze_tool(
                 logger.warning(
                     "Could not delete temporary file: %s", cleanup_error, exc_info=True
                 )
+        if (
+            source_cleanup
+            and source_video_path is not None
+            and source_video_path != temp_video_path
+            and source_video_path.exists()
+        ):
+            try:
+                source_video_path.unlink()
+                logger.debug("Cleaned up downloaded source video")
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Could not delete downloaded source video: %s", cleanup_error, exc_info=True
+                )
 
 
 VIDEO_ANALYZE_SCHEMA = {
@@ -1896,7 +2076,8 @@ VIDEO_ANALYZE_SCHEMA = {
         "Sends the video to a video-capable model (e.g. Gemini) for understanding. "
         "Use this for video files — for images, use vision_analyze instead. "
         "Supports mp4, webm, mov, avi, mkv, mpeg formats. "
-        "Note: large videos (>20 MB) may be slow; max ~50 MB."
+        "Files at or below 100 MiB are sent unchanged; larger files are compressed "
+        "to a temporary high-quality derivative without modifying the original."
     ),
     "parameters": {
         "type": "object",

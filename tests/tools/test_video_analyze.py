@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from tools.vision_tools import (
     _detect_video_mime_type,
+    _prepare_video_for_analysis,
     _video_to_base64_data_url,
     _handle_video_analyze,
     _MAX_VIDEO_BASE64_BYTES,
@@ -192,6 +193,79 @@ class TestVideoAnalyzeTool:
         data = json.loads(result)
         assert data["success"] is True
         assert "demo" in data["analysis"].lower()
+
+    def test_under_limit_is_never_compressed(self, tmp_path):
+        video = tmp_path / "under-limit.mp4"
+        video.write_bytes(b"x" * 128)
+
+        with patch("tools.vision_tools._video_analysis_limits", return_value=(256, 240, 4096)), \
+             patch("tools.vision_tools._compress_video_for_analysis") as compress:
+            prepared, cleanup = self._run(_prepare_video_for_analysis(video))
+
+        assert prepared == video
+        assert cleanup is False
+        compress.assert_not_called()
+
+    def test_exact_limit_is_not_compressed(self, tmp_path):
+        video = tmp_path / "at-limit.mp4"
+        video.write_bytes(b"x" * 256)
+
+        with patch("tools.vision_tools._video_analysis_limits", return_value=(256, 240, 4096)), \
+             patch("tools.vision_tools._compress_video_for_analysis") as compress:
+            prepared, cleanup = self._run(_prepare_video_for_analysis(video))
+
+        assert prepared == video
+        assert cleanup is False
+        compress.assert_not_called()
+
+    def test_over_limit_uses_temporary_derivative_and_preserves_original(self, tmp_path):
+        video = tmp_path / "over-limit.mp4"
+        original = b"original-video-bytes"
+        video.write_bytes(original)
+        derivative = tmp_path / "compressed.mp4"
+        derivative.write_bytes(b"small")
+
+        with patch("tools.vision_tools._video_analysis_limits", return_value=(8, 7, 4096)), \
+             patch("tools.vision_tools._compress_video_for_analysis", return_value=derivative) as compress:
+            prepared, cleanup = self._run(_prepare_video_for_analysis(video))
+
+        assert prepared == derivative
+        assert cleanup is True
+        assert video.read_bytes() == original
+        compress.assert_called_once_with(video, 7)
+
+    def test_compressor_output_must_fit_target(self, tmp_path):
+        video = tmp_path / "over-limit.mp4"
+        video.write_bytes(b"x" * 9)
+        derivative = tmp_path / "still-too-large.mp4"
+        derivative.write_bytes(b"x" * 8)
+
+        with patch("tools.vision_tools._video_analysis_limits", return_value=(8, 7, 4096)), \
+             patch("tools.vision_tools._compress_video_for_analysis", return_value=derivative):
+            try:
+                self._run(_prepare_video_for_analysis(video))
+            except ValueError as exc:
+                assert "could not be reduced" in str(exc).lower()
+            else:
+                raise AssertionError("oversized derivative should be rejected")
+
+    def test_video_calls_dedicated_video_auxiliary_route(self, tmp_path):
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"x" * 100)
+        captured = {}
+
+        async def capture_llm(**kwargs):
+            captured.update(kwargs)
+            response = MagicMock()
+            response.choices = [MagicMock()]
+            response.choices[0].message.content = "OK"
+            return response
+
+        with patch("tools.vision_tools.async_call_llm", side_effect=capture_llm), \
+             patch("tools.vision_tools.extract_content_or_reasoning", return_value="OK"):
+            self._run(video_analyze_tool(str(video), "Describe"))
+
+        assert captured["task"] == "video"
 
     def test_local_file_read_guard_blocks_env_via_video_extension(self, tmp_path):
         """A .env file symlinked with a video extension must still be blocked.

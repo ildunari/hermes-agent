@@ -209,8 +209,10 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
             text = item.get("text")
             if isinstance(text, str) and text:
                 parts.append({"text": text})
-        elif ptype == "image_url":
-            url = ((item.get("image_url") or {}).get("url") or "")
+        elif ptype in {"image_url", "video_url"}:
+            field = "video_url" if ptype == "video_url" else "image_url"
+            ref = item.get(field) or {}
+            url = ref.get("url", "") if isinstance(ref, dict) else ref
             if not isinstance(url, str) or not url.startswith("data:"):
                 continue
             try:
