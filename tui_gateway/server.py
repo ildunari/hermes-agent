@@ -568,24 +568,21 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         history = list(session.get("history", []))
 
     # ── Persist unflushed messages to SQLite ──────────────────────────
-    # Two sources, tried in order of freshness:
-    #   1. agent._session_messages — set by the last _persist_session()
-    #      call inside run_conversation().  This is the most recent
-    #      snapshot the agent thread wrote, and may include partial
-    #      turn data that hasn't reached session["history"] yet.
-    #   2. session["history"] — updated after run_conversation()
-    #      returns.  Stale when the agent is mid‑turn, but correct
-    #      when the turn completed before finalize.
-    # Best‑effort — the agent thread may still be mid‑turn, so only
-    # previously completed messages are guaranteed.
+    # Flush ``agent._session_messages`` via ``_persist_session``'s marker-based
+    # dedup (same contract as the gateway-shutdown flush, #13121). Do NOT pass
+    # ``conversation_history``: ``session["history"]`` and ``_session_messages``
+    # alias the SAME list once a turn completes, so passing it made
+    # ``_flush_messages_to_session_db`` treat every message as already-durable
+    # and skip it — a data-loss bug when finalize is the sole persist path after
+    # a WS disconnect/restart (e.g. the in-turn flush hit a transient SQLite
+    # failure). Markers persist the genuinely-unflushed tail without duplicating
+    # durable rows (including a resumed-but-not-run session's already-in-DB
+    # transcript, which stays in ``session["history"]`` only).
     if agent is not None and hasattr(agent, "_persist_session"):
-        snapshot = (
-            getattr(agent, "_session_messages", None)
-            or history
-        )
+        snapshot = getattr(agent, "_session_messages", None)
         if snapshot:
             try:
-                agent._persist_session(snapshot, conversation_history=history)
+                agent._persist_session(snapshot)
             except Exception:
                 pass
 
@@ -1018,6 +1015,33 @@ def _profile_home(profile: str | None) -> Path | None:
     if home.resolve() == Path(_hermes_home).resolve():
         return None
     return home if (home / "state.db").exists() or home.exists() else None
+
+
+def _resolve_profile_dir(profile: str) -> Path | None:
+    """Resolve an explicit profile without silently falling back to launch."""
+    try:
+        from hermes_cli import profiles as profiles_mod
+
+        canon = profiles_mod.normalize_profile_name(profile)
+        profiles_mod.validate_profile_name(canon)
+        if not profiles_mod.profile_exists(canon):
+            return None
+        home = Path(profiles_mod.get_profile_dir(canon)).resolve()
+        if canon != "default":
+            profiles_root = Path(profiles_mod._get_profiles_root()).resolve()
+            home.relative_to(profiles_root)
+        return home
+    except Exception:
+        return None
+
+
+def _open_profile_db(profile_home: Path):
+    """Open the DB selected by an already validated explicit profile."""
+    if profile_home.resolve() == Path(_hermes_home).resolve():
+        return _get_db()
+    from hermes_state import SessionDB
+
+    return SessionDB(db_path=profile_home / "state.db")
 
 
 def _profile_scoped(handler):
@@ -3669,6 +3693,19 @@ def _on_tool_progress(
         # the stable tool id and args. Emitting another id-less progress row
         # here makes the desktop live view diverge from hydrated history.
         return
+    if event_type == "tool.output_risk" and name:
+        metadata = _kwargs.get("risk_metadata")
+        if not isinstance(metadata, dict):
+            return
+        payload: dict[str, object] = {
+            "tool_id": str(_kwargs.get("tool_call_id") or ""),
+            "name": str(name),
+            "risk": str(metadata.get("risk") or "low"),
+            "findings": [str(item) for item in metadata.get("findings", [])],
+            "redacted": bool(metadata.get("redacted", False)),
+        }
+        _emit("tool.output_risk", sid, payload)
+        return
     if event_type == "reasoning.available" and preview:
         payload: dict[str, object] = {"text": str(preview)}
         if _session_verbose(sid):
@@ -5147,8 +5184,6 @@ def _inflight_snapshot(session: dict) -> dict | None:
 
 @method("session.create")
 def _(rid, params: dict) -> dict:
-    sid = uuid.uuid4().hex[:8]
-    key = _new_session_key()
     cols = int(params.get("cols", 80))
     history = _coerce_seed_history(params.get("messages"))
     title = str(params.get("title") or "").strip()
@@ -5173,8 +5208,47 @@ def _(rid, params: dict) -> dict:
     # profile must build its agent + persist against THAT profile's home/state.db,
     # not the dashboard's launch profile. Stored on the session so _start_agent_build
     # and each turn re-bind HERMES_HOME. None/own profile → launch (unchanged).
-    profile = (params.get("profile") or "").strip() or None
+    profile = str(params.get("profile") or "").strip() or None
     profile_home = _profile_home(profile)
+
+    # Explicit profile routing is strict: never fall back to the launch profile.
+    explicit_profile_home = None
+    if profile is not None:
+        explicit_profile_home = _resolve_profile_dir(profile)
+        if explicit_profile_home is None:
+            return _err(rid, 4004, "profile not found")
+        if not (explicit_profile_home / "state.db").is_file():
+            return _err(rid, 5008, "profile state.db unavailable")
+        profile_home = None if explicit_profile_home.resolve() == Path(_hermes_home).resolve() else explicit_profile_home
+
+    # Branch parents are profile-local. Validate the parent in the selected DB
+    # before claiming a slot or creating any in-memory/DB child state. Open a
+    # temporary foreign-profile DB only for this lookup and close it immediately.
+    if parent_session_id:
+        branch_db = None
+        temporary_db = False
+        try:
+            if explicit_profile_home is not None:
+                branch_db = _open_profile_db(explicit_profile_home)
+                temporary_db = branch_db is not _get_db()
+            else:
+                branch_db = _get_db()
+            if branch_db is None:
+                return _db_unavailable_error(rid, code=5008)
+            parent = branch_db.get_session(parent_session_id)
+        except Exception as exc:
+            return _err(rid, 5008, f"profile state.db unavailable: {exc}")
+        finally:
+            if temporary_db and branch_db is not None:
+                try:
+                    branch_db.close()
+                except Exception:
+                    pass
+        if not parent:
+            return _err(rid, 4007, "parent session not found")
+
+    sid = uuid.uuid4().hex[:8]
+    key = _new_session_key()
 
     # The desktop composer owns its model/effort/fast as plain UI state and ships
     # it on every session.create. Honor each as a PER-SESSION override (built into
@@ -12736,6 +12810,9 @@ def _(rid, params: dict) -> dict:
                 "meta": to_plain_text(c.display_meta) if c.display_meta else "",
             }
             for c in completer.get_completions(doc, None)
+            # Keep the upstream command registry intact while hiding the removed
+            # Desktop alias: /model is the sole model/provider picker here.
+            if c.text.lstrip("/") != "provider"
         ][:30]
         text_lower = text.lower()
         extras = [

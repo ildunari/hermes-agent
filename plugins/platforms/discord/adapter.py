@@ -7572,9 +7572,11 @@ def _define_discord_view_classes() -> None:
                 return
 
             models = provider.get("models", [])
+            model_labels = provider.get("model_labels", {})
             options = []
             for model_id in models[:25]:
-                short = model_id.split("/")[-1] if "/" in model_id else model_id
+                configured = model_labels.get(model_id)
+                short = configured or (model_id.split("/")[-1] if "/" in model_id else model_id)
                 options.append(
                     discord.SelectOption(
                         label=_truncate_discord_component_text(

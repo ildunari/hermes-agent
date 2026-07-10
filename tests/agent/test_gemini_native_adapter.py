@@ -19,6 +19,57 @@ class DummyResponse:
         return self._payload
 
 
+def test_build_native_request_accepts_gemini_file_video_parts():
+    from agent.gemini_native_adapter import build_gemini_request
+
+    request = build_gemini_request(
+        messages=[{
+            "role": "user",
+            "content": [{
+                "type": "video_file",
+                "video_file": {
+                    "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc",
+                    "mime_type": "video/mp4",
+                },
+            }],
+        }],
+        tools=[],
+        tool_choice=None,
+    )
+
+    assert request["contents"][0]["parts"] == [{
+        "fileData": {
+            "mimeType": "video/mp4",
+            "fileUri": "https://generativelanguage.googleapis.com/v1beta/files/abc",
+        }
+    }]
+
+
+def test_build_native_request_accepts_base64_video_parts():
+    from agent.gemini_native_adapter import build_gemini_request
+
+    request = build_gemini_request(
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this clip"},
+                {
+                    "type": "video_url",
+                    "video_url": {"url": "data:video/mp4;base64,AAEC"},
+                },
+            ],
+        }],
+        tools=[],
+        tool_choice=None,
+    )
+
+    parts = request["contents"][0]["parts"]
+    assert parts == [
+        {"text": "Describe this clip"},
+        {"inlineData": {"mimeType": "video/mp4", "data": "AAEC"}},
+    ]
+
+
 def test_build_native_request_preserves_thought_signature_on_tool_replay():
     from agent.gemini_native_adapter import build_gemini_request
 

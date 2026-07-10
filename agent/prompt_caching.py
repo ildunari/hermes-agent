@@ -1,7 +1,7 @@
-"""Anthropic prompt caching strategy.
+"""Anthropic prompt caching strategy and cache-health diagnostics.
 
 Single layout: ``system_and_3``. 4 cache_control breakpoints — system
-prompt + last 3 non-system messages, all at the same TTL (5m or 1h).
+prompt + last 3 non-system messages, using 5m, 1h, or mixed TTL policy.
 Reduces input token costs by ~75% on multi-turn conversations within a
 single session.
 
@@ -89,7 +89,8 @@ def apply_anthropic_cache_control(
     """Apply system_and_3 caching strategy to messages for Anthropic models.
 
     Places up to 4 cache_control breakpoints: system prompt + last 3 non-system
-    messages, all at the same TTL.
+    messages. ``mixed`` keeps the stable system prefix for 1 hour while using
+    the cheaper 5-minute tier for the rolling conversation tail.
 
     Returns:
         Deep copy of messages with cache_control breakpoints injected.
@@ -98,12 +99,13 @@ def apply_anthropic_cache_control(
     if not messages:
         return messages
 
-    marker = _build_marker(cache_ttl)
+    system_marker = _build_marker("1h" if cache_ttl == "mixed" else cache_ttl)
+    message_marker = _build_marker("5m" if cache_ttl == "mixed" else cache_ttl)
 
     breakpoints_used = 0
 
     if messages[0].get("role") == "system":
-        _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
+        _apply_cache_marker(messages[0], system_marker, native_anthropic=native_anthropic)
         breakpoints_used += 1
 
     remaining = 4 - breakpoints_used
@@ -114,6 +116,34 @@ def apply_anthropic_cache_control(
         and _can_carry_marker(messages[i], native_anthropic=native_anthropic)
     ]
     for idx in non_sys[-remaining:]:
-        _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
+        _apply_cache_marker(messages[idx], message_marker, native_anthropic=native_anthropic)
 
     return messages
+
+
+def detect_cache_invalidation(
+    previous: Dict[str, int] | None,
+    current: Dict[str, int],
+    *,
+    min_prefix_tokens: int = 2048,
+) -> bool:
+    """Return True only for an observed warm-to-cold prompt-cache transition.
+
+    Configuration changes are not proof of a miss. Following OMP's useful
+    diagnostic invariant, report invalidation only when a previously warm
+    prefix stops reading from cache and the provider writes a replacement of
+    meaningful size. Small prompts are ignored because provider accounting
+    noise would otherwise produce false positives.
+    """
+    if not previous:
+        return False
+    previous_read = int(previous.get("cache_read", 0) or 0)
+    current_read = int(current.get("cache_read", 0) or 0)
+    current_write = int(current.get("cache_write", 0) or 0)
+    current_input = int(current.get("input", 0) or 0)
+    return (
+        previous_read >= min_prefix_tokens
+        and current_read == 0
+        and current_write > 0
+        and current_write + current_input >= min_prefix_tokens
+    )

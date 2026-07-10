@@ -2305,6 +2305,7 @@ export interface ModelOptionProvider {
   name: string;
   slug: string;
   models?: string[];
+  model_labels?: Record<string, string>;
   total_models?: number;
   is_current?: boolean;
   is_user_defined?: boolean;

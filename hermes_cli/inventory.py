@@ -53,7 +53,11 @@ class ConfigContext:
     user_providers: dict
     custom_providers: list
     hidden_providers: tuple[str, ...] = ()
+    pinned_providers: tuple[str, ...] = ()
     visible_models: dict[str, tuple[str, ...]] | None = None
+    hidden_models: dict[str, tuple[str, ...]] | None = None
+    provider_labels: dict[str, str] | None = None
+    model_labels: dict[str, dict[str, str]] | None = None
 
     def with_overrides(
         self,
@@ -98,31 +102,43 @@ def load_picker_context() -> ConfigContext:
         current_provider = ""
         current_base_url = ""
     raw = cfg.get("providers")
-    hidden: list[str] = []
-    visible: dict[str, tuple[str, ...]] = {}
-    for section_name in ("model_picker", "model_catalog"):
-        section = cfg.get(section_name)
-        if not isinstance(section, dict):
-            continue
-        values = section.get("hidden_providers") or section.get("hide_providers") or []
-        if isinstance(values, str):
-            hidden.extend(part.strip() for part in values.split(","))
-        elif isinstance(values, (list, tuple, set)):
-            hidden.extend(str(part).strip() for part in values)
     try:
-        from hermes_cli.model_switch import load_visible_model_policy
+        from hermes_cli.model_switch import (
+            load_hidden_model_policy,
+            load_hidden_provider_policy,
+            load_model_label_policy,
+            load_model_picker_policy,
+            load_pinned_provider_policy,
+            load_provider_label_policy,
+            load_visible_model_policy,
+        )
 
-        visible = load_visible_model_policy(cfg)
+        policy = load_model_picker_policy(cfg)
+        hidden = load_hidden_provider_policy(cfg, policy=policy)
+        pinned = load_pinned_provider_policy(cfg, policy=policy)
+        visible = load_visible_model_policy(cfg, policy=policy)
+        hidden_models = load_hidden_model_policy(cfg, policy=policy)
+        provider_labels = load_provider_label_policy(cfg, policy=policy)
+        model_labels = load_model_label_policy(cfg, policy=policy)
     except Exception:
+        hidden = ()
+        pinned = ()
         visible = {}
+        hidden_models = {}
+        provider_labels = {}
+        model_labels = {}
     return ConfigContext(
         current_provider=current_provider,
         current_model=current_model,
         current_base_url=current_base_url,
         user_providers=raw if isinstance(raw, dict) else {},
         custom_providers=get_compatible_custom_providers(cfg),
-        hidden_providers=tuple(part for part in hidden if part),
+        hidden_providers=hidden,
+        pinned_providers=pinned,
         visible_models=visible,
+        hidden_models=hidden_models,
+        provider_labels=provider_labels,
+        model_labels=model_labels,
     )
 
 
@@ -208,6 +224,8 @@ def build_models_payload(
 
     if explicit_only:
         rows = _filter_explicit_provider_rows(rows, ctx)
+    if ctx.pinned_providers:
+        rows = _append_pinned_provider_rows(rows, ctx.pinned_providers, ctx)
 
     # --- Deduplicate: remove models from aggregators that overlap with
     # user-defined providers.  When a local proxy (e.g. litellm-proxy)
@@ -258,8 +276,12 @@ def build_models_payload(
         rows = list(rows) + [r for r in _append_unconfigured_rows(rows, ctx) if str(r.get("slug", "")).lower() != "moa"]
     if ctx.hidden_providers:
         rows = _filter_hidden_providers(rows, ctx.hidden_providers)
+    if ctx.hidden_models:
+        rows = _filter_hidden_models(rows, ctx.hidden_models)
     if ctx.visible_models:
         rows = _filter_visible_models(rows, ctx.visible_models)
+    if ctx.provider_labels or ctx.model_labels:
+        rows = _apply_picker_labels(rows, ctx.provider_labels, ctx.model_labels)
     if picker_hints:
         _apply_picker_hints(rows)
     if canonical_order:
@@ -341,6 +363,37 @@ def _append_unconfigured_rows(rows: list[dict], ctx: ConfigContext) -> list[dict
     return extras
 
 
+def _append_pinned_provider_rows(
+    rows: list[dict], pinned: tuple[str, ...], ctx: ConfigContext
+) -> list[dict]:
+    """Add display-only canonical rows requested by the shared picker policy."""
+    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_LABELS, _PROVIDER_MODELS
+
+    out = list(rows)
+    seen = {str(row.get("slug", "")).lower() for row in out}
+    canonical = {entry.slug.lower(): entry for entry in CANONICAL_PROVIDERS}
+    current = (ctx.current_provider or "").lower()
+    for raw_slug in pinned:
+        slug = str(raw_slug or "").strip().lower()
+        if not slug or slug in seen or slug not in canonical:
+            continue
+        entry = canonical[slug]
+        models = list(_PROVIDER_MODELS.get(slug, ()))
+        out.append(
+            {
+                "slug": entry.slug,
+                "name": _PROVIDER_LABELS.get(entry.slug, entry.label),
+                "is_current": slug == current,
+                "is_user_defined": False,
+                "models": models,
+                "total_models": len(models),
+                "source": "shared-picker-policy",
+            }
+        )
+        seen.add(slug)
+    return out
+
+
 def _expand_hidden_provider_slugs(hidden: tuple[str, ...]) -> set[str]:
     from hermes_cli.model_switch import expand_hidden_provider_slugs
 
@@ -353,10 +406,30 @@ def _filter_hidden_providers(rows: list[dict], hidden: tuple[str, ...]) -> list[
     return filter_hidden_provider_rows(rows, hidden)
 
 
-def _filter_visible_models(rows: list[dict], visible: dict[str, tuple[str, ...]]) -> list[dict]:
+def _filter_visible_models(
+    rows: list[dict], visible: dict[str, tuple[str, ...]]
+) -> list[dict]:
     from hermes_cli.model_switch import filter_visible_model_rows
 
     return filter_visible_model_rows(rows, visible)
+
+
+def _filter_hidden_models(
+    rows: list[dict], hidden: dict[str, tuple[str, ...]]
+) -> list[dict]:
+    from hermes_cli.model_switch import filter_hidden_model_rows
+
+    return filter_hidden_model_rows(rows, hidden)
+
+
+def _apply_picker_labels(
+    rows: list[dict],
+    provider_labels: dict[str, str] | None,
+    model_labels: dict[str, dict[str, str]] | None,
+) -> list[dict]:
+    from hermes_cli.model_switch import apply_model_picker_labels
+
+    return apply_model_picker_labels(rows, provider_labels, model_labels)
 
 
 def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list[dict]:
@@ -396,12 +469,61 @@ def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list
             kept.append(row)
             continue
         if slug == "moa":
-            if row.get("models"):
+            # MoA is a virtual routing mode, not an independently configured
+            # provider. Hide it from explicit-only pickers unless it is the
+            # current provider (handled above) or the user explicitly wrote an
+            # enabled MoA preset into config.yaml. Use raw config so the
+            # DEFAULT_CONFIG preset does not make every desktop picker show MoA.
+            if _raw_config_has_enabled_moa_preset():
                 kept.append(row)
             continue
         if is_provider_explicitly_configured(slug):
             kept.append(row)
     return kept
+
+
+def _raw_config_has_enabled_moa_preset() -> bool:
+    """Return True when the user's raw config explicitly enables MoA.
+
+    ``load_config()`` includes ``DEFAULT_CONFIG["moa"].presets.default`` for
+    everyone. Explicit-only model pickers must not treat that default as a user
+    choice, but they should keep MoA visible once the user has saved at least
+    one enabled preset (or an older flat MoA config) in their own config.yaml.
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+
+        raw = read_raw_config()
+    except Exception:
+        return False
+
+    if not isinstance(raw, dict):
+        return False
+    moa = raw.get("moa")
+    if not isinstance(moa, dict):
+        return False
+
+    presets = moa.get("presets")
+    if isinstance(presets, dict):
+        for name, preset in presets.items():
+            if not str(name or "").strip():
+                continue
+            if not isinstance(preset, dict):
+                return True
+            if preset.get("enabled", True):
+                return True
+        return False
+
+    legacy_keys = {
+        "reference_models",
+        "aggregator",
+        "reference_temperature",
+        "aggregator_temperature",
+        "max_tokens",
+        "reference_max_tokens",
+        "fanout",
+    }
+    return any(key in moa for key in legacy_keys) and bool(moa.get("enabled", True))
 
 
 def _apply_picker_hints(rows: list[dict]) -> None:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
+from dataclasses import replace
 import json
 import time
 from datetime import datetime, timezone
@@ -3050,6 +3052,11 @@ def test_codex_oauth_nonterminal_refresh_does_not_quarantine(tmp_path, monkeypat
 def test_persist_preserves_concurrent_disk_only_entry(tmp_path, monkeypatch):
     """Regression for #19566: stale rotation writes keep concurrent entries."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    # Block external-credential autodiscovery: a real ~/.claude/.credentials.json
+    # on a dev machine would seed an extra claude_code entry and break the
+    # exact-id assertions below (passes on CI where no such file exists).
+    monkeypatch.setattr("agent.anthropic_adapter.read_hermes_oauth_credentials", lambda: None)
+    monkeypatch.setattr("agent.anthropic_adapter.read_claude_code_credentials", lambda: None)
     _write_auth_store(
         tmp_path,
         {
@@ -3111,6 +3118,9 @@ def test_persist_preserves_concurrent_disk_only_entry(tmp_path, monkeypatch):
 
 def test_remove_index_does_not_resurrect_via_disk_merge(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    # Block external-credential autodiscovery (see note in the test above).
+    monkeypatch.setattr("agent.anthropic_adapter.read_hermes_oauth_credentials", lambda: None)
+    monkeypatch.setattr("agent.anthropic_adapter.read_claude_code_credentials", lambda: None)
     _write_auth_store(
         tmp_path,
         {
@@ -3282,3 +3292,51 @@ def test_sync_anthropic_entry_clears_all_error_fields(tmp_path, monkeypatch):
     assert synced.last_error_reason is None
     assert synced.last_error_message is None
     assert synced.last_error_reset_at is None
+
+
+def test_claude_code_pool_refresh_adopts_fresh_token_inside_shared_lock(monkeypatch):
+    from agent.credential_pool import (
+        AUTH_TYPE_OAUTH,
+        CredentialPool,
+        PooledCredential,
+    )
+
+    stale = PooledCredential(
+        provider="anthropic",
+        id="claude-code",
+        label="Claude Code",
+        auth_type=AUTH_TYPE_OAUTH,
+        priority=0,
+        source="claude_code",
+        access_token="stale-access",
+        refresh_token="stale-refresh",
+        expires_at_ms=1,
+    )
+    fresh = replace(
+        stale,
+        access_token="fresh-access",
+        refresh_token="fresh-refresh",
+        expires_at_ms=9_999_999_999_000,
+    )
+    pool = CredentialPool("anthropic", [stale])
+    events = []
+
+    @contextmanager
+    def _lock():
+        events.append("enter")
+        yield
+        events.append("exit")
+
+    monkeypatch.setattr("agent.anthropic_adapter._claude_oauth_refresh_lock", _lock)
+    monkeypatch.setattr(
+        pool, "_sync_anthropic_entry_from_credentials_file", lambda entry: fresh
+    )
+    monkeypatch.setattr(pool, "_entry_needs_refresh", lambda entry: False)
+    monkeypatch.setattr(
+        pool,
+        "_refresh_entry_impl",
+        lambda *args, **kwargs: pytest.fail("fresh token must be adopted without POST"),
+    )
+
+    assert pool._refresh_entry(stale, force=True) is fresh
+    assert events == ["enter", "exit"]

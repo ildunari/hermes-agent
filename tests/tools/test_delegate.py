@@ -71,11 +71,12 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("goal", props)
         self.assertIn("tasks", props)
         self.assertIn("context", props)
-        # toolsets is intentionally NOT exposed to the model — subagents always
-        # inherit the parent's toolsets. Letting the model name toolsets was a
-        # capability-selection surface the model should not control.
-        self.assertNotIn("toolsets", props)
-        self.assertNotIn("toolsets", props["tasks"]["items"]["properties"])
+        for name in ("model", "provider", "reasoning_effort", "enabled_toolsets", "profile"):
+            self.assertIn(name, props)
+            self.assertIn(name, props["tasks"]["items"]["properties"])
+        # Credentials are never accepted through the model-facing surface.
+        self.assertNotIn("api_key", props)
+        self.assertNotIn("api_key", props["tasks"]["items"]["properties"])
         # max_iterations is intentionally NOT exposed to the model — it's
         # config-authoritative via delegation.max_iterations so users get
         # predictable budgets.
@@ -202,6 +203,57 @@ class TestStripBlockedTools(unittest.TestCase):
 
 
 class TestDelegateTask(unittest.TestCase):
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_per_task_overrides_beat_top_level(self, resolve_creds, build_child, run_child):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["terminal", "file", "web"]
+        resolve_creds.side_effect = lambda cfg, _parent: {
+            "model": cfg.get("model"), "provider": cfg.get("provider"),
+            "base_url": None, "api_key": None, "api_mode": None,
+        }
+        build_child.return_value = MagicMock()
+        run_child.return_value = {"task_index": 0, "status": "completed", "summary": "ok"}
+
+        delegate_task(
+            tasks=[{"goal": "one", "model": "task-model", "provider": "task-provider",
+                    "reasoning_effort": "high", "enabled_toolsets": ["terminal", "browser"]}],
+            model="top-model", provider="top-provider", reasoning_effort="low",
+            enabled_toolsets=["terminal", "file"], parent_agent=parent,
+        )
+
+        kwargs = build_child.call_args.kwargs
+        self.assertEqual(kwargs["model"], "task-model")
+        self.assertEqual(kwargs["override_provider"], "task-provider")
+        self.assertEqual(kwargs["reasoning_effort"], "high")
+        self.assertEqual(kwargs["toolsets"], ["terminal", "browser"])
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_top_level_overrides_apply_to_single_task(self, resolve_creds, build_child, run_child):
+        parent = _make_mock_parent()
+        resolve_creds.return_value = {"model": "chosen", "provider": "openrouter", "base_url": "u", "api_key": "k", "api_mode": "chat_completions"}
+        build_child.return_value = MagicMock()
+        run_child.return_value = {"task_index": 0, "status": "completed", "summary": "ok"}
+        delegate_task(goal="one", model="chosen", provider="openrouter",
+                      reasoning_effort="medium", enabled_toolsets=["file"], parent_agent=parent)
+        kwargs = build_child.call_args.kwargs
+        self.assertEqual(kwargs["reasoning_effort"], "medium")
+        self.assertEqual(kwargs["toolsets"], ["file"])
+
+    def test_profile_override_is_structured_refusal(self):
+        result = json.loads(delegate_task(goal="one", profile="other", parent_agent=_make_mock_parent()))
+        self.assertEqual(result["error"]["code"], "profile_override_unsupported")
+        self.assertEqual(result["error"]["requested_profile"], "other")
+        self.assertTrue(result["error"]["retryable"] is False)
+
+    def test_per_task_profile_override_is_structured_refusal(self):
+        result = json.loads(delegate_task(tasks=[{"goal": "one", "profile": "other"}], parent_agent=_make_mock_parent()))
+        self.assertEqual(result["error"]["code"], "profile_override_unsupported")
+        self.assertEqual(result["error"]["task_index"], 0)
+
     def test_no_parent_agent(self):
         result = json.loads(delegate_task(goal="test"))
         self.assertIn("error", result)
@@ -1266,6 +1318,24 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         )
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_provider_forwards_runtime_request_overrides_and_output_cap(self, mock_resolve):
+        mock_resolve.return_value = {
+            "provider": "custom",
+            "model": "real-model",
+            "base_url": "https://gateway.example/v1",
+            "api_key": "gateway-key",
+            "api_mode": "chat_completions",
+            "request_overrides": {"extra_body": {"store": False}},
+            "max_output_tokens": 3072,
+        }
+        creds = _resolve_delegation_credentials(
+            {"model": "real-model", "provider": "gateway"},
+            _make_mock_parent(depth=0),
+        )
+        self.assertEqual(creds["request_overrides"], {"extra_body": {"store": False}})
+        self.assertEqual(creds["max_output_tokens"], 3072)
+
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_standard_provider_not_overwritten_by_configured_name(self, mock_resolve):
         """Standard (non-custom) providers must still return runtime identity,
         not the configured name, to preserve existing behaviour for openrouter,
@@ -1446,6 +1516,8 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         parent.providers_ignored = ["openai/gpt-4o-mini"]
         parent.providers_order = ["google/gemini-2.5-pro"]
         parent.provider_sort = "price"
+        parent.provider_require_parameters = True
+        parent.provider_data_collection = "deny"
 
         with patch("run_agent.AIAgent") as MockAgent:
             mock_child = MagicMock()
@@ -1464,6 +1536,44 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertIsNone(kwargs["providers_ignored"])
             self.assertIsNone(kwargs["providers_order"])
             self.assertIsNone(kwargs["provider_sort"])
+            self.assertIs(kwargs["provider_require_parameters"], False)
+            self.assertEqual(kwargs["provider_data_collection"], "")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_same_provider_inherits_all_routing_preferences(self, mock_creds, mock_cfg):
+        mock_cfg.return_value = {"max_iterations": 45}
+        mock_creds.return_value = {
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.provider = "nous"
+        parent.providers_allowed = ["deepseek"]
+        parent.providers_ignored = ["deepinfra"]
+        parent.providers_order = ["anthropic"]
+        parent.provider_sort = "throughput"
+        parent.provider_require_parameters = True
+        parent.provider_data_collection = "deny"
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+            delegate_task(goal="Keep routing", parent_agent=parent)
+
+        _, kwargs = MockAgent.call_args
+        self.assertEqual(kwargs["providers_allowed"], ["deepseek"])
+        self.assertEqual(kwargs["providers_ignored"], ["deepinfra"])
+        self.assertEqual(kwargs["providers_order"], ["anthropic"])
+        self.assertEqual(kwargs["provider_sort"], "throughput")
+        self.assertIs(kwargs["provider_require_parameters"], True)
+        self.assertEqual(kwargs["provider_data_collection"], "deny")
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
@@ -2063,7 +2173,13 @@ class TestDelegateHeartbeat(unittest.TestCase):
 
         parent = _make_mock_parent()
         touch_calls = []
-        parent._touch_activity = lambda desc: touch_calls.append(desc)
+        heartbeat_seen = threading.Event()
+
+        def record_touch(desc):
+            touch_calls.append(desc)
+            heartbeat_seen.set()
+
+        parent._touch_activity = record_touch
 
         child = MagicMock()
         child.get_activity_summary.return_value = {
@@ -2074,7 +2190,7 @@ class TestDelegateHeartbeat(unittest.TestCase):
         }
 
         def slow_run(**kwargs):
-            time.sleep(0.15)
+            heartbeat_seen.wait(timeout=10.0)
             return {"final_response": "done", "completed": True, "api_calls": 5}
 
         child.run_conversation.side_effect = slow_run
@@ -2107,7 +2223,14 @@ class TestDelegateHeartbeat(unittest.TestCase):
 
         parent = _make_mock_parent()
         touch_calls = []
-        parent._touch_activity = lambda desc: touch_calls.append(desc)
+        third_touch = threading.Event()
+
+        def record_touch(desc):
+            touch_calls.append(desc)
+            if len(touch_calls) > 2:
+                third_touch.set()
+
+        parent._touch_activity = record_touch
 
         child = MagicMock()
         # Child is stuck inside a single terminal call for the whole run.
@@ -2120,10 +2243,10 @@ class TestDelegateHeartbeat(unittest.TestCase):
         }
 
         def slow_run(**kwargs):
-            # Long enough to exceed the OLD idle threshold (5 cycles) at
-            # the patched interval, but shorter than the new in-tool
-            # threshold.
-            time.sleep(0.4)
+            # Keep the child in its tool until the heartbeat proves it made it
+            # past the idle limit. A fixed sleep made this assertion flaky when
+            # the merged suite or CI scheduler delayed heartbeat threads.
+            third_touch.wait(timeout=2.0)
             return {"final_response": "done", "completed": True, "api_calls": 1}
 
         child.run_conversation.side_effect = slow_run
@@ -2148,7 +2271,7 @@ class TestDelegateHeartbeat(unittest.TestCase):
         self.assertGreater(
             len(touch_calls), 2,
             f"Heartbeat stopped too early while child was inside a tool; "
-            f"got {len(touch_calls)} touches over 0.4s at 0.05s interval",
+            f"got {len(touch_calls)} touches before the synchronized timeout",
         )
 
 

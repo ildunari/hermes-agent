@@ -855,8 +855,15 @@ def normalize_usage(
         details = getattr(response_usage, "input_tokens_details", None)
         cache_read_tokens = _to_int(getattr(details, "cached_tokens", 0) if details else 0)
         cache_write_tokens = _to_int(
-            getattr(details, "cache_creation_tokens", 0) if details else 0
+            getattr(details, "cache_write_tokens", 0) if details else 0
         )
+        if not cache_write_tokens:
+            # Older Responses proxies used the Anthropic-derived name. Keep it
+            # as a compatibility fallback while preferring OpenAI's current
+            # GPT-5.6 field.
+            cache_write_tokens = _to_int(
+                getattr(details, "cache_creation_tokens", 0) if details else 0
+            )
         input_tokens = max(0, input_total - cache_read_tokens - cache_write_tokens)
     else:
         prompt_total = _to_int(getattr(response_usage, "prompt_tokens", 0))

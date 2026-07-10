@@ -696,7 +696,13 @@ def enqueue_detached_restart(
     safe_wait_timeout: float | None = None,
     safe_wait_interval: float | None = None,
 ) -> str:
-    """Spawn a detached helper process and return a user-facing status line."""
+    """Spawn an OS-session-independent restart worker and return immediately.
+
+    This is the only supported entry point from a gateway, WebUI, Desktop,
+    slash worker, or agent-owned process. The child gets a new session, null
+    stdin, independent log descriptors, and no inherited descriptors, so it
+    survives termination of the caller while restarting that caller's service.
+    """
 
     normalized = normalize_scope(scope)
     if dry_run:
@@ -711,6 +717,7 @@ def enqueue_detached_restart(
         normalized,
         "--delay",
         str(delay),
+        "--detached-worker",
     ]
     if notify_origin:
         cmd.extend(["--notify-origin-json", json.dumps(notify_origin, separators=(",", ":"))])
@@ -766,6 +773,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "use this when restarting the WebUI or gateway that owns the current session"
         ),
     )
+    parser.add_argument("--detached-worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.install_system_restart_sudoers:
         print(install_system_restart_sudoers(args.sudoers_user, dry_run=args.dry_run))
@@ -790,6 +798,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             )
         )
         return 0
+    if not args.detached_worker and not args.dry_run:
+        parser.error(
+            "refusing an inline restart; use --enqueue-detached so the restart "
+            "worker survives termination of the invoking Hermes process"
+        )
     try:
         return restart_scope(
             args.scope,

@@ -35,9 +35,9 @@ from typing import Any, Dict, List, Optional, Union
 
 # Sources that are excluded from session browsing/searching by default.
 # Third-party integrations tag their sessions with HERMES_SESSION_SOURCE=tool;
-# delegate subagent runs are tagged "subagent" — neither belongs in the
-# user's session history.
-_HIDDEN_SESSION_SOURCES = ("subagent", "tool")
+# delegate runs use "subagent", and validation probes use "smoke-test". These
+# internal runs do not belong in the user's session history by default.
+_HIDDEN_SESSION_SOURCES = ("subagent", "tool", "smoke-test")
 
 # Automation sources that are kept searchable but DEMOTED below interactive
 # sessions in discover ranking. Cron jobs run on a schedule and accumulate
@@ -257,13 +257,16 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10) -> str:
     return json.dumps(response, ensure_ascii=False)
 
 
-def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
+def _list_recent_sessions(
+    db, limit: int, current_session_id: str = None, include_internal: bool = False
+) -> str:
     """Return metadata for the most recent sessions (no LLM calls, no FTS5)."""
     try:
         sessions = db.list_sessions_rich(
             limit=limit + 5,
-            exclude_sources=list(_HIDDEN_SESSION_SOURCES),
+            exclude_sources=None if include_internal else list(_HIDDEN_SESSION_SOURCES),
             order_by_last_active=True,
+            include_archived=include_internal,
         )  # fetch extra so we can skip current
 
         current_root = _resolve_to_parent(db, current_session_id) if current_session_id else None
@@ -433,6 +436,7 @@ def _title_match_result(
     db,
     query: str,
     current_lineage_root: Optional[str],
+    include_internal: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Return a discovery-shaped result when the query matches a session title."""
     title_query = _normalize_title_query(query)
@@ -456,7 +460,7 @@ def _title_match_result(
     except Exception:
         logging.debug("get_session failed for title match %s", session_id, exc_info=True)
         session_meta = {}
-    if session_meta.get("source") in _HIDDEN_SESSION_SOURCES:
+    if not include_internal and session_meta.get("source") in _HIDDEN_SESSION_SOURCES:
         return None
 
     try:
@@ -503,17 +507,18 @@ def _discover(
     limit: int,
     sort: Optional[str],
     current_session_id: str = None,
+    include_internal: bool = False,
 ) -> str:
     """Discovery shape: FTS5 + anchored window + bookends per hit. Single call."""
     role_list = role_filter if role_filter else ["user", "assistant"]
     current_lineage_root = _resolve_to_parent(db, current_session_id) if current_session_id else None
-    title_result = _title_match_result(db, query, current_lineage_root)
+    title_result = _title_match_result(db, query, current_lineage_root, include_internal)
 
     try:
         raw_results = db.search_messages(
             query=query,
             role_filter=role_list,
-            exclude_sources=list(_HIDDEN_SESSION_SOURCES),
+            exclude_sources=None if include_internal else list(_HIDDEN_SESSION_SOURCES),
             limit=_DISCOVER_SCAN_LIMIT,  # widen so dedup-by-lineage can find
             # distinct sessions AND so interactive matches buried under a wall
             # of cron rows are still in hand for the demotion pass below.
@@ -630,6 +635,8 @@ def session_search(
     sort: str = None,
     # Cross-profile (any shape)
     profile: str = None,
+    # Browse/discovery visibility
+    include_internal: bool = False,
 ) -> str:
     """Single-shape tool. Mode inferred from which args are set.
 
@@ -666,6 +673,7 @@ def session_search(
     # Cross-profile read: swap in the named profile's DB (read-only) for every
     # shape below. The current-session-lineage guards no longer apply across
     # profiles, but they key off ids that won't collide, so they stay inert.
+    owned_profile_db = None
     if profile is not None and str(profile).strip():
         try:
             profile_db = _resolve_profile_db(profile)
@@ -673,24 +681,30 @@ def session_search(
             return tool_error(f"profile '{profile}': {e}", success=False)
         if profile_db is not None:
             db = profile_db
+            owned_profile_db = profile_db
             current_session_id = None
+
+    def _finish(result: str) -> str:
+        if owned_profile_db is not None:
+            owned_profile_db.close()
+        return result
 
     # Scroll shape takes precedence — explicit anchor beats any query.
     if (isinstance(session_id, str) and session_id.strip()) and around_message_id is not None:
-        return _scroll(
+        return _finish(_scroll(
             db=db,
             session_id=session_id,
             around_message_id=around_message_id,
             window=window,
             current_session_id=current_session_id,
-        )
+        ))
 
     # Read shape: a session_id with no anchor → dump the whole session.
     if isinstance(session_id, str) and session_id.strip():
         sid = session_id.strip()
         result = _read_session(db, sid)
         if json.loads(result).get("success"):
-            return result
+            return _finish(result)
 
         # Miss in the target profile — the model may have dropped the owning
         # profile from the link. Scan every profile and read it from wherever
@@ -703,8 +717,8 @@ def session_search(
                 located.close()
             if found.get("success"):
                 found["profile"] = owner
-                return json.dumps(found, ensure_ascii=False)
-        return result
+                return _finish(json.dumps(found, ensure_ascii=False))
+        return _finish(result)
 
     # Limit clamp [1, 10]
     if not isinstance(limit, int):
@@ -716,7 +730,7 @@ def session_search(
 
     # Browse shape: no query → recent sessions.
     if not query or not isinstance(query, str) or not query.strip():
-        return _list_recent_sessions(db, limit, current_session_id)
+        return _finish(_list_recent_sessions(db, limit, current_session_id, include_internal))
 
     # Parse role_filter
     role_list: Optional[List[str]] = None
@@ -730,14 +744,15 @@ def session_search(
         if candidate in ("newest", "oldest"):
             sort_norm = candidate
 
-    return _discover(
+    return _finish(_discover(
         db=db,
         query=query.strip(),
         role_filter=role_list,
         limit=limit,
         sort=sort_norm,
         current_session_id=current_session_id,
-    )
+        include_internal=include_internal,
+    ))
 
 
 def check_session_search_requirements() -> bool:
@@ -882,6 +897,15 @@ SESSION_SEARCH_SCHEMA = {
                     "behaviour) or 'tool' to search tool output only."
                 ),
             },
+            "include_internal": {
+                "type": "boolean",
+                "description": (
+                    "Optional. Include internal subagent, tool, and smoke-test sessions "
+                    "in discovery and browse results, including archived rows. Defaults "
+                    "to false. Direct read and scroll by session id are unchanged."
+                ),
+                "default": False,
+            },
             "profile": {
                 "type": "string",
                 "description": (
@@ -913,6 +937,7 @@ registry.register(
         window=args.get("window", 5),
         sort=args.get("sort"),
         profile=args.get("profile"),
+        include_internal=args.get("include_internal", False),
         db=kw.get("db"),
         current_session_id=kw.get("current_session_id"),
     ),

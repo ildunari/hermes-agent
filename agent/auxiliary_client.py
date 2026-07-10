@@ -4944,8 +4944,8 @@ def resolve_provider_client(
         if custom_entry is None:
             custom_entry = _get_named_custom_provider(provider)
         if custom_entry:
-            custom_base = custom_entry.get("base_url", "").strip()
-            custom_key = custom_entry.get("api_key", "").strip()
+            custom_base = (custom_entry.get("base_url") or "").strip()
+            custom_key = (custom_entry.get("api_key") or "").strip()
             custom_key_env = (custom_entry.get("key_env") or custom_entry.get("api_key_env") or "").strip()
             if not custom_key and custom_key_env:
                 custom_key = os.getenv(custom_key_env, "").strip()
@@ -7385,6 +7385,35 @@ async def async_call_llm(
                 f"Run: hermes setup"
             )
         resolved_provider = effective_provider or resolved_provider
+    elif task == "video":
+        video_provider = _normalize_aux_provider(resolved_provider)
+        if video_provider != "gemini":
+            raise RuntimeError(
+                "Video analysis requires auxiliary.video.provider: gemini. "
+                "Arbitrary-file video input is not supported by the configured "
+                f"provider ({resolved_provider or 'auto'})."
+            )
+        client, final_model = _get_cached_client(
+            "gemini",
+            resolved_model,
+            async_mode=True,
+            # Force Gemini's native adapter. An explicit /v1beta base URL can
+            # otherwise be mistaken for a generic OpenAI-compatible endpoint.
+            base_url="",
+            api_key=resolved_api_key,
+            api_mode=resolved_api_mode,
+        )
+        try:
+            from agent.gemini_native_adapter import AsyncGeminiNativeClient, GeminiNativeClient
+            is_native_gemini = isinstance(client, (GeminiNativeClient, AsyncGeminiNativeClient))
+        except ImportError:
+            is_native_gemini = False
+        if client is None or not is_native_gemini:
+            raise RuntimeError(
+                "No native Gemini client is configured for video analysis. "
+                "Set auxiliary.video.provider to gemini and configure GOOGLE_API_KEY."
+            )
+        resolved_provider = "gemini"
     else:
         client, final_model = _get_cached_client(
             resolved_provider,
@@ -7674,6 +7703,11 @@ async def async_call_llm(
                         first_err = retry2_err
                     else:
                         raise
+
+        if task == "video":
+            # Gemini Files references are provider-specific. Never leak them to
+            # a generic fallback that may ignore, reject, or mishandle video.
+            raise first_err
 
         # ── Payment / connection / rate-limit fallback (mirrors sync call_llm) ──
         # Auth error fallback (#21165): a 401 that survived the refresh path

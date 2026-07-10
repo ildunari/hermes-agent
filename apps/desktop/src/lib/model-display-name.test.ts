@@ -14,7 +14,8 @@ describe('model display names', () => {
   })
 
   it('cleans provider IDs and custom provider slugs', () => {
-    expect(displayProviderName('vibeproxy')).toBe('VibeProxy')
+    expect(displayProviderName('vibeproxy')).toBe('CLI Proxy')
+    expect(displayProviderName('openai-codex', 'Company Gateway')).toBe('Company Gateway')
     expect(displayProviderName('openai-codex')).toBe('Codex')
     expect(displayProviderName('custom:atomic')).toBe('Atomic')
     expect(displayProviderName('atomic')).toBe('Atomic')
@@ -23,6 +24,6 @@ describe('model display names', () => {
   })
 
   it('combines readable provider and model labels', () => {
-    expect(displayProviderModel('vibeproxy', 'claude-opus-4-8')).toBe('VibeProxy · Opus 4.8')
+    expect(displayProviderModel('vibeproxy', 'claude-opus-4-8')).toBe('CLI Proxy · Opus 4.8')
   })
 })

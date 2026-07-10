@@ -17,6 +17,63 @@ from hermes_cli.browser_connect import ChromeDebugLaunch
 from tui_gateway import server
 
 
+@pytest.mark.parametrize("case", ["invalid-profile", "missing-db", "missing-parent"])
+def test_session_create_branch_rejects_profile_or_parent_before_runtime(monkeypatch, tmp_path, case):
+    """A branch must be validated in its explicit profile before claiming a slot."""
+    profile_home = tmp_path / "profiles" / "parent"
+    profile_home.mkdir(parents=True)
+    if case != "missing-db":
+        (profile_home / "state.db").touch()
+
+    if case == "invalid-profile":
+        monkeypatch.setattr(server, "_resolve_profile_dir", lambda _name: None)
+    else:
+        monkeypatch.setattr(server, "_resolve_profile_dir", lambda _name: profile_home)
+
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *a, **k: pytest.fail("slot claimed"))
+    monkeypatch.setattr(server, "_schedule_agent_build", lambda *a, **k: pytest.fail("runtime built"))
+    before = set(server._sessions)
+
+    if case == "missing-parent":
+        class EmptyDB:
+            def get_session(self, _session_id):
+                return None
+        monkeypatch.setattr(server, "_open_profile_db", lambda _home: EmptyDB())
+
+    response = server._methods["session.create"](
+        "r-branch",
+        {"profile": "parent", "parent_session_id": "does-not-exist", "messages": [{"role": "user", "content": "x"}]},
+    )
+
+    assert "error" in response
+    assert set(server._sessions) == before
+
+
+def test_resolve_profile_dir_rejects_path_traversal(monkeypatch, tmp_path):
+    from hermes_cli import profiles as profiles_mod
+
+    profiles_root = tmp_path / "profiles"
+    profiles_root.mkdir()
+    escaped = tmp_path / "escaped"
+    escaped.mkdir()
+    (escaped / "state.db").touch()
+    monkeypatch.setattr(profiles_mod, "_get_profiles_root", lambda: profiles_root)
+
+    for name in ("../escaped", "foo/bar", "."):
+        assert server._resolve_profile_dir(name) is None
+
+
+def test_resolve_profile_dir_normalizes_valid_mixed_case(monkeypatch, tmp_path):
+    from hermes_cli import profiles as profiles_mod
+
+    profiles_root = tmp_path / "profiles"
+    home = profiles_root / "coding"
+    home.mkdir(parents=True)
+    monkeypatch.setattr(profiles_mod, "_get_profiles_root", lambda: profiles_root)
+
+    assert server._resolve_profile_dir("Coding") == home.resolve()
+
+
 def test_session_create_rejects_at_active_session_limit(monkeypatch, tmp_path):
     home = tmp_path / ".hermes"
     home.mkdir()
@@ -422,6 +479,43 @@ def test_tui_verbose_tool_events_omit_details_when_redaction_fails(monkeypatch):
     assert events[1][0] == "tool.complete"
     assert "args_text" not in events[0][2]
     assert "result_text" not in events[1][2]
+
+
+def test_tui_tool_output_risk_event_exposes_metadata_without_raw_output(monkeypatch):
+    events: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        server, "_emit", lambda event_type, sid, payload: events.append((event_type, sid, payload))
+    )
+    monkeypatch.setitem(
+        server._sessions,
+        "risk-test",
+        {"tool_progress_mode": "all"},
+    )
+
+    server._on_tool_progress(
+        "risk-test",
+        "tool.output_risk",
+        "web_extract",
+        tool_call_id="tool-1",
+        risk_metadata={
+            "risk": "high",
+            "findings": ["prompt_injection"],
+            "redacted": False,
+        },
+    )
+
+    assert events == [(
+        "tool.output_risk",
+        "risk-test",
+        {
+            "tool_id": "tool-1",
+            "name": "web_extract",
+            "risk": "high",
+            "findings": ["prompt_injection"],
+            "redacted": False,
+        },
+    )]
+    assert "result" not in events[0][2]
 
 
 def test_dispatch_rejects_non_object_request():
@@ -1691,6 +1785,8 @@ def test_make_agent_passes_configured_fallback_chain(monkeypatch):
     monkeypatch.delenv("HERMES_MODEL", raising=False)
     monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
     monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
+    monkeypatch.delenv("HERMES_DESKTOP", raising=False)
+    monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
     monkeypatch.setattr(
         server,
         "_load_cfg",
@@ -1777,7 +1873,8 @@ def test_startup_runtime_resolves_short_alias_without_network(monkeypatch):
 
     model, provider = server._resolve_startup_runtime()
 
-    assert provider == "anthropic"
+    # Subscription routing owns the short Claude aliases when available.
+    assert provider == "vibeproxy"
     assert model.startswith("claude-sonnet")
 
 
@@ -1796,7 +1893,7 @@ def test_startup_runtime_does_not_call_network_detector(monkeypatch):
     model, provider = server._resolve_startup_runtime()
 
     assert model
-    assert provider in {None, "anthropic"}
+    assert provider == "vibeproxy"
 
 
 def _session(agent=None, **extra):
@@ -2291,6 +2388,8 @@ def test_ensure_session_db_row_persists_explicit_cwd(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
+    monkeypatch.delenv("HERMES_DESKTOP", raising=False)
+    monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
 
     server._ensure_session_db_row({"session_key": "k1", "cwd": str(tmp_path), "explicit_cwd": True})
 
@@ -2331,6 +2430,8 @@ def test_ensure_session_db_row_defaults_to_no_workspace(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
+    monkeypatch.delenv("HERMES_DESKTOP", raising=False)
+    monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
 
     server._ensure_session_db_row({"session_key": "k1", "cwd": str(tmp_path)})
 
@@ -8823,6 +8924,8 @@ class TestResolveRuntimeWithFallback:
         monkeypatch.delenv("HERMES_MODEL", raising=False)
         monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
         monkeypatch.delenv("HERMES_TUI_PROVIDER", raising=False)
+        monkeypatch.delenv("HERMES_DESKTOP", raising=False)
+        monkeypatch.delenv("HERMES_DESKTOP_TERMINAL", raising=False)
         monkeypatch.setattr(
             server,
             "_load_cfg",

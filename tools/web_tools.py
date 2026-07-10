@@ -105,6 +105,21 @@ import sys
 logger = logging.getLogger(__name__)
 
 
+def _web_extract_url(value: Any) -> Optional[str]:
+    """Return a usable URL from a model-supplied extract item.
+
+    Models sometimes forward a complete web-search result instead of its URL.
+    Accept the two common URL keys, but reject missing/non-string values rather
+    than stringifying arbitrary objects into misleading fetch targets.
+    """
+    if isinstance(value, dict):
+        value = value.get("url") or value.get("href")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
 def _env_value(name: str) -> str:
@@ -134,7 +149,11 @@ def _load_web_config() -> dict:
     """Load the ``web:`` section from ~/.hermes/config.yaml."""
     try:
         from hermes_cli.config import load_config
-        return load_config().get("web", {})
+        # ``or {}``: a present-but-null ``web:`` section (YAML ``web:`` with no
+        # body) makes ``.get("web", {})`` return None, which would break every
+        # caller that does ``_load_web_config().get(...)``. Honor the ``-> dict``
+        # contract so callers never see None.
+        return load_config().get("web") or {}
     except (ImportError, Exception):
         return {}
 
@@ -792,7 +811,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
 
 
 async def web_extract_tool(
-    urls: List[str],
+    urls: List[Any],
     format: str = None,
     use_llm_processing: bool = True,
     model: Optional[str] = None,
@@ -817,7 +836,8 @@ async def web_extract_tool(
     ``[IMAGE: alt]`` placeholders (real image URLs are preserved as links).
 
     Args:
-        urls (List[str]): List of URLs to extract content from
+        urls (List[Any]): URL strings or search-result objects containing a
+            string ``url`` or ``href`` field.
         format (str): Backward-compatible alias for mode.
         mode (Optional[str]): Extraction mode: markdown/html, or Firecrawl-only answer, summary, json, links.
         question (Optional[str]): Focused page question for Firecrawl mode="answer".
@@ -846,7 +866,21 @@ async def web_extract_tool(
     from agent.redact import _PREFIX_RE
     from urllib.parse import unquote
     normalized_urls: List[str] = []
-    for _url in urls:
+    normalized_indices: List[int] = []
+    invalid_urls: Dict[int, Dict[str, Any]] = {}
+    for index, item in enumerate(urls):
+        _url = _web_extract_url(item)
+        if _url is None:
+            invalid_urls[index] = {
+                "url": "",
+                "title": "",
+                "content": "",
+                "error": (
+                    f"Invalid URL item at index {index}: expected a URL string "
+                    "or an object with a string 'url' or 'href' field"
+                ),
+            }
+            continue
         normalized_url = normalize_url_for_request(_url)
         if (
             _PREFIX_RE.search(_url)
@@ -871,6 +905,7 @@ async def web_extract_tool(
                 ),
             })
         normalized_urls.append(normalized_url)
+        normalized_indices.append(index)
 
     debug_call_data = {
         "parameters": {
@@ -903,15 +938,17 @@ async def web_extract_tool(
 
         # ── SSRF protection — filter out private/internal URLs before any backend ──
         safe_urls = []
-        ssrf_blocked: List[Dict[str, Any]] = []
-        for url in normalized_urls:
+        safe_indices = []
+        ssrf_blocked: Dict[int, Dict[str, Any]] = {}
+        for index, url in zip(normalized_indices, normalized_urls):
             if not await _safe_url_allowed(url):
-                ssrf_blocked.append({
+                ssrf_blocked[index] = {
                     "url": url, "title": "", "content": "",
                     "error": "Blocked: URL targets a private or internal network address",
-                })
+                }
             else:
                 safe_urls.append(url)
+                safe_indices.append(index)
 
         # Dispatch only safe URLs. For default markdown fetches, try cheap
         # machine-readable/static extractors first (Shopify product JSON,
@@ -1051,26 +1088,25 @@ async def web_extract_tool(
                     item.setdefault("requested_url", requested_url)
             results.extend(provider_results)
 
-        # Merge any SSRF-blocked results back in and preserve caller URL order
-        # even when some URLs used the fast path and others fell back.
-        if ssrf_blocked:
-            results = ssrf_blocked + results
-        if results:
-            buckets: Dict[str, List[Dict[str, Any]]] = {}
-            leftovers: List[Dict[str, Any]] = []
-            for item in results:
-                key = item.get("requested_url") or item.get("url")
-                if key:
-                    buckets.setdefault(key, []).append(item)
-                else:
-                    leftovers.append(item)
-            ordered_results: List[Dict[str, Any]] = []
-            for original_url in normalized_urls:
-                if buckets.get(original_url):
-                    ordered_results.append(buckets[original_url].pop(0))
-            for bucket in buckets.values():
-                leftovers.extend(bucket)
-            results = ordered_results + leftovers
+        # Reconstruct original input order across invalid, blocked, fast-path,
+        # and provider results. URL buckets avoid positional mismatches when the
+        # fast extractor handles only a subset of safe URLs.
+        buckets: Dict[str, List[Dict[str, Any]]] = {}
+        for item in results:
+            key = item.get("requested_url") or item.get("url")
+            if key:
+                buckets.setdefault(key, []).append(item)
+        safe_results: Dict[int, Dict[str, Any]] = {}
+        for index, url in zip(safe_indices, [normalized_urls[normalized_indices.index(i)] for i in safe_indices]):
+            bucket = buckets.get(url) or []
+            safe_results[index] = bucket.pop(0) if bucket else {
+                "url": url,
+                "title": "",
+                "content": "",
+                "error": "Extract backend returned no result for this URL",
+            }
+        by_index = {**safe_results, **ssrf_blocked, **invalid_urls}
+        results = [by_index[index] for index in range(len(urls))]
 
         response = {"results": results}
         

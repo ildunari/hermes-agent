@@ -34,13 +34,17 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import math
 import os
+import shutil
+import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 import httpx
-from agent.auxiliary_client import async_call_llm
+from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
 from agent.image_normalization import (
     convert_heic_to_jpeg_for_vision,
     detect_image_mime_type,
@@ -1581,15 +1585,181 @@ registry.register(
 _VIDEO_MIME_TYPES = {
     ".mp4": "video/mp4",
     ".webm": "video/webm",
-    ".mov": "video/mov",
-    ".avi": "video/mp4",
-    ".mkv": "video/mp4",
+    ".mov": "video/quicktime",
+    ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska",
     ".mpeg": "video/mpeg",
     ".mpg": "video/mpeg",
 }
 
-_MAX_VIDEO_BASE64_BYTES = 50 * 1024 * 1024  # 50 MB hard cap
-_VIDEO_SIZE_WARN_BYTES = 20 * 1024 * 1024
+_DEFAULT_MAX_VIDEO_INPUT_BYTES = 100 * 1024 * 1024
+_DEFAULT_VIDEO_COMPRESSION_TARGET_BYTES = 96 * 1024 * 1024
+_DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+# Base64 expands by 4/3.  This cap admits an unmodified 100 MiB source plus
+# the data-URL prefix, while still bounding the request assembled in memory.
+_MAX_VIDEO_BASE64_BYTES = 140 * 1024 * 1024
+_VIDEO_SIZE_WARN_BYTES = 80 * 1024 * 1024
+
+
+def _redact_video_source(source: str) -> str:
+    """Strip URL userinfo, query credentials, and fragments before logging."""
+    try:
+        parsed = urlsplit(str(source))
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return str(source)
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    except Exception:
+        return "<redacted-video-source>"
+
+
+def _video_analysis_limits() -> tuple[int, int, int]:
+    """Return (input limit, compression target, download limit) in bytes."""
+    mib = 1024 * 1024
+    max_mb = _DEFAULT_MAX_VIDEO_INPUT_BYTES / mib
+    target_mb = _DEFAULT_VIDEO_COMPRESSION_TARGET_BYTES / mib
+    download_mb = _DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES / mib
+    try:
+        from hermes_cli.config import cfg_get, load_config
+
+        cfg = load_config()
+        section = cfg_get(cfg, "video_analysis", default={}) or {}
+        max_mb = float(section.get("max_input_mb", max_mb))
+        target_mb = float(section.get("compression_target_mb", target_mb))
+        download_mb = float(section.get("max_download_mb", download_mb))
+    except (TypeError, ValueError):
+        pass
+    except Exception:
+        pass
+
+    defaults = (
+        _DEFAULT_MAX_VIDEO_INPUT_BYTES / mib,
+        _DEFAULT_VIDEO_COMPRESSION_TARGET_BYTES / mib,
+        _DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES / mib,
+    )
+    values = []
+    for value, fallback in zip((max_mb, target_mb, download_mb), defaults):
+        values.append(value if math.isfinite(value) and value > 0 else fallback)
+    max_mb, target_mb, download_mb = values
+
+    max_bytes = int(min(max_mb, 1024.0) * 1024 * 1024)
+    target_bytes = int(max(1.0, min(target_mb, max_mb)) * 1024 * 1024)
+    if target_bytes >= max_bytes:
+        target_bytes = max(1, int(max_bytes * 0.96))
+    download_bytes = int(max(max_mb, min(download_mb, 16384.0)) * 1024 * 1024)
+    return max_bytes, target_bytes, download_bytes
+
+
+def _run_video_command(command: list[str], *, timeout: float = 1800.0) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+
+
+def _probe_video_budget(source: Path) -> tuple[float, int]:
+    """Return duration and audio-stream count for a high-quality AAC budget."""
+    probe = _run_video_command([
+        "ffprobe", "-v", "error", "-show_entries",
+        "format=duration:stream=codec_type,bit_rate", "-of", "json", str(source),
+    ], timeout=120.0)
+    payload = json.loads(probe.stdout or "{}")
+    duration = float((payload.get("format") or {}).get("duration") or 0)
+    if duration <= 0:
+        raise ValueError("Video duration is missing or zero; cannot calculate a safe compression budget")
+    audio_streams = [s for s in payload.get("streams", []) if s.get("codec_type") == "audio"]
+    return duration, len(audio_streams)
+
+
+def _video_encode_base(source: Path) -> list[str]:
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+        "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0", "-map_chapters", "0",
+        "-c:v", "libx264", "-preset", "slow", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart",
+    ]
+
+
+def _compress_video_for_analysis(source: Path, target_bytes: int) -> Path:
+    """Create a high-quality MP4 derivative without modifying ``source``.
+
+    Two-pass H.264 spends the available size budget efficiently while bounding
+    output growth. Resolution, frame rate, chapters, metadata, and all audio
+    tracks are kept; audio is normalized to high-quality 256 kbps AAC so source
+    codecs such as PCM/Opus cannot make the MP4 mux or size budget fail.
+    """
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise RuntimeError("ffmpeg and ffprobe are required to compress videos over the analysis limit")
+
+    output_dir = get_hermes_dir("cache/video", "compressed_video_files")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"analysis_{uuid.uuid4().hex}.mp4"
+    passlog = Path(tempfile.gettempdir()) / f"hermes-video-{uuid.uuid4().hex}"
+    try:
+        duration, audio_count = _probe_video_budget(source)
+        audio_bitrate = 256_000 * audio_count
+        total_bitrate = int((target_bytes * 8 * 0.97) / duration)
+        video_bitrate = total_bitrate - audio_bitrate
+        if video_bitrate < 100_000:
+            raise ValueError(
+                "The video's duration/audio tracks leave too little bitrate to preserve useful visual detail"
+            )
+
+        def encode_at_bitrate(bitrate: int) -> None:
+            output.unlink(missing_ok=True)
+            _run_video_command([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+                "-map", "0:v:0", "-c:v", "libx264", "-preset", "slow", "-pix_fmt", "yuv420p",
+                "-b:v", str(bitrate), "-pass", "1", "-passlogfile", str(passlog),
+                "-an", "-f", "null", os.devnull,
+            ])
+            _run_video_command(_video_encode_base(source) + [
+                "-b:v", str(bitrate), "-pass", "2", "-passlogfile", str(passlog), str(output),
+            ])
+
+        encode_at_bitrate(video_bitrate)
+        if output.stat().st_size > target_bytes:
+            adjusted = int(video_bitrate * (target_bytes / output.stat().st_size) * 0.97)
+            if adjusted < 100_000:
+                raise ValueError("Video cannot fit the configured target with useful visual bitrate")
+            encode_at_bitrate(adjusted)
+        return output
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
+    finally:
+        for artifact in Path(tempfile.gettempdir()).glob(passlog.name + "*"):
+            artifact.unlink(missing_ok=True)
+
+
+async def _prepare_video_for_analysis(source: Path) -> tuple[Path, bool]:
+    """Return a provider-ready path and whether the returned path is temporary."""
+    max_bytes, target_bytes, _ = _video_analysis_limits()
+    if source.stat().st_size <= max_bytes:
+        return source, False
+    work = asyncio.create_task(
+        asyncio.to_thread(_compress_video_for_analysis, source, target_bytes)
+    )
+    try:
+        prepared = await asyncio.shield(work)
+    except asyncio.CancelledError:
+        # to_thread cannot kill subprocess.run. Wait for the bounded encode so
+        # the source remains present, then remove any orphan derivative.
+        try:
+            orphan = await work
+            orphan.unlink(missing_ok=True)
+        finally:
+            raise
+    if not prepared.is_file() or prepared.stat().st_size > target_bytes:
+        prepared.unlink(missing_ok=True)
+        raise ValueError(
+            f"Video could not be reduced below {target_bytes / (1024 * 1024):.0f} MiB without replacing the original"
+        )
+    return prepared, True
 
 
 def _detect_video_mime_type(video_path: Path) -> Optional[str]:
@@ -1599,11 +1769,123 @@ def _detect_video_mime_type(video_path: Path) -> Optional[str]:
 
 
 def _video_to_base64_data_url(video_path: Path, mime_type: Optional[str] = None) -> str:
-    """Convert a video file to a base64-encoded data URL."""
+    """Legacy inline encoder retained for small-payload compatibility tests."""
     data = video_path.read_bytes()
     encoded = base64.b64encode(data).decode("ascii")
     mime = mime_type or _VIDEO_MIME_TYPES.get(video_path.suffix.lower(), "video/mp4")
     return f"data:{mime};base64,{encoded}"
+
+
+def _gemini_video_api_key() -> str:
+    key = str(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
+    if key:
+        return key
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        return str(cfg_get(load_config(), "auxiliary", "video", "api_key", default="") or "").strip()
+    except Exception:
+        return ""
+
+
+async def _upload_video_to_gemini(
+    video_path: Path, mime_type: str, api_key: Optional[str] = None
+) -> tuple[str, str]:
+    """Stream a video to Gemini Files and wait until it is ready."""
+    api_key = str(api_key or _gemini_video_api_key()).strip()
+    if not api_key:
+        raise RuntimeError("A Gemini API credential is required for video analysis")
+
+    size = video_path.stat().st_size
+    headers = {
+        "x-goog-api-key": api_key,
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": str(size),
+        "X-Goog-Upload-Header-Content-Type": mime_type,
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+        start = await client.post(
+            "https://generativelanguage.googleapis.com/upload/v1beta/files",
+            headers=headers,
+            json={"file": {"display_name": video_path.name}},
+        )
+        start.raise_for_status()
+        upload_url = start.headers.get("x-goog-upload-url")
+        if not upload_url:
+            raise RuntimeError("Gemini Files did not return a resumable upload URL")
+
+        async def chunks():
+            with video_path.open("rb") as handle:
+                while True:
+                    chunk = await asyncio.to_thread(handle.read, 1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        uploaded = await client.post(
+            upload_url,
+            headers={
+                "Content-Length": str(size),
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize",
+            },
+            content=chunks(),
+        )
+        uploaded.raise_for_status()
+        payload = uploaded.json()
+        file_info = payload.get("file") if isinstance(payload, dict) else None
+        if not isinstance(file_info, dict):
+            raise RuntimeError("Gemini Files returned no file metadata")
+        name = str(file_info.get("name") or "")
+        uri = str(file_info.get("uri") or "")
+        if not name or not uri:
+            if name:
+                await _delete_gemini_file(name, api_key)
+            raise RuntimeError("Gemini Files response is missing name or URI")
+
+        deadline = asyncio.get_running_loop().time() + 600
+        try:
+            while True:
+                if not isinstance(file_info, dict):
+                    raise RuntimeError("Gemini Files returned malformed processing metadata")
+                state = str(file_info.get("state") or "").upper()
+                if state == "ACTIVE":
+                    return uri, name
+                if state == "FAILED":
+                    raise RuntimeError("Gemini failed while processing the uploaded video")
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise TimeoutError("Timed out waiting for Gemini to process the video")
+                await asyncio.sleep(2)
+                status = await client.get(
+                    f"https://generativelanguage.googleapis.com/v1beta/{name}",
+                    headers={"x-goog-api-key": api_key},
+                )
+                status.raise_for_status()
+                file_info = status.json()
+        except BaseException:
+            cleanup = asyncio.create_task(_delete_gemini_file(name, api_key))
+            try:
+                await asyncio.shield(cleanup)
+            except BaseException:
+                pass
+            raise
+
+
+async def _delete_gemini_file(file_name: str, api_key: Optional[str] = None) -> None:
+    api_key = str(api_key or _gemini_video_api_key()).strip()
+    if not api_key or not file_name:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.delete(
+                f"https://generativelanguage.googleapis.com/v1beta/{file_name}",
+                headers={"x-goog-api-key": api_key},
+            )
+            if response.status_code not in {200, 204, 404}:
+                logger.warning("Gemini Files cleanup returned HTTP %s", response.status_code)
+    except Exception:
+        logger.warning("Failed to clean up Gemini uploaded video", exc_info=True)
 
 
 async def _download_video(video_url: str, destination: Path, max_retries: int = 3) -> Path:
@@ -1611,19 +1893,20 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
     import asyncio
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    safe_video_url = _redact_video_source(video_url)
 
     async def _ssrf_redirect_guard(response):
         from tools.url_safety import async_is_safe_url, redirect_target_from_response
         redirect_url = redirect_target_from_response(response)
         if redirect_url and not await async_is_safe_url(redirect_url):
             raise ValueError(
-                f"Blocked redirect to private/internal address: {redirect_url}"
+                f"Blocked redirect to private/internal address: {_redact_video_source(redirect_url)}"
             )
 
     last_error = None
     for attempt in range(max_retries):
         try:
-            blocked = check_website_access(video_url)
+            blocked = check_website_access(safe_video_url)
             if blocked:
                 raise PermissionError(blocked["message"])
 
@@ -1632,51 +1915,72 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
                 follow_redirects=True,
                 event_hooks={"response": [_ssrf_redirect_guard]},
             ) as client:
-                response = await client.get(
+                _, _, max_download_bytes = _video_analysis_limits()
+                async with client.stream(
+                    "GET",
                     video_url,
                     headers={
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         "Accept": "video/*,*/*;q=0.8",
                     },
-                )
-                response.raise_for_status()
+                ) as response:
+                    response.raise_for_status()
 
-                cl = response.headers.get("content-length")
-                if cl and int(cl) > _MAX_VIDEO_BASE64_BYTES:
-                    raise ValueError(
-                        f"Video too large ({int(cl)} bytes, max {_MAX_VIDEO_BASE64_BYTES})"
-                    )
+                    cl = response.headers.get("content-length")
+                    if cl and int(cl) > max_download_bytes:
+                        raise ValueError(
+                            f"Remote video is too large to download safely ({int(cl)} bytes, max {max_download_bytes})"
+                        )
 
-                final_url = str(response.url)
-                blocked = check_website_access(final_url)
-                if blocked:
-                    raise PermissionError(blocked["message"])
+                    final_url = str(response.url)
+                    blocked = check_website_access(_redact_video_source(final_url))
+                    if blocked:
+                        raise PermissionError(blocked["message"])
 
-                body = response.content
-                if len(body) > _MAX_VIDEO_BASE64_BYTES:
-                    raise ValueError(
-                        f"Video too large ({len(body)} bytes, max {_MAX_VIDEO_BASE64_BYTES})"
-                    )
-                destination.write_bytes(body)
+                    downloaded = 0
+                    with destination.open("wb") as output:
+                        async for chunk in response.aiter_bytes():
+                            downloaded += len(chunk)
+                            if downloaded > max_download_bytes:
+                                raise ValueError(
+                                    f"Remote video exceeded the safe download limit ({max_download_bytes} bytes)"
+                                )
+                            output.write(chunk)
 
             return destination
         except Exception as e:
+            destination.unlink(missing_ok=True)
             last_error = e
+            retryable = isinstance(e, (httpx.TimeoutException, httpx.TransportError))
+            if isinstance(e, httpx.HTTPStatusError):
+                status = e.response.status_code
+                retryable = status in {408, 429} or 500 <= status < 600
+                safe_detail = f"HTTP {status}"
+            else:
+                safe_detail = type(e).__name__
+            if isinstance(e, (ValueError, PermissionError)):
+                raise
+            if not retryable:
+                raise RuntimeError(f"Video download failed ({safe_detail})") from None
             if attempt < max_retries - 1:
                 wait_time = 2 ** (attempt + 1)
-                logger.warning("Video download failed (attempt %s/%s): %s", attempt + 1, max_retries, str(e)[:50])
+                logger.warning("Video download failed (attempt %s/%s): %s", attempt + 1, max_retries, safe_detail)
                 await asyncio.sleep(wait_time)
             else:
                 logger.error(
                     "Video download failed after %s attempts: %s",
-                    max_retries, str(e)[:100], exc_info=True,
+                    max_retries, safe_detail,
                 )
 
     if last_error is None:
         raise RuntimeError(
             f"_download_video exited retry loop without attempting (max_retries={max_retries})"
         )
-    raise last_error
+    if isinstance(last_error, httpx.HTTPStatusError):
+        detail = f"HTTP {last_error.response.status_code}"
+    else:
+        detail = type(last_error).__name__
+    raise RuntimeError(f"Video download failed after {max_retries} attempts ({detail})") from None
 
 
 async def video_analyze_tool(
@@ -1688,9 +1992,10 @@ async def video_analyze_tool(
     if not isinstance(user_prompt, str):
         user_prompt = str(user_prompt) if user_prompt is not None else ""
     _hydrate_vision_env()
+    safe_video_source = _redact_video_source(video_url)
     debug_call_data = {
         "parameters": {
-            "video_url": video_url,
+            "video_url": safe_video_source,
             "user_prompt": user_prompt[:200] + "..." if len(user_prompt) > 200 else user_prompt,
             "model": model,
         },
@@ -1703,13 +2008,17 @@ async def video_analyze_tool(
 
     temp_video_path = None
     should_cleanup = True
+    source_video_path = None
+    source_cleanup = False
+    gemini_file_name = ""
+    gemini_api_key = ""
 
     try:
         from tools.interrupt import is_interrupted
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
-        logger.info("Analyzing video: %s", video_url[:60])
+        logger.info("Analyzing video: %s", safe_video_source[:60])
         logger.info("User prompt: %s", user_prompt[:100])
 
         # Resolve local path vs remote URL
@@ -1725,7 +2034,7 @@ async def video_analyze_tool(
             temp_video_path = local_path
             should_cleanup = False
         elif await _validate_image_url_async(video_url):
-            blocked = check_website_access(video_url)
+            blocked = check_website_access(safe_video_source)
             if blocked:
                 raise PermissionError(blocked["message"])
             temp_dir = get_hermes_dir("cache/video", "temp_video_files")
@@ -1737,9 +2046,15 @@ async def video_analyze_tool(
                 "Invalid video source. Provide an HTTP/HTTPS URL or a valid local file path."
             )
 
+        source_video_path = temp_video_path
+        source_cleanup = should_cleanup
+        prepared_video_path, prepared_cleanup = await _prepare_video_for_analysis(source_video_path)
+        temp_video_path = prepared_video_path
+        should_cleanup = prepared_cleanup
+
         video_size_bytes = temp_video_path.stat().st_size
         video_size_mb = video_size_bytes / (1024 * 1024)
-        logger.info("Video ready (%.1f MB)", video_size_mb)
+        logger.info("Video ready for analysis (%.1f MB)", video_size_mb)
 
         detected_mime = _detect_video_mime_type(temp_video_path)
         if not detected_mime:
@@ -1751,17 +2066,12 @@ async def video_analyze_tool(
         if video_size_bytes > _VIDEO_SIZE_WARN_BYTES:
             logger.warning("Video is %.1f MB — may be slow or rejected", video_size_mb)
 
-        video_data_url = _video_to_base64_data_url(temp_video_path, mime_type=detected_mime)
-        data_size_mb = len(video_data_url) / (1024 * 1024)
-
-        if len(video_data_url) > _MAX_VIDEO_BASE64_BYTES:
-            raise ValueError(
-                f"Video too large for API: base64 payload is {data_size_mb:.1f} MB "
-                f"(limit {_MAX_VIDEO_BASE64_BYTES / (1024 * 1024):.0f} MB). "
-                f"Compress or trim the video and retry."
-            )
-
+        gemini_api_key = _gemini_video_api_key()
+        file_uri, gemini_file_name = await _upload_video_to_gemini(
+            temp_video_path, detected_mime, gemini_api_key
+        )
         debug_call_data["video_size_bytes"] = video_size_bytes
+        debug_call_data["delivery"] = "gemini_files"
 
         messages = [
             {
@@ -1772,9 +2082,10 @@ async def video_analyze_tool(
                         "text": user_prompt,
                     },
                     {
-                        "type": "video_url",
-                        "video_url": {
-                            "url": video_data_url,
+                        "type": "video_file",
+                        "video_file": {
+                            "uri": file_uri,
+                            "mime_type": detected_mime,
                         },
                     },
                 ],
@@ -1786,18 +2097,18 @@ async def video_analyze_tool(
         try:
             from hermes_cli.config import cfg_get, load_config
             _cfg = load_config()
-            _vision_cfg = cfg_get(_cfg, "auxiliary", "vision", default={})
-            _vt = _vision_cfg.get("timeout")
+            _video_cfg = cfg_get(_cfg, "auxiliary", "video", default={}) or {}
+            _vt = _video_cfg.get("timeout")
             if _vt is not None:
                 vision_timeout = max(float(_vt), 180.0)
-            _vtemp = _vision_cfg.get("temperature")
+            _vtemp = _video_cfg.get("temperature")
             if _vtemp is not None:
                 vision_temperature = float(_vtemp)
         except Exception:
             pass
 
         call_kwargs = {
-            "task": "vision",
+            "task": "video",
             "messages": messages,
             "temperature": vision_temperature,
             "max_tokens": 4000,
@@ -1807,12 +2118,12 @@ async def video_analyze_tool(
             call_kwargs["model"] = model
 
         response = await async_call_llm(**call_kwargs)
-        analysis = ((response.choices[0].message.content or "").strip())
+        analysis = (extract_content_or_reasoning(response) or "").strip()
 
         if not analysis:
             logger.warning("Empty visible video response, retrying once")
             response = await async_call_llm(**call_kwargs)
-            analysis = ((response.choices[0].message.content or "").strip())
+            analysis = (extract_content_or_reasoning(response) or "").strip()
 
         analysis_length = len(analysis) if analysis else 0
         logger.info("Video analysis completed (%s characters)", analysis_length)
@@ -1879,6 +2190,8 @@ async def video_analyze_tool(
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     finally:
+        if gemini_file_name:
+            await _delete_gemini_file(gemini_file_name, gemini_api_key)
         if should_cleanup and temp_video_path and temp_video_path.exists():
             try:
                 temp_video_path.unlink()
@@ -1886,6 +2199,19 @@ async def video_analyze_tool(
             except Exception as cleanup_error:
                 logger.warning(
                     "Could not delete temporary file: %s", cleanup_error, exc_info=True
+                )
+        if (
+            source_cleanup
+            and source_video_path is not None
+            and source_video_path != temp_video_path
+            and source_video_path.exists()
+        ):
+            try:
+                source_video_path.unlink()
+                logger.debug("Cleaned up downloaded source video")
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Could not delete downloaded source video: %s", cleanup_error, exc_info=True
                 )
 
 
@@ -1896,7 +2222,8 @@ VIDEO_ANALYZE_SCHEMA = {
         "Sends the video to a video-capable model (e.g. Gemini) for understanding. "
         "Use this for video files — for images, use vision_analyze instead. "
         "Supports mp4, webm, mov, avi, mkv, mpeg formats. "
-        "Note: large videos (>20 MB) may be slow; max ~50 MB."
+        "Files at or below 100 MiB are sent unchanged; larger files are compressed "
+        "to a temporary high-quality derivative without modifying the original."
     ),
     "parameters": {
         "type": "object",

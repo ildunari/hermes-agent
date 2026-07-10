@@ -679,6 +679,11 @@ def run_conversation(
     truncated_response_parts: List[str] = []
     compression_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
+    # Last composed answer intentionally held back by a verification gate. If
+    # that continuation consumes the remaining budget, this is the best
+    # user-facing result available; it must not be confused with error or
+    # recovery text produced by unrelated exit paths.
+    _pending_verification_response = None
 
     # Per-turn tally of consecutive successful credential-pool token refreshes,
     # keyed by (provider, pool-entry-id). A persistent upstream 401 lets
@@ -2198,6 +2203,46 @@ def run_conversation(
                     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
                     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
                     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+
+                    # Diagnose actual invalidation from provider usage deltas,
+                    # not guessed causes. Observation only: this never mutates
+                    # the prompt or request payload.
+                    if getattr(agent, "_use_prompt_caching", False):
+                        from agent.prompt_caching import detect_cache_invalidation
+
+                        _current_cache_usage = {
+                            "input": aggregator_usage.input_tokens,
+                            "cache_read": aggregator_usage.cache_read_tokens,
+                            "cache_write": aggregator_usage.cache_write_tokens,
+                        }
+                        _current_cache_route = (
+                            agent.provider,
+                            agent.model,
+                            agent.base_url,
+                            agent.api_mode,
+                            getattr(agent, "_use_native_cache_layout", False),
+                        )
+                        _same_cache_route = (
+                            getattr(agent, "_last_prompt_cache_route", None)
+                            == _current_cache_route
+                        )
+                        if _same_cache_route and detect_cache_invalidation(
+                            getattr(agent, "_last_prompt_cache_usage", None), _current_cache_usage
+                        ):
+                            logger.warning(
+                                "Prompt cache invalidated: model=%s provider=%s input=%d cache_write=%d",
+                                agent.model,
+                                agent.provider or "unknown",
+                                aggregator_usage.input_tokens,
+                                aggregator_usage.cache_write_tokens,
+                            )
+                            if agent.verbose_logging and not agent.quiet_mode:
+                                agent._vprint(
+                                    f"{agent.log_prefix}⚠ Prompt cache rebuilt after a warm-cache turn "
+                                    f"({aggregator_usage.cache_write_tokens:,} tokens written)"
+                                )
+                        agent._last_prompt_cache_usage = _current_cache_usage
+                        agent._last_prompt_cache_route = _current_cache_route
 
                     # Log API call details for debugging/observability
                     _cache_pct = ""
@@ -5189,6 +5234,10 @@ def run_conversation(
                     }
                     messages.append(continue_msg)
                     agent._session_messages = messages
+                    # An acknowledgment is explicitly non-final. Do not let its
+                    # text suppress iteration-limit summarization if this
+                    # continuation consumes the remaining budget.
+                    final_response = None
                     continue
 
                 codex_ack_continuations = 0
@@ -5263,6 +5312,12 @@ def run_conversation(
                     # terminal. Keep a debug breadcrumb in agent.log for tracing.
                     logger.debug("verification stop-loop nudge issued (attempt %d)",
                                  agent._verification_stop_nudges)
+                    # Keep the attempted answer only as an explicit fallback for
+                    # continuation-budget exhaustion.  ``final_response`` itself
+                    # must be cleared so the finalizer can distinguish this gate
+                    # from unrelated error/recovery exits. (#61631)
+                    _pending_verification_response = final_response
+                    final_response = None
                     continue
 
                 # User verification-loop gate: when the agent edited code this
@@ -5314,6 +5369,8 @@ def run_conversation(
                     agent._session_messages = messages
                     logger.debug("pre_verify nudge issued (attempt %d)",
                                  agent._pre_verify_nudges)
+                    _pending_verification_response = final_response
+                    final_response = None
                     continue
 
                 messages.append(final_msg)
@@ -5398,6 +5455,7 @@ def run_conversation(
         original_user_message=original_user_message,
         _should_review_memory=_should_review_memory,
         _turn_exit_reason=_turn_exit_reason,
+        _pending_verification_response=_pending_verification_response,
     )
 
 

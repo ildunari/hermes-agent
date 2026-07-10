@@ -209,6 +209,10 @@ def test_enqueue_restart_can_request_webui_completion_marker(monkeypatch, tmp_pa
 
     assert "follow-up here" in output
     cmd = launched["cmd"]
+    assert "--detached-worker" in cmd
+    assert launched["kwargs"]["stdin"] is subprocess.DEVNULL
+    assert launched["kwargs"]["start_new_session"] is True
+    assert launched["kwargs"]["close_fds"] is True
     marker_index = cmd.index("--completion-marker") + 1
     assert cmd[marker_index] == str(marker)
 
@@ -260,6 +264,15 @@ def test_cli_enqueue_detached_uses_safe_launcher(monkeypatch, capsys, tmp_path):
     assert launched["kwargs"]["completion_marker"] == str(marker)
     assert launched["kwargs"]["safe_wait_timeout"] == 12
     assert launched["kwargs"]["safe_wait_interval"] == 0.5
+
+
+def test_cli_refuses_inline_restart(capsys):
+    from hermes_cli.restart_surfaces import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--scope", "hermes"])
+    assert exc.value.code == 2
+    assert "refusing an inline restart" in capsys.readouterr().err
 
 
 def test_enqueue_restart_can_stage_until_sessions_drain(monkeypatch, tmp_path):
@@ -550,6 +563,7 @@ def test_main_reports_completion_when_restart_scope_crashes(monkeypatch, tmp_pat
         "--completion-marker", str(marker),
         "--notify-origin-json", '{"platform":"telegram","chat_id":"123"}',
         "--notify-tty", "/dev/ttys001",
+        "--detached-worker",
     ]) == 1
 
     payload = json.loads(marker.read_text())

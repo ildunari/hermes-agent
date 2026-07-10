@@ -70,7 +70,10 @@ export function ModelVisibilityDialog({
   const q = normalize(search)
 
   const matches = (provider: ModelOptionProvider, model: string) =>
-    !q || `${model} ${provider.name} ${provider.slug} ${displayModelName(model)}`.toLowerCase().includes(q)
+    !q ||
+    `${model} ${provider.model_labels?.[model] ?? ''} ${provider.name} ${provider.slug} ${displayModelName(model)}`
+      .toLowerCase()
+      .includes(q)
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -109,7 +112,10 @@ export function ModelVisibilityDialog({
                     {provider.name}
                   </div>
                   {models.map(family => {
-                    const { name, tag } = modelDisplayParts(family.id)
+                    const configuredLabel = provider.model_labels?.[family.id]
+                    const { name, tag } = configuredLabel
+                      ? { name: configuredLabel, tag: '' }
+                      : modelDisplayParts(family.id)
                     const key = modelVisibilityKey(provider.slug, family.id)
 
                     return (

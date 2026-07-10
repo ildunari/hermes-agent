@@ -4005,17 +4005,18 @@ class AIAgent:
         return create_openai_client(self, client_kwargs, reason=reason, shared=shared)
 
     @staticmethod
-    def _force_close_tcp_sockets(client: Any) -> int:
+    def _force_close_tcp_sockets(client: Any, *, release_fds: bool = False) -> int:
         """Forwarder — see ``agent.agent_runtime_helpers.force_close_tcp_sockets``."""
         from agent.agent_runtime_helpers import force_close_tcp_sockets
-        return force_close_tcp_sockets(client)
+        return force_close_tcp_sockets(client, release_fds=release_fds)
 
     def _close_openai_client(self, client: Any, *, reason: str, shared: bool) -> None:
         if client is None:
             return
-        # Force-close TCP sockets first to prevent CLOSE-WAIT accumulation,
-        # then do the graceful SDK-level close.
-        force_closed = self._force_close_tcp_sockets(client)
+        # Owning-thread dispose: shutdown + release FDs so already-shutdown
+        # sockets don't linger in kernel CLOSED state (#61979). Cross-thread
+        # abort uses _abort_request_openai_client (release_fds=False) instead.
+        force_closed = self._force_close_tcp_sockets(client, release_fds=True)
         try:
             client.close()
             logger.info(
@@ -6102,6 +6103,11 @@ class AIAgent:
             max_iterations=function_args.get("max_iterations"),
             role=function_args.get("role"),
             background=requested_background,
+            model=function_args.get("model"),
+            provider=function_args.get("provider"),
+            reasoning_effort=function_args.get("reasoning_effort"),
+            enabled_toolsets=function_args.get("enabled_toolsets"),
+            profile=function_args.get("profile"),
             parent_agent=self,
         )
 

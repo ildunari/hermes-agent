@@ -38,6 +38,53 @@ from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_float, env_int
 
 logger = logging.getLogger(__name__)
+
+
+def _count_cache_control_markers(value: Any) -> int:
+    if isinstance(value, dict):
+        return (1 if "cache_control" in value else 0) + sum(
+            _count_cache_control_markers(child) for child in value.values()
+        )
+    if isinstance(value, list):
+        return sum(_count_cache_control_markers(child) for child in value)
+    return 0
+
+
+def _remove_cache_control_markers(value: Any) -> None:
+    if isinstance(value, dict):
+        value.pop("cache_control", None)
+        for child in value.values():
+            _remove_cache_control_markers(child)
+    elif isinstance(value, list):
+        for child in value:
+            _remove_cache_control_markers(child)
+
+
+def _limit_message_cache_markers_for_tool_breakpoint(
+    messages: list[dict[str, Any]],
+    *,
+    max_message_markers: int = 3,
+) -> list[dict[str, Any]]:
+    """Reserve one of Claude's four cache breakpoints for the tool schema."""
+    if _count_cache_control_markers(messages) <= max_message_markers:
+        return messages
+
+    import copy as _copy
+
+    trimmed = _copy.deepcopy(messages)
+    non_system_indices = [
+        idx
+        for idx, msg in enumerate(trimmed)
+        if isinstance(msg, dict) and msg.get("role") != "system"
+    ]
+    protected = set(non_system_indices[-2:])
+    for idx in non_system_indices:
+        if idx in protected:
+            continue
+        if _count_cache_control_markers(trimmed) <= max_message_markers:
+            break
+        _remove_cache_control_markers(trimmed[idx])
+    return trimmed
 _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
 
 # When the fallback chain is fully exhausted on a non-rate-limit failure
@@ -162,6 +209,25 @@ def _validated_openrouter_provider_sort(raw_sort: Any) -> Optional[str]:
         ", ".join(sorted(_OPENROUTER_PROVIDER_SORT_VALUES)),
     )
     return None
+
+
+def _provider_preferences_for_agent(agent) -> Dict[str, Any]:
+    """Build the validated provider-routing object shared by request paths."""
+    preferences: Dict[str, Any] = {}
+    if agent.providers_allowed:
+        preferences["only"] = agent.providers_allowed
+    if agent.providers_ignored:
+        preferences["ignore"] = agent.providers_ignored
+    if agent.providers_order:
+        preferences["order"] = agent.providers_order
+    provider_sort = _validated_openrouter_provider_sort(agent.provider_sort)
+    if provider_sort:
+        preferences["sort"] = provider_sort
+    if agent.provider_require_parameters:
+        preferences["require_parameters"] = True
+    if agent.provider_data_collection:
+        preferences["data_collection"] = agent.provider_data_collection
+    return preferences
 
 
 def _env_float(name: str, default: float) -> float:
@@ -801,21 +867,8 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         _omit_temp = False
         _fixed_temp = None
 
-    # Provider preferences (OpenRouter-style)
-    _prefs: Dict[str, Any] = {}
-    if agent.providers_allowed:
-        _prefs["only"] = agent.providers_allowed
-    if agent.providers_ignored:
-        _prefs["ignore"] = agent.providers_ignored
-    if agent.providers_order:
-        _prefs["order"] = agent.providers_order
-    _provider_sort = _validated_openrouter_provider_sort(agent.provider_sort)
-    if _provider_sort:
-        _prefs["sort"] = _provider_sort
-    if agent.provider_require_parameters:
-        _prefs["require_parameters"] = True
-    if agent.provider_data_collection:
-        _prefs["data_collection"] = agent.provider_data_collection
+    # Provider preferences (aggregator profile decides whether to emit them).
+    _prefs = _provider_preferences_for_agent(agent)
 
     # Anthropic-compatible max-output fallback (last resort only — applied in
     # build_kwargs *after* ephemeral/user/profile max_tokens, never overriding
@@ -847,6 +900,26 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         }
 
     # ── Provider profile path (registered providers) ───────────────────
+    # OpenAI-wire Claude routes can cache the stable tool schema as a fourth
+    # breakpoint. Work on request-local copies so the agent's canonical tool
+    # definitions and conversation history remain byte-stable.
+    if (
+        getattr(agent, "_use_prompt_caching", False)
+        and not getattr(agent, "_use_native_cache_layout", False)
+        and tools_for_api
+    ):
+        import copy as _copy
+
+        tools_for_api = _copy.deepcopy(tools_for_api)
+        if isinstance(tools_for_api, list) and isinstance(tools_for_api[-1], dict):
+            tool_cache_marker = {"type": "ephemeral"}
+            # Tools are part of the stable prefix, so mixed mode gives them the
+            # same 1h tier as the system prompt while message markers stay 5m.
+            if getattr(agent, "_cache_ttl", "5m") in {"1h", "mixed"}:
+                tool_cache_marker["ttl"] = "1h"
+            tools_for_api[-1]["cache_control"] = tool_cache_marker
+            api_messages = _limit_message_cache_markers_for_tool_breakpoint(api_messages)
+
     # Profiles handle per-provider quirks via hooks. When a profile is
     # found, delegate fully; otherwise fall through to the legacy flag path.
     try:
@@ -1690,18 +1763,28 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             if _lm_reasoning_effort is not None:
                 summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
 
-            # Include provider routing preferences
-            provider_preferences = {}
-            if agent.providers_allowed:
-                provider_preferences["only"] = agent.providers_allowed
-            if agent.providers_ignored:
-                provider_preferences["ignore"] = agent.providers_ignored
-            if agent.providers_order:
-                provider_preferences["order"] = agent.providers_order
-            _provider_sort = _validated_openrouter_provider_sort(agent.provider_sort)
-            if _provider_sort:
-                provider_preferences["sort"] = _provider_sort
-            if provider_preferences and (
+            # Merge the profile's canonical body even when routing is unset:
+            # profiles may always emit required metadata such as Portal tags.
+            provider_preferences = _provider_preferences_for_agent(agent)
+            profile_extra_body = {}
+            try:
+                from providers import get_provider_profile
+
+                provider_profile = get_provider_profile(agent.provider)
+                if provider_profile is not None:
+                    profile_extra_body = provider_profile.build_extra_body(
+                        session_id=getattr(agent, "session_id", None),
+                        provider_preferences=provider_preferences or None,
+                        model=agent.model,
+                        base_url=agent.base_url,
+                        reasoning_config=agent.reasoning_config,
+                    )
+            except Exception:
+                pass
+
+            if profile_extra_body:
+                summary_extra_body.update(profile_extra_body)
+            if provider_preferences and "provider" not in profile_extra_body and (
                 (agent.provider or "").strip().lower() == "openrouter"
                 or agent._is_openrouter_url()
             ):

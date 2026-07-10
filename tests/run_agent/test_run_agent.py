@@ -993,7 +993,7 @@ class TestInit:
                 {"role": "user", "content": "stable user"},
             ])
 
-            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
             assert "cache_control" not in tool
             assert "cache_control" not in a.tools[-1]
 
@@ -1030,6 +1030,41 @@ class TestInit:
             ])
 
             assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+    def test_prompt_caching_vibeproxy_tool_schema_defaults_to_mixed_stable_ttl(self):
+        """CLIProxy Claude defaults its stable tool schema to 1h."""
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "sample_tool",
+                "description": "stable schema",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("hermes_cli.config.load_config", return_value={}),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                provider="vibeproxy",
+                model="claude-sonnet-5",
+                base_url="http://127.0.0.1:8485/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            a.tools = [tool]
+
+            kwargs = a._build_api_kwargs([
+                {"role": "system", "content": "stable system"},
+                {"role": "user", "content": "rolling user"},
+            ])
+
+            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+            assert getattr(a, "_cache_ttl") == "mixed"
 
     def test_prompt_caching_vibeproxy_tool_schema_keeps_total_breakpoints_at_four(self):
         """Adding a tool breakpoint should trim messages to Claude's four-breakpoint cap."""
@@ -1071,7 +1106,7 @@ class TestInit:
             assert "cache_control" in json.dumps(kwargs["messages"][0])
             assert "cache_control" in json.dumps(kwargs["messages"][2])
             assert "cache_control" in json.dumps(kwargs["messages"][3])
-            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+            assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
     def test_prompt_caching_vibeproxy_non_claude_stays_disabled(self):
         """The VibeProxy opt-in is Claude-scoped, not a blanket localhost cache policy."""
@@ -1114,6 +1149,7 @@ class TestInit:
             patch("run_agent.get_tool_definitions", return_value=[]),
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("agent.anthropic_adapter._anthropic_sdk"),
+            patch("hermes_cli.config.load_config", return_value={}),
         ):
             a = AIAgent(
                 api_key="test-key-1234567890",
@@ -1124,6 +1160,7 @@ class TestInit:
             )
             assert a.api_mode == "anthropic_messages"
             assert a._use_prompt_caching is True
+            assert getattr(a, "_cache_ttl") == "mixed"
 
     def test_prompt_caching_cache_ttl_defaults_without_config(self):
         """cache_ttl stays 5m when prompt_caching is absent from config."""
@@ -3029,7 +3066,7 @@ class TestExecuteToolCalls:
             or "interrupted" in messages[0]["content"].lower()
         )
 
-    def test_invalid_json_args_defaults_empty(self, agent):
+    def test_invalid_json_args_are_rejected_without_dispatch(self, agent):
         tc = _mock_tool_call(
             name="web_search", arguments="not valid json", call_id="c1"
         )
@@ -3037,13 +3074,12 @@ class TestExecuteToolCalls:
         messages = []
         with patch("run_agent.handle_function_call", return_value="ok") as mock_hfc:
             agent._execute_tool_calls(mock_msg, messages, "task-1")
-            # Invalid JSON args should fall back to empty dict
-            args, kwargs = mock_hfc.call_args
-            assert args[:3] == ("web_search", {}, "task-1")
-            assert set(kwargs.get("enabled_tools", [])) == agent.valid_tool_names
+            mock_hfc.assert_not_called()
         assert len(messages) == 1
         assert messages[0]["role"] == "tool"
         assert messages[0]["tool_call_id"] == "c1"
+        assert "valid json object" in messages[0]["content"].lower()
+        assert "tool was not executed" in messages[0]["content"].lower()
 
     def test_result_truncation_over_100k(self, agent, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
@@ -4484,6 +4520,48 @@ class TestHandleMaxIterations:
         assert result == "Summary"
         kwargs = agent.client.chat.completions.create.call_args.kwargs
         assert kwargs["extra_body"]["provider"]["only"] == ["Anthropic"]
+
+    def test_summary_keeps_provider_preferences_for_nous(self, agent):
+        agent.base_url = "https://proxy.example.com/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.provider = "nous"
+        agent.providers_allowed = ["deepseek"]
+        agent.providers_ignored = ["deepinfra"]
+        agent.provider_sort = "throughput"
+        agent.provider_require_parameters = True
+        agent.provider_data_collection = "deny"
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Summary"
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        from agent.portal_tags import nous_portal_tags
+
+        assert kwargs["extra_body"]["tags"] == nous_portal_tags()
+        assert kwargs["extra_body"]["provider"] == {
+            "only": ["deepseek"],
+            "ignore": ["deepinfra"],
+            "sort": "throughput",
+            "require_parameters": True,
+            "data_collection": "deny",
+        }
+
+    def test_summary_keeps_nous_profile_body_without_routing_preferences(self, agent):
+        agent.base_url = "https://proxy.example.com/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.provider = "nous"
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Summary"
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        from agent.portal_tags import nous_portal_tags
+
+        assert kwargs["extra_body"] == {"tags": nous_portal_tags()}
 
     def test_summary_drops_invalid_provider_sort(self, agent):
         agent.base_url = "https://openrouter.ai/api/v1"

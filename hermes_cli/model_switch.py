@@ -71,8 +71,8 @@ def _normalize_discover_models(value) -> bool | str:
     return True
 
 
-def load_hidden_provider_policy(config: dict | None = None) -> tuple[str, ...]:
-    """Read provider slugs/groups hidden from display pickers."""
+def load_model_picker_policy(config: dict | None = None) -> dict:
+    """Resolve shared picker policy plus compatibility profile overrides."""
     if config is None:
         try:
             from hermes_cli.config import load_config
@@ -80,67 +80,140 @@ def load_hidden_provider_policy(config: dict | None = None) -> tuple[str, ...]:
             config = load_config()
         except Exception:
             config = {}
-    hidden: list[str] = []
-    for section_name in ("model_picker", "model_catalog"):
-        section = (config or {}).get(section_name)
-        if not isinstance(section, dict):
-            continue
-        values = section.get("hidden_providers") or section.get("hide_providers") or []
-        if isinstance(values, str):
-            hidden.extend(part.strip() for part in values.split(","))
-        elif isinstance(values, (list, tuple, set)):
-            hidden.extend(str(part).strip() for part in values)
-    return tuple(part for part in hidden if part)
+    from hermes_cli.model_picker_policy import merge_model_picker_policy
+
+    return merge_model_picker_policy(config)
 
 
-def load_visible_model_policy(config: dict | None = None) -> dict[str, tuple[str, ...]]:
-    """Read per-provider model allowlists for display pickers."""
-    if config is None:
-        try:
-            from hermes_cli.config import load_config
-
-            config = load_config()
-        except Exception:
-            config = {}
-
-    visible: dict[str, list[str]] = {}
-    for section_name in ("model_picker", "model_catalog"):
-        section = (config or {}).get(section_name)
-        if not isinstance(section, dict):
-            continue
-        raw = section.get("visible_models") or section.get("show_models") or {}
-        if not isinstance(raw, dict):
-            continue
-        for provider, values in raw.items():
-            key = str(provider or "").strip()
-            if not key:
-                continue
-            if isinstance(values, str):
-                models = [part.strip() for part in values.split(",")]
-            elif isinstance(values, (list, tuple, set)):
-                models = [str(part).strip() for part in values]
-            else:
-                continue
-            visible[key] = [model for model in models if model]
-
-    if not visible:
-        return {}
-
+def _normalize_policy_provider_map(values: dict) -> dict:
+    """Normalize one-to-one provider aliases without expanding provider groups."""
     try:
-        from hermes_cli.models import normalize_provider as _normalize_provider
+        from hermes_cli.models import normalize_provider
     except Exception:
-        def _normalize_provider(provider: str | None) -> str:
-            return str(provider or "").strip().lower()
+        normalize_provider = None
 
-    normalized: dict[str, tuple[str, ...]] = {}
-    for provider, models in visible.items():
-        key = str(_normalize_provider(provider) or provider).strip().lower()
-        if key:
-            normalized[key] = tuple(models)
+    normalized: dict = {}
+    for provider, value in values.items():
+        slug = str(provider or "").strip().lower()
+        if normalize_provider is not None:
+            slug = str(normalize_provider(slug) or slug).strip().lower()
+        if slug:
+            normalized[slug] = value
     return normalized
 
 
-def expand_hidden_provider_slugs(hidden: tuple[str, ...] | list[str] | set[str] | None) -> set[str]:
+def load_hidden_provider_policy(
+    config: dict | None = None, *, policy: dict | None = None
+) -> tuple[str, ...]:
+    """Read provider slugs/groups hidden from display pickers."""
+    if config is None and policy is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            config = {}
+    from hermes_cli.model_picker_policy import string_list
+
+    section = policy if policy is not None else load_model_picker_policy(config)
+    return string_list(section.get("hidden_providers") or section.get("hide_providers"))
+
+
+def load_pinned_provider_policy(
+    config: dict | None = None, *, policy: dict | None = None
+) -> tuple[str, ...]:
+    """Read providers that remain visible without profile-local credentials."""
+    if config is None and policy is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            config = {}
+    from hermes_cli.model_picker_policy import string_list
+
+    section = policy if policy is not None else load_model_picker_policy(config)
+    return string_list(section.get("pinned_providers") or section.get("show_providers"))
+
+
+def load_visible_model_policy(
+    config: dict | None = None, *, policy: dict | None = None
+) -> dict[str, tuple[str, ...]]:
+    """Read legacy per-provider model allowlists for display pickers."""
+    if config is None and policy is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            config = {}
+
+    from hermes_cli.model_picker_policy import provider_map
+
+    section = policy if policy is not None else load_model_picker_policy(config)
+    visible = provider_map(section.get("visible_models") or section.get("show_models"))
+    return _normalize_policy_provider_map(visible)
+
+
+def load_hidden_model_policy(
+    config: dict | None = None, *, policy: dict | None = None
+) -> dict[str, tuple[str, ...]]:
+    """Read per-provider model denylists.
+
+    Denylists make newly discovered models visible automatically.  Users only
+    maintain the models they explicitly do not want in selectors.
+    """
+    if config is None and policy is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            config = {}
+    from hermes_cli.model_picker_policy import provider_map
+
+    section = policy if policy is not None else load_model_picker_policy(config)
+    values = provider_map(section.get("hidden_models") or section.get("hide_models"))
+    return _normalize_policy_provider_map(values)
+
+
+def load_provider_label_policy(
+    config: dict | None = None, *, policy: dict | None = None
+) -> dict[str, str]:
+    """Read display-only provider labels."""
+    if config is None and policy is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            config = {}
+    from hermes_cli.model_picker_policy import label_map
+
+    section = policy if policy is not None else load_model_picker_policy(config)
+    return _normalize_policy_provider_map(label_map(section.get("provider_labels")))
+
+
+def load_model_label_policy(
+    config: dict | None = None, *, policy: dict | None = None
+) -> dict[str, dict[str, str]]:
+    """Read display-only labels for provider model IDs."""
+    if config is None and policy is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        except Exception:
+            config = {}
+    from hermes_cli.model_picker_policy import nested_label_map
+
+    section = policy if policy is not None else load_model_picker_policy(config)
+    return _normalize_policy_provider_map(nested_label_map(section.get("model_labels")))
+
+
+def expand_hidden_provider_slugs(
+    hidden: tuple[str, ...] | list[str] | set[str] | None,
+) -> set[str]:
     """Normalize display-hidden provider names to concrete provider slugs."""
     if not hidden:
         return set()
@@ -167,7 +240,9 @@ def expand_hidden_provider_slugs(hidden: tuple[str, ...] | list[str] | set[str] 
     return out
 
 
-def filter_visible_model_rows(rows: list[dict], visible: dict[str, tuple[str, ...]] | None) -> list[dict]:
+def filter_visible_model_rows(
+    rows: list[dict], visible: dict[str, tuple[str, ...]] | None
+) -> list[dict]:
     """Return provider rows with configured per-provider model allowlists applied."""
     if not visible:
         return rows
@@ -180,13 +255,65 @@ def filter_visible_model_rows(rows: list[dict], visible: dict[str, tuple[str, ..
             out.append(row)
             continue
 
-        allowed_lower = {model.lower() for model in allowed}
-        models = [m for m in (row.get("models") or []) if str(m).lower() in allowed_lower]
+        allowed_exact = set(allowed)
+        models = [m for m in (row.get("models") or []) if str(m) in allowed_exact]
         next_row = dict(row)
         next_row["models"] = models
         next_row["total_models"] = len(models)
         out.append(next_row)
 
+    return out
+
+
+def filter_hidden_model_rows(
+    rows: list[dict], hidden: dict[str, tuple[str, ...]] | None
+) -> list[dict]:
+    """Return provider rows with configured model denylists applied."""
+    if not hidden:
+        return rows
+
+    out: list[dict] = []
+    for row in rows:
+        slug = str(row.get("slug", "") or "").strip().lower()
+        denied = hidden.get(slug)
+        if not denied:
+            out.append(row)
+            continue
+        denied_exact = set(denied)
+        models = [m for m in (row.get("models") or []) if str(m) not in denied_exact]
+        next_row = dict(row)
+        next_row["models"] = models
+        next_row["total_models"] = len(models)
+        out.append(next_row)
+    return out
+
+
+def apply_model_picker_labels(
+    rows: list[dict],
+    provider_labels: dict[str, str] | None,
+    model_labels: dict[str, dict[str, str]] | None,
+) -> list[dict]:
+    """Attach presentation labels without changing provider/model route IDs."""
+    if not provider_labels and not model_labels:
+        return rows
+    out: list[dict] = []
+    for row in rows:
+        slug = str(row.get("slug", "") or "").strip().lower()
+        provider_label = (provider_labels or {}).get(slug)
+        labels = (model_labels or {}).get(slug)
+        if not provider_label and not labels:
+            out.append(row)
+            continue
+        next_row = dict(row)
+        if provider_label:
+            next_row["name"] = provider_label
+        if labels:
+            next_row["model_labels"] = {
+                str(model): labels[str(model)]
+                for model in (next_row.get("models") or [])
+                if str(model) in labels
+            }
+        out.append(next_row)
     return out
 
 
@@ -2406,6 +2533,7 @@ def list_authenticated_providers(
                     "api_url": api_url,
                     "api_key": api_key,
                     "models": [],
+                    "has_explicit_models": False,
                     "discover_models": discover,
                     "extra_headers": entry_extra_headers,
                 }
@@ -2430,7 +2558,10 @@ def list_authenticated_providers(
             if default_model and default_model not in groups[group_key]["models"]:
                 groups[group_key]["models"].append(default_model)
 
-            for model_id in _declared_model_ids(entry.get("models", {})):
+            declared_models = _declared_model_ids(entry.get("models", {}))
+            if declared_models:
+                groups[group_key]["has_explicit_models"] = True
+            for model_id in declared_models:
                 if model_id not in groups[group_key]["models"]:
                     groups[group_key]["models"].append(model_id)
 
@@ -2493,11 +2624,13 @@ def list_authenticated_providers(
             #   the (possibly partial) ``models:`` subset configured for
             #   context-length overrides with the full live catalog.
             #   This is the Bifrost / aggregator-gateway case.
-            # - Without an api_key but with an explicit ``models:`` list
-            #   (or top-level ``model:``), the user is narrowing a public
-            #   endpoint to a specific subset (e.g. ollama.com /v1/models
-            #   returns 35 models but the user only wants 4). Preserve the
-            #   explicit list and skip live discovery.
+            # - Without an api_key but with an explicit ``models:`` list,
+            #   the user is narrowing a public endpoint to a specific subset
+            #   (e.g. ollama.com /v1/models returns 35 models but the user
+            #   only wants 4). Preserve the explicit list and skip live
+            #   discovery. The singular ``model:`` field is only the current
+            #   active selection and must not suppress discovery on local
+            #   no-key endpoints.
             # - Without an api_key AND no explicit models, fall through to
             #   live discovery so bare-endpoint custom providers (local
             #   llama.cpp / Ollama servers) still appear populated.
@@ -2518,7 +2651,7 @@ def list_authenticated_providers(
                 and (
                     grp.get("discover_models") == "force"
                     or bool(api_key)
-                    or not grp["models"]
+                    or not grp.get("has_explicit_models")
                 )
                 and grp.get("discover_models", True)
             )
@@ -2634,10 +2767,14 @@ def list_picker_providers(
     )
     if include_moa:
         providers = _prepend_moa_picker_provider(providers, current_provider=current_provider)
+    policy = load_model_picker_policy()
     if hidden_providers is None:
-        hidden_providers = load_hidden_provider_policy()
+        hidden_providers = load_hidden_provider_policy(policy=policy)
     providers = filter_hidden_provider_rows(providers, hidden_providers)
-    visible_models = load_visible_model_policy()
+    visible_models = load_visible_model_policy(policy=policy)
+    hidden_models = load_hidden_model_policy(policy=policy)
+    provider_labels = load_provider_label_policy(policy=policy)
+    model_labels = load_model_label_policy(policy=policy)
 
     filtered: List[dict] = []
     for p in providers:
@@ -2653,6 +2790,8 @@ def list_picker_providers(
             p["total_models"] = len(live_ids)
 
         p = filter_visible_model_rows([p], visible_models)[0]
+        p = filter_hidden_model_rows([p], hidden_models)[0]
+        p = apply_model_picker_labels([p], provider_labels, model_labels)[0]
         has_models = bool(p.get("models"))
         is_custom_endpoint = bool(p.get("is_user_defined")) and bool(p.get("api_url"))
         if not has_models and not is_custom_endpoint:

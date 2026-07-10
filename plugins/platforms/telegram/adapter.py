@@ -1232,12 +1232,23 @@ class TelegramAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _looks_like_network_error(error: Exception) -> bool:
-        """Return True for transient network errors that warrant a reconnect attempt."""
+        """Return True for transient transport failures that warrant reconnect."""
         name = error.__class__.__name__.lower()
+        if name in {"badrequest", "invalidtoken", "forbidden", "retryafter"}:
+            return False
         if name in {"networkerror", "timedout", "connectionerror"}:
             return True
         try:
-            from telegram.error import NetworkError, TimedOut
+            from telegram.error import (
+                BadRequest,
+                Forbidden,
+                InvalidToken,
+                NetworkError,
+                RetryAfter,
+                TimedOut,
+            )
+            if isinstance(error, (BadRequest, InvalidToken, Forbidden, RetryAfter)):
+                return False
             if isinstance(error, (NetworkError, TimedOut)):
                 return True
         except ImportError:
@@ -2356,17 +2367,11 @@ class TelegramAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 return
             except (asyncio.TimeoutError, OSError) as probe_err:
-                logger.warning(
-                    "[%s] Polling heartbeat probe failed (%s); triggering reconnect",
-                    self.name, probe_err,
-                )
-                if self._polling_error_task and not self._polling_error_task.done():
-                    continue   # reconnect already in progress
-                loop = asyncio.get_running_loop()
-                self._polling_error_task = loop.create_task(
-                    self._handle_polling_network_error(probe_err)
-                )
-            except Exception:
+                self._schedule_polling_recovery(probe_err, reason="heartbeat probe")
+            except Exception as probe_err:
+                if self._looks_like_network_error(probe_err):
+                    self._schedule_polling_recovery(probe_err, reason="heartbeat probe")
+                    continue
                 # Non-connectivity errors (e.g. TelegramError 401) are not
                 # CLOSE-WAIT symptoms — let PTB's own handlers surface them.
                 pass
@@ -3353,10 +3358,6 @@ class TelegramAdapter(BasePlatformAdapter):
             # Start polling — retry initialize() for transient TLS resets.
             # Each attempt is capped by _init_timeout so a single unreachable
             # fallback-IP chain can't block startup indefinitely.
-            try:
-                from telegram.error import NetworkError, TimedOut
-            except ImportError:
-                NetworkError = TimedOut = OSError  # type: ignore[misc,assignment]
             _max_connect = 8
             _init_timeout = _env_float("HERMES_TELEGRAM_INIT_TIMEOUT", 30.0)
             for _attempt in range(_max_connect):
@@ -3391,7 +3392,19 @@ class TelegramAdapter(BasePlatformAdapter):
                             f"({_init_timeout:.0f}s each). Check network connectivity to api.telegram.org "
                             f"or set HERMES_TELEGRAM_HTTP_CONNECT_TIMEOUT to a lower value."
                         )
-                except (NetworkError, TimedOut, OSError) as init_err:
+                except OSError as init_err:
+                    if _attempt < _max_connect - 1:
+                        wait = min(2 ** _attempt, 15)
+                        logger.warning(
+                            "[%s] Connect attempt %d/%d failed: %s — retrying in %ds",
+                            self.name, _attempt + 1, _max_connect, init_err, wait,
+                        )
+                        await asyncio.sleep(wait)
+                    else:
+                        raise
+                except Exception as init_err:
+                    if not self._looks_like_network_error(init_err):
+                        raise
                     if _attempt < _max_connect - 1:
                         wait = min(2 ** _attempt, 15)
                         logger.warning(
@@ -5612,7 +5625,9 @@ class TelegramAdapter(BasePlatformAdapter):
         page_info = f" ({start + 1}–{end} of {total})" if total_pages > 1 else ""
         return InlineKeyboardMarkup(rows), page_info
 
-    def _build_model_keyboard(self, models: list, page: int) -> tuple:
+    def _build_model_keyboard(
+        self, models: list, page: int, model_labels: Optional[Dict[str, str]] = None
+    ) -> tuple:
         """Build paginated model buttons. Returns (keyboard, page_info_text)."""
         page_size = self._MODEL_PAGE_SIZE
         total = len(models)
@@ -5626,7 +5641,8 @@ class TelegramAdapter(BasePlatformAdapter):
         buttons: list = []
         for i, model_id in enumerate(page_models):
             abs_idx = start + i
-            short = model_id.split("/")[-1] if "/" in model_id else model_id
+            configured = (model_labels or {}).get(model_id)
+            short = configured or (model_id.split("/")[-1] if "/" in model_id else model_id)
             if len(short) > 38:
                 short = short[:35] + "..."
             buttons.append(
@@ -5683,9 +5699,12 @@ class TelegramAdapter(BasePlatformAdapter):
             state["selected_provider"] = provider_slug
             state["selected_provider_name"] = provider.get("name", provider_slug)
             state["model_list"] = models
+            state["model_labels"] = provider.get("model_labels", {})
             state["model_page"] = 0
 
-            keyboard, page_info = self._build_model_keyboard(models, 0)
+            keyboard, page_info = self._build_model_keyboard(
+                models, 0, state["model_labels"]
+            )
 
             pname = provider.get("name", provider_slug)
             total = provider.get("total_models", len(models))
@@ -5716,7 +5735,9 @@ class TelegramAdapter(BasePlatformAdapter):
             models = state.get("model_list", [])
             state["model_page"] = page
 
-            keyboard, page_info = self._build_model_keyboard(models, page)
+            keyboard, page_info = self._build_model_keyboard(
+                models, page, state.get("model_labels", {})
+            )
 
             pname = state.get("selected_provider_name", "")
             provider_slug = state.get("selected_provider", "")
