@@ -3697,6 +3697,8 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
 
 class TTSSpeakRequest(BaseModel):
     text: str
+    source: str = "read-aloud"
+    rewrite: str = "auto"
 
 
 def _elevenlabs_voice_label(voice: Dict[str, Any]) -> str:
@@ -3809,10 +3811,39 @@ async def speak_text(payload: TTSSpeakRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Text is required")
 
+    speech_text = text
+    try:
+        formatter_cfg = (load_config().get("tts", {}) or {}).get("spoken_formatter", {})
+    except Exception:
+        _log.exception("Desktop speech formatter configuration could not be read; using the original text")
+        formatter_cfg = {}
+    if isinstance(formatter_cfg, dict) and bool(formatter_cfg.get("enabled", False)):
+        try:
+            from tools.tts_text_formatter import prepare_spoken_text
+
+            try:
+                formatter_timeout = float(formatter_cfg.get("timeout", 14.0))
+            except (TypeError, ValueError):
+                formatter_timeout = 14.0
+
+            prepared = prepare_spoken_text(
+                text,
+                source=payload.source or "read-aloud",
+                rewrite=payload.rewrite or "auto",
+                timeout=formatter_timeout,
+                model_enabled=True,
+            )
+            if prepared:
+                speech_text = prepared
+            else:
+                _log.warning("Desktop speech formatter returned empty text; using the original text")
+        except Exception:
+            _log.exception("Desktop speech formatter failed; using the original text")
+
     try:
         from tools.tts_tool import text_to_speech_tool
         loop = asyncio.get_running_loop()
-        result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
+        result_json = await loop.run_in_executor(None, text_to_speech_tool, speech_text)
     except Exception as exc:
         _log.exception("Desktop voice TTS failed")
         raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}")
