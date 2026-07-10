@@ -1564,6 +1564,13 @@ def anthropic_prompt_cache_policy(
     model_lower = eff_model.lower()
     provider_lower = eff_provider.lower()
     is_claude = "claude" in model_lower
+    is_cliproxy_claude_family = provider_lower == "vibeproxy" and (
+        is_claude
+        or any(
+            alias in model_lower
+            for alias in ("opus", "sonnet", "haiku", "mythos", "fable")
+        )
+    )
     # Kimi / Moonshot family via OpenRouter: same cache_control wire format
     # as Claude on OpenRouter (envelope layout).  Without this branch
     # moonshotai/kimi-k2.6 falls through to (False, False), serving ~1%
@@ -1589,6 +1596,14 @@ def anthropic_prompt_cache_policy(
     if is_native_anthropic:
         return True, True
     if (is_openrouter or is_nous_portal) and (is_claude or is_kimi):
+        return True, False
+    # The local CLIProxy Claude OAuth route is exposed through Hermes under
+    # the legacy ``vibeproxy`` provider id and speaks OpenAI-compatible chat
+    # completions. Keep Anthropic cache markers in the OpenAI-wire layout;
+    # the downstream translator converts them to native Claude blocks.
+    # Include the CLIProxy aliases because several curated model ids omit the
+    # literal ``claude`` prefix (for example ``opus-4-8`` and ``fable``).
+    if is_cliproxy_claude_family:
         return True, False
     # Nous Portal Qwen (e.g. qwen3.6-plus) takes the same envelope-layout
     # cache_control path as Portal Claude. Portal proxies to OpenRouter

@@ -38,6 +38,53 @@ from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_float, env_int
 
 logger = logging.getLogger(__name__)
+
+
+def _count_cache_control_markers(value: Any) -> int:
+    if isinstance(value, dict):
+        return (1 if "cache_control" in value else 0) + sum(
+            _count_cache_control_markers(child) for child in value.values()
+        )
+    if isinstance(value, list):
+        return sum(_count_cache_control_markers(child) for child in value)
+    return 0
+
+
+def _remove_cache_control_markers(value: Any) -> None:
+    if isinstance(value, dict):
+        value.pop("cache_control", None)
+        for child in value.values():
+            _remove_cache_control_markers(child)
+    elif isinstance(value, list):
+        for child in value:
+            _remove_cache_control_markers(child)
+
+
+def _limit_message_cache_markers_for_tool_breakpoint(
+    messages: list[dict[str, Any]],
+    *,
+    max_message_markers: int = 3,
+) -> list[dict[str, Any]]:
+    """Reserve one of Claude's four cache breakpoints for the tool schema."""
+    if _count_cache_control_markers(messages) <= max_message_markers:
+        return messages
+
+    import copy as _copy
+
+    trimmed = _copy.deepcopy(messages)
+    non_system_indices = [
+        idx
+        for idx, msg in enumerate(trimmed)
+        if isinstance(msg, dict) and msg.get("role") != "system"
+    ]
+    protected = set(non_system_indices[-2:])
+    for idx in non_system_indices:
+        if idx in protected:
+            continue
+        if _count_cache_control_markers(trimmed) <= max_message_markers:
+            break
+        _remove_cache_control_markers(trimmed[idx])
+    return trimmed
 _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
 
 # When the fallback chain is fully exhausted on a non-rate-limit failure
@@ -847,6 +894,24 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         }
 
     # ── Provider profile path (registered providers) ───────────────────
+    # OpenAI-wire Claude routes can cache the stable tool schema as a fourth
+    # breakpoint. Work on request-local copies so the agent's canonical tool
+    # definitions and conversation history remain byte-stable.
+    if (
+        getattr(agent, "_use_prompt_caching", False)
+        and not getattr(agent, "_use_native_cache_layout", False)
+        and tools_for_api
+    ):
+        import copy as _copy
+
+        tools_for_api = _copy.deepcopy(tools_for_api)
+        if isinstance(tools_for_api, list) and isinstance(tools_for_api[-1], dict):
+            tool_cache_marker = {"type": "ephemeral"}
+            if getattr(agent, "_cache_ttl", "5m") == "1h":
+                tool_cache_marker["ttl"] = "1h"
+            tools_for_api[-1]["cache_control"] = tool_cache_marker
+            api_messages = _limit_message_cache_markers_for_tool_breakpoint(api_messages)
+
     # Profiles handle per-provider quirks via hooks. When a profile is
     # found, delegate fully; otherwise fall through to the legacy flag path.
     try:
