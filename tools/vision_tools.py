@@ -1893,19 +1893,20 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
     import asyncio
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    safe_video_url = _redact_video_source(video_url)
 
     async def _ssrf_redirect_guard(response):
         from tools.url_safety import async_is_safe_url, redirect_target_from_response
         redirect_url = redirect_target_from_response(response)
         if redirect_url and not await async_is_safe_url(redirect_url):
             raise ValueError(
-                f"Blocked redirect to private/internal address: {redirect_url}"
+                f"Blocked redirect to private/internal address: {_redact_video_source(redirect_url)}"
             )
 
     last_error = None
     for attempt in range(max_retries):
         try:
-            blocked = check_website_access(video_url)
+            blocked = check_website_access(safe_video_url)
             if blocked:
                 raise PermissionError(blocked["message"])
 
@@ -1932,7 +1933,7 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
                         )
 
                     final_url = str(response.url)
-                    blocked = check_website_access(final_url)
+                    blocked = check_website_access(_redact_video_source(final_url))
                     if blocked:
                         raise PermissionError(blocked["message"])
 
@@ -2033,7 +2034,7 @@ async def video_analyze_tool(
             temp_video_path = local_path
             should_cleanup = False
         elif await _validate_image_url_async(video_url):
-            blocked = check_website_access(video_url)
+            blocked = check_website_access(safe_video_source)
             if blocked:
                 raise PermissionError(blocked["message"])
             temp_dir = get_hermes_dir("cache/video", "temp_video_files")

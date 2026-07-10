@@ -355,6 +355,18 @@ class TestVideoAnalyzeTool:
         assert data["success"] is False
         assert "unsupported video format" in data["analysis"].lower()
 
+    def test_signed_remote_url_is_redacted_before_policy_checks(self):
+        signed = "https://cdn.example/video.mp4?X-Amz-Signature=SUPERSECRET"
+        with patch("tools.vision_tools._validate_image_url_async", new=AsyncMock(return_value=True)), \
+             patch("tools.vision_tools.check_website_access", return_value=None) as policy, \
+             patch("tools.vision_tools._download_video", new=AsyncMock(side_effect=ValueError("stop"))):
+            self._run(video_analyze_tool(signed, "What?"))
+
+        checked_urls = [call.args[0] for call in policy.call_args_list]
+        assert checked_urls
+        assert all("SUPERSECRET" not in value for value in checked_urls)
+        assert checked_urls[0] == "https://cdn.example/video.mp4"
+
     def test_video_uses_files_api_without_base64_allocation(self, tmp_path):
         video = tmp_path / "large-enough-to-matter.mp4"
         video.write_bytes(b"\x00" * 100)
