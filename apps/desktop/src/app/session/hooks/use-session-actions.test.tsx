@@ -489,6 +489,34 @@ describe('branchStoredSession desktop source tagging', () => {
       source: 'desktop'
     })
   })
+
+  it('creates the branch in the parent session profile, not the active profile argument', async () => {
+    let createParams: Record<string, unknown> | undefined
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.create') {
+        createParams = params
+        return { session_id: 'branch-runtime', stored_session_id: 'branch-stored' } as never
+      }
+      return {} as never
+    })
+
+    setSessions([storedSession({ id: 'stored-parent', message_count: 1, profile: 'parent-profile' })])
+    vi.mocked(getSessionMessages).mockResolvedValue({
+      messages: [{ content: 'branch me', role: 'user', timestamp: 1 }],
+      session_id: 'stored-parent'
+    } as never)
+
+    let branchStoredSession: ((storedSessionId: string, sessionProfile?: string | null) => Promise<boolean>) | null = null
+    render(<BranchHarness onReady={branch => (branchStoredSession = branch)} requestGateway={requestGateway} />)
+    await waitFor(() => expect(branchStoredSession).not.toBeNull())
+
+    await expect(branchStoredSession!('stored-parent', 'active-chip-profile')).resolves.toBe(true)
+    expect(getSessionMessages).toHaveBeenCalledWith('stored-parent', 'parent-profile')
+    expect(createParams).toMatchObject({
+      parent_session_id: 'stored-parent',
+      profile: 'parent-profile'
+    })
+  })
 })
 
 // ── Warm-cache mapping integrity (the "open chat A, chat B loads" bug) ─────────

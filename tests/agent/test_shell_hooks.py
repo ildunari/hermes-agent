@@ -78,6 +78,15 @@ class TestParseResponse:
         r = shell_hooks._parse_response("pre_tool_call", '{"decision": "allow"}')
         assert r is None
 
+    def test_transform_tool_result_replacement_passthrough(self):
+        r = shell_hooks._parse_response(
+            "transform_tool_result", '{"result": "original\\n\\nreminder"}',
+        )
+        assert r == "original\n\nreminder"
+        assert shell_hooks._parse_response(
+            "transform_tool_result", '{"result": 42}',
+        ) is None
+
     def test_pre_llm_call_context_passthrough(self):
         r = shell_hooks._parse_response(
             "pre_llm_call", '{"context": "today is Friday"}',
@@ -297,6 +306,21 @@ class TestCallbackSubprocess:
         )
         cb = shell_hooks._make_callback(spec)
         assert cb(tool_name="terminal") == {"action": "block", "message": "via exit 1"}
+
+    def test_transform_translation_end_to_end(self, tmp_path):
+        script = _write_script(
+            tmp_path,
+            "transform.py",
+            "#!/usr/bin/env python3\nimport json,sys\njson.load(sys.stdin)\nprint(json.dumps({'result':'REPLACED'}))\n",
+        )
+        spec = shell_hooks.ShellHookSpec(
+            event="transform_tool_result",
+            command=str(script),
+            matcher="terminal",
+        )
+        cb = shell_hooks._make_callback(spec)
+        assert cb(tool_name="terminal", result="original") == "REPLACED"
+        assert cb(tool_name="web_search", result="original") is None
 
     def test_block_translation_end_to_end(self, tmp_path):
         """v1 schema-bug regression gate.

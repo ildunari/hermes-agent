@@ -1050,6 +1050,7 @@ def _build_child_agent(
     max_iterations: int,
     task_count: int,
     parent_agent,
+    reasoning_effort: Any = None,
     # Credential overrides from delegation config (provider:model resolution)
     override_provider: Optional[str] = None,
     override_base_url: Optional[str] = None,
@@ -1118,7 +1119,7 @@ def _build_child_agent(
     else:
         parent_toolsets = set(DEFAULT_TOOLSETS)
 
-    if toolsets:
+    if toolsets is not None:
         # Intersect with parent — subagent must not gain tools the parent lacks.
         # Expand composite toolsets (e.g. hermes-cli) so that individual
         # toolset names (e.g. web, terminal) are recognised during intersection.
@@ -1258,7 +1259,11 @@ def _build_child_agent(
         # Keep the raw value — ``str(x or "")`` would coerce a YAML boolean
         # False (``reasoning_effort: false``) to "" and inherit the parent
         # instead of disabling thinking for children.
-        delegation_effort = delegation_cfg.get("reasoning_effort")
+        delegation_effort = (
+            reasoning_effort
+            if reasoning_effort is not None
+            else delegation_cfg.get("reasoning_effort")
+        )
         if delegation_effort or delegation_effort is False:
             from hermes_constants import parse_reasoning_effort
 
@@ -2373,6 +2378,11 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    reasoning_effort: Any = None,
+    enabled_toolsets: Optional[List[str]] = None,
+    profile: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -2444,16 +2454,6 @@ def delegate_task(
         )
     effective_max_iter = default_max_iter
 
-    # Resolve delegation credentials (provider:model pair).
-    # When delegation.provider is configured, this resolves the full credential
-    # bundle (base_url, api_key, api_mode) via the same runtime provider system
-    # used by CLI/gateway startup.  When unconfigured, returns None values so
-    # children inherit from the parent.
-    try:
-        creds = _resolve_delegation_credentials(cfg, parent_agent)
-    except ValueError as exc:
-        return tool_error(str(exc))
-
     # Normalize to task list
     max_children = _get_max_concurrent_children()
     recovered_tasks, tasks_error = _recover_tasks_from_json_string(tasks)
@@ -2473,7 +2473,12 @@ def delegate_task(
             )
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
-        task_list = [{"goal": goal, "context": context, "role": top_role}]
+        task_list = [{
+            "goal": goal, "context": context, "role": top_role,
+            "model": model, "provider": provider,
+            "reasoning_effort": reasoning_effort,
+            "enabled_toolsets": enabled_toolsets, "profile": profile,
+        }]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
 
@@ -2488,6 +2493,37 @@ def delegate_task(
             )
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
+        requested_profile = task.get("profile") or profile
+        if requested_profile:
+            return json.dumps({"error": {
+                "code": "profile_override_unsupported",
+                "message": (
+                    "delegate_task profile overrides are unavailable because the "
+                    "runtime cannot isolate profile state per child without mutating "
+                    "process-global HERMES_HOME. Omit profile to inherit the parent."
+                ),
+                "requested_profile": str(requested_profile),
+                "task_index": i,
+                "retryable": False,
+            }})
+
+    # Resolve credentials independently so per-task provider/model choices cannot
+    # bleed across parallel children. API keys remain config/runtime-owned.
+    task_creds = []
+    try:
+        for task in task_list:
+            task_cfg = dict(cfg)
+            selected_model = task.get("model") or model
+            selected_provider = task.get("provider") or provider
+            if selected_model:
+                task_cfg["model"] = selected_model
+            if selected_provider:
+                task_cfg["provider"] = selected_provider
+                task_cfg.pop("base_url", None)
+                task_cfg.pop("api_mode", None)
+            task_creds.append(_resolve_delegation_credentials(task_cfg, parent_agent))
+    except ValueError as exc:
+        return tool_error(str(exc))
 
     overall_start = time.monotonic()
     results = []
@@ -2509,6 +2545,7 @@ def delegate_task(
     children = []
     try:
         for i, t in enumerate(task_list):
+            creds = task_creds[i]
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
@@ -2516,10 +2553,12 @@ def delegate_task(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
-                # Subagents always inherit the parent's toolsets; the model
-                # cannot choose or narrow them (no model-facing toolsets arg).
-                toolsets=None,
+                # Model-requested toolsets are narrowing-only; construction
+                # intersects with the parent's effective set and strips the
+                # immutable delegate blocklist.
+                toolsets=t.get("enabled_toolsets", enabled_toolsets),
                 model=creds["model"],
+                reasoning_effort=t.get("reasoning_effort", reasoning_effort),
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
@@ -2883,7 +2922,7 @@ def delegate_task(
             # parent's toolsets (no model-facing toolsets arg).
             toolsets=None,
             role=top_role,
-            model=creds["model"],
+            model=(task_creds[0]["model"] if task_creds else None),
             session_key=_session_key,
             origin_ui_session_id=_origin_ui_session_id,
             parent_session_id=_parent_session_id,
@@ -3246,7 +3285,7 @@ def _build_top_level_description() -> str:
         "Only the final summary is returned -- intermediate tool results "
         "never enter your context window.\n\n"
         "TWO MODES (one of 'goal' or 'tasks' is required):\n"
-        "1. Single task: provide 'goal' (+ optional context, toolsets).\n"
+        "1. Single task: provide 'goal' (+ optional context and child overrides).\n"
         f"2. Batch (parallel): provide 'tasks' array with up to {max_children} "
         f"items concurrently for this user (configured via "
         f"delegation.max_concurrent_children in config.yaml). {nesting_clause}\n\n"
@@ -3293,7 +3332,9 @@ def _build_top_level_description() -> str:
         f"Orchestrators are bounded by max_spawn_depth={max_depth} for this "
         f"user and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
-        "- Subagent model is NOT selectable per call: children inherit the parent model (plus its fallback chain) unless you pin all subagents to a model via delegation.provider / delegation.model in config.yaml.\n"
+        "- model/provider/reasoning_effort may be overridden per call or per task; credentials are always resolved from trusted Hermes configuration.\n"
+        "- enabled_toolsets is narrowing-only and cannot grant tools absent from the parent or bypass the immutable child blocklist.\n"
+        "- Explicit profile selection currently returns a structured refusal because profile state is process-global; omit profile to inherit the parent safely.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Results are always returned as an array, one entry per task."
     )
@@ -3309,7 +3350,7 @@ def _build_tasks_param_description() -> str:
         f"Batch mode: tasks to run in parallel (up to {max_children} for this "
         f"user, set via delegation.max_concurrent_children). Each gets "
         "its own subagent with isolated context and terminal session. "
-        "When provided, top-level goal/context/toolsets are ignored."
+        "Per-task overrides beat top-level defaults."
     )
 
 
@@ -3407,6 +3448,23 @@ DELEGATE_TASK_SCHEMA = {
                     "specific you are, the better the subagent performs."
                 ),
             },
+            "model": {"type": "string", "description": "Optional child model override."},
+            "provider": {
+                "type": "string",
+                "description": "Optional configured provider override. Credentials are resolved by Hermes; API keys are not accepted.",
+            },
+            "reasoning_effort": {
+                "oneOf": [{"type": "string"}, {"type": "boolean"}],
+                "description": "Optional child reasoning effort override.",
+            },
+            "enabled_toolsets": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Optional narrowing-only toolset allowlist; cannot grant capabilities absent from the parent or bypass delegate blocks.",
+            },
+            "profile": {
+                "type": "string",
+                "description": "Optional requested profile. Currently returns a structured refusal; omit to inherit the parent profile.",
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -3416,6 +3474,20 @@ DELEGATE_TASK_SCHEMA = {
                         "context": {
                             "type": "string",
                             "description": "Task-specific context",
+                        },
+                        "model": {"type": "string", "description": "Per-task model override."},
+                        "provider": {"type": "string", "description": "Per-task configured provider override."},
+                        "reasoning_effort": {
+                            "oneOf": [{"type": "string"}, {"type": "boolean"}],
+                            "description": "Per-task reasoning effort override.",
+                        },
+                        "enabled_toolsets": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Per-task narrowing-only toolset allowlist.",
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": "Requested profile. Currently returns a structured refusal; omit to inherit parent.",
                         },
                         "role": {
                             "type": "string",
@@ -3505,6 +3577,11 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")),
+        model=args.get("model"),
+        provider=args.get("provider"),
+        reasoning_effort=args.get("reasoning_effort"),
+        enabled_toolsets=args.get("enabled_toolsets"),
+        profile=args.get("profile"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,

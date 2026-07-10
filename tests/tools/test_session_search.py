@@ -75,6 +75,7 @@ class TestSchema:
         assert "window" in params
         # Shared
         assert "role_filter" in params
+        assert params["include_internal"]["default"] is False
 
     def test_no_mode_parameter(self):
         # Mode is inferred from which args are set — no explicit mode param
@@ -110,6 +111,38 @@ class TestSchema:
 class TestHiddenSources:
     def test_tool_source_hidden(self):
         assert "tool" in _HIDDEN_SESSION_SOURCES
+
+    def test_all_internal_sources_hidden(self):
+        assert set(_HIDDEN_SESSION_SOURCES) == {"subagent", "tool", "smoke-test"}
+
+    @staticmethod
+    def _seed_internal(db, *, archived=False):
+        for source in ("subagent", "tool", "smoke-test"):
+            sid = f"internal_{source}"
+            db.create_session(sid, source=source)
+            db.append_message(sid, role="user", content=f"internal needle {source}")
+            if archived:
+                db._conn.execute("UPDATE sessions SET archived = 1 WHERE id = ?", (sid,))
+        db._conn.commit()
+
+    def test_internal_sources_hidden_from_browse_and_discovery_by_default(self, db):
+        self._seed_internal(db)
+        assert json.loads(session_search(db=db))["results"] == []
+        assert json.loads(session_search(query="internal needle", db=db))["results"] == []
+
+    def test_include_internal_exposes_archived_internal_browse_and_discovery(self, db):
+        self._seed_internal(db, archived=True)
+        browsed = json.loads(session_search(db=db, include_internal=True))
+        discovered = json.loads(session_search(query="internal needle", db=db, include_internal=True))
+        expected = {"subagent", "tool", "smoke-test"}
+        assert {row["source"] for row in browsed["results"]} == expected
+        assert {row["source"] for row in discovered["results"]} == expected
+
+    def test_direct_read_of_internal_session_is_unchanged(self, db):
+        self._seed_internal(db)
+        result = json.loads(session_search(session_id="internal_smoke-test", db=db))
+        assert result["success"] is True
+        assert result["session_meta"]["source"] == "smoke-test"
 
 
 class TestFormatTimestamp:

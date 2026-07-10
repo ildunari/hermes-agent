@@ -6103,6 +6103,11 @@ class AIAgent:
             max_iterations=function_args.get("max_iterations"),
             role=function_args.get("role"),
             background=requested_background,
+            model=function_args.get("model"),
+            provider=function_args.get("provider"),
+            reasoning_effort=function_args.get("reasoning_effort"),
+            enabled_toolsets=function_args.get("enabled_toolsets"),
+            profile=function_args.get("profile"),
             parent_agent=self,
         )
 

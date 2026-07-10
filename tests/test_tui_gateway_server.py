@@ -17,6 +17,63 @@ from hermes_cli.browser_connect import ChromeDebugLaunch
 from tui_gateway import server
 
 
+@pytest.mark.parametrize("case", ["invalid-profile", "missing-db", "missing-parent"])
+def test_session_create_branch_rejects_profile_or_parent_before_runtime(monkeypatch, tmp_path, case):
+    """A branch must be validated in its explicit profile before claiming a slot."""
+    profile_home = tmp_path / "profiles" / "parent"
+    profile_home.mkdir(parents=True)
+    if case != "missing-db":
+        (profile_home / "state.db").touch()
+
+    if case == "invalid-profile":
+        monkeypatch.setattr(server, "_resolve_profile_dir", lambda _name: None)
+    else:
+        monkeypatch.setattr(server, "_resolve_profile_dir", lambda _name: profile_home)
+
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *a, **k: pytest.fail("slot claimed"))
+    monkeypatch.setattr(server, "_schedule_agent_build", lambda *a, **k: pytest.fail("runtime built"))
+    before = set(server._sessions)
+
+    if case == "missing-parent":
+        class EmptyDB:
+            def get_session(self, _session_id):
+                return None
+        monkeypatch.setattr(server, "_open_profile_db", lambda _home: EmptyDB())
+
+    response = server._methods["session.create"](
+        "r-branch",
+        {"profile": "parent", "parent_session_id": "does-not-exist", "messages": [{"role": "user", "content": "x"}]},
+    )
+
+    assert "error" in response
+    assert set(server._sessions) == before
+
+
+def test_resolve_profile_dir_rejects_path_traversal(monkeypatch, tmp_path):
+    from hermes_cli import profiles as profiles_mod
+
+    profiles_root = tmp_path / "profiles"
+    profiles_root.mkdir()
+    escaped = tmp_path / "escaped"
+    escaped.mkdir()
+    (escaped / "state.db").touch()
+    monkeypatch.setattr(profiles_mod, "_get_profiles_root", lambda: profiles_root)
+
+    for name in ("../escaped", "foo/bar", "."):
+        assert server._resolve_profile_dir(name) is None
+
+
+def test_resolve_profile_dir_normalizes_valid_mixed_case(monkeypatch, tmp_path):
+    from hermes_cli import profiles as profiles_mod
+
+    profiles_root = tmp_path / "profiles"
+    home = profiles_root / "coding"
+    home.mkdir(parents=True)
+    monkeypatch.setattr(profiles_mod, "_get_profiles_root", lambda: profiles_root)
+
+    assert server._resolve_profile_dir("Coding") == home.resolve()
+
+
 def test_session_create_rejects_at_active_session_limit(monkeypatch, tmp_path):
     home = tmp_path / ".hermes"
     home.mkdir()

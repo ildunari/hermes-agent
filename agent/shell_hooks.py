@@ -381,11 +381,13 @@ def _parse_single_entry(
         )
         matcher = None
 
-    if matcher is not None and event not in {"pre_tool_call", "post_tool_call"}:
+    if matcher is not None and event not in {
+        "pre_tool_call", "post_tool_call", "transform_tool_result"
+    }:
         logger.warning(
             "hooks.%s[%d].matcher=%r will be ignored at runtime — the "
-            "matcher field is only honored for pre_tool_call / "
-            "post_tool_call.  The hook will fire on every %s event.",
+            "matcher field is only honored for pre_tool_call, post_tool_call, "
+            "or transform_tool_result. The hook will fire on every %s event.",
             event, index, matcher, event,
         )
         matcher = None
@@ -489,12 +491,12 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
     return result
 
 
-def _make_callback(spec: ShellHookSpec) -> Callable[..., Optional[Dict[str, Any]]]:
+def _make_callback(spec: ShellHookSpec) -> Callable[..., Optional[Dict[str, Any] | str]]:
     """Build the closure that ``invoke_hook()`` will call per firing."""
 
-    def _callback(**kwargs: Any) -> Optional[Dict[str, Any]]:
+    def _callback(**kwargs: Any) -> Optional[Dict[str, Any] | str]:
         # Matcher gate — only meaningful for tool-scoped events.
-        if spec.event in {"pre_tool_call", "post_tool_call"}:
+        if spec.event in {"pre_tool_call", "post_tool_call", "transform_tool_result"}:
             if not spec.matches_tool(kwargs.get("tool_name")):
                 return None
 
@@ -563,8 +565,11 @@ def _block_message(primary: Any, secondary: Any) -> str:
     return raw if isinstance(raw, str) and raw else _DEFAULT_BLOCK_MESSAGE
 
 
-def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
-    """Translate stdout JSON into a Hermes wire-shape dict.
+def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any] | str]:
+    """Translate stdout JSON into a Hermes hook result.
+
+    Most events return a wire-shape dict; ``transform_tool_result`` returns the
+    replacement string directly to match the Python-hook contract.
 
     For ``pre_tool_call`` the Claude-Code-style ``{"decision": "block",
     "reason": "..."}`` payload is translated into the canonical Hermes
@@ -615,6 +620,13 @@ def _parse_response(event: str, stdout: str) -> Optional[Dict[str, Any]]:
             if isinstance(message, str) and message.strip():
                 return {"action": "continue", "message": message.strip()}
         return None
+
+    if event == "transform_tool_result":
+        replacement = data.get("result")
+        # Python transform hooks return the replacement string directly and the
+        # dispatcher consumes only strings. Normalize shell hooks to that same
+        # contract so they compose identically end to end.
+        return replacement if isinstance(replacement, str) else None
 
     result: Dict[str, str] = {}
 

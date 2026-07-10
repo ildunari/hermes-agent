@@ -71,11 +71,12 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("goal", props)
         self.assertIn("tasks", props)
         self.assertIn("context", props)
-        # toolsets is intentionally NOT exposed to the model — subagents always
-        # inherit the parent's toolsets. Letting the model name toolsets was a
-        # capability-selection surface the model should not control.
-        self.assertNotIn("toolsets", props)
-        self.assertNotIn("toolsets", props["tasks"]["items"]["properties"])
+        for name in ("model", "provider", "reasoning_effort", "enabled_toolsets", "profile"):
+            self.assertIn(name, props)
+            self.assertIn(name, props["tasks"]["items"]["properties"])
+        # Credentials are never accepted through the model-facing surface.
+        self.assertNotIn("api_key", props)
+        self.assertNotIn("api_key", props["tasks"]["items"]["properties"])
         # max_iterations is intentionally NOT exposed to the model — it's
         # config-authoritative via delegation.max_iterations so users get
         # predictable budgets.
@@ -202,6 +203,57 @@ class TestStripBlockedTools(unittest.TestCase):
 
 
 class TestDelegateTask(unittest.TestCase):
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_per_task_overrides_beat_top_level(self, resolve_creds, build_child, run_child):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["terminal", "file", "web"]
+        resolve_creds.side_effect = lambda cfg, _parent: {
+            "model": cfg.get("model"), "provider": cfg.get("provider"),
+            "base_url": None, "api_key": None, "api_mode": None,
+        }
+        build_child.return_value = MagicMock()
+        run_child.return_value = {"task_index": 0, "status": "completed", "summary": "ok"}
+
+        delegate_task(
+            tasks=[{"goal": "one", "model": "task-model", "provider": "task-provider",
+                    "reasoning_effort": "high", "enabled_toolsets": ["terminal", "browser"]}],
+            model="top-model", provider="top-provider", reasoning_effort="low",
+            enabled_toolsets=["terminal", "file"], parent_agent=parent,
+        )
+
+        kwargs = build_child.call_args.kwargs
+        self.assertEqual(kwargs["model"], "task-model")
+        self.assertEqual(kwargs["override_provider"], "task-provider")
+        self.assertEqual(kwargs["reasoning_effort"], "high")
+        self.assertEqual(kwargs["toolsets"], ["terminal", "browser"])
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_top_level_overrides_apply_to_single_task(self, resolve_creds, build_child, run_child):
+        parent = _make_mock_parent()
+        resolve_creds.return_value = {"model": "chosen", "provider": "openrouter", "base_url": "u", "api_key": "k", "api_mode": "chat_completions"}
+        build_child.return_value = MagicMock()
+        run_child.return_value = {"task_index": 0, "status": "completed", "summary": "ok"}
+        delegate_task(goal="one", model="chosen", provider="openrouter",
+                      reasoning_effort="medium", enabled_toolsets=["file"], parent_agent=parent)
+        kwargs = build_child.call_args.kwargs
+        self.assertEqual(kwargs["reasoning_effort"], "medium")
+        self.assertEqual(kwargs["toolsets"], ["file"])
+
+    def test_profile_override_is_structured_refusal(self):
+        result = json.loads(delegate_task(goal="one", profile="other", parent_agent=_make_mock_parent()))
+        self.assertEqual(result["error"]["code"], "profile_override_unsupported")
+        self.assertEqual(result["error"]["requested_profile"], "other")
+        self.assertTrue(result["error"]["retryable"] is False)
+
+    def test_per_task_profile_override_is_structured_refusal(self):
+        result = json.loads(delegate_task(tasks=[{"goal": "one", "profile": "other"}], parent_agent=_make_mock_parent()))
+        self.assertEqual(result["error"]["code"], "profile_override_unsupported")
+        self.assertEqual(result["error"]["task_index"], 0)
+
     def test_no_parent_agent(self):
         result = json.loads(delegate_task(goal="test"))
         self.assertIn("error", result)

@@ -34,7 +34,7 @@ import { sameCronSignature } from '../../desktop-controller-utils'
 // The recents list is local-only: cron rows and messaging platform rows have
 // independent sidebar sections. The coalesced snapshot preserves those slices
 // without letting gateway threads bury interactive local chats during paging.
-const SIDEBAR_EXCLUDED_SOURCES = ['cron', 'subagent', 'tool', ...MESSAGING_SESSION_SOURCE_IDS]
+const SIDEBAR_EXCLUDED_SOURCES = ['cron', 'subagent', 'tool', 'smoke-test', ...MESSAGING_SESSION_SOURCE_IDS]
 // The messaging slice is the inverse: drop cron + every local source so only
 // external-platform conversations remain, then split per platform in the UI.
 const MESSAGING_EXCLUDED_SOURCES = ['cron', ...LOCAL_SESSION_SOURCE_IDS]
