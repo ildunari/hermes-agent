@@ -2217,7 +2217,14 @@ class TestDelegateHeartbeat(unittest.TestCase):
 
         parent = _make_mock_parent()
         touch_calls = []
-        parent._touch_activity = lambda desc: touch_calls.append(desc)
+        third_touch = threading.Event()
+
+        def record_touch(desc):
+            touch_calls.append(desc)
+            if len(touch_calls) > 2:
+                third_touch.set()
+
+        parent._touch_activity = record_touch
 
         child = MagicMock()
         # Child is stuck inside a single terminal call for the whole run.
@@ -2230,10 +2237,10 @@ class TestDelegateHeartbeat(unittest.TestCase):
         }
 
         def slow_run(**kwargs):
-            # Long enough to exceed the OLD idle threshold (5 cycles) at
-            # the patched interval, but shorter than the new in-tool
-            # threshold.
-            time.sleep(0.4)
+            # Keep the child in its tool until the heartbeat proves it made it
+            # past the idle limit. A fixed sleep made this assertion flaky when
+            # the merged suite or CI scheduler delayed heartbeat threads.
+            third_touch.wait(timeout=2.0)
             return {"final_response": "done", "completed": True, "api_calls": 1}
 
         child.run_conversation.side_effect = slow_run
@@ -2258,7 +2265,7 @@ class TestDelegateHeartbeat(unittest.TestCase):
         self.assertGreater(
             len(touch_calls), 2,
             f"Heartbeat stopped too early while child was inside a tool; "
-            f"got {len(touch_calls)} touches over 0.4s at 0.05s interval",
+            f"got {len(touch_calls)} touches before the synchronized timeout",
         )
 
 

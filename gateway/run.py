@@ -4800,6 +4800,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         cfg = _load_gateway_runtime_config()
         return str(cfg_get(cfg, "agent", "system_prompt", default="") or "").strip()
 
+    @staticmethod
+    def _load_display_config() -> dict:
+        """Load the effective ``display`` section for runtime policy helpers."""
+        cfg = _load_gateway_runtime_config()
+        display_cfg = cfg.get("display", {}) if isinstance(cfg, dict) else {}
+        return display_cfg if isinstance(display_cfg, dict) else {}
+
     def _resolve_model_for_channel(
         self,
         platform: Platform,
@@ -8914,6 +8921,127 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
+    def _hygiene_compaction_status_enabled(self, source) -> bool:
+        platform = getattr(source, "platform", None)
+        platform_key = _gateway_platform_value(platform)
+        if not platform_key:
+            return False
+        display_cfg = self._load_display_config()
+        platforms_cfg = display_cfg.get("platforms", {}) if isinstance(display_cfg, dict) else {}
+        platform_cfg = platforms_cfg.get(platform_key, {}) if isinstance(platforms_cfg, dict) else {}
+        if isinstance(platform_cfg, dict) and "compaction_status" in platform_cfg:
+            return bool(platform_cfg.get("compaction_status"))
+        # Telegram supports one editable status bubble. BlueBubbles/iMessage
+        # would turn updates into chat noise, so it stays silent by default.
+        return platform == Platform.TELEGRAM
+
+    @staticmethod
+    def _format_hygiene_token_counter(used: int, total: int) -> str:
+        if total > 0:
+            pct = int(round((max(0, used) / total) * 100))
+            return f"{used:,}/{total:,} tokens ({pct}%)"
+        return f"~{used:,} tokens"
+
+    @staticmethod
+    def _format_hygiene_elapsed(seconds: float) -> str:
+        seconds = max(0, int(round(seconds)))
+        minutes, secs = divmod(seconds, 60)
+        return f"{minutes}m {secs:02d}s" if minutes else f"{secs}s"
+
+    def _format_hygiene_compaction_status_start(
+        self, *, msg_count: int, approx_tokens: int,
+        context_length: int, started_at: float,
+    ) -> str:
+        elapsed = self._format_hygiene_elapsed(time.monotonic() - started_at)
+        counter = self._format_hygiene_token_counter(approx_tokens, context_length)
+        return f"🗜️ Compressing context… {elapsed} elapsed\n{counter} · {msg_count:,} messages"
+
+    def _format_hygiene_compaction_status_done(
+        self, *, old_count: int, new_count: int, old_tokens: int, new_tokens: int,
+        context_length: int, started_at: float, aborted: bool = False,
+        failed: bool = False, preserved: bool = False, error: Optional[Any] = None,
+    ) -> str:
+        elapsed = self._format_hygiene_elapsed(time.monotonic() - started_at)
+        old_counter = self._format_hygiene_token_counter(old_tokens, context_length)
+        new_counter = self._format_hygiene_token_counter(new_tokens, context_length)
+        if failed:
+            detail = f" ({error})" if error else ""
+            return f"⚠️ Context compression failed after {elapsed}{detail}. Conversation is unchanged."
+        if aborted:
+            return f"⚠️ Context compression aborted after {elapsed}. Conversation is unchanged.\n{old_counter}"
+        if preserved:
+            return f"⚠️ Context compression could not safely rewrite after {elapsed}. Conversation is unchanged.\n{old_counter}"
+        return (f"🗜️ Context compressed in {elapsed}\nMessages: {old_count:,} → {new_count:,}\n"
+                f"Context: {old_counter} → {new_counter}")
+
+    async def _start_hygiene_compaction_status(
+        self, source, *, metadata: Optional[Dict[str, Any]], msg_count: int,
+        approx_tokens: int, context_length: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not self._hygiene_compaction_status_enabled(source):
+            return None
+        adapter = self.adapters.get(source.platform)
+        if not adapter or not getattr(source, "chat_id", None):
+            return None
+        started_at = time.monotonic()
+        content = self._format_hygiene_compaction_status_start(
+            msg_count=msg_count, approx_tokens=approx_tokens,
+            context_length=context_length, started_at=started_at,
+        )
+        try:
+            result = await adapter.send(source.chat_id, content, metadata=metadata)
+        except Exception as err:
+            logger.debug("Failed to send hygiene compaction status: %s", err)
+            return None
+        if not getattr(result, "success", False) or not getattr(result, "message_id", None):
+            return None
+        status = {"adapter": adapter, "chat_id": source.chat_id,
+                  "message_id": str(result.message_id), "started_at": started_at, "task": None}
+
+        async def _ticker() -> None:
+            while True:
+                await asyncio.sleep(10)
+                update = self._format_hygiene_compaction_status_start(
+                    msg_count=msg_count, approx_tokens=approx_tokens,
+                    context_length=context_length, started_at=started_at,
+                )
+                await self._edit_hygiene_compaction_status(status, update)
+
+        status["task"] = asyncio.create_task(_ticker())
+        return status
+
+    async def _edit_hygiene_compaction_status(
+        self, status: Optional[Dict[str, Any]], content: str, *, finalize: bool = False,
+    ) -> None:
+        if not status or not status.get("adapter"):
+            return
+        try:
+            result = await status["adapter"].edit_message(
+                status["chat_id"], status["message_id"], content, finalize=finalize,
+            )
+            if not getattr(result, "success", False):
+                logger.debug("Hygiene compaction status edit unsupported/failed: %s", getattr(result, "error", None))
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:
+            logger.debug("Failed to edit hygiene compaction status: %s", err)
+
+    async def _finish_hygiene_compaction_status(
+        self, status: Optional[Dict[str, Any]], content: str,
+    ) -> None:
+        if not status:
+            return
+        task = status.get("task")
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("Hygiene compaction status ticker failed", exc_info=True)
+        await self._edit_hygiene_compaction_status(status, content, finalize=True)
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -11255,6 +11383,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
 
                     _hyg_meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+                    _hyg_status = None
 
                     try:
                         from run_agent import AIAgent
@@ -11280,6 +11409,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             ]
 
                             if len(_hyg_msgs) >= 4:
+                                _hyg_status = await self._start_hygiene_compaction_status(
+                                    source,
+                                    metadata=_hyg_meta,
+                                    msg_count=_msg_count,
+                                    approx_tokens=_approx_tokens,
+                                    context_length=_hyg_context_length,
+                                )
                                 _hyg_session_db = getattr(self._session_db, "_db", self._session_db)
                                 _hyg_agent = AIAgent(
                                     **_hyg_runtime,
@@ -11424,6 +11560,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     # /compress to retry or /reset to start
                                     # fresh.
                                     _comp = getattr(_hyg_agent, "context_compressor", None)
+                                    _hyg_aborted = bool(
+                                        _comp is not None
+                                        and getattr(_comp, "_last_compress_aborted", False)
+                                    )
+                                    await self._finish_hygiene_compaction_status(
+                                        _hyg_status,
+                                        self._format_hygiene_compaction_status_done(
+                                            old_count=_msg_count,
+                                            new_count=_new_count,
+                                            old_tokens=_approx_tokens,
+                                            new_tokens=_new_tokens,
+                                            context_length=_hyg_context_length,
+                                            started_at=(
+                                                _hyg_status["started_at"]
+                                                if _hyg_status else time.monotonic()
+                                            ),
+                                            aborted=_hyg_aborted,
+                                            preserved=not (_hyg_rotated or _hyg_in_place),
+                                        ),
+                                    )
                                     if _comp is not None and getattr(_comp, "_last_compress_aborted", False):
                                         _err = getattr(_comp, "_last_summary_error", None) or "unknown error"
                                         _warn_msg = (
@@ -11479,6 +11635,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     except Exception as e:
                         logger.warning(
                             "Session hygiene auto-compress failed: %s", e
+                        )
+                        await self._finish_hygiene_compaction_status(
+                            _hyg_status,
+                            self._format_hygiene_compaction_status_done(
+                                old_count=_msg_count,
+                                new_count=_msg_count,
+                                old_tokens=_approx_tokens,
+                                new_tokens=_approx_tokens,
+                                context_length=_hyg_context_length,
+                                started_at=(
+                                    _hyg_status["started_at"]
+                                    if _hyg_status else time.monotonic()
+                                ),
+                                failed=True,
+                                error=e,
+                            ),
                         )
 
         # First-message onboarding -- only on the very first interaction ever

@@ -209,8 +209,14 @@ def test_explicit_only_keeps_configured_vibeproxy_and_moa_presets(monkeypatch):
         {
             "slug": "vibeproxy",
             "name": "VibeProxy",
-            "models": ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5"],
-            "total_models": 3,
+            "models": [
+                "claude-fable-5",
+                "claude-opus-4-8",
+                "claude-sonnet-5",
+                "gemini-3.5-flash-low",
+                "gemini-3.1-pro-low",
+            ],
+            "total_models": 5,
             "is_current": False,
             "is_user_defined": False,
             "source": "built-in",
@@ -237,6 +243,17 @@ def test_explicit_only_keeps_configured_vibeproxy_and_moa_presets(monkeypatch):
         "hermes_cli.inventory._moa_provider_row",
         lambda _current_provider="": dict(rows[0]),
     )
+    monkeypatch.setattr(
+        "hermes_cli.config.read_raw_config",
+        lambda: {
+            "moa": {
+                "presets": {
+                    "Design": {"enabled": True},
+                    "Speed": {"enabled": True},
+                }
+            }
+        },
+    )
 
     payload = build_models_payload(
         ConfigContext(
@@ -255,6 +272,8 @@ def test_explicit_only_keeps_configured_vibeproxy_and_moa_presets(monkeypatch):
         "claude-fable-5",
         "claude-opus-4-8",
         "claude-sonnet-5",
+        "gemini-3.5-flash-low",
+        "gemini-3.1-pro-low",
     ]
     assert by_slug["moa"]["models"] == ["default", "Speed", "Design"]
     assert "ambient" not in by_slug

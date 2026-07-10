@@ -2567,7 +2567,7 @@ class GatewaySlashCommandsMixin:
             max_file_size_mb=cp_cfg.get("max_file_size_mb", 10),
         )
 
-        session_entry = self.session_store.get_or_create_session(event.source)
+        session_entry = await self.async_session_store.get_or_create_session(event.source)
         cwd = self._session_cwd_for_entry(session_entry)
         self._bind_task_cwd(session_entry.session_id, cwd)
         arg = event.get_command_args().strip()

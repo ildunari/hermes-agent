@@ -12810,6 +12810,9 @@ def _(rid, params: dict) -> dict:
                 "meta": to_plain_text(c.display_meta) if c.display_meta else "",
             }
             for c in completer.get_completions(doc, None)
+            # Keep the upstream command registry intact while hiding the removed
+            # Desktop alias: /model is the sole model/provider picker here.
+            if c.text.lstrip("/") != "provider"
         ][:30]
         text_lower = text.lower()
         extras = [

@@ -1871,7 +1871,8 @@ def test_startup_runtime_resolves_short_alias_without_network(monkeypatch):
 
     model, provider = server._resolve_startup_runtime()
 
-    assert provider == "anthropic"
+    # Subscription routing owns the short Claude aliases when available.
+    assert provider == "vibeproxy"
     assert model.startswith("claude-sonnet")
 
 
@@ -1890,7 +1891,7 @@ def test_startup_runtime_does_not_call_network_detector(monkeypatch):
     model, provider = server._resolve_startup_runtime()
 
     assert model
-    assert provider in {None, "anthropic"}
+    assert provider == "vibeproxy"
 
 
 def _session(agent=None, **extra):
