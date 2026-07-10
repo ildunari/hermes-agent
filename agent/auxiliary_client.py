@@ -7397,7 +7397,9 @@ async def async_call_llm(
             "gemini",
             resolved_model,
             async_mode=True,
-            base_url=resolved_base_url,
+            # Force Gemini's native adapter. An explicit /v1beta base URL can
+            # otherwise be mistaken for a generic OpenAI-compatible endpoint.
+            base_url="",
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
         )
