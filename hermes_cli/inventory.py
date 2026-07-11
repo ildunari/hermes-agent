@@ -280,8 +280,9 @@ def build_models_payload(
         rows = _filter_hidden_models(rows, ctx.hidden_models)
     if ctx.visible_models:
         rows = _filter_visible_models(rows, ctx.visible_models)
-    if ctx.provider_labels or ctx.model_labels:
-        rows = _apply_picker_labels(rows, ctx.provider_labels, ctx.model_labels)
+    # Always attach polished model_labels (policy overrides still win inside
+    # apply_model_picker_labels). Desktop/WebUI/Hermex pickers depend on this.
+    rows = _apply_picker_labels(rows, ctx.provider_labels, ctx.model_labels)
     if picker_hints:
         _apply_picker_hints(rows)
     if canonical_order:

@@ -11,6 +11,10 @@ describe('model display names', () => {
     expect(displayModelName('claude-haiku-4-5-20251001', { provider: 'vibeproxy' })).toBe('Haiku 4.5')
     expect(displayModelName('gpt-5.4-mini')).toBe('GPT 5.4 Mini')
     expect(displayModelName('z-ai/glm-5v-turbo')).toBe('GLM 5V Turbo')
+    expect(displayModelName('gpt-5.6-sol')).toBe('GPT 5.6 Sol')
+    expect(displayModelName('gpt-5.6-terra')).toBe('GPT 5.6 Terra')
+    expect(displayModelName('grok-4.5')).toBe('Grok 4.5')
+    expect(displayModelName('grok-composer-2.5-fast')).toBe('Grok Composer 2.5 Fast')
   })
 
   it('cleans provider IDs and custom provider slugs', () => {

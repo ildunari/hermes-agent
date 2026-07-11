@@ -293,26 +293,40 @@ def apply_model_picker_labels(
     provider_labels: dict[str, str] | None,
     model_labels: dict[str, dict[str, str]] | None,
 ) -> list[dict]:
-    """Attach presentation labels without changing provider/model route IDs."""
-    if not provider_labels and not model_labels:
-        return rows
+    """Attach presentation labels without changing provider/model route IDs.
+
+    Always synthesizes polished ``model_labels`` from model IDs via
+    ``prettify_model_label`` so Desktop / WebUI / Hermex pickers never fall
+    through to raw slugs like ``gpt-5.6-sol`` or ``claude-opus-4-8``. Explicit
+    policy labels from config still win when present.
+    """
+    try:
+        from hermes_cli.model_display import prettify_model_label
+    except Exception:  # pragma: no cover - import safety
+        def prettify_model_label(model_id: str) -> str:  # type: ignore
+            return str(model_id or "")
+
     out: list[dict] = []
     for row in rows:
         slug = str(row.get("slug", "") or "").strip().lower()
         provider_label = (provider_labels or {}).get(slug)
-        labels = (model_labels or {}).get(slug)
-        if not provider_label and not labels:
-            out.append(row)
-            continue
+        policy_labels = (model_labels or {}).get(slug) or {}
+        models = list(row.get("models") or [])
+        synthesized: dict[str, str] = {}
+        for model in models:
+            mid = str(model)
+            if not mid:
+                continue
+            if mid in policy_labels and str(policy_labels[mid]).strip():
+                synthesized[mid] = str(policy_labels[mid]).strip()
+            else:
+                pretty = prettify_model_label(mid)
+                synthesized[mid] = pretty or mid
         next_row = dict(row)
         if provider_label:
             next_row["name"] = provider_label
-        if labels:
-            next_row["model_labels"] = {
-                str(model): labels[str(model)]
-                for model in (next_row.get("models") or [])
-                if str(model) in labels
-            }
+        if synthesized:
+            next_row["model_labels"] = synthesized
         out.append(next_row)
     return out
 
