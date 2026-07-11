@@ -79,6 +79,17 @@ logger = logging.getLogger(__name__)
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
 
 
+def append_api_only_user_context(
+    api_message: Dict[str, Any], contexts: List[str]
+) -> Dict[str, Any]:
+    """Append context to an API message copy without mutating transcript state."""
+    pieces = [piece for piece in contexts if isinstance(piece, str) and piece]
+    base = api_message.get("content", "")
+    if pieces and isinstance(base, str):
+        api_message["content"] = base + "\n\n" + "\n\n".join(pieces)
+    return api_message
+
+
 def _estimate_compression_payload_tokens(
     agent: Any,
     messages: List[Dict[str, Any]],
@@ -665,6 +676,7 @@ def run_conversation(
     _plugin_user_context = _ctx.plugin_user_context
     _plugin_system_context = _ctx.plugin_system_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
+    _per_turn_user_context = _ctx.per_turn_user_context
 
     # Main conversation loop
 
@@ -870,12 +882,12 @@ def run_conversation(
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:
                         _injections.append(_fenced)
+                if _per_turn_user_context:
+                    _injections.append(_per_turn_user_context)
                 if _plugin_user_context:
                     _injections.append(_plugin_user_context)
                 if _injections:
-                    _base = api_msg.get("content", "")
-                    if isinstance(_base, str):
-                        api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                    append_api_only_user_context(api_msg, _injections)
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved

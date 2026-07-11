@@ -1,0 +1,104 @@
+{
+  "dimension": 768,
+  "embedding_shape": [
+    2,
+    768
+  ],
+  "latency": {
+    "1": {
+      "items_per_second_p50": 194.16,
+      "p50_ms": 5.15,
+      "p95_ms": 6.6
+    },
+    "16": {
+      "items_per_second_p50": 1017.8,
+      "p50_ms": 15.72,
+      "p95_ms": 16.14
+    },
+    "2": {
+      "items_per_second_p50": 351.69,
+      "p50_ms": 5.69,
+      "p95_ms": 7.12
+    },
+    "32": {
+      "items_per_second_p50": 1277.71,
+      "p50_ms": 25.04,
+      "p95_ms": 27.22
+    },
+    "4": {
+      "items_per_second_p50": 618.47,
+      "p50_ms": 6.47,
+      "p95_ms": 7.95
+    },
+    "8": {
+      "items_per_second_p50": 942.76,
+      "p50_ms": 8.49,
+      "p95_ms": 9.93
+    }
+  },
+  "load_ms": 1377.83,
+  "max_rss_mb": 1244.75,
+  "model": "mlx-community/embeddinggemma-300m-8bit",
+  "offline_reload": {
+    "embedding_shape": [
+      1,
+      768
+    ],
+    "load_ms": 1339.12,
+    "passed": true
+  },
+  "packages": {
+    "huggingface-hub": "1.23.0",
+    "mlx": "0.32.0",
+    "mlx-embeddings": "0.1.0",
+    "numpy": "2.5.1"
+  },
+  "platform": "macOS-26.5-arm64-arm-64bit-Mach-O",
+  "python": "3.13.12",
+  "revision": {
+    "commit": "c8316c9e35cf8830541b04d315398c67faa6e497",
+    "snapshot_path": "~/.cache/huggingface/hub/models--mlx-community--embeddinggemma-300m-8bit/snapshots/c8316c9e35cf8830541b04d315398c67faa6e497"
+  },
+  "schema_version": 1,
+  "synthetic": {
+    "cases": 24,
+    "corpus_documents": 72,
+    "mrr": 0.8333,
+    "per_category": {
+      "date": {
+        "n": 4,
+        "top1": 3,
+        "top3": 4
+      },
+      "direction": {
+        "n": 4,
+        "top1": 1,
+        "top3": 4
+      },
+      "negation": {
+        "n": 4,
+        "top1": 2,
+        "top3": 4
+      },
+      "paraphrase": {
+        "n": 4,
+        "top1": 3,
+        "top3": 4
+      },
+      "pronoun": {
+        "n": 4,
+        "top1": 3,
+        "top3": 4
+      },
+      "reference": {
+        "n": 4,
+        "top1": 4,
+        "top3": 4
+      }
+    },
+    "positive_margin_min": -0.0684,
+    "positive_margin_p50": 0.0216,
+    "top1": 16,
+    "top3": 24
+  }
+}

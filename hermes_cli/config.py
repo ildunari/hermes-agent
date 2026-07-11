@@ -989,12 +989,16 @@ DEFAULT_CONFIG = {
     "max_live_sessions": 16,
     "agent": {
         "max_turns": 90,
-        # Reserved contact-memory flags. Live Lane A injection is hard-blocked
-        # until core provides a provider-request suffix after cache breakpoints;
-        # changing these values alone cannot enable retrieval injection.
+        # Contact-scoped retrieval is default-off and only receives scopes
+        # assigned by authenticated gateway routing.
         "contact_memory": {
             "enabled": False,
             "lane_a": False,
+            "embedding": {
+                "backend": "off",
+                "model": "mlx-community/embeddinggemma-300m-4bit",
+                "timeout_seconds": 120,
+            },
         },
         # Inactivity timeout for gateway agent execution (seconds).
         # The agent can run indefinitely as long as it's actively calling

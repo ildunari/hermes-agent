@@ -251,6 +251,37 @@ class ContactMemoryStore:
                 (version_id, model_id, len(arr), arr.tobytes(), time.time()),
             )
 
+    def embedding_coverage(
+        self,
+        principal: RetrievalPrincipal,
+        model_id: str,
+        *,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """Return text-free vector coverage diagnostics for authorized active facts."""
+        timestamp = float(now if now is not None else time.time())
+        clause, params = visibility_sql(principal, timestamp, alias="f")
+        with self._connect() as con:
+            active = int(con.execute(
+                f"SELECT count(*) FROM fact f WHERE {clause}", params
+            ).fetchone()[0])
+            rows = con.execute(
+                f"SELECT e.model_id,e.dimensions,count(*) AS n "
+                f"FROM fact f JOIN embedding e ON e.version_id=f.version_id "
+                f"WHERE {clause} GROUP BY e.model_id,e.dimensions",
+                params,
+            ).fetchall()
+        matching = sum(int(row["n"]) for row in rows if row["model_id"] == model_id)
+        dimensions = sorted({
+            int(row["dimensions"]) for row in rows if row["model_id"] == model_id
+        })
+        return {
+            "active_authorized_facts": active,
+            "matching_vectors": matching,
+            "matching_dimensions": dimensions,
+            "complete": active > 0 and matching == active and len(dimensions) == 1,
+        }
+
     def vector_search(self, principal: RetrievalPrincipal, query_vector: Sequence[float], *, model_id: str, limit: int = 3, now: float | None = None) -> list[SearchResult]:
         query_values = [float(value) for value in query_vector]
         norm = sum(value * value for value in query_values) ** 0.5

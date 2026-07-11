@@ -116,6 +116,8 @@ class TurnContext:
     plugin_system_context: str = ""
     # External-memory prefetch result, reused across loop iterations.
     ext_prefetch_cache: str = ""
+    # Host-assigned API-only context copied onto the current user message.
+    per_turn_user_context: str = ""
 
 
 def _estimate_compression_payload_tokens(
@@ -587,10 +589,7 @@ def build_turn_context(
             if _system_piece:
                 _system_ctx_parts.append(_system_piece)
                 continue
-
-            elif isinstance(r, str) and r.strip():
-                _piece = r
-            else:
+            if not _piece:
                 continue
             if _spill_if_oversized is not None:
                 try:
@@ -659,4 +658,5 @@ def build_turn_context(
         plugin_user_context=plugin_user_context,
         plugin_system_context=plugin_system_context,
         ext_prefetch_cache=ext_prefetch_cache,
+        per_turn_user_context=str(getattr(agent, "per_turn_user_context", "") or ""),
     )

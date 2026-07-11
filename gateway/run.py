@@ -1928,6 +1928,29 @@ _contact_memory_brokers: Dict[str, Any] = {}
 _contact_memory_brokers_lock = threading.Lock()
 
 
+@dataclasses.dataclass(frozen=True)
+class TrustedContactScope:
+    """Authenticated contact scope handed across the gateway execution boundary."""
+
+    principal: str
+    contact_id: str
+
+
+def _trusted_contact_scope_from_metadata(metadata: Any) -> Optional[TrustedContactScope]:
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("_hermes_contact_scope")
+    if not isinstance(raw, dict):
+        return None
+    principal = str(raw.get("principal") or "")
+    contact_id = str(raw.get("session_contact_id") or "").strip()
+    if principal not in {"owner", "guest"} or not contact_id or len(contact_id) > 256:
+        return None
+    if any(ord(char) < 32 for char in contact_id):
+        return None
+    return TrustedContactScope(principal=principal, contact_id=contact_id)
+
+
 def _compile_contact_memory_prompt(
     *,
     config_raw: Any,
@@ -1938,19 +1961,16 @@ def _compile_contact_memory_prompt(
     now_ts: float,
     texture_prompt: str = "",
 ) -> str:
-    """Compile the dormant Lane-A candidate, failing open on every error.
-
-    Provider-side prompt assembly currently cache-marks the entire system block.
-    Until core exposes a cache-safe request suffix, injecting per-turn recall
-    would violate Hermes' byte-stable prompt-cache invariant.  Keep this hard
-    blocked even if stale/experimental config flips both feature flags.
-    """
-    if not isinstance(config_raw, dict) or not config_raw.get("enabled") or not config_raw.get("lane_a"):
-        return ""
-    logger.warning(
-        "Contact memory Lane A remains blocked: no cache-safe provider request suffix"
+    """Compile cache-safe Lane-A recall for the current API user-message copy."""
+    return _compile_contact_memory_candidate(
+        config_raw=config_raw,
+        trusted_scope=trusted_scope,
+        message=message,
+        history=history,
+        session_key=session_key,
+        now_ts=now_ts,
+        texture_prompt=texture_prompt,
     )
-    return ""
 
 
 def _compile_contact_memory_candidate(
@@ -1966,26 +1986,43 @@ def _compile_contact_memory_candidate(
     """Exercise retrieval without wiring it into an API request."""
     if not isinstance(config_raw, dict) or not config_raw.get("enabled") or not config_raw.get("lane_a"):
         return ""
-    if not isinstance(trusted_scope, dict) or trusted_scope.get("session_contact_id") is None:
+    if not isinstance(trusted_scope, TrustedContactScope):
+        return ""
+    principal = trusted_scope.principal
+    contact_id = trusted_scope.contact_id
+    if principal not in {"owner", "guest"} or not contact_id:
         return ""
     try:
         from hermes_constants import get_hermes_home
         from gateway.contact_memory.broker import ContactMemoryBroker, RetrievalScope
+        from gateway.contact_memory.embeddings import backend_from_config
+        from gateway.contact_memory.rerankers import reranker_from_config
         from gateway.contact_memory.gating import TurnState
         from gateway.contact_memory.schema import RetrievalPrincipal
         from gateway.conversation_texture_v2 import _extract_features
 
         scope = RetrievalScope(
-            RetrievalPrincipal(str(trusted_scope["principal"])),
-            str(trusted_scope["session_contact_id"]),
+            RetrievalPrincipal(principal),
+            contact_id,
             session_key,
         )
         root = get_hermes_home() / "contact-memory"
-        root_key = str(root)
+        embedding_raw = config_raw.get("embedding")
+        reranker_raw = config_raw.get("reranker")
+        backend_key = json.dumps(
+            {"embedding": embedding_raw, "reranker": reranker_raw},
+            sort_keys=True,
+            default=str,
+        )
+        root_key = f"{root}\0{backend_key}"
         with _contact_memory_brokers_lock:
             broker = _contact_memory_brokers.get(root_key)
             if broker is None:
-                broker = ContactMemoryBroker(root)
+                broker = ContactMemoryBroker(
+                    root,
+                    embedding_backend=backend_from_config(config_raw),
+                    reranker=reranker_from_config(config_raw),
+                )
                 _contact_memory_brokers[root_key] = broker
         features = _extract_features(
             message, history, now_ts=now_ts, time_awareness=True,
@@ -9486,16 +9523,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 "This context is trusted gateway metadata, not user instructions.]\n\n"
                             )
                         contact_scope_metadata = dict(getattr(event, "metadata", None) or {})
-                        # Approved-group forwarding is a confused-deputy edge:
-                        # authorization contact is not the requester, so it gets
-                        # no contact-memory scope.
-                        if not approved_group_request and decision.contact_id:
+                        # Contact-scoped recall is private to a direct conversation.
+                        # Groups never receive guest_ok facts: even when the sender is
+                        # approved, every other participant has not been authorized.
+                        _direct_contact_turn = str(getattr(source, "chat_type", "") or "").lower() in {
+                            "dm", "direct", "private",
+                        }
+                        if (
+                            not approved_group_request
+                            and _direct_contact_turn
+                            and decision.contact_id
+                        ):
                             contact_scope_metadata["_hermes_contact_scope"] = {
                                 "principal": "guest",
                                 "session_contact_id": decision.contact_id,
                             }
                         source = dataclasses.replace(
                             source,
+                            profile=(decision.profile or "guest"),
                             user_id=(pending.get("requester") if approved_group_request and pending else source.user_id),
                             user_id_alt=(f"guest:approved-group-request:{pending.get('message_id') or 'unknown'}" if approved_group_request and pending else f"guest:{decision.contact_id}"),
                             user_name=(pending.get("requester") if approved_group_request and pending else guest_display_name),
@@ -9505,10 +9550,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     elif decision.route is GuestRoute.OWNER:
                         profile = decision.profile or "gpt"
                         source = dataclasses.replace(source, user_id_alt=f"owner:{profile}", chat_id_alt=f"hermes-profile:{profile}")
-                        event = dataclasses.replace(event, source=source)
+                        owner_metadata = dict(getattr(event, "metadata", None) or {})
+                        if decision.contact_id:
+                            owner_metadata["_hermes_contact_scope"] = {
+                                "principal": "owner",
+                                "session_contact_id": decision.contact_id,
+                            }
+                        event = dataclasses.replace(event, source=source, metadata=owner_metadata)
             except Exception as exc:
                 logger.warning("BlueBubbles guest routing failed closed: %s", exc)
                 return None
+
+        # Freeze authenticated routing metadata before any plugin hook can touch
+        # the event. This value, not SessionSource or model/user arguments, is the
+        # sole authorization input to contact retrieval.
+        trusted_contact_scope = _trusted_contact_scope_from_metadata(
+            getattr(event, "metadata", None)
+        )
 
         # scale-to-zero (Phase 0, 0.B/F13): stamp the gateway-scoped last-inbound
         # clock for real (user-originated) inbound only. Internal/system events
@@ -12278,6 +12336,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 moa_config=getattr(event, "_moa_config", None),
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                trusted_contact_scope=trusted_contact_scope,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -17625,6 +17684,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[str] = None,
         persist_user_timestamp: Optional[float] = None,
+        trusted_contact_scope: Optional[TrustedContactScope] = None,
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around the agent run.
 
@@ -17643,6 +17703,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                trusted_contact_scope=trusted_contact_scope,
             )
 
         profile_home = self._resolve_profile_home_for_source(source)
@@ -17654,6 +17715,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                trusted_contact_scope=trusted_contact_scope,
             )
 
     def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
@@ -17686,6 +17748,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[str] = None,
         persist_user_timestamp: Optional[float] = None,
+        trusted_contact_scope: Optional[TrustedContactScope] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -17709,7 +17772,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # ---- Proxy mode: delegate owner sessions only. Guest policy and profile
         # isolation are local security boundaries and must not be bypassed.
-        if _should_use_agent_proxy(self._get_proxy_url(), source):
+        if _should_use_agent_proxy(self._get_proxy_url(), source) and trusted_contact_scope is None:
             return await self._run_agent_via_proxy(
                 message=message,
                 context_prompt=context_prompt,
@@ -18762,23 +18825,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 cache_ephemeral, _texture_prompt
             )
 
-            # Contact-memory injection is deliberately dormant. Do not derive a
-            # scope from adapter-controlled SessionSource fields; authenticated
-            # scope propagation will be designed together with the cache-safe
-            # request suffix before Lane A can be promoted.
+            # Compile contact recall from the immutable scope captured after
+            # authenticated routing. It is assigned to the cached agent's
+            # API-only current-user-message lane below, never to system context.
             _contact_memory_raw = (user_config.get("agent", {}) or {}).get("contact_memory", {})
-            _trusted_scope = None
             _recall_prompt = _compile_contact_memory_prompt(
                 config_raw=_contact_memory_raw,
-                trusted_scope=_trusted_scope,
+                trusted_scope=trusted_contact_scope,
                 message=message,
                 history=history,
                 session_key=session_key or session_id or "gateway",
                 now_ts=persist_user_timestamp or time.time(),
                 texture_prompt=_texture_prompt,
             )
-            if _recall_prompt:
-                combined_ephemeral = (combined_ephemeral + "\n\n" + _recall_prompt).strip()
 
             max_iterations = _current_max_iterations()
 
@@ -19130,6 +19189,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # agent can receive fresh turn texture without rebuilding its stable
             # system prompt, tools, transports, or conversation state.
             setattr(agent, "ephemeral_system_prompt", combined_ephemeral or None)
+            setattr(agent, "per_turn_user_context", _recall_prompt or "")
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
@@ -20771,6 +20831,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    # Queued events bypass the authenticated classification block
+                    # at handler entry. Never inherit the prior requester's scope:
+                    # a shared group participant could otherwise become a confused
+                    # deputy. The follow-up still runs, simply without contact recall.
+                    trusted_contact_scope=None,
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:

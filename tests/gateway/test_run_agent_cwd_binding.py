@@ -126,6 +126,10 @@ async def test_run_agent_rebinds_session_cwd_override(monkeypatch, tmp_path):
         cwd_override=str(project_dir),
     )
     runner.session_store = MagicMock()
+    # Production SessionStore owns a concrete entries mapping. Leaving this as
+    # a MagicMock makes the restart-resume path look truthy and injects
+    # persistence kwargs into the minimal test agent.
+    runner.session_store._entries = {}
     runner.session_store.get_session.return_value = None
     runner.session_store.get_or_create_session.return_value = session_entry
 
@@ -205,6 +209,7 @@ async def test_run_agent_prefers_exact_session_key_binding(monkeypatch, tmp_path
         cwd_override=str(fallback_dir),
     )
     runner.session_store = MagicMock()
+    runner.session_store._entries = {}
     runner.session_store.get_session.return_value = exact_entry
     runner.session_store.get_or_create_session.return_value = fallback_entry
 
@@ -274,6 +279,7 @@ async def test_run_agent_replaces_stale_task_cwd_with_session_binding(monkeypatc
         cwd_override=str(project_dir),
     )
     runner.session_store = MagicMock()
+    runner.session_store._entries = {}
     runner.session_store.get_session.return_value = session_entry
     runner.session_store.get_or_create_session.return_value = session_entry
 

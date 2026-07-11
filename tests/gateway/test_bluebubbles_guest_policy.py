@@ -360,7 +360,8 @@ owner_identities:
   - kosta@example.com
 guest_profile: guest
 contacts:
-  steve:
+  stephen-lucier:
+    id: stephen-lucier
     display_name: Steve Lucier
     identities:
       bluebubbles:
@@ -384,13 +385,52 @@ contacts:
 
     assert result is None
     source = captured["source"]
-    assert source.user_id_alt == "guest:steve"
+    assert source.profile == "guest"
+    assert source.user_id_alt == "guest:stephen-lucier"
     assert source.user_name == "Steve Lucier"
     assert source.chat_id_alt == "hermes-profile:guest"
     assert "Guest contact context" in captured["event"].text
-    assert "approved_contact_id=steve" in captured["event"].text
+    assert "approved_contact_id=stephen-lucier" in captured["event"].text
+    assert captured["event"].metadata["_hermes_contact_scope"] == {
+        "principal": "guest", "session_contact_id": "stephen-lucier",
+    }
     assert "display_name=Steve Lucier" in captured["event"].text
     assert captured["event"].text.endswith("hello")
+
+
+@pytest.mark.asyncio
+async def test_bluebubbles_approved_contact_group_gets_no_retrieval_scope(tmp_path):
+    registry = tmp_path / "contacts.yaml"
+    registry.write_text(
+        """
+guest_profile: guest
+contacts:
+  stephen-lucier:
+    display_name: Steve Lucier
+    identities:
+      bluebubbles:
+        handles: [guest@example.com]
+    allowed_surfaces: [bluebubbles]
+""".strip(),
+        encoding="utf-8",
+    )
+    runner = _runner(extra={"guest_routing_enabled": True, "guest_contacts_file": str(registry)})
+    event = _event(
+        "hello group",
+        _source(user_id="guest@example.com", chat_id="iMessage;+;family-chat", chat_type="group"),
+    )
+    captured = {}
+
+    def stop_after_routing(_hook_name, *, event, gateway, session_store):
+        captured["event"] = event
+        return [{"action": "skip", "reason": "captured"}]
+
+    with patch("hermes_cli.plugins.invoke_hook", side_effect=stop_after_routing):
+        assert await runner._handle_message(event) is None
+
+    assert captured["event"].source.profile == "guest"
+    assert captured["event"].source.user_id_alt == "guest:stephen-lucier"
+    assert "_hermes_contact_scope" not in captured["event"].metadata
 
 
 @pytest.mark.asyncio
@@ -486,6 +526,7 @@ contacts:
     assert "authorized Hermes" in captured["event"].text
     assert "message below is from this approved contact" not in captured["event"].text
     assert "what time is dinner?" in captured["event"].text
+    assert "_hermes_contact_scope" not in captured["event"].metadata
 
 
 @pytest.mark.asyncio
@@ -539,7 +580,8 @@ async def test_bluebubbles_owner_registry_sender_is_authorized_and_routed(tmp_pa
         """
 owner_identities:
   - kosta@example.com
-owner_profile: gpt
+owner_profile: poke
+owner_contact_id: stephen-lucier
 guest_profile: guest
 contacts:
   steve:
@@ -561,9 +603,13 @@ contacts:
     monkeypatch.delenv("GATEWAY_ALLOWED_USERS", raising=False)
     monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
 
+    owner_source = _source(
+        user_id="kosta@example.com", chat_id="iMessage;+;family-chat", chat_type="group"
+    )
+    owner_source.profile = "poke"
     event = MessageEvent(
         text="status",
-        source=_source(user_id="kosta@example.com", chat_id="iMessage;+;family-chat", chat_type="group"),
+        source=owner_source,
         raw_message={},
         message_id="m1",
         observed_only=True,
@@ -574,8 +620,10 @@ contacts:
 
     assert result is None
     routed_source = runner.session_store.get_or_create_session.call_args.args[0]
-    assert routed_source.user_id_alt == "owner:gpt"
-    assert routed_source.chat_id_alt == "hermes-profile:gpt"
+    assert routed_source.profile == "poke"
+    assert routed_source.user_id_alt == "owner:poke"
+    assert routed_source.chat_id_alt == "hermes-profile:poke"
+    assert event.source.profile == "poke"
     runner.session_store.append_to_transcript.assert_called_once()
 
 

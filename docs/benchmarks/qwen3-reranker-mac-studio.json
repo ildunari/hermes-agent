@@ -1,0 +1,69 @@
+{
+  "candidate_limit": 10,
+  "models": {
+    "candidate": {
+      "id": "mlx-community/embeddinggemma-300m-4bit",
+      "revision": {
+        "commit": "5d9ef074df3957afc5c77127f208fddbc3c54187",
+        "snapshot_path": "~/.cache/huggingface/hub/models--mlx-community--embeddinggemma-300m-4bit/snapshots/5d9ef074df3957afc5c77127f208fddbc3c54187"
+      }
+    },
+    "reranker": {
+      "id": "mlx-community/Qwen3-Reranker-0.6B-4bit",
+      "revision": {
+        "commit": "5f324548f1d20c2b5a450f126fc6ef2fb1126524",
+        "snapshot_path": "~/.cache/huggingface/hub/models--mlx-community--Qwen3-Reranker-0.6B-4bit/snapshots/5f324548f1d20c2b5a450f126fc6ef2fb1126524"
+      }
+    }
+  },
+  "platform": "macOS-26.5-arm64-arm-64bit-Mach-O",
+  "production_gate": {
+    "passed": true,
+    "requirements": {
+      "direction": "at least 3/4",
+      "negation": "at least 3/4",
+      "top1": "at least 22/24",
+      "warm_p95_ms": "below 400"
+    }
+  },
+  "schema_version": 1,
+  "synthetic": {
+    "candidate_coverage": 24,
+    "cases": 24,
+    "corpus_documents": 72,
+    "mrr": 0.9792,
+    "per_category": {
+      "date": {
+        "n": 4,
+        "top1": 4
+      },
+      "direction": {
+        "n": 4,
+        "top1": 4
+      },
+      "negation": {
+        "n": 4,
+        "top1": 3
+      },
+      "paraphrase": {
+        "n": 4,
+        "top1": 4
+      },
+      "pronoun": {
+        "n": 4,
+        "top1": 4
+      },
+      "reference": {
+        "n": 4,
+        "top1": 4
+      }
+    },
+    "top1": 23
+  },
+  "warm_retrieval_latency_ms": {
+    "max": 210.46,
+    "p50": 205.97,
+    "p95": 209.28,
+    "samples": 50
+  }
+}

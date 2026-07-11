@@ -369,6 +369,10 @@ def init_agent(
     agent.quiet_mode = quiet_mode
     agent.tool_progress_mode = tool_progress_mode
     agent.ephemeral_system_prompt = ephemeral_system_prompt
+    # API-call-only suffix for trusted per-turn context. Hosts must replace this
+    # on every turn; it is copied onto the current API user message and is never
+    # written into the transcript or cached system prompt.
+    agent.per_turn_user_context = ""
     agent.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
     agent._user_id = user_id  # Platform user identifier (gateway sessions)
     agent._user_id_alt = user_id_alt  # Optional stable alternate platform identifier

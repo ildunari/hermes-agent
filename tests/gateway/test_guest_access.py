@@ -23,11 +23,12 @@ UNKNOWN_PHONE = "+12025550999"
 
 def _registry():
     return ContactRegistry.from_dict({
-        "owner_profile": "gpt",
+        "owner_profile": "poke",
+        "owner_contact_id": "stephen-lucier",
         "guest_profile": "guest",
         "owner_identities": [OWNER_PHONE, "kosta@example.com"],
         "contacts": {
-            "steve": {
+            "stephen-lucier": {
                 "display_name": "Steve Lucier",
                 "role": "family_guest",
                 "identities": {"bluebubbles": {"handles": [GUEST_PHONE]}},
@@ -53,10 +54,11 @@ def test_normalize_bluebubbles_phone_and_email_aliases():
     assert normalize_identity("iMessage;-;Kosta@Example.COM") == "kosta@example.com"
 
 
-def test_owner_dm_routes_to_gpt_profile():
+def test_owner_dm_routes_to_poke_profile():
     decision = classify_bluebubbles_route(_source("+1 202 555 0123"), {}, _registry())
     assert decision.route is GuestRoute.OWNER
-    assert decision.profile == "gpt"
+    assert decision.profile == "poke"
+    assert decision.contact_id == "stephen-lucier"
     assert decision.reason == "owner sender"
 
 
@@ -64,7 +66,7 @@ def test_approved_family_dm_routes_to_guest_profile():
     decision = classify_bluebubbles_route(_source("202-555-0124"), {}, _registry())
     assert decision.route is GuestRoute.GUEST
     assert decision.profile == "guest"
-    assert decision.contact_id == "steve"
+    assert decision.contact_id == "stephen-lucier"
     assert decision.contact_display_name == "Steve Lucier"
     assert decision.contact_role == "family_guest"
 
@@ -93,7 +95,7 @@ def test_group_with_owner_participant_keeps_guest_sender_on_guest_profile():
     )
     assert decision.route is GuestRoute.GUEST
     assert decision.profile == "guest"
-    assert decision.contact_id == "steve"
+    assert decision.contact_id == "stephen-lucier"
     assert decision.contact_display_name == "Steve Lucier"
     assert decision.contact_role == "family_guest"
 
@@ -107,7 +109,7 @@ def test_group_without_owner_allows_approved_guest_sender():
     )
     assert decision.route is GuestRoute.GUEST
     assert decision.profile == "guest"
-    assert decision.contact_id == "steve"
+    assert decision.contact_id == "stephen-lucier"
 
 
 def test_group_unknown_sender_is_denied_but_approved_contacts_are_discoverable():
@@ -120,7 +122,7 @@ def test_group_unknown_sender_is_denied_but_approved_contacts_are_discoverable()
     )
     assert decision.route is GuestRoute.DENY
     approved = approved_bluebubbles_contacts_in_message(raw, registry)
-    assert [contact.contact_id for contact in approved] == ["steve"]
+    assert [contact.contact_id for contact in approved] == ["stephen-lucier"]
 
 
 def test_guest_toolset_excludes_admin_and_paid_tools():

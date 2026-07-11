@@ -29,7 +29,7 @@ def can_retrieve(principal: RetrievalPrincipal, fact: FactProposal, *, now: floa
         return False
     if fact.valid_to is not None and fact.valid_to <= timestamp:
         return False
-    if fact.mention_policy is MentionPolicy.RESTRICTED:
+    if fact.mention_policy in {MentionPolicy.RESTRICTED, MentionPolicy.SENSITIVE}:
         return False
     if principal is RetrievalPrincipal.GUEST:
         return (
@@ -46,7 +46,8 @@ def visibility_sql(principal: RetrievalPrincipal, now: float, *, alias: str = ""
     p = f"{alias}." if alias else ""
     common = (
         f"{p}status='active' AND {p}tx_to IS NULL AND {p}valid_from<=? "
-        f"AND ({p}valid_to IS NULL OR {p}valid_to>?) AND {p}mention_policy!='restricted'"
+        f"AND ({p}valid_to IS NULL OR {p}valid_to>?) "
+        f"AND {p}mention_policy NOT IN ('restricted','sensitive')"
     )
     params: tuple[object, ...] = (now, now)
     if principal is RetrievalPrincipal.GUEST:

@@ -78,6 +78,9 @@ class ContactRegistry:
     admin_delivery_target: str | None = None
     guest_profile: str = "guest"
     owner_profile: str = "gpt"
+    # Optional contact namespace exposed to the authenticated owner/Poke route.
+    # It is configuration, never inferred from message text or memories.
+    owner_contact_id: str | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> "ContactRegistry":
@@ -124,6 +127,11 @@ class ContactRegistry:
             admin_delivery_target=data.get("admin_delivery_target"),
             guest_profile=str(data.get("guest_profile") or "guest"),
             owner_profile=str(data.get("owner_profile") or "gpt"),
+            owner_contact_id=(
+                str(data.get("owner_contact_id")).strip()
+                if data.get("owner_contact_id")
+                else None
+            ),
         )
 
     def find_bluebubbles_contact(self, identity: str | None) -> ContactPolicy | None:
@@ -342,7 +350,12 @@ def classify_bluebubbles_route(source: Any, raw_message: Mapping[str, Any] | Non
     chat_type = (getattr(source, "chat_type", None) or "dm").lower()
 
     if registry.is_owner_identity(sender):
-        return BlueBubblesRouteDecision(GuestRoute.OWNER, registry.owner_profile, reason="owner sender")
+        return BlueBubblesRouteDecision(
+            GuestRoute.OWNER,
+            registry.owner_profile,
+            contact_id=registry.owner_contact_id,
+            reason="owner sender",
+        )
 
     contact = registry.find_bluebubbles_contact(sender)
     contact_allowed = bool(contact and "bluebubbles" in contact.allowed_surfaces)

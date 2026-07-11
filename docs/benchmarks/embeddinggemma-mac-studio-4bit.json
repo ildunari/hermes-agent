@@ -1,0 +1,110 @@
+{
+  "dimension": 768,
+  "dossier_aggregate": {
+    "eligible_unique_labels": 2,
+    "rows_read": 151,
+    "top1": 0,
+    "top3": 1
+  },
+  "embedding_shape": [
+    2,
+    768
+  ],
+  "latency": {
+    "1": {
+      "items_per_second_p50": 203.67,
+      "p50_ms": 4.91,
+      "p95_ms": 6.56
+    },
+    "16": {
+      "items_per_second_p50": 1015.16,
+      "p50_ms": 15.76,
+      "p95_ms": 16.45
+    },
+    "2": {
+      "items_per_second_p50": 373.09,
+      "p50_ms": 5.36,
+      "p95_ms": 6.8
+    },
+    "32": {
+      "items_per_second_p50": 1286.71,
+      "p50_ms": 24.87,
+      "p95_ms": 26.24
+    },
+    "4": {
+      "items_per_second_p50": 634.43,
+      "p50_ms": 6.3,
+      "p95_ms": 7.83
+    },
+    "8": {
+      "items_per_second_p50": 923.42,
+      "p50_ms": 8.66,
+      "p95_ms": 10.05
+    }
+  },
+  "load_ms": 1320.49,
+  "max_rss_mb": 1096.66,
+  "model": "mlx-community/embeddinggemma-300m-4bit",
+  "offline_reload": {
+    "embedding_shape": [
+      1,
+      768
+    ],
+    "load_ms": 1291.28,
+    "passed": true
+  },
+  "packages": {
+    "huggingface-hub": "1.23.0",
+    "mlx": "0.32.0",
+    "mlx-embeddings": "0.1.0",
+    "numpy": "2.5.1"
+  },
+  "platform": "macOS-26.5-arm64-arm-64bit-Mach-O",
+  "python": "3.13.12",
+  "revision": {
+    "commit": "5d9ef074df3957afc5c77127f208fddbc3c54187",
+    "snapshot_path": "~/.cache/huggingface/hub/models--mlx-community--embeddinggemma-300m-4bit/snapshots/5d9ef074df3957afc5c77127f208fddbc3c54187"
+  },
+  "schema_version": 1,
+  "synthetic": {
+    "cases": 24,
+    "corpus_documents": 72,
+    "mrr": 0.8542,
+    "per_category": {
+      "date": {
+        "n": 4,
+        "top1": 4,
+        "top3": 4
+      },
+      "direction": {
+        "n": 4,
+        "top1": 1,
+        "top3": 4
+      },
+      "negation": {
+        "n": 4,
+        "top1": 2,
+        "top3": 4
+      },
+      "paraphrase": {
+        "n": 4,
+        "top1": 3,
+        "top3": 4
+      },
+      "pronoun": {
+        "n": 4,
+        "top1": 3,
+        "top3": 4
+      },
+      "reference": {
+        "n": 4,
+        "top1": 4,
+        "top3": 4
+      }
+    },
+    "positive_margin_min": -0.0592,
+    "positive_margin_p50": 0.0211,
+    "top1": 17,
+    "top3": 24
+  }
+}
