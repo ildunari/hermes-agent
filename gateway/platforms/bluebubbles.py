@@ -13,6 +13,7 @@ from collections import OrderedDict
 import json
 import logging
 import os
+import random
 import re
 import uuid
 from datetime import datetime
@@ -150,6 +151,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self.split_outbound_paragraphs = self._coerce_bool(
             extra.get("split_outbound_paragraphs", os.getenv("BLUEBUBBLES_SPLIT_OUTBOUND_PARAGRAPHS")),
             default=False,
+        )
+        self.bubble_delay_min_ms = max(0, int(extra.get("bubble_delay_min_ms", 0) or 0))
+        self.bubble_delay_max_ms = max(
+            self.bubble_delay_min_ms,
+            int(extra.get("bubble_delay_max_ms", self.bubble_delay_min_ms) or self.bubble_delay_min_ms),
+        )
+        self.bubble_typing_chars_per_second = max(
+            1.0, float(extra.get("bubble_typing_chars_per_second", 18.0) or 18.0)
         )
         self.webhook_register = self._coerce_bool(
             extra.get("webhook_register", os.getenv("BLUEBUBBLES_WEBHOOK_REGISTER", "true")),
@@ -679,6 +688,16 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         last = SendResult(success=True)
         delivered_chunks = 0
         for chunk in chunks:
+            if delivered_chunks > 0 and self.bubble_delay_max_ms > 0:
+                # A burst should feel typed, not atomically dumped. The delay is
+                # bounded by profile config and scales gently with bubble length.
+                try:
+                    await self.send_typing(chat_id)
+                except Exception:
+                    pass
+                jitter = random.uniform(self.bubble_delay_min_ms, self.bubble_delay_max_ms) / 1000.0
+                typed = min(2.5, len(chunk) / self.bubble_typing_chars_per_second)
+                await asyncio.sleep(jitter + typed)
             guid = await self._resolve_chat_guid(chat_id)
             if not guid:
                 # If the target looks like an address, try creating a new chat

@@ -314,6 +314,12 @@ class GatewayAuthorizationMixin:
         ):
             return True
 
+        route_marker = str(getattr(source, "user_id_alt", "") or "")
+        if route_marker.startswith("guest:"):
+            return True
+        if source.platform == Platform.BLUEBUBBLES and route_marker.startswith("owner:"):
+            return True
+
         user_id = source.user_id
 
         # Telegram (and similar) authorize entire group/forum/channel chats

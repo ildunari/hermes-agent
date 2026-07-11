@@ -446,6 +446,8 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     text = str(message or "").strip()
     if not text:
         return None
+    if _gateway_platform_value(platform) == "bluebubbles" and str(event_type).lower() == "lifecycle":
+        return None
     if _gateway_surface_passes_raw_text(platform):
         return text
 
@@ -1849,6 +1851,159 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
+def _texture_timezone(user_config: Dict[str, Any], texture_raw: Dict[str, Any]) -> str:
+    """Resolve an explicit IANA timezone without consulting the gateway host."""
+    agent_config = user_config.get("agent", {}) or {}
+    return str(
+        texture_raw.get("timezone")
+        or agent_config.get("timezone")
+        or user_config.get("timezone")
+        or "UTC"
+    )
+
+
+def _compile_conversation_texture_prompt(
+    *,
+    texture_raw: Dict[str, Any],
+    message: str,
+    history: List[Dict[str, Any]],
+    session_key: str,
+    user_config: Dict[str, Any],
+    now_ts: Optional[float] = None,
+    current_message_id: Optional[str] = None,
+    turn_ordinal: Optional[int] = None,
+) -> str:
+    """Compile v1/v2 private guidance, failing open on every compiler error."""
+    if not isinstance(texture_raw, dict) or not texture_raw.get("enabled"):
+        return ""
+    engine = str(texture_raw.get("engine") or "v1").strip().lower()
+    try:
+        if engine == "v2":
+            from gateway.conversation_texture_v2 import (
+                TextureConfig,
+                compile_turn_guidance,
+                load_exemplars,
+            )
+            config = TextureConfig.from_mapping(texture_raw)
+            return compile_turn_guidance(
+                message=message,
+                history=history,
+                session_key=session_key,
+                config=config,
+                exemplars=load_exemplars(config.exemplar_path),
+                now_ts=now_ts,
+                timezone_name=_texture_timezone(user_config, texture_raw),
+                current_message_id=current_message_id,
+                turn_ordinal=turn_ordinal,
+            )
+
+        from gateway.conversation_texture import (
+            TextureConfig,
+            compile_turn_guidance,
+            load_exemplars,
+        )
+        config = TextureConfig.from_mapping(texture_raw)
+        return compile_turn_guidance(
+            message=message,
+            history=history,
+            session_key=session_key,
+            config=config,
+            exemplars=load_exemplars(config.exemplar_path),
+        )
+    except Exception as exc:
+        logger.warning("Conversation texture guidance skipped: %s", exc)
+        return ""
+
+
+def _with_conversation_texture(base_prompt: str, texture_prompt: str) -> tuple[str, str]:
+    """Return separate cache-signature and per-execution prompts."""
+    cache_prompt = base_prompt
+    execution_prompt = base_prompt
+    if texture_prompt:
+        execution_prompt = (execution_prompt + "\n\n" + texture_prompt).strip()
+    return cache_prompt, execution_prompt
+
+
+_contact_memory_brokers: Dict[str, Any] = {}
+_contact_memory_brokers_lock = threading.Lock()
+
+
+def _compile_contact_memory_prompt(
+    *,
+    config_raw: Any,
+    trusted_scope: Any,
+    message: str,
+    history: List[Dict[str, Any]],
+    session_key: str,
+    now_ts: float,
+    texture_prompt: str = "",
+) -> str:
+    """Compile the dormant Lane-A candidate, failing open on every error.
+
+    Provider-side prompt assembly currently cache-marks the entire system block.
+    Until core exposes a cache-safe request suffix, injecting per-turn recall
+    would violate Hermes' byte-stable prompt-cache invariant.  Keep this hard
+    blocked even if stale/experimental config flips both feature flags.
+    """
+    if not isinstance(config_raw, dict) or not config_raw.get("enabled") or not config_raw.get("lane_a"):
+        return ""
+    logger.warning(
+        "Contact memory Lane A remains blocked: no cache-safe provider request suffix"
+    )
+    return ""
+
+
+def _compile_contact_memory_candidate(
+    *,
+    config_raw: Any,
+    trusted_scope: Any,
+    message: str,
+    history: List[Dict[str, Any]],
+    session_key: str,
+    now_ts: float,
+    texture_prompt: str = "",
+) -> str:
+    """Exercise retrieval without wiring it into an API request."""
+    if not isinstance(config_raw, dict) or not config_raw.get("enabled") or not config_raw.get("lane_a"):
+        return ""
+    if not isinstance(trusted_scope, dict) or trusted_scope.get("session_contact_id") is None:
+        return ""
+    try:
+        from hermes_constants import get_hermes_home
+        from gateway.contact_memory.broker import ContactMemoryBroker, RetrievalScope
+        from gateway.contact_memory.gating import TurnState
+        from gateway.contact_memory.schema import RetrievalPrincipal
+        from gateway.conversation_texture_v2 import _extract_features
+
+        scope = RetrievalScope(
+            RetrievalPrincipal(str(trusted_scope["principal"])),
+            str(trusted_scope["session_contact_id"]),
+            session_key,
+        )
+        root = get_hermes_home() / "contact-memory"
+        root_key = str(root)
+        with _contact_memory_brokers_lock:
+            broker = _contact_memory_brokers.get(root_key)
+            if broker is None:
+                broker = ContactMemoryBroker(root)
+                _contact_memory_brokers[root_key] = broker
+        features = _extract_features(
+            message, history, now_ts=now_ts, time_awareness=True,
+            timezone_name=str(config_raw.get("timezone") or "UTC"),
+        )
+        turn = TurnState(
+            register=features.register,
+            closure=features.closure,
+            reaction="response_class: reaction" in texture_prompt,
+            turn_index=sum(row.get("role") == "user" for row in history),
+            now=now_ts,
+        )
+        return broker.prefetch(scope, message, history, turn).rendered
+    except Exception as exc:
+        logger.warning("Contact memory prefetch skipped: %s", exc)
+        return ""
+
+
 _OWN_POLICY_OPEN_ENV = {
     Platform.WECOM: ("WECOM_DM_POLICY", "WECOM_GROUP_POLICY", "WECOM_ALLOW_ALL_USERS"),
     Platform.WEIXIN: ("WEIXIN_DM_POLICY", "WEIXIN_GROUP_POLICY", "WEIXIN_ALLOW_ALL_USERS"),
@@ -1898,7 +2053,7 @@ def _own_policy_open_startup_violation(config) -> Optional[str]:
 _AGENT_PENDING_SENTINEL = object()
 
 
-def _resolve_runtime_agent_kwargs() -> dict:
+def _resolve_runtime_agent_kwargs(config: dict | None = None) -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
     Provider is read from ``config.yaml`` ``model.provider`` (the single
@@ -1918,8 +2073,20 @@ def _resolve_runtime_agent_kwargs() -> dict:
     )
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
 
+    model_cfg = (config or {}).get("model") if isinstance(config, dict) else None
+    model_cfg = model_cfg if isinstance(model_cfg, dict) else {}
+    requested_provider = str(model_cfg.get("provider") or "").strip() or None
+    explicit_api_key = str(model_cfg.get("api_key") or "").strip() or None
+    explicit_base_url = str(model_cfg.get("base_url") or "").strip() or None
+    target_model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip() or None
+
     try:
-        runtime = resolve_runtime_provider()
+        runtime = resolve_runtime_provider(
+            requested=requested_provider,
+            explicit_api_key=explicit_api_key,
+            explicit_base_url=explicit_base_url,
+            target_model=target_model,
+        )
     except AuthError as auth_exc:
         # Distinguish a transient rate-limit/quota cap (credentials are fine,
         # re-auth cannot help) from a genuine auth failure (expired/revoked
@@ -1929,14 +2096,16 @@ def _resolve_runtime_agent_kwargs() -> dict:
             logger.warning("Primary provider rate-limited (429): %s — trying fallback", auth_exc)
         else:
             logger.warning("Primary provider auth failed: %s — trying fallback", auth_exc)
-        fb_config = _try_resolve_fallback_provider()
+        fb_config = _try_resolve_fallback_provider(config)
         if fb_config is not None:
             return fb_config
         raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
-    model_cfg = _get_model_config()
+    runtime_model_cfg = model_cfg if isinstance(config, dict) else _get_model_config()
+    runtime_model_cfg = runtime_model_cfg if isinstance(runtime_model_cfg, dict) else {}
+    api_mode_override = str(runtime_model_cfg.get("api_mode") or "").strip() or None
     max_tokens = None
     _env_mt = os.environ.get("HERMES_MAX_TOKENS")
     if _env_mt:
@@ -1944,8 +2113,8 @@ def _resolve_runtime_agent_kwargs() -> dict:
             max_tokens = int(_env_mt)
         except (ValueError, TypeError):
             max_tokens = None
-    elif isinstance(model_cfg, dict):
-        mt = model_cfg.get("max_tokens")
+    else:
+        mt = runtime_model_cfg.get("max_tokens")
         if isinstance(mt, int):
             max_tokens = mt
     # Fall back to a per-provider output cap (custom_providers max_output_tokens)
@@ -1960,7 +2129,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
         "provider": runtime.get("provider"),
-        "api_mode": runtime.get("api_mode"),
+        "api_mode": api_mode_override or runtime.get("api_mode"),
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
@@ -2006,16 +2175,19 @@ def _credential_pool_for_provider(provider: Optional[str]):
         return None
 
 
-def _try_resolve_fallback_provider() -> dict | None:
+def _try_resolve_fallback_provider(config: dict | None = None) -> dict | None:
     """Attempt to resolve credentials from the fallback_model/fallback_providers config."""
     from hermes_cli.runtime_provider import resolve_runtime_provider
     try:
-        import yaml as _y
-        cfg_path = _hermes_home / "config.yaml"
-        if not cfg_path.exists():
-            return None
-        with open(cfg_path, encoding="utf-8") as _f:
-            cfg = _y.safe_load(_f) or {}
+        if isinstance(config, dict):
+            cfg = config
+        else:
+            import yaml as _y
+            cfg_path = _hermes_home / "config.yaml"
+            if not cfg_path.exists():
+                return None
+            with open(cfg_path, encoding="utf-8") as _f:
+                cfg = _y.safe_load(_f) or {}
         fb_list = get_fallback_chain(cfg)
         if not fb_list:
             return None
@@ -2436,6 +2608,95 @@ def _load_gateway_config() -> dict:
     except Exception:
         pass
     return raw
+
+
+def _load_gateway_config_for_profile(profile: str | None) -> dict:
+    """Load profile config without changing the process-wide Hermes home."""
+    if not profile or not str(profile).strip():
+        return _load_gateway_config()
+    profile = str(profile).strip()
+    if profile == os.getenv("HERMES_PROFILE"):
+        return _load_gateway_config()
+    config_path = Path.home() / ".hermes" / "profiles" / profile / "config.yaml"
+    try:
+        if config_path.exists():
+            import yaml
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.debug("Could not load gateway profile config from %s", config_path, exc_info=True)
+    return {}
+
+
+def _load_guest_profile_identity_prompt(profile: str | None, config: dict | None = None) -> str:
+    """Load the guest profile's explicit identity and safety instructions."""
+    if not profile or not str(profile).strip():
+        return ""
+    profile = str(profile).strip()
+    cfg = config if isinstance(config, dict) else _load_gateway_config_for_profile(profile)
+    parts: list[str] = []
+    configured = str(cfg_get(cfg or {}, "agent", "system_prompt", default="") or "").strip()
+    if configured:
+        parts.append(configured)
+    soul_path = Path.home() / ".hermes" / "profiles" / profile / "SOUL.md"
+    try:
+        if soul_path.exists():
+            soul = soul_path.read_text(encoding="utf-8").strip()
+            if soul:
+                parts.append(soul)
+    except Exception:
+        logger.debug("Could not load guest SOUL.md from %s", soul_path, exc_info=True)
+    return "\n\n".join(parts)
+
+
+def _is_guest_source(source: Optional[SessionSource]) -> bool:
+    return str(getattr(source, "user_id_alt", "") or "").startswith("guest:")
+
+
+def _is_owner_routed_source(source: Optional[SessionSource]) -> bool:
+    return str(getattr(source, "user_id_alt", "") or "").startswith("owner:")
+
+
+def _routed_profile_for_source(source: Optional[SessionSource]) -> Optional[str]:
+    marker = str(getattr(source, "chat_id_alt", "") or "")
+    if marker.startswith("hermes-profile:") and (_is_guest_source(source) or _is_owner_routed_source(source)):
+        return marker.split(":", 1)[1] or None
+    return None
+
+
+def _guest_profile_for_source(source: Optional[SessionSource]) -> Optional[str]:
+    return _routed_profile_for_source(source) if _is_guest_source(source) else None
+
+
+def _prepend_guest_profile_identity_prompt(prompt: str, source: Optional[SessionSource], config: dict | None, *, guest_session: bool) -> str:
+    if not guest_session:
+        return prompt or ""
+    identity = _load_guest_profile_identity_prompt(_guest_profile_for_source(source), config)
+    return ((prompt or "") + "\n\n" + identity).strip() if identity else (prompt or "")
+
+
+def _should_use_agent_proxy(proxy_url: str | None, source: Optional[SessionSource]) -> bool:
+    return bool(proxy_url) and not _is_guest_source(source)
+
+
+def _bluebubbles_guest_group_pending_key(source: Optional[SessionSource]) -> str:
+    return ":".join(("bluebubbles-guest-group", str(getattr(source, "chat_id", "") or ""), str(getattr(source, "thread_id", "") or "")))
+
+
+_GUEST_GROUP_APPROVAL_WORDS = frozenset({"yes", "y", "yeah", "yep", "ok", "okay", "sure", "answer", "respond", "go ahead", "do it", "approved", "approve"})
+_GUEST_GROUP_DENIAL_WORDS = frozenset({"no", "n", "nah", "nope", "deny", "ignore", "don't", "dont"})
+
+
+def _looks_like_guest_group_approval(text: str, reply_to_message_id: str | None, prompt_message_id: str | None, *, mentioned: bool = False) -> bool:
+    raw = (text or "").strip().lower()
+    if reply_to_message_id and prompt_message_id and str(reply_to_message_id) == str(prompt_message_id):
+        return raw in _GUEST_GROUP_APPROVAL_WORDS
+    return bool(mentioned and raw in _GUEST_GROUP_APPROVAL_WORDS)
+
+
+def _looks_like_guest_group_denial(text: str, reply_to_message_id: str | None, prompt_message_id: str | None) -> bool:
+    raw = (text or "").strip().lower()
+    return bool(reply_to_message_id and prompt_message_id and str(reply_to_message_id) == str(prompt_message_id) and raw in _GUEST_GROUP_DENIAL_WORDS)
 
 
 def _load_gateway_runtime_config() -> dict:
@@ -3862,7 +4123,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
             )
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        runtime_kwargs = (
+            _resolve_runtime_agent_kwargs(user_config)
+            if _routed_profile_for_source(source)
+            else _resolve_runtime_agent_kwargs()
+        )
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             logger.info(
@@ -9086,6 +9351,165 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # are system-generated and must skip user authorization.
         is_internal = bool(getattr(event, "internal", False))
 
+        # Adapter metadata is untrusted. Remove any attempted retrieval scope;
+        # only authenticated BlueBubbles routing below may add this key.
+        if getattr(event, "metadata", None) and "_hermes_contact_scope" in event.metadata:
+            event = dataclasses.replace(
+                event,
+                metadata={k: v for k, v in event.metadata.items() if k != "_hermes_contact_scope"},
+            )
+
+        # BlueBubbles is the ingress owner for this surface. Classify before
+        # hooks/auth and fail closed whenever registry routing is enabled.
+        if not is_internal and source.platform == Platform.BLUEBUBBLES:
+            try:
+                platform_cfg = getattr(getattr(self, "config", None), "platforms", {}).get(Platform.BLUEBUBBLES)
+                extra = getattr(platform_cfg, "extra", {}) if platform_cfg else {}
+                registry_path = extra.get("guest_contacts_file") or extra.get("contact_registry") or os.getenv("HERMES_BLUEBUBBLES_GUEST_CONTACTS")
+                if registry_path or extra.get("guest_routing_enabled"):
+                    from gateway.guest_access import (
+                        GuestRoute,
+                        approved_bluebubbles_contacts_in_message,
+                        classify_bluebubbles_route,
+                        load_contact_registry,
+                    )
+                    registry = load_contact_registry(registry_path)
+                    decision = classify_bluebubbles_route(source, event.raw_message, registry)
+                    if decision.route is GuestRoute.DENY:
+                        approved_contacts = approved_bluebubbles_contacts_in_message(event.raw_message, registry)
+                        if source.chat_type == "group" and approved_contacts:
+                            pending_key = _bluebubbles_guest_group_pending_key(source)
+                            pending_requests = getattr(self, "_pending_bluebubbles_guest_group_requests", {})
+                            pending_queue = pending_requests.get(pending_key, [])
+                            if isinstance(pending_queue, dict):
+                                pending_queue = [pending_queue]
+                            if event.reply_to_message_id and any(
+                                str(event.reply_to_message_id) == str(item.get("prompt_message_id"))
+                                for item in pending_queue if isinstance(item, dict)
+                            ):
+                                return None
+                            primary = approved_contacts[0]
+                            group_source = dataclasses.replace(
+                                source,
+                                user_id_alt=f"guest:{primary.contact_id}",
+                                chat_id_alt=f"hermes-profile:{registry.guest_profile or 'guest'}",
+                            )
+                            if getattr(event, "observed_only", False):
+                                source = group_source
+                                event = dataclasses.replace(event, source=source)
+                            else:
+                                pending = {
+                                    "text": event.text,
+                                    "source": group_source,
+                                    "requester": source.user_name or source.user_id or "someone",
+                                    "message_id": event.message_id,
+                                }
+                                adapter = self.adapters.get(source.platform)
+                                prompt_result = None
+                                if adapter:
+                                    prompt_result = await adapter.send(
+                                        source.chat_id,
+                                        "approved contacts: someone asked me this, ok to answer?\n\n"
+                                        f"\"{(event.text or '').strip()}\"",
+                                    )
+                                if prompt_result is not None and not getattr(prompt_result, "success", False):
+                                    return None
+                                if prompt_result is not None:
+                                    pending["prompt_message_id"] = getattr(prompt_result, "message_id", None)
+                                if not hasattr(self, "_pending_bluebubbles_guest_group_requests"):
+                                    self._pending_bluebubbles_guest_group_requests = {}
+                                queue = self._pending_bluebubbles_guest_group_requests.setdefault(pending_key, [])
+                                queue.append(pending)
+                                if len(queue) > 10:
+                                    del queue[:-10]
+                                return None
+                        else:
+                            logger.info("BlueBubbles guest routing denied sender=%s reason=%s", source.user_id, decision.reason)
+                            return None
+                    if decision.route is GuestRoute.GUEST:
+                        approved_group_request = False
+                        pending_key = _bluebubbles_guest_group_pending_key(source)
+                        pending_requests = getattr(self, "_pending_bluebubbles_guest_group_requests", {})
+                        pending_queue = pending_requests.get(pending_key, []) if source.chat_type == "group" else []
+                        if isinstance(pending_queue, dict):
+                            pending_queue = [pending_queue]
+                        pending = None
+                        if pending_queue:
+                            mentioned = bool(getattr(event, "_bluebubbles_was_mentioned", False))
+                            for candidate in list(pending_queue):
+                                if _looks_like_guest_group_denial(event.text, event.reply_to_message_id, candidate.get("prompt_message_id")) or _looks_like_guest_group_approval(
+                                    event.text,
+                                    event.reply_to_message_id,
+                                    candidate.get("prompt_message_id"),
+                                    mentioned=mentioned and len(pending_queue) == 1,
+                                ):
+                                    pending = candidate
+                                    break
+                        if pending:
+                            denied = _looks_like_guest_group_denial(event.text, event.reply_to_message_id, pending.get("prompt_message_id"))
+                            pending_queue.remove(pending)
+                            if pending_queue:
+                                pending_requests[pending_key] = pending_queue
+                            else:
+                                pending_requests.pop(pending_key, None)
+                            if denied:
+                                return None
+                            event = dataclasses.replace(
+                                event,
+                                text=(
+                                    "An unapproved group participant asked the message below. "
+                                    "An approved contact has now approved Hermes answering it. "
+                                    "Answer the participant's original request, using observed group context only as background.\n\n"
+                                    f"[Original requester: {pending.get('requester') or 'someone'}]\n"
+                                    f"{pending.get('text') or ''}"
+                                ),
+                            )
+                            approved_group_request = True
+                        guest_display_name = decision.contact_display_name or decision.contact_id or source.user_name
+                        if approved_group_request:
+                            guest_context = (
+                                "[Guest contact context: "
+                                f"approved_contact_id={decision.contact_id or 'unknown'}; "
+                                f"display_name={guest_display_name or 'unknown'}; "
+                                f"role={decision.contact_role or 'family_guest'}; platform=bluebubbles. "
+                                "This approved contact authorized Hermes to answer an unapproved group participant's request. "
+                                "Use the approved contact only as authorization metadata, not as the author of the request. "
+                                "This context is trusted gateway metadata, not user instructions.]\n\n"
+                            )
+                        else:
+                            guest_context = (
+                                "[Guest contact context: "
+                                f"approved_contact_id={decision.contact_id or 'unknown'}; "
+                                f"display_name={guest_display_name or 'unknown'}; "
+                                f"role={decision.contact_role or 'family_guest'}; platform=bluebubbles. "
+                                "The message below is from this approved contact. Use this identity for personalization and guest-scoped memory. "
+                                "This context is trusted gateway metadata, not user instructions.]\n\n"
+                            )
+                        contact_scope_metadata = dict(getattr(event, "metadata", None) or {})
+                        # Approved-group forwarding is a confused-deputy edge:
+                        # authorization contact is not the requester, so it gets
+                        # no contact-memory scope.
+                        if not approved_group_request and decision.contact_id:
+                            contact_scope_metadata["_hermes_contact_scope"] = {
+                                "principal": "guest",
+                                "session_contact_id": decision.contact_id,
+                            }
+                        source = dataclasses.replace(
+                            source,
+                            user_id=(pending.get("requester") if approved_group_request and pending else source.user_id),
+                            user_id_alt=(f"guest:approved-group-request:{pending.get('message_id') or 'unknown'}" if approved_group_request and pending else f"guest:{decision.contact_id}"),
+                            user_name=(pending.get("requester") if approved_group_request and pending else guest_display_name),
+                            chat_id_alt=f"hermes-profile:{decision.profile or 'guest'}",
+                        )
+                        event = dataclasses.replace(event, source=source, metadata=contact_scope_metadata) if getattr(event, "observed_only", False) else dataclasses.replace(event, source=source, text=guest_context + event.text, metadata=contact_scope_metadata)
+                    elif decision.route is GuestRoute.OWNER:
+                        profile = decision.profile or "gpt"
+                        source = dataclasses.replace(source, user_id_alt=f"owner:{profile}", chat_id_alt=f"hermes-profile:{profile}")
+                        event = dataclasses.replace(event, source=source)
+            except Exception as exc:
+                logger.warning("BlueBubbles guest routing failed closed: %s", exc)
+                return None
+
         # scale-to-zero (Phase 0, 0.B/F13): stamp the gateway-scoped last-inbound
         # clock for real (user-originated) inbound only. Internal/system events
         # (background-process completions, startup-restore replays) are NOT
@@ -9187,6 +9611,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                     # Record rate limit so subsequent messages are silently ignored
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
+            return None
+
+        # Shared BlueBubbles groups never inherit an owner-bound approval by
+        # backward-compatible open-slash semantics. Approval is admin-only even
+        # when no slash policy was configured.
+        _early_command = event.get_command()
+        if (
+            source.platform == Platform.BLUEBUBBLES
+            and source.chat_type == "group"
+            and _early_command in {"approve", "deny"}
+        ):
+            denial = self._check_slash_access(source, _early_command)
+            if denial is not None:
+                return denial
+
+        if getattr(event, "observed_only", False):
+            session_entry = self.session_store.get_or_create_session(source)
+            sender = source.user_name or source.user_id or "group member"
+            observed_text = (event.text or "").strip()
+            if event.media_urls:
+                observed_text = f"{observed_text}\nAttachments: " + ", ".join(event.media_urls)
+            self.session_store.append_to_transcript(
+                session_entry.session_id,
+                {
+                    "role": "user",
+                    "content": f"[Observed group message from {sender}] {observed_text}",
+                    "message_id": event.message_id,
+                    "observed": True,
+                },
+            )
             return None
         
         # Intercept messages that are responses to a pending /update prompt.
@@ -12639,6 +13093,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not canonical_cmd:
             return None
         policy = _policy_for_source(self.config, source)
+        canonical_cmd = str(canonical_cmd).strip().lower()
+        guest_admin_commands = {"restart", "model", "yolo", "approve", "deny"}
+        must_be_admin = (
+            (_is_guest_source(source) and canonical_cmd in guest_admin_commands)
+            or (
+                source.platform == Platform.BLUEBUBBLES
+                and source.chat_type == "group"
+                and canonical_cmd in {"approve", "deny"}
+            )
+        )
+        if must_be_admin and (not policy.enabled or not policy.is_admin(source.user_id)):
+            return f"⛔ /{canonical_cmd} is admin-only here."
         if not policy.enabled or policy.can_run(source.user_id, canonical_cmd):
             return None
         logger.info(
@@ -17233,8 +17699,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
-        # ---- Proxy mode: delegate to remote API server ----
-        if self._get_proxy_url():
+        routed_profile = _routed_profile_for_source(source)
+        user_config = _load_gateway_config_for_profile(routed_profile) if routed_profile else {}
+        if not user_config:
+            if _is_guest_source(source):
+                raise RuntimeError(f"Guest profile config not found or empty: {routed_profile or 'guest'}")
+            user_config = _load_gateway_config()
+        guest_session = _is_guest_source(source)
+
+        # ---- Proxy mode: delegate owner sessions only. Guest policy and profile
+        # isolation are local security boundaries and must not be bypassed.
+        if _should_use_agent_proxy(self._get_proxy_url(), source):
             return await self._run_agent_via_proxy(
                 message=message,
                 context_prompt=context_prompt,
@@ -17254,11 +17729,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return True
             return self._is_session_run_current(session_key, run_generation)
         
-        user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
 
         from hermes_cli.tools_config import _get_platform_tools
-        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        enabled_toolsets = (
+            ["hermes-bluebubbles-guest"]
+            if guest_session
+            else sorted(_get_platform_tools(user_config, platform_key))
+        )
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
@@ -18244,7 +18722,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Combine platform context, YAML channel_prompts hint for this chat,
             # channel_overrides system_prompt (or global ephemeral), and gateway
             # ephemeral prompt from _get_system_prompt_for_channel.
-            combined_ephemeral = context_prompt or ""
+            combined_ephemeral = _prepend_guest_profile_identity_prompt(
+                context_prompt or "",
+                source,
+                user_config,
+                guest_session=guest_session,
+            )
             event_channel_prompt = (channel_prompt or "").strip()
             if event_channel_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + event_channel_prompt).strip()
@@ -18256,6 +18739,46 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             if cfg_channel_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
+
+            # Keep the static channel/profile portion in the agent-cache
+            # signature. The texture suffix is intentionally per-turn and is
+            # assigned to the cached agent immediately before execution.
+            cache_ephemeral = combined_ephemeral
+
+            # Optional profile-scoped conversational texture. The engine gate
+            # defaults to v1; v2 is opt-in. The helper owns fail-open behavior
+            # and keeps the private suffix out of the cached-agent signature.
+            _texture_raw = (user_config.get("agent", {}) or {}).get("conversation_texture", {})
+            _texture_prompt = _compile_conversation_texture_prompt(
+                texture_raw=_texture_raw,
+                message=message,
+                history=history,
+                session_key=session_key or session_id or "gateway",
+                user_config=user_config,
+                now_ts=persist_user_timestamp or time.time(),
+                current_message_id=event_message_id,
+            )
+            cache_ephemeral, combined_ephemeral = _with_conversation_texture(
+                cache_ephemeral, _texture_prompt
+            )
+
+            # Contact-memory injection is deliberately dormant. Do not derive a
+            # scope from adapter-controlled SessionSource fields; authenticated
+            # scope propagation will be designed together with the cache-safe
+            # request suffix before Lane A can be promoted.
+            _contact_memory_raw = (user_config.get("agent", {}) or {}).get("contact_memory", {})
+            _trusted_scope = None
+            _recall_prompt = _compile_contact_memory_prompt(
+                config_raw=_contact_memory_raw,
+                trusted_scope=_trusted_scope,
+                message=message,
+                history=history,
+                session_key=session_key or session_id or "gateway",
+                now_ts=persist_user_timestamp or time.time(),
+                texture_prompt=_texture_prompt,
+            )
+            if _recall_prompt:
+                combined_ephemeral = (combined_ephemeral + "\n\n" + _recall_prompt).strip()
 
             max_iterations = _current_max_iterations()
 
@@ -18422,7 +18945,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 turn_route["model"],
                 turn_route["runtime"],
                 enabled_toolsets,
-                combined_ephemeral,
+                cache_ephemeral,
                 cache_keys=self._extract_cache_busting_config(user_config),
                 user_id=getattr(source, "user_id", None),
                 user_id_alt=getattr(source, "user_id_alt", None),
@@ -18561,6 +19084,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     enabled_toolsets=enabled_toolsets,
                     disabled_toolsets=disabled_toolsets,
                     ephemeral_system_prompt=combined_ephemeral or None,
+                    # Guest profiles do not currently bind memory-manager paths
+                    # to the routed profile's HERMES_HOME.  Always skip generic
+                    # memory here rather than risk reading the owner's store.
+                    skip_memory=guest_session,
+                    skip_context_files=guest_session,
                     prefill_messages=self._prefill_messages or None,
                     reasoning_config=reasoning_config,
                     service_tier=self._service_tier,
@@ -18597,6 +19125,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+
+            # This value is read when each API request is assembled, so a cached
+            # agent can receive fresh turn texture without rebuilding its stable
+            # system prompt, tools, transports, or conversation state.
+            setattr(agent, "ephemeral_system_prompt", combined_ephemeral or None)
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
@@ -19170,7 +19703,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _conversation_kwargs["moa_config"] = moa_config
                 if _persist_user_timestamp_override is not None:
                     _conversation_kwargs["persist_user_timestamp"] = _persist_user_timestamp_override
-                result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
+                if guest_session:
+                    from gateway.guest_access import guest_policy_context
+                    with guest_policy_context(True):
+                        result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
+                else:
+                    result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 # Cancel any pending clarify entries so blocked agent

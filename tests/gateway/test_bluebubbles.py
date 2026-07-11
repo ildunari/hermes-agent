@@ -233,6 +233,54 @@ class TestBlueBubblesHelpers:
         assert sent == ["first thought", "second thought"]
 
     @pytest.mark.asyncio
+    async def test_split_bubbles_add_typing_and_length_scaled_delay(self, monkeypatch):
+        adapter = _make_adapter(
+            monkeypatch,
+            split_outbound_paragraphs=True,
+            bubble_delay_min_ms=100,
+            bubble_delay_max_ms=100,
+            bubble_typing_chars_per_second=10,
+        )
+        sent = []
+        typing = []
+        sleeps = []
+
+        async def fake_resolve_chat_guid(chat_id):
+            return "iMessage;-;user@example.com"
+
+        async def fake_typing(chat_id):
+            typing.append(chat_id)
+            return True
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        class FakeResponse:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"data": {"guid": "msg"}}
+
+        class FakeClient:
+            async def post(self, url, json=None, **kwargs):
+                assert json is not None
+                sent.append(json["message"])
+                return FakeResponse()
+
+        adapter.client = FakeClient()  # type: ignore[assignment]
+        monkeypatch.setattr(adapter, "_resolve_chat_guid", fake_resolve_chat_guid)
+        monkeypatch.setattr(adapter, "send_typing", fake_typing)
+        monkeypatch.setattr("gateway.platforms.bluebubbles.asyncio.sleep", fake_sleep)
+
+        result = await adapter.send("user@example.com", "wait\n\nwhat happened")
+
+        assert result.success is True
+        assert sent == ["wait", "what happened"]
+        assert typing == ["user@example.com"]
+        assert sleeps == [pytest.approx(1.4)]
+
+    @pytest.mark.asyncio
     async def test_send_marks_late_chunk_failure_as_partial_delivery(self, monkeypatch):
         import httpx
 
@@ -388,6 +436,7 @@ class TestBlueBubblesHelpers:
     @pytest.mark.asyncio
     async def test_disconnect_unregisters_after_successful_registration(self, monkeypatch):
         adapter = _make_adapter(monkeypatch)
+        adapter.webhook_register = True
         adapter._registered_webhook = True
         called = False
 

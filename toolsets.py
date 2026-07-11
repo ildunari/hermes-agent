@@ -89,6 +89,16 @@ _HERMES_WEBHOOK_SAFE_TOOLS = [
     "clarify",
 ]
 
+# Guest sessions remain agentic, but host/admin and paid tools are absent.
+_HERMES_BLUEBUBBLES_GUEST_TOOLS = [
+    "terminal", "process", "execute_code",
+    "web_search", "web_extract",
+    "browser_navigate", "browser_snapshot", "browser_click", "browser_type",
+    "browser_scroll", "browser_back", "browser_press", "browser_get_images",
+    "vision_analyze", "image_generate", "text_to_speech",
+    "todo", "clarify", "guest_fs",
+]
+
 
 # Core toolset definitions
 # These can include individual tools or reference other toolsets
@@ -480,6 +490,12 @@ TOOLSETS = {
     "hermes-bluebubbles": {
         "description": "BlueBubbles iMessage bot toolset - Apple iMessage via local BlueBubbles server",
         "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
+
+    "hermes-bluebubbles-guest": {
+        "description": "BlueBubbles guest toolset with sandboxed host access",
+        "tools": _HERMES_BLUEBUBBLES_GUEST_TOOLS,
         "includes": []
     },
 

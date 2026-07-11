@@ -989,6 +989,13 @@ DEFAULT_CONFIG = {
     "max_live_sessions": 16,
     "agent": {
         "max_turns": 90,
+        # Reserved contact-memory flags. Live Lane A injection is hard-blocked
+        # until core provides a provider-request suffix after cache breakpoints;
+        # changing these values alone cannot enable retrieval injection.
+        "contact_memory": {
+            "enabled": False,
+            "lane_a": False,
+        },
         # Inactivity timeout for gateway agent execution (seconds).
         # The agent can run indefinitely as long as it's actively calling
         # tools or receiving API responses.  Only fires when the agent has
