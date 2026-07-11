@@ -2585,6 +2585,38 @@ def _gateway_config_home() -> Path:
     return _hermes_home
 
 
+def _resolve_personality_prompt(value: Any) -> str:
+    """Render one configured personality using the canonical prompt shape."""
+    if isinstance(value, dict):
+        parts = [str(value.get("system_prompt") or "").strip()]
+        if value.get("tone"):
+            parts.append(f'Tone: {value["tone"]}')
+        if value.get("style"):
+            parts.append(f'Style: {value["style"]}')
+        return "\n".join(part for part in parts if part)
+    return str(value or "").strip()
+
+
+def _resolve_platform_default_personality_prompt(config: dict, platform_key: str) -> str:
+    """Resolve a platform's configured default personality overlay."""
+    if not isinstance(config, dict) or not platform_key:
+        return ""
+    platforms_cfg = config.get("platforms") or {}
+    platform_cfg = platforms_cfg.get(platform_key) if isinstance(platforms_cfg, dict) else None
+    if not isinstance(platform_cfg, dict):
+        return ""
+    extra = platform_cfg.get("extra") or {}
+    if not isinstance(extra, dict):
+        return ""
+    personality_name = str(extra.get("default_personality") or "").strip().lower()
+    if not personality_name:
+        return ""
+    personalities = cfg_get(config, "agent", "personalities", default={})
+    if not isinstance(personalities, dict) or personality_name not in personalities:
+        return ""
+    return _resolve_personality_prompt(personalities[personality_name])
+
+
 def _load_gateway_config() -> dict:
     """Load and parse ~/.hermes/config.yaml, returning {} on any error.
 
