@@ -80,6 +80,7 @@ from gateway.platforms.base import (
     validate_media_delivery_path,
 )
 from agent.redact import redact_sensitive_text
+from gateway.readiness import collect_runtime_readiness
 
 logger = logging.getLogger(__name__)
 
@@ -959,9 +960,13 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_streams: Dict[str, "asyncio.Queue[Optional[Dict]]"] = {}
         # Creation timestamps for orphaned-run TTL sweep
         self._run_streams_created: Dict[str, float] = {}
+        # Runs with a connected SSE consumer; their queue is actively draining.
+        self._run_stream_subscribers: set[str] = set()
         # Active run agent/task references for stop support
         self._active_run_agents: Dict[str, Any] = {}
         self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
+        # Stop is cooperative: the executor thread may outlive the HTTP request.
+        self._stopping_run_ids: set[str] = set()
         # Pollable run status for dashboards and external control-plane UIs.
         self._run_statuses: Dict[str, Dict[str, Any]] = {}
         # Active approval session key for each run_id.  The approval core
@@ -1010,8 +1015,32 @@ class APIServerAdapter(BasePlatformAdapter):
         # from a request flood (#7483).
         self._max_concurrent_runs: int = self._resolve_max_concurrent_runs()
         # Number of in-flight runs on the non-streaming chat/responses paths
-        # (the /v1/runs path tracks its own in-flight set via _run_streams).
+        # (the /v1/runs path tracks its own in-flight set via
+        # _active_run_tasks).
         self._inflight_agent_runs: int = 0
+
+    def _readiness_work_counts(self) -> tuple[int, int, int]:
+        """Return bounded work counts from each subsystem's public state."""
+        active_api_runs = sum(
+            1
+            for status in self._run_statuses.values()
+            if status.get("status") in {"queued", "running", "waiting_for_approval"}
+        )
+        process_depth = 0
+        active_delegations = 0
+        try:
+            from tools.process_registry import process_registry
+
+            process_depth = process_registry.completion_queue.qsize()
+        except Exception:
+            pass
+        try:
+            from tools.async_delegation import active_count
+
+            active_delegations = active_count()
+        except Exception:
+            pass
+        return active_api_runs, process_depth, active_delegations
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -2098,8 +2127,19 @@ class APIServerAdapter(BasePlatformAdapter):
         # This endpoint is served BY the gateway process, so it is by definition
         # alive — gateway_running is True. Derive busy/drainable from the same
         # shared contract /api/status uses so the two surfaces never disagree.
+        active_api_runs, process_depth, active_delegations = self._readiness_work_counts()
+        from gateway.run import _resolve_gateway_model
+
+        readiness = collect_runtime_readiness(
+            configured_model=_resolve_gateway_model(),
+            runtime_status=runtime,
+            active_api_runs=active_api_runs,
+            process_completion_queue_depth=process_depth,
+            active_delegations=active_delegations,
+        )
         return web.json_response({
-            "status": "ok",
+            "status": readiness["status"],
+            "readiness": readiness,
             "platform": "hermes-agent",
             "version": _hermes_version(),
             "gateway_state": gw_state,
@@ -4761,14 +4801,18 @@ class APIServerAdapter(BasePlatformAdapter):
 
         The cap bounds total in-flight agent activity across every
         agent-serving endpoint: the non-streaming chat/responses paths
-        (tracked by ``_inflight_agent_runs``) plus the ``/v1/runs`` streaming
-        path (tracked by ``_run_streams``). A configured value of 0 disables
-        the cap entirely.
+        (tracked by ``_inflight_agent_runs``) plus the ``/v1/runs`` path
+        (tracked by live entries in ``_active_run_tasks``).  Stream queues are
+        transport state and may disappear while their underlying run remains
+        active, so they must not define run concurrency. A configured value of
+        0 disables the cap entirely.
         """
         limit = self._max_concurrent_runs
         if limit <= 0:
             return None
-        inflight = self._inflight_agent_runs + len(self._run_streams)
+        inflight = self._inflight_agent_runs + sum(
+            not task.done() for task in self._active_run_tasks.values()
+        )
         if inflight >= limit:
             return web.json_response(
                 _openai_error(
@@ -5224,12 +5268,19 @@ class APIServerAdapter(BasePlatformAdapter):
 
         event_cb = self._make_run_event_callback(run_id, loop)
 
+        def _put_event_if_active(event: Optional[Dict]) -> None:
+            """Enqueue only while this run still owns live transport state."""
+            if self._run_streams.get(run_id) is q:
+                q.put_nowait(event)
+
         # Also wire stream_delta_callback so message.delta events flow through.
         def _text_cb(delta: Optional[str]) -> None:
             if delta is None:
                 return
+            if run_id not in self._run_streams:
+                return
             try:
-                loop.call_soon_threadsafe(q.put_nowait, {
+                loop.call_soon_threadsafe(_put_event_if_active, {
                     "event": "message.delta",
                     "run_id": run_id,
                     "timestamp": time.time(),
@@ -5255,6 +5306,18 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._set_run_status(run_id, "running")
                 from gateway.run import _load_gateway_config
                 user_config = _load_gateway_config()
+                if run_id in self._stopping_run_ids:
+                    _put_event_if_active({
+                        "event": "run.cancelled",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                    })
+                    self._set_run_status(
+                        run_id,
+                        "cancelled",
+                        last_event="run.cancelled",
+                    )
+                    return
                 agent = self._create_agent(
                     ephemeral_system_prompt=ephemeral_system_prompt,
                     session_id=session_id,
@@ -5340,12 +5403,23 @@ model_override=self._api_run_model_override(user_config),
                     return r, u
 
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
+                if run_id in self._stopping_run_ids:
+                    _put_event_if_active({
+                        "event": "run.cancelled",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                    })
+                    self._set_run_status(
+                        run_id,
+                        "cancelled",
+                        last_event="run.cancelled",
+                    )
                 # Check for structured failure (non-retryable client errors like
                 # 401/400 return failed=True instead of raising, so the except
                 # block below never fires — issue #15561).
-                if isinstance(result, dict) and result.get("failed"):
+                elif isinstance(result, dict) and result.get("failed"):
                     error_msg = _redact_api_error_text(result.get("error") or "agent run failed")
-                    q.put_nowait({
+                    _put_event_if_active({
                         "event": "run.failed",
                         "run_id": run_id,
                         "timestamp": time.time(),
@@ -5359,7 +5433,7 @@ model_override=self._api_run_model_override(user_config),
                     )
                 else:
                     final_response = result.get("final_response", "") if isinstance(result, dict) else ""
-                    q.put_nowait({
+                    _put_event_if_active({
                         "event": "run.completed",
                         "run_id": run_id,
                         "timestamp": time.time(),
@@ -5380,7 +5454,7 @@ model_override=self._api_run_model_override(user_config),
                     last_event="run.cancelled",
                 )
                 try:
-                    q.put_nowait({
+                    _put_event_if_active({
                         "event": "run.cancelled",
                         "run_id": run_id,
                         "timestamp": time.time(),
@@ -5397,7 +5471,7 @@ model_override=self._api_run_model_override(user_config),
                     last_event="run.failed",
                 )
                 try:
-                    q.put_nowait({
+                    _put_event_if_active({
                         "event": "run.failed",
                         "run_id": run_id,
                         "timestamp": time.time(),
@@ -5419,12 +5493,13 @@ model_override=self._api_run_model_override(user_config),
                     pass
                 # Sentinel: signal SSE stream to close
                 try:
-                    q.put_nowait(None)
+                    _put_event_if_active(None)
                 except Exception:
                     pass
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
+                self._stopping_run_ids.discard(run_id)
 
         task = asyncio.create_task(_run_and_close())
         self._active_run_tasks[run_id] = task
@@ -5476,6 +5551,7 @@ model_override=self._api_run_model_override(user_config),
             return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
 
         q = self._run_streams[run_id]
+        self._run_stream_subscribers.add(run_id)
 
         response = web.StreamResponse(
             status=200,
@@ -5503,6 +5579,7 @@ model_override=self._api_run_model_override(user_config),
         except Exception as exc:
             logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
         finally:
+            self._run_stream_subscribers.discard(run_id)
             self._run_streams.pop(run_id, None)
             self._run_streams_created.pop(run_id, None)
 
@@ -5611,6 +5688,7 @@ model_override=self._api_run_model_override(user_config),
             return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
 
         self._set_run_status(run_id, "stopping", last_event="run.stopping")
+        self._stopping_run_ids.add(run_id)
 
         if agent is not None:
             try:
@@ -5618,37 +5696,29 @@ model_override=self._api_run_model_override(user_config),
             except Exception:
                 pass
 
-        if task is not None and not task.done():
-            task.cancel()
-            # Bounded wait: run_conversation() executes in the default
-            # executor thread which task.cancel() cannot preempt — we rely on
-            # agent.interrupt() above to break the loop. Cap the wait so a
-            # slow/unresponsive interrupt can't hang this handler.
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "[api_server] stop for run %s timed out after 5s; "
-                    "agent may still be finishing the current step",
-                    run_id,
-                )
-            except (asyncio.CancelledError, Exception):
-                pass
-
         return web.json_response({"run_id": run_id, "status": "stopping"})
 
     async def _sweep_orphaned_runs(self) -> None:
-        """Periodically clean up run streams that were never consumed."""
+        """Periodically expire transport buffers and terminal status records."""
         while True:
             await asyncio.sleep(60)
+            self._sweep_orphaned_runs_once(time.time())
+
+    def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
+        """Expire old SSE buffers without treating transport age as run age."""
+        if now is None:
             now = time.time()
-            stale = [
-                run_id
-                for run_id, created_at in list(self._run_streams_created.items())
-                if now - created_at > self._RUN_STREAM_TTL
-            ]
-            for run_id in stale:
-                logger.debug("[api_server] sweeping orphaned run %s", run_id)
+        stale = [
+            run_id
+            for run_id, created_at in list(self._run_streams_created.items())
+            if now - created_at > self._RUN_STREAM_TTL
+            and run_id not in self._run_stream_subscribers
+        ]
+        for run_id in stale:
+            logger.debug("[api_server] sweeping expired run transport %s", run_id)
+            task = self._active_run_tasks.get(run_id)
+            task_done = task is None or task.done()
+            if task_done:
                 try:
                     from tools.approval import unregister_gateway_notify
 
@@ -5657,20 +5727,24 @@ model_override=self._api_run_model_override(user_config),
                         unregister_gateway_notify(approval_session_key)
                 except Exception:
                     pass
-                self._run_streams.pop(run_id, None)
-                self._run_streams_created.pop(run_id, None)
+            # The transport TTL always bounds buffering. Live control state is
+            # independent and survives until the executor-backed task returns.
+            self._run_streams.pop(run_id, None)
+            self._run_streams_created.pop(run_id, None)
+            if task_done:
                 self._active_run_agents.pop(run_id, None)
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
+                self._stopping_run_ids.discard(run_id)
 
-            stale_statuses = [
-                run_id
-                for run_id, status in list(self._run_statuses.items())
-                if status.get("status") in {"completed", "failed", "cancelled"}
-                and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL
-            ]
-            for run_id in stale_statuses:
-                self._run_statuses.pop(run_id, None)
+        stale_statuses = [
+            run_id
+            for run_id, status in list(self._run_statuses.items())
+            if status.get("status") in {"completed", "failed", "cancelled"}
+            and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL
+        ]
+        for run_id in stale_statuses:
+            self._run_statuses.pop(run_id, None)
 
     # ------------------------------------------------------------------
     # BasePlatformAdapter interface
