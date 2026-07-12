@@ -17,6 +17,15 @@ describe('model display names', () => {
     expect(displayModelName('grok-composer-2.5-fast')).toBe('Grok Composer 2.5 Fast')
   })
 
+  it('hides the Antigravity Gemini effort-tier suffix from the display name', () => {
+    expect(displayModelName('gemini-3.1-pro-low')).toBe('Gemini 3.1 Pro')
+    expect(displayModelName('gemini-3.1-pro-low', { provider: 'vibeproxy' })).toBe('Gemini 3.1 Pro')
+    expect(displayModelName('gemini-3.5-flash-low')).toBe('Gemini 3.5 Flash')
+    expect(displayModelName('gemini-3.5-flash-extra-low')).toBe('Gemini 3.5 Flash')
+    // Non-effort gemini ids keep their real trailing token.
+    expect(displayModelName('gemini-3.1-flash-image')).toBe('Gemini 3.1 Flash Image')
+  })
+
   it('cleans provider IDs and custom provider slugs', () => {
     expect(displayProviderName('vibeproxy')).toBe('CLI Proxy')
     expect(displayProviderName('openai-codex', 'Company Gateway')).toBe('Company Gateway')

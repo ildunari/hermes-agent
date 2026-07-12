@@ -25,6 +25,7 @@ import type {
 } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { AlertTriangle, Cpu, Loader2 } from '@/lib/icons'
+import { displayModelName } from '@/lib/model-display-name'
 import { cn } from '@/lib/utils'
 import { notifyError } from '@/store/notifications'
 import { startManualLocalEndpoint, startManualProviderOAuth } from '@/store/onboarding'
@@ -287,6 +288,19 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
 
   const modelsForProvider = useCallback(
     (provider: string) => providers.find(row => row.slug === provider)?.models ?? [],
+    [providers]
+  )
+
+  // Keep route IDs (including CLIProxy's required `-low` suffixes) as Select
+  // values, but render the same display-only labels as the regular picker.
+  // Reasoning effort belongs to the adjacent reasoning control, not the model
+  // name shown to the user.
+  const modelLabel = useCallback(
+    (provider: string, model: string) => {
+      const row = providers.find(candidate => candidate.slug === provider)
+
+      return row?.model_labels?.[model] || displayModelName(model, { provider })
+    },
     [providers]
   )
 
@@ -651,7 +665,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                 <SelectContent>
                   {withActive(selectedProviderModels, selectedModel).map(model => (
                     <SelectItem key={model} value={model}>
-                      {model}
+                      {modelLabel(selectedProvider, model)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -804,7 +818,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                         <SelectContent>
                           {withActive(auxDraftProviderModels, auxDraft.model).map(model => (
                             <SelectItem key={model} value={model}>
-                              {model}
+                              {modelLabel(auxDraft.provider, model)}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -981,7 +995,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                       <SelectContent>
                         {withActive(modelsForProvider(slot.provider), slot.model).map(model => (
                           <SelectItem key={model} value={model}>
-                            {model}
+                            {modelLabel(slot.provider, model)}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -1061,7 +1075,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                         currentMoaPreset.aggregator.model
                       ).map(model => (
                         <SelectItem key={model} value={model}>
-                          {model}
+                          {modelLabel(currentMoaPreset.aggregator.provider, model)}
                         </SelectItem>
                       ))}
                     </SelectContent>
