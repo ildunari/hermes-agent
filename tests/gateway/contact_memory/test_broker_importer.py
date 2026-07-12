@@ -142,6 +142,55 @@ def test_importer_accepts_existing_contact_persona_schema_conservatively(tmp_pat
     assert not (tmp_path / "memory").exists()
 
 
+def test_explicit_guest_review_allows_sensitive_guest_or_relationship_fact(tmp_path: Path):
+    dossier = tmp_path / "reviewed-sensitive.jsonl"
+    rows = [
+        {
+            "id": "guest-sensitive", "subject": "person:contact",
+            "fact": "Reviewed private fact about the guest", "sensitive": True,
+            "audience": "guest_ok", "guest_reviewed": True,
+            "confidence": .9, "trust": .9,
+        },
+        {
+            "id": "shared-sensitive", "subject": "relationship:owner-contact",
+            "fact": "Reviewed private fact about the relationship", "sensitive": True,
+            "audience": "guest_ok", "guest_reviewed": True,
+            "confidence": .9, "trust": .9,
+        },
+    ]
+    dossier.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    result = import_jsonl(dossier, "contact-a", root=tmp_path / "memory", dry_run=False)
+
+    assert result["counts"]["guest_ok"] == 2
+    facts = ContactMemoryStore(tmp_path / "memory", "contact-a").active_facts(RetrievalPrincipal.GUEST)
+    assert {fact.source_id for fact in facts} == {"guest-sensitive", "shared-sensitive"}
+    assert all(fact.mention_policy is MentionPolicy.MENTIONABLE for fact in facts)
+
+
+def test_ambiguous_fact_requires_explicit_guest_review(tmp_path: Path):
+    dossier = tmp_path / "ambiguous.jsonl"
+    rows = [
+        {
+            "id": "ambiguous-unreviewed", "subject": "ambiguous",
+            "fact": "Unreviewed third-party detail", "sensitive": True,
+            "confidence": .9, "trust": .9,
+        },
+        {
+            "id": "ambiguous-reviewed", "subject": "ambiguous",
+            "fact": "Reviewed shared detail involving a third party", "sensitive": True,
+            "audience": "guest_ok", "guest_reviewed": True,
+            "confidence": .9, "trust": .9,
+        },
+    ]
+    dossier.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    result = import_jsonl(dossier, "contact-a", root=tmp_path / "memory", dry_run=True)
+
+    assert result["counts"]["quarantined"] == 1
+    assert result["counts"]["guest_ok"] == 1
+
+
 def test_import_is_idempotent_and_quarantine_never_supersedes_reviewed_active(tmp_path: Path):
     dossier = tmp_path / "dossier.jsonl"
     dossier.write_text(json.dumps({

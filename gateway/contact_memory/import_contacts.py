@@ -65,8 +65,12 @@ def _classify(row: dict[str, Any], contact_id: str) -> tuple[FactProposal, str]:
     stated = str(row.get("assertion_type") or "stated").lower() == "stated"
     confidence = _score(row.get("confidence"), default=0.5)
     trust = _score(row.get("trust"), default=confidence)
-    guest_ok = explicit_guest and stated and confidence >= 0.7 and trust >= 0.7 and not sensitive and not third_party
-    quarantined = sensitive or third_party
+    # Explicit owner review is the authority for Guest visibility. A reviewed
+    # fact may be intimate, sensitive, or include a third party when it is about
+    # the guest or their shared relationship; the review is what grants that
+    # guest access. Unreviewed sensitive/ambiguous rows still fail closed.
+    guest_ok = explicit_guest and stated and confidence >= 0.7 and trust >= 0.7
+    quarantined = (sensitive or third_party) and not guest_ok
     status = FactStatus.QUARANTINED if quarantined else FactStatus.ACTIVE
     audience = Audience.GUEST_OK if guest_ok else Audience.OWNER_ONLY
     policy = MentionPolicy.MENTIONABLE if guest_ok else (MentionPolicy.SENSITIVE if sensitive else MentionPolicy.BACKGROUND)
