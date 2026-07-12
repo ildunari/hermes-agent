@@ -1354,3 +1354,7 @@ not the specific names.
 
 Reviewers should reject new change-detector tests; authors should convert
 them into invariants before re-requesting review.
+
+## Multi-Agent Collaboration
+
+Other models may be working in this project at the same time. If anything odd happens or files change unexpectedly, assume another agent may be responsible before reverting or overwriting it. Use `hey.md` in the project root to coordinate with the other agents. Never block waiting for them: leave a concise message, keep making progress on unblocked work, reconcile changes constructively, and work together to achieve the shared goal. When the work is complete, remove resolved coordination messages from `hey.md`; delete the file if it is empty.
