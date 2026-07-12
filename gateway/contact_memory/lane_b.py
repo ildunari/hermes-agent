@@ -21,7 +21,9 @@ _TOOL_SCHEMA = {
     "name": TOOL_NAME,
     "description": (
         "Search private facts for the contact authenticated for this request. "
-        "Use when the current question needs a specific contact detail that was not recalled automatically."
+        "You MUST use this before answering a direct question about Kosta, the authenticated contact, "
+        "or their shared relationship/history when the answer is not already in visible context. "
+        "Do not claim no memory/history or tell the contact to ask Kosta until this search returns no match."
     ),
     "parameters": {
         "type": "object",

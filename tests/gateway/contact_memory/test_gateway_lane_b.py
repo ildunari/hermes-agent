@@ -82,6 +82,8 @@ def test_lane_b_is_query_only_request_local_and_not_in_core_schema(tmp_path, mon
     schema = tools[0].schema
     assert schema["parameters"]["properties"].keys() == {"query"}
     assert schema["parameters"]["additionalProperties"] is False
+    assert "MUST use this" in schema["description"]
+    assert "Do not claim no memory/history" in schema["description"]
     assert "contact_memory_search" not in {
         item["function"]["name"] for item in get_tool_definitions(quiet_mode=True)
     }
