@@ -4581,6 +4581,18 @@ class GatewaySlashCommandsMixin:
         if is_managed():
             return f"✗ {format_managed_message('update Hermes Agent')}"
 
+        try:
+            import yaml
+
+            raw_config = yaml.safe_load(
+                (_hermes_home / "config.yaml").read_text(encoding="utf-8")
+            ) or {}
+            gateway_config = raw_config.get("gateway", {}) if isinstance(raw_config, dict) else {}
+            if isinstance(gateway_config, dict) and gateway_config.get("update_command") == "smart_only":
+                return "Built-in /update is disabled; use /update_smart instead."
+        except (OSError, ValueError, TypeError):
+            pass
+
         import sys as _sys
         module_file = getattr(_sys.modules.get(__name__), "__file__", __file__)
         try:
@@ -4623,6 +4635,16 @@ class GatewaySlashCommandsMixin:
         _tmp_pending.write_text(json.dumps(pending))
         _tmp_pending.replace(pending_path)
         exit_code_path.unlink(missing_ok=True)
+
+        history_path = _hermes_home / ".update_history.jsonl"
+        history_record = {
+            "command": "/update",
+            **pending,
+            "hermes_cmd": hermes_cmd,
+            "gateway_pid": os.getpid(),
+        }
+        with history_path.open("a", encoding="utf-8") as history_file:
+            history_file.write(json.dumps(history_record, sort_keys=True) + "\n")
 
         # Spawn `hermes update --gateway` detached so it survives gateway restart.
         # --gateway enables file-based IPC for interactive prompts (stash

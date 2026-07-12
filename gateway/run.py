@@ -15940,7 +15940,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 continue
 
             target = (platform.value, str(home.chat_id), str(home.thread_id) if home.thread_id else None)
-            if target in skipped or target in delivered:
+            chat_was_notified = home.thread_id is None and any(
+                skipped_platform == platform.value
+                and skipped_chat == str(home.chat_id)
+                for skipped_platform, skipped_chat, _ in skipped
+            )
+            if target in skipped or target in delivered or chat_was_notified:
                 continue
 
             try:

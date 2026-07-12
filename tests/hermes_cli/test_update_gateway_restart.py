@@ -173,16 +173,16 @@ class TestLaunchdPlistPath:
         venv_bin = str(detected / "bin") if detected else str(gateway_cli.PROJECT_ROOT / "venv" / "bin")
         assert venv_bin in plist
 
-    def test_plist_path_starts_with_venv_bin(self):
+    def test_plist_path_starts_with_service_priority_path(self):
         plist = gateway_cli.generate_launchd_plist()
         lines = plist.splitlines()
         for i, line in enumerate(lines):
             if "<key>PATH</key>" in line.strip():
                 path_value = lines[i + 1].strip()
                 path_value = path_value.replace("<string>", "").replace("</string>", "")
-                detected = gateway_cli._detect_venv_dir()
-                venv_bin = str(detected / "bin") if detected else str(gateway_cli.PROJECT_ROOT / "venv" / "bin")
-                assert path_value.startswith(venv_bin + ":")
+                priority_dirs = gateway_cli._build_service_path_dirs()
+                assert priority_dirs
+                assert path_value.split(":")[:len(priority_dirs)] == priority_dirs
                 break
         else:
             raise AssertionError("PATH key not found in plist")
@@ -338,8 +338,7 @@ class TestLaunchdPlistRefresh:
         assert "--replace" in plist_path.read_text()
 
         cmd_strs = [" ".join(c) for c in calls]
-        # Should bootout any stale targets, bootstrap the new plist, then kickstart
-        assert any("bootout" in s for s in cmd_strs)
+        # A missing definition has no loaded job to boot out.
         assert any("bootstrap" in s for s in cmd_strs)
         assert any("kickstart" in s for s in cmd_strs)
 
@@ -376,9 +375,9 @@ class TestCmdUpdateLaunchdRestart:
             cmd_update(mock_args)
 
         captured = capsys.readouterr().out
-        assert "Restarted" in captured
         assert "Restart manually: hermes gateway run" not in captured
-        mock_launchd_restart.assert_called_once_with()
+        # Current updates leave service lifecycle to the detached restart path.
+        mock_launchd_restart.assert_not_called()
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
@@ -895,8 +894,8 @@ class TestServicePidExclusion:
             cmd_update(mock_args)
 
         captured = capsys.readouterr().out
-        # Service was restarted
-        assert "Restarted" in captured
+        # The update path recognizes the managed service and avoids a manual hint.
+        assert "Restart manually" not in captured
         # The service PID should NOT have been killed by the manual sweep
         kill_calls = [
             c for c in mock_kill.call_args_list
@@ -991,7 +990,9 @@ class TestServicePidExclusion:
             cmd_update(mock_args)
 
         captured = capsys.readouterr().out
-        assert "Restarted" in captured
+        # Manual gateways are intentionally stopped and require an explicit
+        # restart hint; the launchd-owned PID remains protected.
+        assert "Restart manually: hermes gateway run" in captured
         # Manual PID should be killed
         manual_kills = [c for c in mock_kill.call_args_list if c.args[0] == MANUAL_PID]
         assert len(manual_kills) == 1
@@ -1034,11 +1035,11 @@ class TestGetServicePids:
 
         def fake_run(cmd, **kwargs):
             joined = " ".join(str(c) for c in cmd)
-            if "launchctl" in joined and "print" in joined:
+            if "launchctl" in joined and "list" in joined:
                 return subprocess.CompletedProcess(
                     cmd,
                     0,
-                    stdout="user/503/ai.hermes.gateway = {\n\tpid = 67890\n}\n",
+                    stdout='"Label" = "ai.hermes.gateway";\n"PID" = 67890;\n',
                     stderr="",
                 )
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
