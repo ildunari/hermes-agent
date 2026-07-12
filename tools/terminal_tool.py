@@ -1111,6 +1111,11 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
             env.cwd = new_cwd
 
 
+def get_task_env_override(task_id: str, key: str, default: Any = None) -> Any:
+    """Read one infrastructure-only task override without exposing the backing map."""
+    return _task_env_overrides.get(task_id, {}).get(key, default)
+
+
 def clear_task_env_overrides(task_id: str):
     """
     Clear environment overrides for a task after rollout completes.

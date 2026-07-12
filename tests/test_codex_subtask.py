@@ -124,6 +124,28 @@ def test_cancel_running_job(monkeypatch, tmp_path):
     assert done["status"] in {"cancelled", "error", "interrupted"}
 
 
+def test_send_during_running_turn_fails_fast_and_cancel_still_works(monkeypatch, tmp_path):
+    monkeypatch.setattr(sup, "CodexAppServerSession", FakeSession)
+    FakeSession.sleep_seconds = 5
+    FakeSession.result = FakeTurnResult(final_text="late")
+    s = sup.Supervisor(tmp_path / "jobs.db")
+    queued = s.dispatch({"action": "submit", "mode": "async", "prompt": "sleep", "cwd": str(tmp_path), "timeout_seconds": 10})
+    job_id = queued["job_id"]
+    time.sleep(0.1)
+
+    started = time.monotonic()
+    sent = s.dispatch({"action": "send", "job_id": job_id, "message": "change course"})
+    assert time.monotonic() - started < 0.5
+    assert sent["status"] == "error"
+    assert "mid-turn send is not supported" in sent["error"]
+
+    started = time.monotonic()
+    cancel = s.dispatch({"action": "cancel", "job_id": job_id})
+    assert time.monotonic() - started < 0.5
+    assert cancel["status"] in {"starting", "running", "cancelled", "interrupted"}
+    done = s.dispatch({"action": "await", "job_id": job_id, "timeout_seconds": 2})
+    assert done["status"] in {"cancelled", "error", "interrupted"}
+
 
 
 def test_registry_handles_concurrent_reads_and_writes(tmp_path):
