@@ -7,6 +7,8 @@ agent:
   contact_memory:
     enabled: false
     lane_a: false
+    lane_b: false
+    extraction: false
     embedding:
       backend: off # or embeddinggemma
       model: mlx-community/embeddinggemma-300m-4bit
@@ -16,13 +18,30 @@ agent:
       model: mlx-community/Qwen3-Reranker-0.6B-4bit
       timeout_seconds: 0.35
       startup_timeout_seconds: 120
+    extractor:
+      backend: off # or qwen3-mlx
+      model: mlx-community/Qwen3-4B-Instruct-2507-4bit
+      revision: 50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b
+      timeout_seconds: 15
+      startup_timeout_seconds: 180
+      max_tokens: 320
+    extraction_runtime:
+      max_queue: 32
+      workers: 1
+      max_retries: 1
 ```
 
-When both feature switches are enabled, Lane A runs only for an immutable contact scope assigned after authenticated BlueBubbles routing. Approved Guest messages receive the contact's Guest scope. The owner/Poke route receives owner scope only when the trusted contact registry declares `owner_contact_id`. Forwarded unapproved group requests deliberately receive no scope.
+Lane A runs only when `enabled` and `lane_a` are true and an immutable contact scope was assigned after authenticated BlueBubbles routing. Approved Guest messages receive the contact's Guest scope. The owner/Poke route receives owner scope only when the trusted contact registry declares `owner_contact_id`. Forwarded unapproved group requests deliberately receive no scope.
 
 Recall is appended to an API-call copy of the current user message through `AIAgent.per_turn_user_context`. It never changes the cached system prompt, cached-agent signature, caller-owned history, persisted transcript, or role alternation. Retrieval and optional embedding failures fail open to a normal reply.
 
 Data lives under `$HERMES_HOME/contact-memory/contacts/` using SHA-256-derived opaque filenames. Guest visibility requires an active, stated, high-trust/high-confidence `guest_ok` or `public` fact. Restricted, sensitive, inferred, pending, quarantined, withdrawn, and superseded facts are excluded before scoring and checked again before rendering.
+
+## Explicit retrieval (Lane B)
+
+When `enabled` and `lane_b` are true, a trusted scoped request temporarily exposes `contact_memory_search`. This is a request-scoped service capability, not a registered core tool: it is absent from the permanent tool schema and is removed immediately after the agent call. It is never exposed for unscoped, group, forwarded, or queued work.
+
+The model supplies only a bounded `query` string. Principal, contact ID, and session key are immutable values derived from authenticated gateway routing and closed over by the service handler; attempts to include namespace or principal arguments are rejected. Results use the same broker, audience, lifecycle, assertion, trust, confidence, sensitivity, reranking, rendering, and recent-recall filters as Lane A. Backend failures return an unavailable result and do not block the reply.
 
 The trusted BlueBubbles contact registry can opt the authenticated owner/Poke route into one contact namespace:
 
@@ -117,7 +136,27 @@ $PY scripts/contact_memory/benchmark_qwen3_reranker.py --repeats 50 \
   --output docs/benchmarks/qwen3-reranker-mac-studio.json
 ```
 
-Lane B is intentionally not shipped: a model-facing query tool was unnecessary for Lane A and no new core schema was justified. Pending extraction also remains operator-reviewed rather than being enabled asynchronously without a validated local extractor.
+## Qwen3 asynchronous extractor
+
+When `extraction` is enabled, completed authenticated direct owner/Guest turns
+are submitted to a bounded process-local queue after the reply is produced.
+Groups, forwarded work, queued follow-ups, synthetic events, and turns without a
+platform evidence ID are excluded. Submission does not await model loading or
+inference, and worker failure never changes the reply.
+
+The pinned Qwen3 4B worker runs persistently in the isolated MLX environment and
+receives only the current user message plus its trusted source ID. It does not
+use assistant claims as evidence. Model output is untrusted: the core overwrites
+the evidence pointer, rejects unknown fields, third-party subjects, secrets,
+instructions, invalid enums, and low-confidence output, and writes a proposal
+ledger before promotion. Only a deterministic allow-list of normal, stated,
+high-confidence first-party preferences/possessions/location/work/hobby/pet
+facts can auto-promote, and promotion never grants Guest visibility. Everything
+else stays pending for operator review.
+
+The privacy-safe synthetic benchmark selected revision
+`50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b` at 26/28 (92.86%), with zero
+unsafe auto-promotion candidates and about 1.85 seconds median warm inference.
 
 ## Optional Model2Vec benchmark
 

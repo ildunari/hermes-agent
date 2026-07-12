@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StrEnum(str, Enum):
@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS pending_fact (
   payload_json TEXT NOT NULL,
   source_id TEXT NOT NULL,
   source_contact_id TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected')),
+  status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected','superseded','promoted')),
   created_at REAL NOT NULL,
   decided_at REAL
 );
@@ -189,7 +189,11 @@ CREATE TABLE IF NOT EXISTS recommendation (
   confidence REAL NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('proposed','active','withdrawn','fulfilled','rejected')),
   supersedes_id TEXT,
-  created_at REAL NOT NULL
+  created_at REAL NOT NULL,
+  updated_at REAL,
+  expires_at REAL,
+  change_requirements_json TEXT NOT NULL DEFAULT '[]',
+  idempotency_key TEXT UNIQUE
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_recommendation
   ON recommendation(topic) WHERE status='active';
@@ -204,6 +208,17 @@ CREATE TABLE IF NOT EXISTS recall_event (
 );
 CREATE INDEX IF NOT EXISTS recall_cooldown
   ON recall_event(session_key, event_type, created_at, turn_index);
+CREATE TABLE IF NOT EXISTS callback_event (
+  event_id TEXT PRIMARY KEY,
+  session_key TEXT NOT NULL,
+  subject_type TEXT NOT NULL CHECK(subject_type IN ('fact','recommendation')),
+  subject_id TEXT NOT NULL,
+  turn_index INTEGER NOT NULL,
+  created_at REAL NOT NULL,
+  UNIQUE(session_key, subject_type, subject_id, turn_index)
+);
+CREATE INDEX IF NOT EXISTS callback_event_cooldown
+  ON callback_event(session_key, subject_type, subject_id, created_at, turn_index);
 """
 
 REGISTRY_SCHEMA_SQL = """

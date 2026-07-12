@@ -16,6 +16,7 @@ from gateway.contact_memory.rerankers import (
 )
 from gateway.contact_memory.schema import (
     AssertionType, Audience, FactProposal, MentionPolicy, RetrievalPrincipal,
+    SearchResult,
 )
 from gateway.contact_memory.store import ContactMemoryStore
 from gateway.run import (
@@ -67,6 +68,23 @@ def test_gateway_lane_a_is_default_off_and_requires_immutable_trusted_scope(tmp_
     assert "green hatchback" in rendered
     with pytest.raises(FrozenInstanceError):
         _scope().contact_id = "other"  # type: ignore[misc]
+
+
+def test_explicit_routed_profile_root_overrides_host_home(tmp_path, monkeypatch):
+    host = tmp_path / "host"
+    routed = tmp_path / "routed"
+    host.mkdir()
+    routed.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(host))
+    _contact_memory_brokers.clear()
+    _seed(routed)
+    rendered = _compile_contact_memory_prompt(
+        config_raw={"enabled": True, "lane_a": True},
+        trusted_scope=_scope(), message="should i keep the car", history=[],
+        session_key="session", now_ts=1000.0, profile_home=routed,
+    )
+    assert "green hatchback" in rendered
+    assert not (host / "contact-memory").exists()
 
 
 def test_recall_uses_api_copy_and_preserves_system_cache_and_transcript(tmp_path, monkeypatch):
@@ -339,7 +357,8 @@ def test_broker_reranker_reorders_and_fails_open():
             return [0.1, 0.9]
 
     broker = ContactMemoryBroker("/tmp", reranker=ReverseReranker())
-    assert broker._rerank("query", [first, second]) == [second, first]  # type: ignore[arg-type]
+    reranked = broker._rerank("query", [first, second])  # type: ignore[arg-type]
+    assert [result.score for result in reranked] == [0.9, 0.1]
 
     class BrokenReranker(ReverseReranker):
         def score(self, query, documents):
@@ -347,6 +366,19 @@ def test_broker_reranker_reorders_and_fails_open():
 
     broker.reranker = BrokenReranker()
     assert broker._rerank("query", [first, second]) == [first, second]  # type: ignore[arg-type]
+
+
+def test_hybrid_candidates_reserve_lexical_quota():
+    class Fact:
+        def __init__(self, version_id):
+            self.version_id = version_id
+            self.trust = self.confidence = 1.0
+
+    semantic = [SearchResult(Fact(f"dense-{i}"), 1 - i / 100, semantic_score=1 - i / 100) for i in range(10)]  # type: ignore[arg-type]
+    lexical = [SearchResult(Fact("category"), 0.4, lexical_score=0.4)]  # type: ignore[arg-type]
+    selected = ContactMemoryBroker._hybrid_candidates(lexical, semantic, set(), 10)
+    assert len(selected) == 10
+    assert any(result.fact.version_id == "category" for result in selected)
 
 
 def test_profile_contact_memory_root_resolves_to_selected_profile(tmp_path, monkeypatch):

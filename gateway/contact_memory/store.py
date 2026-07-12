@@ -71,16 +71,77 @@ class ContactMemoryStore:
             ).fetchone() if con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
             ).fetchone() else None
-            if existing is not None and str(existing[0]) != str(SCHEMA_VERSION):
+            if existing is not None and str(existing[0]) not in {"1", str(SCHEMA_VERSION)}:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {existing[0]}; expected {SCHEMA_VERSION}"
                 )
+            if existing is not None and str(existing[0]) == "1":
+                self._upgrade_v1_to_v2(con)
+                return
             con.executescript(CONTACT_SCHEMA_SQL)
             con.execute(
                 "INSERT INTO schema_meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(SCHEMA_VERSION),),
             )
+
+    def _upgrade_v1_to_v2(self, con: sqlite3.Connection) -> None:
+        """Atomically alter, replay, and version a v1 contact database."""
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            self._migrate_v1_to_v2(con)
+            self._execute_script(con, CONTACT_SCHEMA_SQL)
+            con.execute(
+                "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+
+    @staticmethod
+    def _execute_script(con: sqlite3.Connection, script: str) -> None:
+        """Execute a SQL script without ``executescript``'s implicit commit."""
+        statement = ""
+        for character in script:
+            statement += character
+            if character == ";" and sqlite3.complete_statement(statement):
+                con.execute(statement)
+                statement = ""
+        if statement.strip():
+            raise ValueError("incomplete SQL statement")
+
+    @staticmethod
+    def _migrate_v1_to_v2(con: sqlite3.Connection) -> None:
+        """Upgrade mutable ledgers while leaving immutable fact history intact."""
+        ContactMemoryStore._execute_script(con, """
+        ALTER TABLE pending_fact RENAME TO pending_fact_v1;
+        CREATE TABLE pending_fact (
+          proposal_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+          payload_json TEXT NOT NULL, source_id TEXT NOT NULL,
+          source_contact_id TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected','superseded','promoted')),
+          created_at REAL NOT NULL, decided_at REAL
+        );
+        INSERT INTO pending_fact SELECT * FROM pending_fact_v1;
+        DROP TABLE pending_fact_v1;
+        ALTER TABLE recommendation ADD COLUMN updated_at REAL;
+        ALTER TABLE recommendation ADD COLUMN expires_at REAL;
+        ALTER TABLE recommendation ADD COLUMN change_requirements_json TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE recommendation ADD COLUMN idempotency_key TEXT;
+        CREATE UNIQUE INDEX recommendation_idempotency
+          ON recommendation(idempotency_key) WHERE idempotency_key IS NOT NULL;
+        CREATE TABLE callback_event (
+          event_id TEXT PRIMARY KEY, session_key TEXT NOT NULL,
+          subject_type TEXT NOT NULL CHECK(subject_type IN ('fact','recommendation')),
+          subject_id TEXT NOT NULL, turn_index INTEGER NOT NULL, created_at REAL NOT NULL,
+          UNIQUE(session_key, subject_type, subject_id, turn_index)
+        );
+        CREATE INDEX callback_event_cooldown
+          ON callback_event(session_key, subject_type, subject_id, created_at, turn_index);
+        """)
 
     @contextmanager
     def _immediate(self) -> Iterator[sqlite3.Connection]:
@@ -348,31 +409,134 @@ class ContactMemoryStore:
             ).fetchall()
         return {row[0] for row in rows}
 
-    def set_recommendation(self, topic: str, recommendation: str, basis_fact_ids: Sequence[str], *, confidence: float, status: str = "active") -> str:
+    def ingest_extracted_fact(
+        self,
+        proposal: FactProposal,
+        *,
+        idempotency_key: str,
+        auto_promote: bool = False,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """Persist one validated extraction with atomic dedupe/supersession.
+
+        Every extraction gets a ledger row. Promotion and closing the previous
+        active version happen in the same writer transaction.
+        """
+        if proposal.source_contact_id != self.contact_id:
+            raise ValueError("source_contact_id does not match physical contact namespace")
+        payload = {
+            **proposal.__dict__,
+            "audience": proposal.audience.value,
+            "mention_policy": proposal.mention_policy.value,
+            "assertion_type": proposal.assertion_type.value,
+            "status": proposal.status.value,
+        }
+        timestamp = float(now if now is not None else time.time())
+        with self._immediate() as con:
+            existing = con.execute(
+                "SELECT proposal_id,status FROM pending_fact WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing:
+                return {"proposal_id": str(existing["proposal_id"]), "status": str(existing["status"]), "deduplicated": True}
+            proposal_id = uuid.uuid4().hex
+            # A correction makes older unresolved proposals for the same logical
+            # slot stale; reviewers must never approve both later.
+            rows = con.execute(
+                "SELECT proposal_id,payload_json FROM pending_fact WHERE status='pending'"
+            ).fetchall()
+            for row in rows:
+                old = json.loads(row["payload_json"])
+                if old.get("logical_id") == proposal.logical_id and (
+                    old.get("subject_id"), old.get("predicate"), old.get("object_text")
+                ) != (proposal.subject_id, proposal.predicate, proposal.object_text):
+                    con.execute(
+                        "UPDATE pending_fact SET status='superseded',decided_at=? WHERE proposal_id=?",
+                        (timestamp, row["proposal_id"]),
+                    )
+            state = "promoted" if auto_promote else "pending"
+            con.execute(
+                "INSERT INTO pending_fact(proposal_id,idempotency_key,payload_json,source_id,source_contact_id,status,created_at,decided_at) VALUES(?,?,?,?,?,?,?,?)",
+                (proposal_id, idempotency_key, json.dumps(payload, ensure_ascii=False, sort_keys=True), proposal.source_id, proposal.source_contact_id, state, timestamp, timestamp if auto_promote else None),
+            )
+            record = None
+            if auto_promote:
+                active = FactProposal(
+                    logical_id=proposal.logical_id, subject_id=proposal.subject_id,
+                    predicate=proposal.predicate, object_text=proposal.object_text,
+                    audience=Audience.OWNER_ONLY, mention_policy=MentionPolicy.BACKGROUND,
+                    assertion_type=AssertionType.STATED, source_id=proposal.source_id,
+                    source_contact_id=proposal.source_contact_id,
+                    evidence_pointer=proposal.evidence_pointer, trust=proposal.trust,
+                    confidence=proposal.confidence, status=FactStatus.ACTIVE,
+                    valid_from=proposal.valid_from, valid_to=proposal.valid_to,
+                    metadata={**proposal.metadata, "auto_promoted": True, "proposal_id": proposal_id},
+                )
+                record = self._insert_fact(con, active, timestamp=timestamp)
+        return {"proposal_id": proposal_id, "status": state, "deduplicated": False, "fact": record}
+
+    def set_recommendation(self, topic: str, recommendation: str, basis_fact_ids: Sequence[str], *, confidence: float, status: str = "active", change_requirements: Sequence[str] = (), expires_at: float | None = None, idempotency_key: str | None = None, now: float | None = None) -> str:
         if not topic.strip() or not recommendation.strip():
             raise ValueError("topic and recommendation are required")
         if status not in {"proposed", "active", "withdrawn", "fulfilled", "rejected"}:
             raise ValueError("invalid recommendation status")
         if not 0 <= confidence <= 1:
             raise ValueError("confidence must be in [0, 1]")
+        timestamp = float(now if now is not None else time.time())
         recommendation_id = uuid.uuid4().hex
         with self._immediate() as con:
+            if idempotency_key:
+                duplicate = con.execute("SELECT recommendation_id FROM recommendation WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+                if duplicate:
+                    return str(duplicate[0])
             missing = [fact_id for fact_id in basis_fact_ids if con.execute("SELECT 1 FROM fact WHERE version_id=?", (fact_id,)).fetchone() is None]
             if missing:
                 raise ValueError("recommendation basis contains unknown facts")
             prior = con.execute("SELECT recommendation_id FROM recommendation WHERE topic=? AND status='active'", (topic,)).fetchone()
             if status == "active":
-                con.execute("UPDATE recommendation SET status='withdrawn' WHERE topic=? AND status='active'", (topic,))
+                con.execute("UPDATE recommendation SET status='withdrawn',updated_at=? WHERE topic=? AND status='active'", (timestamp, topic))
             con.execute(
-                "INSERT INTO recommendation(recommendation_id,topic,recommendation,basis_fact_ids_json,confidence,status,supersedes_id,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (recommendation_id, topic, recommendation, json.dumps(list(dict.fromkeys(basis_fact_ids))), confidence, status, prior[0] if prior else None, time.time()),
+                "INSERT INTO recommendation(recommendation_id,topic,recommendation,basis_fact_ids_json,confidence,status,supersedes_id,created_at,updated_at,expires_at,change_requirements_json,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (recommendation_id, topic, recommendation, json.dumps(list(dict.fromkeys(basis_fact_ids))), confidence, status, prior[0] if prior else None, timestamp, timestamp, expires_at, json.dumps(list(dict.fromkeys(change_requirements))), idempotency_key),
             )
         return recommendation_id
 
-    def active_recommendations(self) -> list[dict[str, object]]:
-        with self._connect() as con:
+    def active_recommendations(self, *, now: float | None = None) -> list[dict[str, object]]:
+        timestamp = float(now if now is not None else time.time())
+        with self._immediate() as con:
+            con.execute("UPDATE recommendation SET status='withdrawn',updated_at=? WHERE status='active' AND expires_at IS NOT NULL AND expires_at<=?", (timestamp, timestamp))
             rows = con.execute("SELECT * FROM recommendation WHERE status='active' ORDER BY created_at DESC").fetchall()
-        return [{**dict(row), "basis_fact_ids": json.loads(row["basis_fact_ids_json"])} for row in rows]
+            active_rows = []
+            for row in rows:
+                basis = json.loads(row["basis_fact_ids_json"])
+                live = sum(
+                    con.execute("SELECT count(*) FROM fact WHERE version_id=? AND status='active' AND tx_to IS NULL", (fact_id,)).fetchone()[0]
+                    for fact_id in basis
+                )
+                if basis and live == len(basis):
+                    active_rows.append(row)
+                else:
+                    con.execute("UPDATE recommendation SET status='withdrawn',updated_at=? WHERE recommendation_id=?", (timestamp, row["recommendation_id"]))
+        return [{**dict(row), "basis_fact_ids": json.loads(row["basis_fact_ids_json"]), "change_requirements": json.loads(row["change_requirements_json"])} for row in active_rows]
+
+    def record_callback(self, session_key: str, subject_id: str, *, turn_index: int, subject_type: str = "fact", now: float | None = None) -> None:
+        if subject_type not in {"fact", "recommendation"}:
+            raise ValueError("invalid callback subject type")
+        timestamp = float(now if now is not None else time.time())
+        with self._immediate() as con:
+            con.execute(
+                "INSERT OR IGNORE INTO callback_event(event_id,session_key,subject_type,subject_id,turn_index,created_at) VALUES(?,?,?,?,?,?)",
+                (uuid.uuid4().hex, session_key, subject_type, subject_id, int(turn_index), timestamp),
+            )
+
+    def callback_on_cooldown(self, session_key: str, subject_id: str, *, turn_index: int, subject_type: str = "fact", cooldown_turns: int = 10, cooldown_seconds: float = 3600, now: float | None = None) -> bool:
+        timestamp = float(now if now is not None else time.time())
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT 1 FROM callback_event WHERE session_key=? AND subject_type=? AND subject_id=? AND (turn_index>? OR created_at>?) LIMIT 1",
+                (session_key, subject_type, subject_id, int(turn_index) - int(cooldown_turns), timestamp - float(cooldown_seconds)),
+            ).fetchone()
+        return row is not None
 
     def add_pending(self, proposal: FactProposal, idempotency_key: str) -> str:
         proposal_id = uuid.uuid4().hex
@@ -465,7 +629,7 @@ class ContactMemoryStore:
 
     def secure_delete_all(self) -> None:
         with self._immediate() as con:
-            for table in ("recall_event", "embedding", "edge", "recommendation", "pending_fact", "fact"):
+            for table in ("callback_event", "recall_event", "embedding", "edge", "recommendation", "pending_fact", "fact"):
                 con.execute(f"DELETE FROM {table}")
         with self._connect() as con:
             con.execute("PRAGMA wal_checkpoint(TRUNCATE)")

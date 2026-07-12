@@ -994,10 +994,28 @@ DEFAULT_CONFIG = {
         "contact_memory": {
             "enabled": False,
             "lane_a": False,
+            "lane_b": False,
+            "extraction": False,
+            "retrieval": {
+                "minimum_reranker_score": -6.5,
+            },
             "embedding": {
                 "backend": "off",
                 "model": "mlx-community/embeddinggemma-300m-4bit",
                 "timeout_seconds": 120,
+            },
+            "extractor": {
+                "backend": "off",
+                "model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+                "revision": "50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b",
+                "timeout_seconds": 15,
+                "startup_timeout_seconds": 180,
+                "max_tokens": 320,
+            },
+            "extraction_runtime": {
+                "max_queue": 32,
+                "workers": 1,
+                "max_retries": 1,
             },
         },
         # Inactivity timeout for gateway agent execution (seconds).

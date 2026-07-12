@@ -1924,8 +1924,10 @@ def _with_conversation_texture(base_prompt: str, texture_prompt: str) -> tuple[s
     return cache_prompt, execution_prompt
 
 
-_contact_memory_brokers: Dict[str, Any] = {}
-_contact_memory_brokers_lock = threading.Lock()
+from gateway.contact_memory.runtime import (
+    _brokers as _contact_memory_brokers,
+    get_broker as _get_contact_memory_broker,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1934,6 +1936,7 @@ class TrustedContactScope:
 
     principal: str
     contact_id: str
+    source_text: str = ""
 
 
 def _trusted_contact_scope_from_metadata(metadata: Any) -> Optional[TrustedContactScope]:
@@ -1948,7 +1951,60 @@ def _trusted_contact_scope_from_metadata(metadata: Any) -> Optional[TrustedConta
         return None
     if any(ord(char) < 32 for char in contact_id):
         return None
-    return TrustedContactScope(principal=principal, contact_id=contact_id)
+    source_text = raw.get("source_text")
+    if not isinstance(source_text, str) or not source_text.strip():
+        source_text = ""
+    return TrustedContactScope(
+        principal=principal, contact_id=contact_id, source_text=source_text[:4000]
+    )
+
+
+async def _submit_contact_memory_extraction(
+    *,
+    config_raw: Any,
+    trusted_scope: Any,
+    profile_home: Any,
+    source_id: Any,
+    user_text: str,
+    assistant_text: str,
+) -> bool:
+    """Enqueue authenticated direct-turn extraction without awaiting inference."""
+    if (
+        not isinstance(config_raw, dict)
+        or not config_raw.get("enabled")
+        or not config_raw.get("extraction")
+        or not isinstance(trusted_scope, TrustedContactScope)
+        or trusted_scope.principal not in {"owner", "guest"}
+    ):
+        return False
+    source_id = str(source_id or "").strip()
+    clean_user = str(user_text or "").strip()
+    if not source_id or not clean_user or not str(assistant_text or "").strip():
+        return False
+    try:
+        from pathlib import Path
+        from gateway.contact_memory.extractor import ExtractionJob
+        from gateway.contact_memory.runtime import get_extraction_runtime
+        from gateway.contact_memory.store import ContactMemoryStore
+
+        root = Path(profile_home).resolve() / "contact-memory"
+        # Store construction opens/migrates SQLite and may wait on its busy
+        # timeout. Never perform that work on the gateway event loop.
+        store = await asyncio.to_thread(
+            ContactMemoryStore, root, trusted_scope.contact_id
+        )
+        runtime = get_extraction_runtime(root, config_raw)
+        if runtime is None:
+            return False
+        return runtime.submit(ExtractionJob(
+            store,
+            clean_user,
+            str(assistant_text),
+            {"source_id": source_id, "principal": trusted_scope.principal},
+        ))
+    except Exception as exc:
+        logger.warning("Contact memory extraction submission skipped: %s", exc)
+        return False
 
 
 def _compile_contact_memory_prompt(
@@ -1960,6 +2016,8 @@ def _compile_contact_memory_prompt(
     session_key: str,
     now_ts: float,
     texture_prompt: str = "",
+    profile_home: Any = None,
+    usage_sink: Any = None,
 ) -> str:
     """Compile cache-safe Lane-A recall for the current API user-message copy."""
     return _compile_contact_memory_candidate(
@@ -1970,6 +2028,8 @@ def _compile_contact_memory_prompt(
         session_key=session_key,
         now_ts=now_ts,
         texture_prompt=texture_prompt,
+        profile_home=profile_home,
+        usage_sink=usage_sink,
     )
 
 
@@ -1982,6 +2042,8 @@ def _compile_contact_memory_candidate(
     session_key: str,
     now_ts: float,
     texture_prompt: str = "",
+    profile_home: Any = None,
+    usage_sink: Any = None,
 ) -> str:
     """Exercise retrieval without wiring it into an API request."""
     if not isinstance(config_raw, dict) or not config_raw.get("enabled") or not config_raw.get("lane_a"):
@@ -1994,9 +2056,7 @@ def _compile_contact_memory_candidate(
         return ""
     try:
         from hermes_constants import get_hermes_home
-        from gateway.contact_memory.broker import ContactMemoryBroker, RetrievalScope
-        from gateway.contact_memory.embeddings import backend_from_config
-        from gateway.contact_memory.rerankers import reranker_from_config
+        from gateway.contact_memory.broker import RetrievalScope
         from gateway.contact_memory.gating import TurnState
         from gateway.contact_memory.schema import RetrievalPrincipal
         from gateway.conversation_texture_v2 import _extract_features
@@ -2006,24 +2066,8 @@ def _compile_contact_memory_candidate(
             contact_id,
             session_key,
         )
-        root = get_hermes_home() / "contact-memory"
-        embedding_raw = config_raw.get("embedding")
-        reranker_raw = config_raw.get("reranker")
-        backend_key = json.dumps(
-            {"embedding": embedding_raw, "reranker": reranker_raw},
-            sort_keys=True,
-            default=str,
-        )
-        root_key = f"{root}\0{backend_key}"
-        with _contact_memory_brokers_lock:
-            broker = _contact_memory_brokers.get(root_key)
-            if broker is None:
-                broker = ContactMemoryBroker(
-                    root,
-                    embedding_backend=backend_from_config(config_raw),
-                    reranker=reranker_from_config(config_raw),
-                )
-                _contact_memory_brokers[root_key] = broker
+        root = Path(profile_home or get_hermes_home()).resolve() / "contact-memory"
+        broker = _get_contact_memory_broker(root, config_raw)
         features = _extract_features(
             message, history, now_ts=now_ts, time_awareness=True,
             timezone_name=str(config_raw.get("timezone") or "UTC"),
@@ -2035,10 +2079,51 @@ def _compile_contact_memory_candidate(
             turn_index=sum(row.get("role") == "user" for row in history),
             now=now_ts,
         )
-        return broker.prefetch(scope, message, history, turn).rendered
+        bundle = broker.prefetch(scope, message, history, turn)
+        if usage_sink is not None and (bundle.fact_ids or bundle.recommendation_ids):
+            usage_sink.append((
+                broker, scope, bundle.fact_ids, bundle.recommendation_ids,
+                turn.turn_index,
+            ))
+        return bundle.rendered
     except Exception as exc:
         logger.warning("Contact memory prefetch skipped: %s", exc)
         return ""
+
+
+def _contact_memory_lane_b_tools(
+    *,
+    config_raw: Any,
+    trusted_scope: Any,
+    session_key: str,
+    turn_index: int,
+    profile_home: Any = None,
+) -> list[Any]:
+    """Build the request-local Lane B surface from authenticated scope only."""
+    if not isinstance(config_raw, dict) or not config_raw.get("enabled") or not config_raw.get("lane_b"):
+        return []
+    if not isinstance(trusted_scope, TrustedContactScope):
+        return []
+    try:
+        from hermes_constants import get_hermes_home
+        from gateway.contact_memory.broker import RetrievalScope
+        from gateway.contact_memory.lane_b import build_lane_b_tool
+        from gateway.contact_memory.schema import RetrievalPrincipal
+
+        scope = RetrievalScope(
+            RetrievalPrincipal(trusted_scope.principal),
+            trusted_scope.contact_id,
+            session_key,
+        )
+        return [build_lane_b_tool(
+            root=Path(profile_home or get_hermes_home()).resolve() / "contact-memory",
+            config=config_raw,
+            scope=scope,
+            turn_index=turn_index,
+        )]
+    except Exception as exc:
+        logger.warning("Contact memory Lane B skipped: %s", exc)
+        return []
 
 
 _OWN_POLICY_OPEN_ENV = {
@@ -3058,6 +3143,22 @@ def _normalize_empty_agent_response(
         )
 
     return response
+
+
+def _is_successful_completed_turn(agent_result: Any, response: Any = None) -> bool:
+    """True only for a real, complete model turn suitable for side effects."""
+    if not isinstance(agent_result, dict):
+        return False
+    if agent_result.get("completed") is not True:
+        return False
+    if int(agent_result.get("api_calls", 0) or 0) < 1:
+        return False
+    if agent_result.get("interrupted") or agent_result.get("failed"):
+        return False
+    if agent_result.get("partial") or agent_result.get("error"):
+        return False
+    final = response if response is not None else agent_result.get("final_response")
+    return bool(str(final or "").strip())
 
 
 def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
@@ -8656,6 +8757,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             await self._finalize_shutdown_agents(active_agents)
 
+            # Drain auxiliary extraction after live turns finish. This is
+            # bounded; a wedged MLX worker is terminated instead of delaying
+            # adapter teardown indefinitely.
+            try:
+                from gateway.contact_memory.runtime import close_extraction_runtimes
+                await close_extraction_runtimes(timeout=10.0)
+            except Exception as _e:
+                logger.debug("contact extraction shutdown error: %s", _e)
+            try:
+                from gateway.contact_memory.runtime import close_brokers
+                await close_brokers()
+            except Exception as _e:
+                logger.debug("contact retrieval shutdown error: %s", _e)
+
             # Also shut down memory providers on idle cached agents.
             # _finalize_shutdown_agents only handles agents that were
             # mid-turn at drain time; the _agent_cache may still hold
@@ -9569,6 +9684,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             contact_scope_metadata["_hermes_contact_scope"] = {
                                 "principal": "guest",
                                 "session_contact_id": decision.contact_id,
+                                "source_text": event.text or "",
                             }
                         source = dataclasses.replace(
                             source,
@@ -9583,10 +9699,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         profile = decision.profile or "gpt"
                         source = dataclasses.replace(source, user_id_alt=f"owner:{profile}", chat_id_alt=f"hermes-profile:{profile}")
                         owner_metadata = dict(getattr(event, "metadata", None) or {})
-                        if decision.contact_id:
+                        _direct_owner_turn = str(
+                            getattr(source, "chat_type", "") or ""
+                        ).lower() in {"dm", "direct", "private"}
+                        if decision.contact_id and _direct_owner_turn:
                             owner_metadata["_hermes_contact_scope"] = {
                                 "principal": "owner",
                                 "session_contact_id": decision.contact_id,
+                                "source_text": event.text or "",
                             }
                         event = dataclasses.replace(event, source=source, metadata=owner_metadata)
             except Exception as exc:
@@ -11025,7 +11145,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _run_generation = self._begin_session_run_generation(_quick_key)
 
         try:
-            _agent_result = await self._handle_message_with_agent(event, source, _quick_key, _run_generation)
+            _agent_result = await self._handle_message_with_agent(
+                event,
+                source,
+                _quick_key,
+                _run_generation,
+                trusted_contact_scope=trusted_contact_scope,
+            )
             # Goal continuation: after the agent returns a final response
             # for this turn, check any standing /goal — the judge will
             # either mark it done, pause it (budget), or enqueue a
@@ -11447,7 +11573,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
         return source
 
-    async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
+    async def _handle_message_with_agent(
+        self,
+        event,
+        source,
+        _quick_key: str,
+        run_generation: int,
+        *,
+        trusted_contact_scope: Optional[TrustedContactScope] = None,
+    ):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
@@ -12864,6 +12998,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             await self._refresh_agent_cache_message_count(
                 session_key, session_entry.session_id
             )
+
+            # Extraction is post-turn and fire-and-forget. Authenticated scope is
+            # absent for groups and queued follow-ups; internal/forwarded events
+            # are rejected again here in depth.
+            _event_metadata = getattr(event, "metadata", None) or {}
+            _is_forwarded = bool(
+                isinstance(_event_metadata, dict)
+                and any(_event_metadata.get(key) for key in (
+                    "forwarded", "is_forwarded", "forwarded_from",
+                    "gateway_session_id", "_queued_followup",
+                ))
+            )
+            if (
+                _is_successful_completed_turn(agent_result, response)
+                and not getattr(event, "internal", False)
+                and not _is_forwarded
+            ):
+                _profile_home = self._resolve_profile_home_for_source(source)
+                _profile_cfg = _load_gateway_config_for_profile(
+                    _routed_profile_for_source(source)
+                ) or _load_gateway_config()
+                _contact_cfg = (_profile_cfg.get("agent") or {}).get(
+                    "contact_memory", {}
+                )
+                await _submit_contact_memory_extraction(
+                    config_raw=_contact_cfg,
+                    trusted_scope=trusted_contact_scope,
+                    profile_home=_profile_home,
+                    source_id=getattr(event, "message_id", None),
+                    user_text=(
+                        trusted_contact_scope.source_text
+                        if isinstance(trusted_contact_scope, TrustedContactScope)
+                        else ""
+                    ),
+                    assistant_text=response,
+                )
 
             # Intentional silence is a delivery decision, not a transcript
             # mutation.  The agent's [SILENT]/NO_REPLY assistant turn above is
@@ -18861,6 +19031,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # authenticated routing. It is assigned to the cached agent's
             # API-only current-user-message lane below, never to system context.
             _contact_memory_raw = (user_config.get("agent", {}) or {}).get("contact_memory", {})
+            _contact_memory_home = self._resolve_profile_home_for_source(source)
+            _lane_a_usage: list[Any] = []
             _recall_prompt = _compile_contact_memory_prompt(
                 config_raw=_contact_memory_raw,
                 trusted_scope=trusted_contact_scope,
@@ -18869,6 +19041,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_key=session_key or session_id or "gateway",
                 now_ts=persist_user_timestamp or time.time(),
                 texture_prompt=_texture_prompt,
+                profile_home=_contact_memory_home,
+                usage_sink=_lane_a_usage,
             )
 
             max_iterations = _current_max_iterations()
@@ -19222,6 +19396,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # system prompt, tools, transports, or conversation state.
             setattr(agent, "ephemeral_system_prompt", combined_ephemeral or None)
             setattr(agent, "per_turn_user_context", _recall_prompt or "")
+            _lane_b_tools = _contact_memory_lane_b_tools(
+                config_raw=_contact_memory_raw,
+                trusted_scope=trusted_contact_scope,
+                session_key=session_key or session_id or "gateway",
+                turn_index=sum(row.get("role") == "user" for row in history),
+                profile_home=_contact_memory_home,
+            )
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
@@ -19795,12 +19976,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _conversation_kwargs["moa_config"] = moa_config
                 if _persist_user_timestamp_override is not None:
                     _conversation_kwargs["persist_user_timestamp"] = _persist_user_timestamp_override
-                if guest_session:
-                    from gateway.guest_access import guest_policy_context
-                    with guest_policy_context(True):
+                from agent.request_scoped_tools import bind_request_scoped_tools
+                with bind_request_scoped_tools(agent, _lane_b_tools) as _tool_binding:
+                    if guest_session:
+                        from gateway.guest_access import guest_policy_context
+                        with guest_policy_context(True):
+                            result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
+                    else:
                         result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
-                else:
-                    result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
+                    if _is_successful_completed_turn(result):
+                        _tool_binding.commit_success()
+                        for (_broker, _scope, _fact_ids, _rec_ids, _turn) in _lane_a_usage:
+                            try:
+                                _broker.record_usage(
+                                    _scope, _fact_ids, turn_index=_turn,
+                                    recommendation_ids=_rec_ids,
+                                )
+                            except Exception as _usage_exc:
+                                logger.debug("contact-memory usage commit failed: %s", _usage_exc)
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 # Cancel any pending clarify entries so blocked agent

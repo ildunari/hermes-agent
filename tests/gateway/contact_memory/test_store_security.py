@@ -219,3 +219,95 @@ def test_corrupt_or_future_schema_is_rejected_on_reopen(tmp_path: Path):
         assert "unsupported contact-memory schema" in str(exc)
     else:
         raise AssertionError("future schema was silently overwritten")
+
+
+def test_v1_migration_recovers_atomically_after_interruption(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact-a")
+    fact = store.supersede_fact(_proposal(), now=1000.0)
+    pending_id = store.add_pending(
+        _proposal(logical_id="food:favorite", source_id="synthetic-message-2"),
+        "pending-key",
+    )
+    recommendation_id = store.set_recommendation(
+        "vehicle",
+        "Keep the hatchback.",
+        [fact.version_id],
+        confidence=0.9,
+        now=1001.0,
+    )
+
+    # Recreate the mutable tables exactly as they existed in schema v1.
+    with sqlite3.connect(store.path) as con:
+        con.executescript("""
+        ALTER TABLE pending_fact RENAME TO pending_fact_v2;
+        CREATE TABLE pending_fact (
+          proposal_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+          payload_json TEXT NOT NULL, source_id TEXT NOT NULL,
+          source_contact_id TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending','accepted','rejected')),
+          created_at REAL NOT NULL, decided_at REAL
+        );
+        INSERT INTO pending_fact SELECT
+          proposal_id,idempotency_key,payload_json,source_id,source_contact_id,
+          status,created_at,decided_at FROM pending_fact_v2;
+        DROP TABLE pending_fact_v2;
+        ALTER TABLE recommendation RENAME TO recommendation_v2;
+        CREATE TABLE recommendation (
+          recommendation_id TEXT PRIMARY KEY, topic TEXT NOT NULL,
+          recommendation TEXT NOT NULL, basis_fact_ids_json TEXT NOT NULL,
+          confidence REAL NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('proposed','active','withdrawn','fulfilled','rejected')),
+          supersedes_id TEXT, created_at REAL NOT NULL
+        );
+        INSERT INTO recommendation SELECT
+          recommendation_id,topic,recommendation,basis_fact_ids_json,confidence,
+          status,supersedes_id,created_at FROM recommendation_v2;
+        DROP TABLE recommendation_v2;
+        DROP TABLE callback_event;
+        UPDATE schema_meta SET value='1' WHERE key='schema_version';
+        """)
+
+    class SimulatedInterruption(RuntimeError):
+        pass
+
+    class InterruptedMigrationStore(ContactMemoryStore):
+        @staticmethod
+        def _migrate_v1_to_v2(con: sqlite3.Connection) -> None:
+            ContactMemoryStore._migrate_v1_to_v2(con)
+            # Fail after table alteration but before replay and version bump.
+            raise SimulatedInterruption
+
+    try:
+        InterruptedMigrationStore(tmp_path, "contact-a")
+    except SimulatedInterruption:
+        pass
+    else:
+        raise AssertionError("simulated migration interruption did not occur")
+
+    with sqlite3.connect(store.path) as con:
+        assert con.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "1"
+        assert [row[1] for row in con.execute("PRAGMA table_info(recommendation)")] == [
+            "recommendation_id", "topic", "recommendation", "basis_fact_ids_json",
+            "confidence", "status", "supersedes_id", "created_at",
+        ]
+
+    recovered = ContactMemoryStore(tmp_path, "contact-a")
+    reopened = ContactMemoryStore(tmp_path, "contact-a")
+    assert reopened.count_versions("vehicle:color") == 1
+    assert [record.object_text for record in reopened.active_facts(RetrievalPrincipal.OWNER)] == [
+        "Their hatchback is green."
+    ]
+    assert [row["proposal_id"] for row in recovered.list_pending()] == [pending_id]
+    with sqlite3.connect(store.path) as con:
+        assert con.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "2"
+        assert con.execute(
+            "SELECT recommendation FROM recommendation WHERE recommendation_id=?",
+            (recommendation_id,),
+        ).fetchone()[0] == "Keep the hatchback."
+        columns = [row[1] for row in con.execute("PRAGMA table_info(recommendation)")]
+        assert columns.count("updated_at") == 1
+        assert columns.count("idempotency_key") == 1

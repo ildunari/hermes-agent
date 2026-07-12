@@ -372,30 +372,31 @@ contacts:
     )
     runner = _runner(extra={"guest_routing_enabled": True, "guest_contacts_file": str(registry)})
     event = _event("hello", _source(user_id="guest@example.com", chat_id="guest@example.com", chat_type="dm"))
+    runner._handle_message_with_agent = AsyncMock(return_value=None)
 
-    captured = {}
-
-    def stop_after_auth(_hook_name, *, event, gateway, session_store):
-        captured["source"] = event.source
-        captured["event"] = event
-        return [{"action": "skip", "reason": "captured"}]
-
-    with patch("hermes_cli.plugins.invoke_hook", side_effect=stop_after_auth):
+    with patch("hermes_cli.plugins.invoke_hook", return_value=[]):
         result = await runner._handle_message(event)
 
     assert result is None
-    source = captured["source"]
+    handler_call = runner._handle_message_with_agent.await_args
+    assert handler_call is not None
+    captured_event = handler_call.args[0]
+    source = captured_event.source
     assert source.profile == "guest"
     assert source.user_id_alt == "guest:stephen-lucier"
     assert source.user_name == "Steve Lucier"
     assert source.chat_id_alt == "hermes-profile:guest"
-    assert "Guest contact context" in captured["event"].text
-    assert "approved_contact_id=stephen-lucier" in captured["event"].text
-    assert captured["event"].metadata["_hermes_contact_scope"] == {
+    assert "Guest contact context" in captured_event.text
+    assert "approved_contact_id=stephen-lucier" in captured_event.text
+    assert captured_event.metadata["_hermes_contact_scope"] == {
         "principal": "guest", "session_contact_id": "stephen-lucier",
+        "source_text": "hello",
     }
-    assert "display_name=Steve Lucier" in captured["event"].text
-    assert captured["event"].text.endswith("hello")
+    trusted_scope = handler_call.kwargs["trusted_contact_scope"]
+    assert trusted_scope.principal == "guest"
+    assert trusted_scope.contact_id == "stephen-lucier"
+    assert "display_name=Steve Lucier" in captured_event.text
+    assert captured_event.text.endswith("hello")
 
 
 @pytest.mark.asyncio
@@ -615,7 +616,13 @@ contacts:
         observed_only=True,
     )
 
-    with patch("hermes_cli.plugins.invoke_hook", return_value=[]):
+    captured = {}
+
+    def capture_routed_event(_hook_name, *, event, **_kwargs):
+        captured["event"] = event
+        return []
+
+    with patch("hermes_cli.plugins.invoke_hook", side_effect=capture_routed_event):
         result = await runner._handle_message(event)
 
     assert result is None
@@ -623,8 +630,45 @@ contacts:
     assert routed_source.profile == "poke"
     assert routed_source.user_id_alt == "owner:poke"
     assert routed_source.chat_id_alt == "hermes-profile:poke"
+    assert "_hermes_contact_scope" not in captured["event"].metadata
     assert event.source.profile == "poke"
     runner.session_store.append_to_transcript.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bluebubbles_owner_dm_passes_trusted_contact_scope(tmp_path):
+    registry = tmp_path / "contacts.yaml"
+    registry.write_text(
+        """
+owner_identities:
+  - kosta@example.com
+owner_profile: poke
+owner_contact_id: stephen-lucier
+contacts: {}
+""".strip(),
+        encoding="utf-8",
+    )
+    runner = _runner(
+        extra={"guest_routing_enabled": True, "guest_contacts_file": str(registry)}
+    )
+    runner._handle_message_with_agent = AsyncMock(return_value=None)
+    event = _event(
+        "hello",
+        _source(
+            user_id="kosta@example.com",
+            chat_id="kosta@example.com",
+            chat_type="dm",
+        ),
+    )
+
+    with patch("hermes_cli.plugins.invoke_hook", return_value=[]):
+        assert await runner._handle_message(event) is None
+
+    handler_call = runner._handle_message_with_agent.await_args
+    assert handler_call is not None
+    trusted_scope = handler_call.kwargs["trusted_contact_scope"]
+    assert trusted_scope.principal == "owner"
+    assert trusted_scope.contact_id == "stephen-lucier"
 
 
 @pytest.mark.asyncio

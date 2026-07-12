@@ -31,6 +31,7 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.tool_guardrails import ToolGuardrailDecision
+from agent.request_scoped_tools import get_request_scoped_handler
 from agent.tool_dispatch_helpers import (
     _is_destructive_command,
     _is_multimodal_tool_result,
@@ -1450,6 +1451,26 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     spinner.stop(cute_msg)
                 elif agent._should_emit_quiet_tool_messages():
                     agent._vprint(f"  {cute_msg}")
+        elif (request_handler := get_request_scoped_handler(agent, function_name)) is not None:
+            # Authorization is closed over by the service-owned handler; only
+            # model-provided query arguments cross this boundary.
+            handler = request_handler
+            assert handler is not None
+            def _execute(next_args: dict) -> Any:
+                return handler(next_args)
+            try:
+                function_result, function_args = _run_agent_tool_execution_middleware(
+                    agent,
+                    function_name=function_name,
+                    function_args=function_args,
+                    effective_task_id=effective_task_id,
+                    tool_call_id=getattr(tool_call, "id", "") or "",
+                    execute=_execute,
+                )
+            except Exception as tool_error:
+                function_result = json.dumps({"error": f"Request-scoped tool failed: {tool_error}"})
+                logger.error("request-scoped tool raised for %s: %s", function_name, tool_error, exc_info=True)
+            tool_duration = time.time() - tool_start_time
         elif agent.quiet_mode:
             spinner = None
             if agent._should_emit_quiet_tool_messages() and agent._should_start_quiet_spinner():

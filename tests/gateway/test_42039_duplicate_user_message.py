@@ -94,6 +94,12 @@ def _event():
     )
 
 
+def _trusted_scope():
+    return gateway_run.TrustedContactScope(
+        principal="guest", contact_id="contact-a"
+    )
+
+
 def _source():
     return SessionSource(
         platform=Platform.TELEGRAM,
@@ -239,6 +245,54 @@ async def test_normal_path_skip_db_when_agent_has_session_db(
         _event(), _source(), "agent:main:telegram:group:-1001:12345", 1
     )
 
+    _assert_user_call_has_skip_db(
+        runner.session_store.append_to_transcript.call_args_list, True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "agent_result",
+    [
+        {
+            "failed": True,
+            "final_response": None,
+            "error": "429 Too Many Requests",
+            "messages": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        },
+        {
+            "final_response": "Hello!",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "Hello!"},
+            ],
+            "tools": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        },
+    ],
+    ids=["early-failure", "normal"],
+)
+async def test_contact_scope_reaches_agent_on_all_result_paths(
+    monkeypatch, tmp_path, agent_result
+):
+    """The authenticated scope must be bound before result-path branching."""
+    runner = _bootstrap(monkeypatch, tmp_path)
+    runner._run_agent = AsyncMock(return_value=agent_result)
+
+    await runner._handle_message_with_agent(
+        _event(),
+        _source(),
+        "agent:main:telegram:group:-1001:12345",
+        1,
+        trusted_contact_scope=_trusted_scope(),
+    )
+
+    run_call = runner._run_agent.await_args
+    assert run_call is not None
+    assert run_call.kwargs["trusted_contact_scope"] == _trusted_scope()
     _assert_user_call_has_skip_db(
         runner.session_store.append_to_transcript.call_args_list, True
     )
