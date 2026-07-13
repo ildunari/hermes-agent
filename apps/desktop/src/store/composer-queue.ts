@@ -243,6 +243,7 @@ export const migrateQueuedPrompts = (fromKey: string | null | undefined, toKey: 
 /** Inputs to {@link shouldAutoDrain}. */
 export interface AutoDrainInput {
   isBusy: boolean
+  isConnected: boolean
   queueLength: number
 }
 
@@ -255,8 +256,13 @@ export interface AutoDrainInput {
  * busy ref to the current value, swallowing the settle edge — an edge-gated
  * drain would then strand the entry forever. The caller's drain lock
  * (`drainingQueueRef`) serializes sends so being edge-free can't double-submit.
+ *
+ * Gated on `isConnected` so a draft queued while the gateway is closed (a
+ * post-boot reconnect keeps the composer editable) waits instead of spinning
+ * failed sends, then flushes the moment the socket reopens.
  */
-export const shouldAutoDrain = ({ isBusy, queueLength }: AutoDrainInput): boolean => !isBusy && queueLength > 0
+export const shouldAutoDrain = ({ isBusy, isConnected, queueLength }: AutoDrainInput): boolean =>
+  !isBusy && isConnected && queueLength > 0
 
 /** Auto-drain attempts for one entry before we stop retrying and toast. The
  * entry stays queued for a manual send; a remount/reconnect resets the count. */

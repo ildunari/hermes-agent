@@ -150,21 +150,28 @@ describe('migrateQueuedPrompts', () => {
 })
 
 describe('shouldAutoDrain', () => {
-  it('drains whenever idle with a non-empty queue', () => {
-    expect(shouldAutoDrain({ isBusy: false, queueLength: 1 })).toBe(true)
+  it('drains whenever idle and connected with a non-empty queue', () => {
+    expect(shouldAutoDrain({ isBusy: false, isConnected: true, queueLength: 1 })).toBe(true)
   })
 
   it('drains on mount/reconnect with no observed busy edge', () => {
     // The whole point of dropping the edge: a remount resets the busy ref, so an
     // edge-gated drain would strand the entry. Idle + non-empty must still fire.
-    expect(shouldAutoDrain({ isBusy: false, queueLength: 2 })).toBe(true)
+    expect(shouldAutoDrain({ isBusy: false, isConnected: true, queueLength: 2 })).toBe(true)
   })
 
   it('does not drain mid-turn', () => {
-    expect(shouldAutoDrain({ isBusy: true, queueLength: 1 })).toBe(false)
+    expect(shouldAutoDrain({ isBusy: true, isConnected: true, queueLength: 1 })).toBe(false)
   })
 
   it('does not drain an empty queue', () => {
-    expect(shouldAutoDrain({ isBusy: false, queueLength: 0 })).toBe(false)
+    expect(shouldAutoDrain({ isBusy: false, isConnected: true, queueLength: 0 })).toBe(false)
+  })
+
+  it('does not drain while the gateway is closed, then flushes when it reopens', () => {
+    // A draft queued during a post-boot reconnect must wait — not spin failed
+    // sends — and drain the moment the socket is open again.
+    expect(shouldAutoDrain({ isBusy: false, isConnected: false, queueLength: 1 })).toBe(false)
+    expect(shouldAutoDrain({ isBusy: false, isConnected: true, queueLength: 1 })).toBe(true)
   })
 })
