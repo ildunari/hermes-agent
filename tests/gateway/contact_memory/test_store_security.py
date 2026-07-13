@@ -14,6 +14,7 @@ from gateway.contact_memory.schema import (
     FactStatus,
     MentionPolicy,
     RetrievalPrincipal,
+    SCHEMA_VERSION,
 )
 from gateway.contact_memory.security import can_retrieve, render_recall
 from gateway.contact_memory.store import ContactMemoryStore
@@ -303,7 +304,7 @@ def test_v1_migration_recovers_atomically_after_interruption(tmp_path: Path):
     with sqlite3.connect(store.path) as con:
         assert con.execute(
             "SELECT value FROM schema_meta WHERE key='schema_version'"
-        ).fetchone()[0] == "2"
+        ).fetchone()[0] == str(SCHEMA_VERSION)
         assert con.execute(
             "SELECT recommendation FROM recommendation WHERE recommendation_id=?",
             (recommendation_id,),

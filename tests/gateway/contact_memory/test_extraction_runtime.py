@@ -21,7 +21,7 @@ from gateway.run import (
     _is_successful_completed_turn,
     _submit_contact_memory_extraction,
 )
-from gateway.contact_memory.schema import RetrievalPrincipal
+from gateway.contact_memory.schema import RetrievalPrincipal, SCHEMA_VERSION
 from gateway.contact_memory.store import ContactMemoryStore
 
 
@@ -330,3 +330,7 @@ def test_schema_v1_migrates_without_losing_pending_rows(tmp_path: Path):
         con.execute("CREATE TABLE recommendation(recommendation_id TEXT PRIMARY KEY,topic TEXT NOT NULL,recommendation TEXT NOT NULL,basis_fact_ids_json TEXT NOT NULL,confidence REAL NOT NULL,status TEXT NOT NULL,supersedes_id TEXT,created_at REAL NOT NULL)")
     reopened = ContactMemoryStore(tmp_path, "contact")
     assert reopened.list_pending()[0]["proposal_id"] == proposal_id
+    with sqlite3.connect(reopened.path) as con:
+        assert con.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == str(SCHEMA_VERSION)

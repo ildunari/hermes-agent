@@ -19,17 +19,24 @@ import subprocess
 import threading
 from typing import Any, Awaitable, Callable, Mapping, Protocol, cast
 
-from .schema import AssertionType, Audience, FactProposal, FactStatus, MentionPolicy
+from .schema import (
+    AssertionType, Audience, FactProposal, FactStatus, InterestValence,
+    MentionPolicy, SignalType,
+)
 from .store import ContactMemoryStore
 
 
 class ExtractorBackend(Protocol):
-    async def extract(self, user_text: str, assistant_text: str, metadata: Mapping[str, Any]) -> list[Mapping[str, Any]]: ...
+    async def extract(
+        self, user_text: str, assistant_text: str, metadata: Mapping[str, Any]
+    ) -> list[Mapping[str, Any]] | Mapping[str, Any]: ...
 
 
-Extractor = Callable[[str, str, Mapping[str, Any]], Awaitable[list[Mapping[str, Any]]]]
+ExtractorOutput = list[Mapping[str, Any]] | Mapping[str, Any]
+Extractor = Callable[[str, str, Mapping[str, Any]], Awaitable[ExtractorOutput]]
 
 _MAX_OPERATIONS = 12
+_MAX_INTEREST_EVENTS = 12
 _MAX_TEXT = 500
 _MIN_CONFIDENCE = 0.60
 _AUTO_CONFIDENCE = 0.95
@@ -39,6 +46,11 @@ _INSTRUCTION_RE = re.compile(r"(?i)(?:ignore (?:all |the )?(?:previous|prior)|sy
 _SENSITIVE_RE = re.compile(r"(?i)\b(?:diagnos|medication|pregnan|therapy|bank|debt|salary|income|tax|lawsuit|lawyer|visa|immigration|sex|sexual|fetish|relationship|break ?up|affair|abuse|arrest|crime|password|secret|token)\b")
 _SAFE_PREDICATE_RE = re.compile(r"^(?:likes|dislikes|prefers|favorite_|uses_|owns_|lives_in$|works_at$|has_hobby$|has_pet$)")
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9:_./-]{0,127}$", re.I)
+_MODEL_INTEREST_SIGNALS = frozenset({
+    SignalType.SPONTANEOUS_RAISE, SignalType.ENTHUSIASM,
+    SignalType.ENGAGED_MENTION, SignalType.NEUTRAL_ACK,
+    SignalType.DISMISSIVE, SignalType.EXPLICIT_NEGATIVE,
+})
 QWEN3_EXTRACTOR_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 QWEN3_EXTRACTOR_REVISION = "50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b"
 QWEN3_EXTRACTOR_VENV = Path.home() / ".cache/hermes-contact-memory/embeddinggemma-venv"
@@ -109,7 +121,7 @@ class Qwen3ExtractorBackend:
 
     def _extract_sync(
         self, user_text: str, assistant_text: str, metadata: Mapping[str, Any]
-    ) -> list[Mapping[str, Any]]:
+    ) -> Mapping[str, Any]:
         del assistant_text  # Assistant claims are deliberately outside extraction evidence.
         source_id = str(metadata.get("source_id") or "").strip()
         if not source_id:
@@ -127,9 +139,13 @@ class Qwen3ExtractorBackend:
                     raise OSError("worker exited")
                 payload = json.loads(line)
                 proposals = payload.get("proposals")
-                if not payload.get("ok") or not isinstance(proposals, list):
+                interest_events = payload.get("interest_events", [])
+                if (
+                    not payload.get("ok") or not isinstance(proposals, list)
+                    or not isinstance(interest_events, list)
+                ):
                     raise ExtractorWorkerError(str(payload.get("error") or "invalid extractor response"))
-                return proposals
+                return {"proposals": proposals, "interest_events": interest_events}
             except TimeoutError as exc:
                 self.close()
                 raise ExtractorWorkerError("extractor worker timed out") from exc
@@ -139,7 +155,7 @@ class Qwen3ExtractorBackend:
 
     async def extract(
         self, user_text: str, assistant_text: str, metadata: Mapping[str, Any]
-    ) -> list[Mapping[str, Any]]:
+    ) -> Mapping[str, Any]:
         return await asyncio.to_thread(
             self._extract_sync, user_text, assistant_text, metadata
         )
@@ -260,14 +276,50 @@ def is_safe_to_auto_promote(proposal: FactProposal) -> bool:
     )
 
 
+def validate_interest_event(raw: Mapping[str, Any]) -> tuple[object, SignalType, InterestValence]:
+    """Validate model-owned semantic fields; storage canonicalizes the topic."""
+    if set(raw) != {"topic", "signal_type", "valence"}:
+        raise ValueError("interest event has invalid fields")
+    signal = SignalType(str(raw.get("signal_type") or ""))
+    if signal not in _MODEL_INTEREST_SIGNALS:
+        raise ValueError("interest signal must be derived from user text")
+    valence = InterestValence(str(raw.get("valence") or ""))
+    if signal is SignalType.EXPLICIT_NEGATIVE and valence is not InterestValence.NEGATIVE:
+        raise ValueError("explicit_negative must have negative valence")
+    return raw.get("topic"), signal, valence
+
+
 async def propose_turn_memories(store: ContactMemoryStore, extractor: Extractor | ExtractorBackend, user_text: str, assistant_text: str, metadata: Mapping[str, Any]) -> list[str]:
     source_id = str(metadata.get("source_id") or "").strip()
     if not source_id:
         raise ValueError("trusted source_id is required")
+    try:
+        length_observation = await asyncio.to_thread(
+            store.record_contact_message_length, source_id, len(str(user_text))
+        )
+    except Exception:
+        # This telemetry-derived signal must never block the existing fact lane.
+        length_observation = None
     method = cast(Extractor, getattr(extractor, "extract", extractor))
-    raw_operations = await method(user_text, assistant_text, metadata)
+    # Preserve the established callback contract. The first-party Qwen backend
+    # deterministically ignores assistant prose before invoking its worker.
+    raw_output = await method(user_text, assistant_text, metadata)
+    if isinstance(raw_output, list):
+        raw_operations = raw_output
+        raw_interest_events: object = []
+    elif isinstance(raw_output, Mapping):
+        if set(raw_output) - {"proposals", "interest_events"}:
+            raise ValueError("extractor returned an invalid output envelope")
+        raw_operations = raw_output.get("proposals")
+        raw_interest_events = raw_output.get("interest_events", [])
+    else:
+        raise ValueError("extractor returned an invalid output envelope")
     if not isinstance(raw_operations, list) or len(raw_operations) > _MAX_OPERATIONS:
         raise ValueError("extractor returned an invalid operation batch")
+    if not isinstance(raw_interest_events, list):
+        raw_interest_events = []
+    else:
+        raw_interest_events = raw_interest_events[:_MAX_INTEREST_EVENTS]
     proposal_ids: list[str] = []
     for raw in raw_operations:
         if not isinstance(raw, Mapping):
@@ -305,6 +357,40 @@ async def propose_turn_memories(store: ContactMemoryStore, extractor: Extractor 
             auto_promote=is_safe_to_auto_promote(proposal),
         )
         proposal_ids.append(str(result["proposal_id"]))
+
+    # Interest extraction is an advisory sibling lane. Invalid interest output
+    # is dropped item-by-item so it cannot regress durable fact extraction.
+    topic_valences: dict[str, InterestValence] = {}
+    for raw in raw_interest_events:
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            topic, signal, valence = validate_interest_event(raw)
+            event = await asyncio.to_thread(
+                store.record_interest_event,
+                topic_text=topic, signal_type=signal, valence=valence,
+                source_id=source_id,
+            )
+        except Exception:
+            continue
+        previous = topic_valences.get(event.topic_text)
+        if previous is None or valence is InterestValence.NEGATIVE:
+            topic_valences[event.topic_text] = valence
+
+    # The model supplies only the topic. Length classification is deterministic,
+    # per-contact, and measured against the median before this message was added.
+    if length_observation is not None and length_observation.is_long_reply:
+        for topic, valence in topic_valences.items():
+            if valence is InterestValence.NEGATIVE:
+                continue
+            try:
+                await asyncio.to_thread(
+                    store.record_interest_event,
+                    topic_text=topic, signal_type=SignalType.LONG_REPLY,
+                    valence=valence, source_id=source_id,
+                )
+            except Exception:
+                continue
     return proposal_ids
 
 
