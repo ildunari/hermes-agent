@@ -112,6 +112,12 @@ GATEWAY_STATUS_PATHS: dict[str, Path] = {
 # hiding a failed restart forever while covering normal long agent runs.
 DEFAULT_SAFE_WAIT_TIMEOUT = 24 * 60 * 60
 DEFAULT_SAFE_WAIT_INTERVAL = 2.0
+# The system dashboard LaunchDaemon uses ThrottleInterval=30. A failed first
+# launch (for example, while an updated editable checkout is refreshing
+# bytecode) cannot be retried before that interval expires, so readiness must
+# cover at least one throttled retry plus normal dashboard startup.
+DEFAULT_HEALTH_WAIT_TIMEOUT = 60.0
+DEFAULT_HEALTH_WAIT_INTERVAL = 0.5
 
 # WebUI busy probe: the WebUI (ai.hermes.webui) hosts live chat turns whose
 # worker state dies with the process. /health reports `active_runs` (worker
@@ -597,8 +603,8 @@ def _wait_for_scope_health(
     scope: str,
     *,
     active_labels: set[str],
-    timeout: float = 20.0,
-    interval: float = 0.5,
+    timeout: float = DEFAULT_HEALTH_WAIT_TIMEOUT,
+    interval: float = DEFAULT_HEALTH_WAIT_INTERVAL,
 ) -> list[str]:
     """Poll boundedly so normal launchd startup latency is not a false failure."""
     deadline = time.monotonic() + max(0.0, timeout)

@@ -137,6 +137,14 @@ def test_restart_scope_fails_when_verify_port_missing(monkeypatch, tmp_path):
     assert "port 9119 is not listening" in (tmp_path / "restart.log").read_text()
 
 
+def test_health_wait_covers_one_launchd_throttled_retry():
+    from hermes_cli import restart_surfaces
+
+    # com.kosta.hermes-dashboard-system has ThrottleInterval=30. The bounded
+    # readiness window must permit one failed launch and its delayed retry.
+    assert restart_surfaces.DEFAULT_HEALTH_WAIT_TIMEOUT > 30
+
+
 def test_describe_plan_names_canonical_command_and_scope_summary():
     plan = describe_plan("gateways", uid=503)
     assert "Canonical command: /restart-gateways" in plan
