@@ -108,10 +108,6 @@ export function useComposerSubmit({
   )
 
   const submitDraft = () => {
-    if (disabled) {
-      return
-    }
-
     // Source the text from the DOM editor, not React state. The AUI composer
     // state (`draft`) and the derived `hasComposerPayload` lag the DOM by a
     // render, so on fast typing or IME composition the final keystroke(s) may
@@ -129,6 +125,17 @@ export function useComposerSubmit({
         draftRef.current = domText
         setComposerText(domText)
       }
+    }
+
+    // Gateway isn't open (a post-boot reconnect keeps the composer editable by
+    // design). Don't silently drop the Enter — queue the draft so it shows as
+    // pending and the bounded auto-drain flushes it the instant the socket
+    // reopens, instead of the message vanishing with no feedback.
+    if (disabled) {
+      queueCurrentDraft()
+      focusInput()
+
+      return
     }
 
     const text = draftRef.current

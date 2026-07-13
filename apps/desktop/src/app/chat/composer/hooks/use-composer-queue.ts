@@ -28,6 +28,7 @@ interface UseComposerQueueArgs {
   clearDraft: () => void
   draftRef: RefObject<string>
   focusInput: () => void
+  gatewayConnected: boolean
   loadIntoComposer: (text: string, attachments: ComposerAttachment[]) => void
   onCancel: ChatBarProps['onCancel']
   onSubmit: ChatBarProps['onSubmit']
@@ -52,6 +53,7 @@ export function useComposerQueue({
   clearDraft,
   draftRef,
   focusInput,
+  gatewayConnected,
   loadIntoComposer,
   onCancel,
   onSubmit,
@@ -258,7 +260,7 @@ export function useComposerQueue({
   // a stale-session 404) can't strand the entry permanently nor spin-loop. The
   // drain lock serializes sends; a remount/reconnect resets the failure counts.
   const autoDrainNext = useCallback(() => {
-    if (busy || drainingQueueRef.current || !activeQueueSessionKey) {
+    if (busy || !gatewayConnected || drainingQueueRef.current || !activeQueueSessionKey) {
       return
     }
 
@@ -289,7 +291,7 @@ export function useComposerQueue({
         }
       })
       .catch(onFail)
-  }, [activeQueueSessionKey, busy, pickDrainHead, queuedPrompts, runDrain, t])
+  }, [activeQueueSessionKey, busy, gatewayConnected, pickDrainHead, queuedPrompts, runDrain, t])
 
   // Re-key on a runtime session-id change. A stable stored id (queueSessionKey)
   // never churns, so a change there is a real session switch and must NOT
@@ -306,14 +308,15 @@ export function useComposerQueue({
     migrateQueuedPrompts(prev, activeQueueSessionKey)
   }, [activeQueueSessionKey, queueSessionKey])
 
-  // Queued turns flow whenever the session is idle — on the busy→false settle
-  // edge, on mount/reconnect, and after a re-key — so a swallowed edge can't
-  // strand them. To cancel queued turns, the user deletes them from the panel.
+  // Queued turns flow whenever the session is idle AND the gateway is open — on
+  // the busy→false settle edge, on mount/reconnect, on the socket reopening, and
+  // after a re-key — so a swallowed edge can't strand them. To cancel queued
+  // turns, the user deletes them from the panel.
   useEffect(() => {
-    if (shouldAutoDrain({ isBusy: busy, queueLength: queuedPrompts.length })) {
+    if (shouldAutoDrain({ isBusy: busy, isConnected: gatewayConnected, queueLength: queuedPrompts.length })) {
       autoDrainNext()
     }
-  }, [autoDrainNext, busy, queuedPrompts.length])
+  }, [autoDrainNext, busy, gatewayConnected, queuedPrompts.length])
 
   // Queue-edit cleanup: on session swap the scope effect already stashed the
   // edit snapshot; only restore into the composer when still on the same scope.
