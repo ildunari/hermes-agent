@@ -1711,6 +1711,11 @@ class ContactMemoryStore:
     def set_proactive_send_outcome(
         self, send_id: str, outcome: ProactiveOutcome | str, *, now: float | None = None
     ) -> ProactiveSend:
+        """Set an outcome without ledger feedback (legacy/admin helper).
+
+        Runtime outcome tracking should use :meth:`record_proactive_outcome`,
+        which closes the proactive-send and bandit/event loop atomically.
+        """
         resolved = ProactiveOutcome(_enum_text(outcome))
         timestamp = _finite_timestamp(now)
         with self._immediate() as con:
@@ -1729,6 +1734,101 @@ class ContactMemoryStore:
                 "UPDATE proactive_send SET outcome=?,outcome_at=COALESCE(outcome_at,?) WHERE send_id=?",
                 (resolved.value, timestamp, send_id),
             )
+            updated = con.execute(
+                "SELECT * FROM proactive_send WHERE send_id=?", (send_id,)
+            ).fetchone()
+        assert updated is not None
+        return self._row_to_proactive_send(updated)
+
+    def record_proactive_outcome(
+        self,
+        send_id: str,
+        outcome: ProactiveOutcome | str,
+        *,
+        source_id: str,
+        now: float | None = None,
+    ) -> ProactiveSend:
+        """Atomically close a send and apply exactly-once interest feedback.
+
+        The deterministic event id is inserted with ``folded_at`` already set,
+        because this transaction applies its score and Thompson deltas directly.
+        A retry can therefore repair a historical outcome row that lacks its
+        event, but can never double-update the bandit or raw score.
+        """
+        from .schema import INTEREST_SIGNAL_BANDIT, INTEREST_SIGNAL_WEIGHTS
+
+        resolved = ProactiveOutcome(_enum_text(outcome))
+        timestamp = _finite_timestamp(now)
+        source = str(source_id).strip()
+        if not source or len(source) > 500 or any(ord(ch) < 32 for ch in source):
+            raise ValueError("source_id is invalid")
+        feedback = {
+            ProactiveOutcome.ENGAGED: (
+                SignalType.PROACTIVE_ENGAGED, InterestValence.POSITIVE,
+            ),
+            ProactiveOutcome.ACKNOWLEDGED: (
+                SignalType.NEUTRAL_ACK, InterestValence.NEUTRAL,
+            ),
+            ProactiveOutcome.IGNORED: (
+                SignalType.PROACTIVE_IGNORED, InterestValence.NEUTRAL,
+            ),
+            ProactiveOutcome.DISMISSED: (
+                SignalType.DISMISSIVE, InterestValence.NEUTRAL,
+            ),
+        }
+        with self._immediate() as con:
+            row = con.execute(
+                "SELECT * FROM proactive_send WHERE send_id=?", (send_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown proactive send: {send_id}")
+            if row["gate_decision"] != GateDecision.SENT.value or row["sent_at"] is None:
+                raise ValueError("only sent proactive records can receive outcomes")
+            if timestamp < float(row["sent_at"]):
+                raise ValueError("outcome_at cannot precede sent_at")
+            if row["outcome"] is not None and row["outcome"] != resolved.value:
+                raise ValueError("proactive send already has a different outcome")
+            con.execute(
+                "UPDATE proactive_send SET outcome=?,outcome_at=COALESCE(outcome_at,?) "
+                "WHERE send_id=?",
+                (resolved.value, timestamp, send_id),
+            )
+            interest_id = row["interest_id"]
+            if interest_id is not None:
+                interest = con.execute(
+                    "SELECT topic FROM interest WHERE interest_id=?", (interest_id,)
+                ).fetchone()
+                if interest is None:
+                    raise RuntimeError("proactive send references a missing interest")
+                signal, valence = feedback[resolved]
+                event_id = hashlib.sha256(
+                    f"proactive-outcome\0{send_id}\0{resolved.value}".encode()
+                ).hexdigest()
+                inserted = con.execute(
+                    """INSERT OR IGNORE INTO interest_event(
+                       event_id,topic_text,signal_type,valence,source_id,created_at,folded_at
+                       ) VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        event_id, str(interest["topic"]), signal.value, valence.value,
+                        source, timestamp, timestamp,
+                    ),
+                ).rowcount
+                if inserted:
+                    alpha_delta, beta_delta = INTEREST_SIGNAL_BANDIT.get(
+                        signal, (0.0, 0.0)
+                    )
+                    con.execute(
+                        """UPDATE interest SET
+                           raw_score=raw_score+?,
+                           evidence_count=evidence_count+1,
+                           last_evidence_at=MAX(last_evidence_at,?),
+                           ts_alpha=ts_alpha+?,ts_beta=ts_beta+?,updated_at=?
+                           WHERE interest_id=?""",
+                        (
+                            INTEREST_SIGNAL_WEIGHTS.get(signal, 0.0), timestamp,
+                            alpha_delta, beta_delta, timestamp, interest_id,
+                        ),
+                    )
             updated = con.execute(
                 "SELECT * FROM proactive_send WHERE send_id=?", (send_id,)
             ).fetchone()

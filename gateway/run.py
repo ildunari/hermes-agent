@@ -27,6 +27,7 @@ except ModuleNotFoundError:
 import asyncio
 import concurrent.futures
 import dataclasses
+import hashlib
 import inspect
 import json
 import logging
@@ -1952,6 +1953,9 @@ def _with_conversation_texture(base_prompt: str, texture_prompt: str) -> tuple[s
     return cache_prompt, execution_prompt
 
 
+from gateway.proactive_checkin import ProactiveTurnRequest, run_proactive_child_turn
+
+
 from gateway.contact_memory.runtime import (
     _brokers as _contact_memory_brokers,
     get_broker as _get_contact_memory_broker,
@@ -1985,6 +1989,119 @@ def _trusted_contact_scope_from_metadata(metadata: Any) -> Optional[TrustedConta
     return TrustedContactScope(
         principal=principal, contact_id=contact_id, source_text=source_text[:4000]
     )
+
+
+async def _record_proactive_inbound(
+    *,
+    config_raw: Any,
+    trusted_scope: Any,
+    profile_home: Any,
+    profile: str,
+    source: Any,
+    session_id: str,
+    source_id: str,
+    text: str,
+    received_at: float,
+    metadata: Any = None,
+) -> dict[str, Any] | None:
+    """Cancel slots and close outcomes off-loop for authenticated DM ingress."""
+    if not isinstance(config_raw, dict) or not isinstance(trusted_scope, TrustedContactScope):
+        return None
+    raw = (config_raw.get("agent", {}) or {}).get("proactive", {})
+    if not isinstance(raw, dict) or not raw.get("enabled"):
+        return None
+    if getattr(source, "chat_type", "") != "dm":
+        return None
+    platform = getattr(getattr(source, "platform", None), "value", None)
+    if platform != "bluebubbles":
+        return None
+    try:
+        from gateway.proactive_scheduler import ProactiveConfig, handle_inbound
+
+        cfg = ProactiveConfig.from_mapping(config_raw)
+        scope_meta = metadata.get("_hermes_contact_scope", {}) if isinstance(metadata, dict) else {}
+        timezone_name = str(
+            (metadata.get("_hermes_contact_timezone") if isinstance(metadata, dict) else None)
+            or (scope_meta.get("timezone") if isinstance(scope_meta, dict) else None)
+            or raw.get("timezone")
+            or (config_raw.get("agent", {}) or {}).get("timezone")
+            or config_raw.get("timezone")
+            or cfg.timezone
+        )
+        root = Path(profile_home).resolve()
+        route = {
+            "platform": platform,
+            "chat_id": str(getattr(source, "chat_id", "") or ""),
+            "chat_type": "dm",
+            "user_id": str(getattr(source, "user_id", "") or ""),
+            "session_id": str(session_id),
+        }
+        return await asyncio.to_thread(
+            handle_inbound,
+            state_db=root / "state.db",
+            contact_memory_root=root / "contact-memory",
+            profile=str(profile or "default"),
+            contact_id=trusted_scope.contact_id,
+            route=route,
+            timezone_name=timezone_name,
+            source_id=str(source_id),
+            text=str(text or ""),
+            received_at=float(received_at),
+            config=cfg,
+        )
+    except Exception as exc:
+        # Advisory and non-blocking exactly like contact-memory extraction.
+        logger.warning("Proactive inbound tracking skipped: %s", exc)
+        return None
+
+
+def _run_proactive_tick_once(
+    *,
+    profile_home: Any,
+    profile: str,
+    config_raw: Any,
+    session_db: Any = None,
+    generate: Any = None,
+    now: float | None = None,
+) -> dict[str, int]:
+    """Run one no-transport scheduler tick and optionally persist dry-run children."""
+    from gateway.proactive_scheduler import ProactiveConfig, ProactiveScheduler
+
+    root = Path(profile_home).resolve()
+    scheduler = ProactiveScheduler(
+        state_db_path=root / "state.db",
+        profile_home=root,
+        profile_name=str(profile),
+        config=ProactiveConfig.from_mapping(config_raw),
+    )
+    initiated = 0
+
+    def _initiate(route, claim) -> None:
+        nonlocal initiated
+        if session_db is None or generate is None or claim.kind != "checkin":
+            return
+        parent_session_id = str(claim.payload.get("session_id") or route.session_id or "")
+        if not parent_session_id:
+            return
+        purpose = (
+            '<checkin_texture private="true">Dry-run one tiny follow-up about: '
+            + str(claim.payload.get("reason") or "follow up")[:500]
+            + ". Do not send it to transport.</checkin_texture>"
+        )
+        run_proactive_child_turn(
+            session_db=session_db,
+            parent_session_id=parent_session_id,
+            purpose_prompt=purpose,
+            kind="checkin",
+            generate=generate,
+            child_session_id=f"proactive-{claim.slot_id}",
+            now_ts=now,
+        )
+        initiated += 1
+
+    result = scheduler.tick(now=now, on_dry_run=_initiate)
+    result["initiated"] = initiated
+    return result
 
 
 async def _submit_contact_memory_extraction(
@@ -7102,6 +7219,50 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         {"restart_timeout", "shutdown_timeout", "restart_interrupted"}
     )
 
+    @staticmethod
+    def _proactive_dry_run_generate(request: ProactiveTurnRequest) -> str:
+        """Persist an auditable assistant-first artifact without model/transport I/O."""
+        return f"[dry-run proactive {request.kind}; transport suppressed]"
+
+    async def _proactive_scheduler_watcher(self) -> None:
+        """Drive enabled profile schedulers every 30 minutes; never send transport."""
+        while self._running:
+            try:
+                from hermes_cli.profiles import get_active_profile_name, get_profile_dir
+                from hermes_state import SessionDB
+
+                active = get_active_profile_name() or os.getenv("HERMES_PROFILE") or "default"
+                for profile in dict.fromkeys((active, "poke", "guest")):
+                    config_raw = _load_gateway_config_for_profile(profile)
+                    raw = (config_raw.get("agent", {}) or {}).get("proactive", {})
+                    if not (isinstance(raw, dict) and raw.get("enabled")):
+                        continue
+                    profile_home = get_profile_dir(profile)
+
+                    def _tick_profile() -> dict[str, int]:
+                        db = SessionDB(Path(profile_home) / "state.db")
+                        try:
+                            return _run_proactive_tick_once(
+                                profile_home=profile_home,
+                                profile=profile,
+                                config_raw=config_raw,
+                                session_db=db,
+                                generate=self._proactive_dry_run_generate,
+                            )
+                        finally:
+                            db.close()
+
+                    result = await asyncio.to_thread(_tick_profile)
+                    logger.info("Proactive dry-run tick (%s): %s", profile, result)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Proactive scheduler tick failed", exc_info=True)
+            for _ in range(1800):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
     async def _run_startup_resume_event(
         self,
         adapter: BasePlatformAdapter,
@@ -8011,6 +8172,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 ", ".join(p.value for p in self._failed_platforms),
             )
         asyncio.create_task(self._platform_reconnect_watcher())
+
+        # Code-owned proactive policy ticker. Phase 3 is structurally dry-run and
+        # this watcher has no adapter/delivery-router reference.
+        asyncio.create_task(self._proactive_scheduler_watcher())
 
         # Start background handoff watcher — picks up CLI sessions marked
         # handoff_state='pending' in state.db and re-binds them to the
@@ -9840,6 +10005,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 "session_contact_id": decision.contact_id,
                                 "source_text": event.text or "",
                             }
+                            contact_scope_metadata["_hermes_contact_timezone"] = (
+                                decision.contact_timezone or "UTC"
+                            )
                         source = dataclasses.replace(
                             source,
                             profile=(decision.profile or "guest"),
@@ -11837,6 +12005,42 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+
+        # Phase-3 proactive ingress hook: authenticated DMs cancel armed/claimed
+        # slots immediately and close any <24h outcome. It is config-gated,
+        # advisory, and offloaded so the reactive LLM hot path gains no blocking
+        # database work. No live profile enables it as part of this code change.
+        if isinstance(trusted_contact_scope, TrustedContactScope):
+            _proactive_cfg = _load_gateway_config_for_profile(
+                getattr(source, "profile", None)
+            )
+            _event_ts = getattr(event, "timestamp", None)
+            try:
+                _proactive_ts = float(
+                    _event_ts.timestamp() if hasattr(_event_ts, "timestamp") else _event_ts
+                )
+            except (TypeError, ValueError):
+                _proactive_ts = time.time()
+            _proactive_source_id = str(getattr(event, "message_id", None) or "").strip()
+            if not _proactive_source_id:
+                _proactive_source_id = hashlib.sha256(
+                    f"{session_entry.session_id}\0{_proactive_ts:.6f}\0{event.text or ''}".encode()
+                ).hexdigest()
+            _proactive_task = asyncio.create_task(_record_proactive_inbound(
+                config_raw=_proactive_cfg,
+                trusted_scope=trusted_contact_scope,
+                profile_home=self._resolve_profile_home_for_source(source),
+                profile=str(getattr(source, "profile", None) or os.getenv("HERMES_PROFILE") or "default"),
+                source=source,
+                session_id=session_entry.session_id,
+                source_id=_proactive_source_id,
+                text=str(event.text or ""),
+                received_at=_proactive_ts,
+                metadata=getattr(event, "metadata", None),
+            ))
+            self._background_tasks.add(_proactive_task)
+            _proactive_task.add_done_callback(self._background_tasks.discard)
+
         pinned_session_id = str(
             (getattr(event, "metadata", None) or {}).get("gateway_session_id") or ""
         ).strip()

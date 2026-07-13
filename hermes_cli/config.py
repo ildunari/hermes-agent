@@ -1018,6 +1018,25 @@ DEFAULT_CONFIG = {
                 "max_retries": 1,
             },
         },
+        # Proactive scheduler policy. Phase 3 is default-off and code-enforced
+        # dry-run: slots and outcomes are durable, but no transport send occurs.
+        "proactive": {
+            "enabled": False,
+            "dry_run": True,
+            "transport": "bluebubbles",
+            "timezone": "UTC",
+            "active_hours": {"start": "09:00", "end": "21:30"},
+            "morning_jitter_minutes": 45,
+            "weekly_interest_cap": 2,
+            "weekly_total_cap": 3,
+            "min_gap_hours": 48,
+            "eligibility_min_messages_14d": 5,
+            "backoff_after_dismissals": 3,
+            "backoff_days": 30,
+            "exploration_floor": 0.10,
+            "serious_share_block_hours": 72,
+            "claim_lease_seconds": 900,
+        },
         # Inactivity timeout for gateway agent execution (seconds).
         # The agent can run indefinitely as long as it's actively calling
         # tools or receiving API responses.  Only fires when the agent has

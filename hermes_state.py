@@ -17,6 +17,7 @@ Key design decisions:
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -2148,6 +2149,82 @@ class SessionDB:
         self._insert_session_row(session_id, source, **kwargs)
         return session_id
 
+    def create_initiated_assistant_child(
+        self,
+        *,
+        parent_session_id: str,
+        child_session_id: str,
+        assistant_content: str,
+        initiated_kind: str,
+        timestamp: float | None = None,
+    ) -> str:
+        """Atomically persist an agent-initiated child whose first turn is assistant.
+
+        No parent messages are copied and no synthetic user row is manufactured.
+        The child's stable system prompt/model metadata is snapshotted byte-for-
+        byte from its parent; the execution-only proactive directive is never
+        written into that cache prefix.
+        """
+        content = str(assistant_content or "").strip()
+        if not content:
+            raise ValueError("initiated assistant content is required")
+        if initiated_kind not in {"checkin", "interest_share", "exploration"}:
+            raise ValueError("invalid initiated turn kind")
+        when = float(time.time() if timestamp is None else timestamp)
+        if not math.isfinite(when):
+            raise ValueError("timestamp must be finite")
+
+        def _do(conn):
+            parent = conn.execute(
+                "SELECT * FROM sessions WHERE id=?", (parent_session_id,)
+            ).fetchone()
+            if parent is None:
+                raise KeyError(f"unknown parent session: {parent_session_id}")
+            if str(parent["chat_type"] or "dm") != "dm":
+                raise ValueError("agent-initiated turns are DM-only")
+            if conn.execute(
+                "SELECT 1 FROM sessions WHERE id=?", (child_session_id,)
+            ).fetchone() is not None:
+                raise ValueError("child_session_id already exists")
+            try:
+                model_config = json.loads(parent["model_config"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                model_config = {}
+            if not isinstance(model_config, dict):
+                model_config = {}
+            model_config["_proactive_from"] = parent_session_id
+            model_config["_proactive_kind"] = initiated_kind
+            conn.execute(
+                """INSERT INTO sessions(
+                   id,source,user_id,session_key,chat_id,chat_type,thread_id,
+                   display_name,origin_json,model,model_config,system_prompt,
+                   parent_session_id,started_at,last_active,message_count,cwd,
+                   git_branch,git_repo_root
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    child_session_id, parent["source"], parent["user_id"],
+                    None, parent["chat_id"], parent["chat_type"],
+                    parent["thread_id"], parent["display_name"], parent["origin_json"],
+                    parent["model"], json.dumps(model_config, sort_keys=True),
+                    parent["system_prompt"], parent_session_id, when, when, 1,
+                    parent["cwd"], parent["git_branch"], parent["git_repo_root"],
+                ),
+            )
+            conn.execute(
+                "INSERT INTO messages(session_id,role,content,timestamp,active,observed) "
+                "VALUES(?,'assistant',?,?,1,0)",
+                (child_session_id, self._encode_content(content), when),
+            )
+            first = conn.execute(
+                "SELECT role FROM messages WHERE session_id=? ORDER BY id LIMIT 1",
+                (child_session_id,),
+            ).fetchone()
+            if first is None or first["role"] != "assistant":
+                raise RuntimeError("initiated child did not persist assistant first")
+            return child_session_id
+
+        return self._execute_write(_do)
+
     def record_gateway_session_peer(
         self,
         session_id: str,
@@ -2454,6 +2531,7 @@ class SessionDB:
                 SELECT * FROM sessions
                 WHERE session_key = ?
                   AND source = ?
+                  AND json_extract(COALESCE(model_config, '{}'), '$._proactive_from') IS NULL
                   AND (ended_at IS NULL OR end_reason = 'agent_close')
                   AND (COALESCE(message_count, 0) > 0 OR EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = sessions.id LIMIT 1
@@ -2475,6 +2553,7 @@ class SessionDB:
                 """
                 SELECT * FROM sessions
                 WHERE source = ?
+                  AND json_extract(COALESCE(model_config, '{}'), '$._proactive_from') IS NULL
                   AND COALESCE(user_id, '') = COALESCE(?, '')
                   AND COALESCE(chat_id, '') = COALESCE(?, '')
                   AND COALESCE(chat_type, '') = COALESCE(?, '')
