@@ -65,7 +65,6 @@ import {
 } from './desktop-uninstall'
 import { installEmbedReferer } from './embed-referer'
 import { readDirForIpc } from './fs-read-dir'
-import { resolvePickerDefaultPath } from './wsl-path-bridge'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
 import { scanGitRepos } from './git-repo-scan'
 import {
@@ -96,6 +95,7 @@ import {
 } from './hardening'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
+import { resolveRepoVenvRoot } from './runtime-paths'
 import {
   buildSessionWindowUrl,
   chatWindowWebPreferences,
@@ -128,6 +128,7 @@ import {
 import { readWindowsUserEnvVar } from './windows-user-env'
 import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './workspace-cwd'
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
+import { resolvePickerDefaultPath } from './wsl-path-bridge'
 
 const USER_DATA_OVERRIDE = process.env.HERMES_DESKTOP_USER_DATA_DIR
 
@@ -362,8 +363,9 @@ function pathWithHermesManagedNode(...entries) {
 // install.ps1 / install.sh use, so a desktop-only user and a CLI-only user end
 // up with identical layouts and can share one install.
 const ACTIVE_HERMES_ROOT = path.join(HERMES_HOME, 'hermes-agent')
-// VENV_ROOT — venv lives inside the repo, exactly like install.ps1 does it.
-const VENV_ROOT = path.join(ACTIVE_HERMES_ROOT, 'venv')
+// Prefer the canonical .venv used by current CLI/gateway services while
+// retaining compatibility with older installs that only have legacy venv.
+const VENV_ROOT = resolveRepoVenvRoot(ACTIVE_HERMES_ROOT)
 // BOOTSTRAP_COMPLETE_MARKER — written by the first-launch bootstrap runner
 // (Phase 1D) after install.ps1 has completed all stages and the user has
 // finished initial configuration. Presence of this marker means the install
@@ -2320,9 +2322,10 @@ function repairMacUpdaterHelper(updater) {
 // fresh entry points. On Windows this is the file the running backend
 // `hermes.exe` holds open; on POSIX it's never mandatory-locked.
 function venvHermesShimPath(updateRoot) {
+  const venvRoot = resolveRepoVenvRoot(updateRoot)
   return IS_WINDOWS
-    ? path.join(updateRoot, 'venv', 'Scripts', 'hermes.exe')
-    : path.join(updateRoot, 'venv', 'bin', 'hermes')
+    ? path.join(venvRoot, 'Scripts', 'hermes.exe')
+    : path.join(venvRoot, 'bin', 'hermes')
 }
 
 // Best-effort lock probe mirroring the Rust updater's is_locked(): a running
@@ -2569,7 +2572,7 @@ async function applyUpdates(opts = {}) {
       updaterArgs.push('--target-app', targetApp)
     }
 
-    const venvBin = path.join(updateRoot, 'venv', IS_WINDOWS ? 'Scripts' : 'bin')
+    const venvBin = path.join(resolveRepoVenvRoot(updateRoot), IS_WINDOWS ? 'Scripts' : 'bin')
 
     // Stop our own backend(s) and wait for the venv shim to unlock BEFORE we
     // spawn the updater. Without this the updater races a still-locked
@@ -2656,7 +2659,7 @@ async function handOffWindowsBootstrapRecovery(reason) {
     ? await resolveHealedBranch(updateRoot, configuredBranch || DEFAULT_UPDATE_BRANCH)
     : configuredBranch || DEFAULT_UPDATE_BRANCH
 
-  const venvBin = path.join(updateRoot, 'venv', IS_WINDOWS ? 'Scripts' : 'bin')
+  const venvBin = path.join(resolveRepoVenvRoot(updateRoot), IS_WINDOWS ? 'Scripts' : 'bin')
   const venvHermes = path.join(venvBin, IS_WINDOWS ? 'hermes.exe' : 'hermes')
   const venvPython = path.join(venvBin, IS_WINDOWS ? 'python.exe' : 'python')
 
@@ -2711,7 +2714,7 @@ async function handOffWindowsBootstrapRecovery(reason) {
 // Resolve the hermes CLI to drive an in-app update: prefer the venv shim in
 // the install we're updating, fall back to `hermes` on PATH.
 function resolveHermesCliBinary(updateRoot) {
-  const venvHermes = path.join(updateRoot, 'venv', 'bin', 'hermes')
+  const venvHermes = path.join(resolveRepoVenvRoot(updateRoot), 'bin', 'hermes')
 
   if (fileExists(venvHermes)) {
     return venvHermes
@@ -2796,7 +2799,7 @@ async function applyUpdatesPosixInApp(opts: any) {
   // Node lives directly under %LOCALAPPDATA%\hermes\node, not node\bin.
   const env: Record<string, string> = {
     HERMES_HOME,
-    PATH: pathWithHermesManagedNode(path.join(updateRoot, 'venv', 'bin'))
+    PATH: pathWithHermesManagedNode(path.join(resolveRepoVenvRoot(updateRoot), 'bin'))
   }
 
   // `hermes update` reaps stale `hermes serve` backends (a code update
@@ -3321,7 +3324,7 @@ function createPythonBackend(root, label, backendArgs, options: any = {}) {
     return null
   }
 
-  const venvRoot = path.join(root, 'venv')
+  const venvRoot = resolveRepoVenvRoot(root)
   const venvPython = getVenvPython(venvRoot)
   const command = IS_WINDOWS && fileExists(venvPython) ? venvPython : python
 

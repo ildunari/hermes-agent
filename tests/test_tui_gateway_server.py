@@ -3805,6 +3805,53 @@ def test_config_set_model_global_persists(monkeypatch):
     assert saved_values["model.base_url"] == "https://api.anthropic.com"
 
 
+def test_config_set_model_global_uses_session_profile_home(tmp_path, monkeypatch):
+    """A dashboard multiplexing profiles must persist into the session owner.
+
+    The Desktop can connect a Coding session through a dashboard launched as the
+    GPT profile.  Model resolution and explicit global persistence must use the
+    session's bound profile home, not the dashboard process home.
+    """
+    launch_home = tmp_path / "profiles" / "gpt"
+    session_home = tmp_path / "profiles" / "coding"
+    launch_home.mkdir(parents=True)
+    session_home.mkdir(parents=True)
+    seen = []
+
+    session = _session()
+    session["profile_home"] = str(session_home)
+    server._sessions["sid"] = session
+
+    def fake_apply(_sid, _session, _raw, **_kwargs):
+        from hermes_constants import get_hermes_home
+
+        seen.append(get_hermes_home())
+        return {"value": "new/model", "warning": ""}
+
+    monkeypatch.setattr(server, "_apply_model_switch", fake_apply)
+    monkeypatch.setenv("HERMES_HOME", str(launch_home))
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "config.set",
+                "params": {
+                    "session_id": "sid",
+                    "key": "model",
+                    "value": "new/model --global",
+                },
+            }
+        )
+        assert resp["result"]["value"] == "new/model"
+        assert seen == [session_home]
+        from hermes_constants import get_hermes_home
+
+        assert get_hermes_home() == launch_home
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_config_set_model_explicit_provider_skips_broken_default_init(monkeypatch):
     seen = {"build": 0, "wait": 0, "requested": []}
     session = _session()

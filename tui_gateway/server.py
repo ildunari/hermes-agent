@@ -10357,15 +10357,27 @@ def _(rid, params: dict) -> dict:
                         return init_err
                     if session.get("agent") is None:
                         return _err(rid, 5032, "agent initialization failed")
-                result = _apply_model_switch(
-                    params.get("session_id", ""),
-                    session,
-                    value,
-                    confirm_expensive_model=bool(
-                        params.get("confirm_expensive_model", False)
-                    ),
-                    parsed_flags=parsed_flags,
+                profile_home = session.get("profile_home")
+                home_token = (
+                    set_hermes_home_override(profile_home) if profile_home else None
                 )
+                try:
+                    # A single dashboard can multiplex sessions owned by other
+                    # profiles. Resolve providers and persist explicit --global
+                    # changes against the session owner, never the dashboard's
+                    # launch profile.
+                    result = _apply_model_switch(
+                        params.get("session_id", ""),
+                        session,
+                        value,
+                        confirm_expensive_model=bool(
+                            params.get("confirm_expensive_model", False)
+                        ),
+                        parsed_flags=parsed_flags,
+                    )
+                finally:
+                    if home_token is not None:
+                        reset_hermes_home_override(home_token)
             else:
                 result = _apply_model_switch(
                     "",
