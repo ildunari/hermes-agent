@@ -2119,6 +2119,113 @@ def _compile_contact_memory_candidate(
         return ""
 
 
+def _snapshot_interest_digest(
+    *,
+    config_raw: Any,
+    trusted_scope: Any,
+    profile_home: Any,
+    session_key: str,
+    session_id: Any,
+    snapshots: Any,
+    lock: Any,
+    now_monotonic: Optional[float] = None,
+    cache_ttl_seconds: Optional[float] = None,
+    cache_max_entries: Optional[int] = None,
+) -> str:
+    """Return the session-frozen interest digest for cache-safe user injection.
+
+    The digest is read from disk ONCE per (session_key, session_id) and cached
+    for the life of that session so a mid-session maintenance regeneration cannot
+    hot-swap it (plan Component 2). A new session_id under the same key (session
+    reset) re-reads. The returned text is appended to the API-only per-turn user
+    context, never the stable cached system prompt, so prompt caching is safe.
+    """
+    if not isinstance(config_raw, dict) or not config_raw.get("enabled"):
+        return ""
+    if not isinstance(trusted_scope, TrustedContactScope):
+        return ""
+    session_identity = session_key or str(session_id or "")
+    if not session_identity:
+        return ""
+    try:
+        from hermes_constants import get_hermes_home
+
+        profile_root = Path(profile_home or get_hermes_home()).resolve()
+    except Exception as exc:
+        logger.warning("Interest digest profile resolution skipped: %s", exc)
+        return ""
+    key = (
+        str(profile_root),
+        trusted_scope.contact_id,
+        session_identity,
+        str(session_id or ""),
+    )
+    # Kept as ignored compatibility parameters for callers/tests from the
+    # earlier TTL/LRU implementation. A live session snapshot must never be
+    # evicted by elapsed wall time or unrelated sessions filling a cache.
+    del now_monotonic, cache_ttl_seconds, cache_max_entries
+    with lock:
+        for cache_key, cache_value in list(snapshots.items()):
+            if not isinstance(cache_value, tuple) or len(cache_value) != 2:
+                snapshots.pop(cache_key, None)
+        cached = snapshots.get(key)
+        if isinstance(cached, tuple) and len(cached) == 2:
+            return str(cached[1] or "")
+    try:
+        from gateway.contact_memory.interest_maintenance import (
+            read_digest,
+            render_digest_for_injection,
+        )
+
+        root = profile_root / "contact-memory"
+        digest = read_digest(root, trusted_scope.contact_id).strip()
+        rendered = render_digest_for_injection(digest) if digest else ""
+    except Exception as exc:
+        logger.warning("Interest digest snapshot skipped: %s", exc)
+        rendered = ""
+    with lock:
+        # Seeing a different durable session_id for this exact
+        # (profile, contact, routing key) proves the prior session is inactive.
+        # Reap only those stale entries; never evict an unrelated live session.
+        for cache_key in list(snapshots):
+            if (
+                isinstance(cache_key, tuple)
+                and len(cache_key) == 4
+                and cache_key[:3] == key[:3]
+                and cache_key[3] != key[3]
+            ):
+                snapshots.pop(cache_key, None)
+        snapshots[key] = (str(session_id or ""), rendered)
+    return rendered
+
+
+def _clear_interest_digest_snapshots(
+    snapshots: Any,
+    lock: Any,
+    *,
+    session_key: str,
+    session_id: Optional[str] = None,
+) -> int:
+    """Drop snapshots only at a proven session boundary."""
+    removed = 0
+    with lock:
+        for key in list(snapshots):
+            if not isinstance(key, tuple) or len(key) != 4 or key[2] != session_key:
+                continue
+            if session_id is not None and key[3] != str(session_id):
+                continue
+            snapshots.pop(key, None)
+            removed += 1
+    return removed
+
+
+def _join_contact_turn_context(recall_prompt: str, interest_digest: str) -> str:
+    """Assemble the API-only current-user context without touching system text."""
+    if recall_prompt and interest_digest:
+        return recall_prompt.rstrip() + "\n\n" + interest_digest
+    return recall_prompt or interest_digest or ""
+
+
 def _contact_memory_lane_b_tools(
     *,
     config_raw: Any,
@@ -3488,6 +3595,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         import threading as _threading
         self._agent_cache: "OrderedDict[str, tuple]" = OrderedDict()
         self._agent_cache_lock = _threading.Lock()
+
+        # Per-session interest-digest snapshots. The maintenance digest is read
+        # ONCE per session and frozen for that session's lifetime so a mid-session
+        # maintenance regeneration cannot hot-swap the text (plan §Component 2:
+        # accept staleness, do not hot-swap). Injected only on the cache-safe
+        # per-turn user-context side, never into the stable system prefix.
+        # Key: (profile root, contact, session key, session id). Entries are
+        # reaped only when reset/finalization proves the session inactive.
+        self._interest_digest_snapshots: "OrderedDict[tuple, tuple]" = OrderedDict()
+        self._interest_digest_lock = _threading.Lock()
 
         # Per-session model overrides from /model command.
         # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode
@@ -8269,6 +8386,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _update_prompt_pending = getattr(self, "_update_prompt_pending", None)
                         if isinstance(_update_prompt_pending, dict):
                             _update_prompt_pending.pop(key, None)
+                        _digest_snapshots = getattr(self, "_interest_digest_snapshots", None)
+                        _digest_lock = getattr(self, "_interest_digest_lock", None)
+                        if _digest_snapshots is not None and _digest_lock is not None:
+                            _clear_interest_digest_snapshots(
+                                _digest_snapshots,
+                                _digest_lock,
+                                session_key=key,
+                                session_id=entry.session_id,
+                            )
                         # Persist the finalized flag to sessions.json AND
                         # state.db (single write-path, #9006) — also drops
                         # the persisted /model override, since finalization
@@ -17162,6 +17288,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def _invalidate_session_run_generation(self, session_key: str, *, reason: str = "") -> int:
         """Invalidate any in-flight run token for ``session_key``."""
         generation = self._begin_session_run_generation(session_key)
+        if reason == "session_reset":
+            snapshots = getattr(self, "_interest_digest_snapshots", None)
+            lock = getattr(self, "_interest_digest_lock", None)
+            if snapshots is not None and lock is not None:
+                _clear_interest_digest_snapshots(
+                    snapshots, lock, session_key=session_key
+                )
         if reason:
             logger.info(
                 "Invalidated run generation for %s → %d (%s)",
@@ -19147,6 +19280,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 texture_prompt=_texture_prompt,
                 profile_home=_contact_memory_home,
                 usage_sink=_lane_a_usage,
+            )
+
+            # Session-frozen interest digest (Phase 2). Read once per session and
+            # appended to the same API-only user-context lane as recall — never
+            # the cached system prefix — so prompt caching stays byte-stable and
+            # a mid-session maintenance regen cannot hot-swap it.
+            _digest_snapshots = getattr(self, "_interest_digest_snapshots", None)
+            _digest_lock = getattr(self, "_interest_digest_lock", None)
+            if _digest_snapshots is None or _digest_lock is None:
+                import threading as _threading
+                _digest_snapshots = OrderedDict()
+                _digest_lock = _threading.Lock()
+                self._interest_digest_snapshots = _digest_snapshots
+                self._interest_digest_lock = _digest_lock
+            _interest_digest = _snapshot_interest_digest(
+                config_raw=_contact_memory_raw,
+                trusted_scope=trusted_contact_scope,
+                profile_home=_contact_memory_home,
+                session_key=session_key or session_id or "gateway",
+                session_id=session_id,
+                snapshots=_digest_snapshots,
+                lock=_digest_lock,
+            )
+            _recall_prompt = _join_contact_turn_context(
+                _recall_prompt, _interest_digest
             )
 
             max_iterations = _current_max_iterations()

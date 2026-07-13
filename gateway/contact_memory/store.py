@@ -24,6 +24,8 @@ except ImportError:  # pragma: no cover
 from .schema import (
     CONTACT_SCHEMA_SQL,
     SCHEMA_VERSION,
+    INTEREST_HALF_LIFE_CLASSES,
+    INTEREST_MAX_LIVE_TOPICS,
     AssertionType,
     Audience,
     FactProposal,
@@ -146,6 +148,34 @@ class ContactMemoryStore:
         except OSError:
             pass
 
+    @property
+    def contact_namespace(self) -> str:
+        """Opaque filename stem shared by this contact's DB and digest."""
+        return self.path.stem
+
+    @classmethod
+    def open_existing(cls, root: str | Path, path: str | Path, *, timeout: float = 10.0):
+        """Open an enumerated opaque contact DB without recovering its contact ID.
+
+        Contact identifiers are deliberately absent from filenames and ledger
+        rows.  Offline profile maintenance only needs the already-routed DB and
+        its opaque namespace, so it must not invent or persist a reverse map.
+        """
+        root_path = Path(root).expanduser().resolve()
+        candidate = Path(path).expanduser().resolve()
+        contacts = (root_path / "contacts").resolve()
+        if candidate.parent != contacts or not re.fullmatch(r"[0-9a-f]{64}\.sqlite3", candidate.name):
+            raise ValueError("contact database path is outside the opaque contacts directory")
+        if not candidate.is_file():
+            raise FileNotFoundError(candidate)
+        store = cls.__new__(cls)
+        store.root = root_path
+        store.contact_id = ""
+        store.path = candidate
+        store.timeout = timeout
+        store._initialize()
+        return store
+
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.path, timeout=self.timeout, isolation_level=None)
         con.row_factory = sqlite3.Row
@@ -260,6 +290,20 @@ class ContactMemoryStore:
             raise
         finally:
             con.close()
+
+    @contextmanager
+    def interest_maintenance_transaction(self) -> Iterator[sqlite3.Connection]:
+        """Expose one writer transaction to the offline maintenance engine.
+
+        Phase-2 maintenance deliberately spans folding, taxonomy changes,
+        lifecycle transitions, cap enforcement, and its bookkeeping row.  Those
+        operations must share one ``BEGIN IMMEDIATE`` rather than nesting the
+        ordinary one-operation store methods (which would commit partial work).
+        The connection is intentionally scoped to the context and rolls back on
+        *any* exception.
+        """
+        with self._immediate() as con:
+            yield con
 
     @staticmethod
     def _row_to_fact(row: sqlite3.Row) -> FactRecord:
@@ -865,7 +909,90 @@ class ContactMemoryStore:
                 ).rowcount
         return changed
 
-    def fold_unfolded_interest_events(self, *, now: float | None = None) -> dict[str, object]:
+    def _fold_unfolded_interest_events_in_transaction(
+        self, con: sqlite3.Connection, *, timestamp: float
+    ) -> dict[str, object]:
+        """Fold pending events using an already-open maintenance transaction."""
+        from .schema import INTEREST_SIGNAL_BANDIT, INTEREST_SIGNAL_WEIGHTS
+
+        affected: dict[str, str] = {}
+        folded = 0
+        rows = con.execute(
+            "SELECT event_id,topic_text,signal_type,valence,created_at "
+            "FROM interest_event WHERE folded_at IS NULL "
+            "ORDER BY created_at,event_id"
+        ).fetchall()
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["topic_text"]), []).append(row)
+        for topic, events in grouped.items():
+            existing = con.execute(
+                "SELECT * FROM interest WHERE topic=? AND retired_at IS NULL",
+                (topic,),
+            ).fetchone()
+            score_delta = 0.0
+            alpha_delta = 0.0
+            beta_delta = 0.0
+            latest = 0.0
+            turned_negative = False
+            for event in events:
+                signal = SignalType(str(event["signal_type"]))
+                score_delta += INTEREST_SIGNAL_WEIGHTS.get(signal, 0.0)
+                da, db = INTEREST_SIGNAL_BANDIT.get(signal, (0.0, 0.0))
+                alpha_delta += da
+                beta_delta += db
+                latest = max(latest, float(event["created_at"]))
+                if signal is SignalType.EXPLICIT_NEGATIVE:
+                    turned_negative = True
+            if existing is None:
+                interest_id = uuid.uuid4().hex
+                valence = (
+                    InterestValence.NEGATIVE.value if turned_negative
+                    else InterestValence.POSITIVE.value
+                )
+                con.execute(
+                    """INSERT INTO interest(
+                      interest_id,topic,parent_id,raw_score,last_evidence_at,evidence_count,
+                      valence,half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
+                    ) VALUES(?,?,NULL,?,?,?,?,?, 'candidate', ?,?,?,?,NULL)""",
+                    (
+                        interest_id, topic, score_delta, latest, len(events),
+                        valence, 90.0, max(1.0, 1.0 + alpha_delta),
+                        max(1.0, 1.0 + beta_delta), timestamp, timestamp,
+                    ),
+                )
+                affected[interest_id] = topic
+            else:
+                interest_id = str(existing["interest_id"])
+                new_score = float(existing["raw_score"]) + score_delta
+                new_count = int(existing["evidence_count"]) + len(events)
+                new_last = max(float(existing["last_evidence_at"]), latest)
+                valence = (
+                    InterestValence.NEGATIVE.value
+                    if turned_negative or existing["valence"] == InterestValence.NEGATIVE.value
+                    else str(existing["valence"])
+                )
+                new_alpha = max(0.0001, float(existing["ts_alpha"]) + alpha_delta)
+                new_beta = max(0.0001, float(existing["ts_beta"]) + beta_delta)
+                con.execute(
+                    "UPDATE interest SET raw_score=?,evidence_count=?,last_evidence_at=?,"
+                    "valence=?,ts_alpha=?,ts_beta=?,updated_at=? WHERE interest_id=?",
+                    (
+                        new_score, new_count, new_last, valence,
+                        new_alpha, new_beta, timestamp, interest_id,
+                    ),
+                )
+                affected[interest_id] = topic
+            for event in events:
+                folded += con.execute(
+                    "UPDATE interest_event SET folded_at=? WHERE event_id=? AND folded_at IS NULL",
+                    (timestamp, event["event_id"]),
+                ).rowcount
+        return {"folded_events": folded, "affected_interests": affected}
+
+    def fold_unfolded_interest_events(
+        self, *, now: float | None = None, maintenance_claim_id: str | None = None
+    ) -> dict[str, object]:
         """Deterministically fold every unfolded signal into ledger raw scores.
 
         This is the maintenance "step 1" from the plan. It runs in one writer
@@ -876,94 +1003,36 @@ class ContactMemoryStore:
         Score/bandit deltas come from ``schema.INTEREST_SIGNAL_WEIGHTS`` /
         ``INTEREST_SIGNAL_BANDIT`` — the single source of truth for weights.
         """
-        from .schema import INTEREST_SIGNAL_BANDIT, INTEREST_SIGNAL_WEIGHTS
-
         timestamp = _finite_timestamp(now)
-        affected: dict[str, str] = {}
-        folded = 0
         with self._immediate() as con:
-            rows = con.execute(
-                "SELECT event_id,topic_text,signal_type,valence,created_at "
-                "FROM interest_event WHERE folded_at IS NULL "
-                "ORDER BY created_at,event_id"
-            ).fetchall()
-            grouped: dict[str, list[sqlite3.Row]] = {}
-            for row in rows:
-                grouped.setdefault(str(row["topic_text"]), []).append(row)
-            for topic, events in grouped.items():
-                existing = con.execute(
-                    "SELECT * FROM interest WHERE topic=? AND retired_at IS NULL",
-                    (topic,),
-                ).fetchone()
-                score_delta = 0.0
-                alpha_delta = 0.0
-                beta_delta = 0.0
-                latest = 0.0
-                turned_negative = False
-                for event in events:
-                    signal = SignalType(str(event["signal_type"]))
-                    score_delta += INTEREST_SIGNAL_WEIGHTS.get(signal, 0.0)
-                    da, db = INTEREST_SIGNAL_BANDIT.get(signal, (0.0, 0.0))
-                    alpha_delta += da
-                    beta_delta += db
-                    latest = max(latest, float(event["created_at"]))
-                    if signal is SignalType.EXPLICIT_NEGATIVE:
-                        turned_negative = True
-                if existing is None:
-                    interest_id = uuid.uuid4().hex
-                    valence = (
-                        InterestValence.NEGATIVE.value if turned_negative
-                        else InterestValence.POSITIVE.value
-                    )
-                    con.execute(
-                        """INSERT INTO interest(
-                          interest_id,topic,parent_id,raw_score,last_evidence_at,evidence_count,
-                          valence,half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
-                        ) VALUES(?,?,NULL,?,?,?,?,?, 'candidate', ?,?,?,?,NULL)""",
-                        (
-                            interest_id, topic, score_delta, latest, len(events),
-                            valence, 90.0, max(1.0, 1.0 + alpha_delta),
-                            max(1.0, 1.0 + beta_delta), timestamp, timestamp,
-                        ),
-                    )
-                    affected[interest_id] = topic
-                else:
-                    interest_id = str(existing["interest_id"])
-                    new_score = float(existing["raw_score"]) + score_delta
-                    new_count = int(existing["evidence_count"]) + len(events)
-                    new_last = max(float(existing["last_evidence_at"]), latest)
-                    # Valence is sticky: an explicit negative is a permanent block.
-                    valence = (
-                        InterestValence.NEGATIVE.value
-                        if turned_negative or existing["valence"] == InterestValence.NEGATIVE.value
-                        else str(existing["valence"])
-                    )
-                    new_alpha = max(0.0001, float(existing["ts_alpha"]) + alpha_delta)
-                    new_beta = max(0.0001, float(existing["ts_beta"]) + beta_delta)
-                    con.execute(
-                        "UPDATE interest SET raw_score=?,evidence_count=?,last_evidence_at=?,"
-                        "valence=?,ts_alpha=?,ts_beta=?,updated_at=? WHERE interest_id=?",
-                        (
-                            new_score, new_count, new_last, valence,
-                            new_alpha, new_beta, timestamp, interest_id,
-                        ),
-                    )
-                    affected[interest_id] = topic
-                for event in events:
-                    folded += con.execute(
-                        "UPDATE interest_event SET folded_at=? WHERE event_id=? AND folded_at IS NULL",
-                        (timestamp, event["event_id"]),
-                    ).rowcount
-        return {"folded_events": folded, "affected_interests": affected}
+            claim_state: dict[str, object] = {}
+            if maintenance_claim_id is not None:
+                claim_state = self._interest_maintenance_state_in(con)
+                if (
+                    claim_state.get("status") != "running"
+                    or claim_state.get("claim_id") != maintenance_claim_id
+                ):
+                    raise RuntimeError("interest maintenance claim is not current")
+            result = self._fold_unfolded_interest_events_in_transaction(
+                con, timestamp=timestamp
+            )
+            if maintenance_claim_id is not None:
+                folded = int(result["folded_events"])
+                claim_state.update({
+                    "phase": "folded",
+                    "updated_at": timestamp,
+                    "folded_events": int(claim_state.get("folded_events", 0)) + folded,
+                })
+                self._write_interest_maintenance_state_in(con, claim_state)
+            return result
 
     _MAINTENANCE_META_KEY = "interest_maintenance_v1"
 
-    def interest_maintenance_state(self) -> dict[str, object]:
-        """Return the last maintenance run bookkeeping (text-free)."""
-        with self._connect() as con:
-            row = con.execute(
-                "SELECT value FROM schema_meta WHERE key=?", (self._MAINTENANCE_META_KEY,)
-            ).fetchone()
+    @classmethod
+    def _interest_maintenance_state_in(cls, con: sqlite3.Connection) -> dict[str, object]:
+        row = con.execute(
+            "SELECT value FROM schema_meta WHERE key=?", (cls._MAINTENANCE_META_KEY,)
+        ).fetchone()
         if not row:
             return {}
         try:
@@ -972,18 +1041,370 @@ class ContactMemoryStore:
             return {}
         return payload if isinstance(payload, dict) else {}
 
+    @classmethod
+    def _write_interest_maintenance_state_in(
+        cls, con: sqlite3.Connection, payload: dict[str, object]
+    ) -> None:
+        con.execute(
+            "INSERT INTO schema_meta(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (cls._MAINTENANCE_META_KEY, json.dumps(payload, separators=(",", ":"))),
+        )
+
+    def interest_maintenance_state(self) -> dict[str, object]:
+        """Return durable per-contact maintenance claim/run bookkeeping."""
+        with self._connect() as con:
+            return self._interest_maintenance_state_in(con)
+
+    def claim_interest_maintenance(
+        self,
+        *,
+        now: float | None = None,
+        force: bool = False,
+        min_unfolded_events: int = 20,
+        max_run_age_seconds: float = 7 * 86_400.0,
+        lease_seconds: float = 15 * 60.0,
+    ) -> dict[str, object] | None:
+        """Atomically claim a run, or recover a stale folded-but-uncompleted run."""
+        timestamp = _finite_timestamp(now)
+        lease = max(1.0, float(lease_seconds))
+        with self._immediate() as con:
+            state = self._interest_maintenance_state_in(con)
+            running = state.get("status") == "running"
+            updated = state.get("updated_at", state.get("started_at"))
+            if running and isinstance(updated, (int, float)) and timestamp - float(updated) < lease:
+                return None
+            unfolded = int(con.execute(
+                "SELECT count(*) FROM interest_event WHERE folded_at IS NULL"
+            ).fetchone()[0])
+            last_run = state.get("last_run_at")
+            recovery = running
+            due = (
+                force
+                or recovery
+                or unfolded >= max(1, int(min_unfolded_events))
+                or (unfolded > 0 and not isinstance(last_run, (int, float)))
+                or (
+                    isinstance(last_run, (int, float))
+                    and timestamp - float(last_run) >= float(max_run_age_seconds)
+                )
+            )
+            if not due:
+                return None
+            claim: dict[str, object] = {
+                "status": "running",
+                "phase": "claimed",
+                "claim_id": uuid.uuid4().hex,
+                "generation": int(state.get("generation", 0)) + 1,
+                "started_at": timestamp,
+                "updated_at": timestamp,
+                "folded_events": int(state.get("folded_events", 0)) if recovery else 0,
+            }
+            if isinstance(last_run, (int, float)):
+                claim["last_run_at"] = float(last_run)
+            self._write_interest_maintenance_state_in(con, claim)
+            return claim
+
+    def complete_interest_maintenance(
+        self, claim_id: str, *, now: float | None = None
+    ) -> dict[str, object]:
+        """Complete only the current claim; stale workers cannot overwrite it."""
+        timestamp = _finite_timestamp(now)
+        with self._immediate() as con:
+            state = self._interest_maintenance_state_in(con)
+            if state.get("status") != "running" or state.get("claim_id") != claim_id:
+                raise RuntimeError("interest maintenance claim is not current")
+            payload: dict[str, object] = {
+                "status": "completed",
+                "phase": "completed",
+                "generation": int(state.get("generation", 0)),
+                "last_run_at": timestamp,
+                "last_folded_events": int(state.get("folded_events", 0)),
+                "completed_at": timestamp,
+            }
+            self._write_interest_maintenance_state_in(con, payload)
+            return payload
+
     def record_interest_maintenance_run(
         self, *, now: float | None = None, folded_events: int = 0
     ) -> dict[str, object]:
+        """Compatibility helper for importing historical completed-run state."""
         timestamp = _finite_timestamp(now)
-        payload = {"last_run_at": timestamp, "last_folded_events": int(folded_events)}
+        payload: dict[str, object] = {
+            "status": "completed", "phase": "completed", "generation": 0,
+            "last_run_at": timestamp, "last_folded_events": int(folded_events),
+            "completed_at": timestamp,
+        }
         with self._immediate() as con:
-            con.execute(
-                "INSERT INTO schema_meta(key,value) VALUES(?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (self._MAINTENANCE_META_KEY, json.dumps(payload, separators=(",", ":"))),
-            )
+            self._write_interest_maintenance_state_in(con, payload)
         return payload
+
+    def _apply_deterministic_interest_maintenance_in(
+        self, con: sqlite3.Connection, *, timestamp: float
+    ) -> dict[str, list[str]]:
+        """Apply lifecycle and iterative cap using an existing writer transaction."""
+        promoted: list[str] = []
+        retired: list[str] = []
+        pruned: list[str] = []
+        rows = con.execute("SELECT * FROM interest WHERE retired_at IS NULL").fetchall()
+        for row in rows:
+            # An earlier parent cascade may already have retired this snapshot row.
+            if con.execute(
+                "SELECT 1 FROM interest WHERE interest_id=? AND retired_at IS NULL",
+                (row["interest_id"],),
+            ).fetchone() is None:
+                continue
+            item = self._row_to_interest(row)
+            effective = item.effective_score(timestamp)
+            if item.state is InterestState.CANDIDATE:
+                days = int(con.execute(
+                    "SELECT count(DISTINCT CAST(created_at / 86400 AS INTEGER)) "
+                    "FROM interest_event WHERE topic_text=?", (item.topic,),
+                ).fetchone()[0])
+                if effective >= 1.5 and days >= 2:
+                    con.execute(
+                        "UPDATE interest SET state='active',updated_at=? WHERE interest_id=?",
+                        (timestamp, item.interest_id),
+                    )
+                    promoted.append(item.interest_id)
+            elif item.state is InterestState.ACTIVE:
+                stale = timestamp - item.last_evidence_at >= 2 * item.half_life_days * 86_400.0
+                if effective < 0.2 and stale:
+                    subtree = con.execute(
+                        """WITH RECURSIVE descendants(interest_id,depth) AS (
+                          SELECT interest_id,0 FROM interest WHERE interest_id=? AND retired_at IS NULL
+                          UNION ALL
+                          SELECT child.interest_id,descendants.depth+1 FROM interest child
+                          JOIN descendants ON child.parent_id=descendants.interest_id
+                          WHERE child.retired_at IS NULL
+                        ) SELECT interest_id FROM descendants ORDER BY depth DESC,interest_id""",
+                        (item.interest_id,),
+                    ).fetchall()
+                    for descendant in subtree:
+                        descendant_id = str(descendant["interest_id"])
+                        con.execute(
+                            "UPDATE interest SET state='retired',retired_at=?,updated_at=? "
+                            "WHERE interest_id=? AND retired_at IS NULL",
+                            (timestamp, timestamp, descendant_id),
+                        )
+                        retired.append(descendant_id)
+
+        # Remove one current leaf per iteration. A parent cannot be selected while
+        # it has a live child, so every committed intermediate graph stays valid.
+        while True:
+            live_rows = con.execute("SELECT * FROM interest WHERE retired_at IS NULL").fetchall()
+            if len(live_rows) <= INTEREST_MAX_LIVE_TOPICS:
+                break
+            parent_ids = {
+                str(row["parent_id"]) for row in live_rows if row["parent_id"] is not None
+            }
+            leaves = [
+                self._row_to_interest(row) for row in live_rows
+                if str(row["interest_id"]) not in parent_ids
+            ]
+            if not leaves:
+                raise RuntimeError("interest taxonomy has no prunable leaf")
+            leaf = min(leaves, key=lambda item: (item.effective_score(timestamp), item.interest_id))
+            con.execute(
+                "UPDATE interest SET state='retired',retired_at=?,updated_at=? WHERE interest_id=?",
+                (timestamp, timestamp, leaf.interest_id),
+            )
+            pruned.append(leaf.interest_id)
+        if con.execute(
+            """SELECT 1 FROM interest child JOIN interest parent
+               ON parent.interest_id=child.parent_id
+               WHERE child.retired_at IS NULL AND parent.retired_at IS NOT NULL LIMIT 1"""
+        ).fetchone() is not None:
+            raise RuntimeError("maintenance would commit an orphaned taxonomy child")
+        return {"promoted": promoted, "retired": retired, "pruned": pruned}
+
+    def apply_interest_maintenance_batch(
+        self,
+        *,
+        merges: Sequence[tuple[str, str]] = (),
+        splits: Sequence[tuple[str, Sequence[tuple[str, str]]]] = (),
+        half_lives: dict[str, float] | None = None,
+        now: float | None = None,
+        maintenance_claim_id: str | None = None,
+    ) -> dict[str, list[str]]:
+        """Validate and apply one complete proposal under one BEGIN IMMEDIATE.
+
+        Validation is deliberately repeated inside the writer lock. The model's
+        earlier snapshot can be stale; only this graph check is authoritative.
+        Any invalid edge, duplicate target, structural conflict, topic collision,
+        or projected cap overflow raises before mutation. Any later SQLite error
+        rolls the entire batch back through ``_immediate``.
+        """
+        timestamp = _finite_timestamp(now)
+        half_lives = dict(half_lives or {})
+        merge_list = [(str(a), str(b)) for a, b in merges]
+        split_list = [(str(parent), [(str(cid), str(topic)) for cid, topic in children])
+                      for parent, children in splits]
+        if len(merge_list) > INTEREST_MAX_LIVE_TOPICS:
+            raise ValueError("merges must be a bounded list")
+        if len(split_list) > 12:
+            raise ValueError("splits must be a bounded list")
+        if len(half_lives) > INTEREST_MAX_LIVE_TOPICS:
+            raise ValueError("half-lives must be a bounded mapping")
+        with self._immediate() as con:
+            if maintenance_claim_id is not None:
+                claim_state = self._interest_maintenance_state_in(con)
+                if (
+                    claim_state.get("status") != "running"
+                    or claim_state.get("claim_id") != maintenance_claim_id
+                ):
+                    raise RuntimeError("interest maintenance claim is not current")
+            all_rows = con.execute("SELECT * FROM interest").fetchall()
+            rows = [row for row in all_rows if row["retired_at"] is None]
+            by_id = {str(row["interest_id"]): row for row in rows}
+            live_ids = set(by_id)
+            historical_ids = {str(row["interest_id"]) for row in all_rows}
+            # Retired topics remain reserved: replaying a deterministic proposal
+            # must not silently reuse a historical taxonomy identity.
+            existing_topics = {
+                str(row["topic"]): str(row["interest_id"]) for row in all_rows
+            }
+            if con.execute(
+                """SELECT 1 FROM interest child LEFT JOIN interest parent
+                   ON parent.interest_id=child.parent_id
+                   WHERE child.retired_at IS NULL AND child.parent_id IS NOT NULL
+                     AND (parent.interest_id IS NULL OR parent.retired_at IS NOT NULL
+                          OR parent.parent_id IS NOT NULL) LIMIT 1"""
+            ).fetchone() is not None:
+                raise ValueError("existing live interest taxonomy is invalid")
+
+            used_merge_ids: set[str] = set()
+            absorbed: set[str] = set()
+            for keep_id, absorb_id in merge_list:
+                if keep_id == absorb_id or keep_id not in live_ids or absorb_id not in live_ids:
+                    raise ValueError("merge references invalid live interests")
+                if keep_id in used_merge_ids or absorb_id in used_merge_ids:
+                    raise ValueError("an interest may appear in only one merge")
+                keep, absorb = by_id[keep_id], by_id[absorb_id]
+                if keep["valence"] != absorb["valence"]:
+                    raise ValueError("cannot merge across valence polarity")
+                if keep["parent_id"] != absorb["parent_id"]:
+                    raise ValueError("merges must stay within one taxonomy level and parent")
+                if con.execute(
+                    "SELECT 1 FROM interest WHERE parent_id=? AND retired_at IS NULL LIMIT 1",
+                    (absorb_id,),
+                ).fetchone() is not None:
+                    raise ValueError("cannot absorb a parent with live children")
+                used_merge_ids.update((keep_id, absorb_id))
+                absorbed.add(absorb_id)
+
+            split_parents: set[str] = set()
+            new_ids: set[str] = set()
+            new_topics: set[str] = set()
+            child_total = 0
+            for parent_id, children in split_list:
+                if parent_id not in live_ids or parent_id in split_parents:
+                    raise ValueError("split parent must be unique and live")
+                if parent_id in used_merge_ids or parent_id in half_lives:
+                    raise ValueError("split parent overlaps another directive")
+                if by_id[parent_id]["parent_id"] is not None:
+                    raise ValueError("split would exceed the two-level taxonomy")
+                if not 3 <= len(children) <= 8:
+                    raise ValueError("split requires 3 to 8 child topics")
+                split_parents.add(parent_id)
+                for child_id, topic in children:
+                    canonical = normalize_interest_topic(topic)
+                    if canonical != topic:
+                        raise ValueError("split child topic is not normalized")
+                    expected_child_id = "child-" + hashlib.sha256(
+                        f"{parent_id}\0{canonical}".encode("utf-8")
+                    ).hexdigest()[:24]
+                    if child_id != expected_child_id:
+                        raise ValueError("split child id is not deterministic")
+                    if (
+                        child_id in historical_ids or child_id in new_ids
+                        or canonical in existing_topics or canonical in new_topics
+                    ):
+                        raise ValueError("split child id/topic conflicts with the graph")
+                    new_ids.add(child_id)
+                    new_topics.add(canonical)
+                    child_total += 1
+
+            half_ids = set(half_lives)
+            if not half_ids.issubset(live_ids):
+                raise ValueError("half-life references an unknown live interest")
+            if half_ids & used_merge_ids:
+                raise ValueError("half-life target overlaps a merge directive")
+            for days in half_lives.values():
+                if isinstance(days, bool):
+                    raise ValueError("invalid interest half-life class")
+                try:
+                    numeric_days = float(days)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("invalid interest half-life class") from exc
+                if not math.isfinite(numeric_days) or numeric_days not in INTEREST_HALF_LIFE_CLASSES:
+                    raise ValueError("invalid interest half-life class")
+
+            projected = len(rows) - len(absorbed) + child_total
+            if child_total and projected > INTEREST_MAX_LIVE_TOPICS:
+                raise ValueError("maintenance proposal would exceed the live-topic cap")
+
+            for keep_id, absorb_id in merge_list:
+                keep, absorb = by_id[keep_id], by_id[absorb_id]
+                con.execute(
+                    "UPDATE interest SET raw_score=?,evidence_count=?,last_evidence_at=?,"
+                    "ts_alpha=?,ts_beta=?,updated_at=? WHERE interest_id=?",
+                    (
+                        float(keep["raw_score"]) + 0.5 * float(absorb["raw_score"]),
+                        int(keep["evidence_count"]) + int(absorb["evidence_count"]),
+                        max(float(keep["last_evidence_at"]), float(absorb["last_evidence_at"])),
+                        float(keep["ts_alpha"]) + max(0.0, float(absorb["ts_alpha"]) - 1.0),
+                        float(keep["ts_beta"]) + max(0.0, float(absorb["ts_beta"]) - 1.0),
+                        timestamp, keep_id,
+                    ),
+                )
+                con.execute(
+                    "UPDATE interest SET state='retired',retired_at=?,updated_at=? WHERE interest_id=?",
+                    (timestamp, timestamp, absorb_id),
+                )
+                # Preserve promotion provenance after synonym consolidation:
+                # distinct evidence days for the absorbed topic now count toward
+                # the canonical kept topic, while immutable source IDs remain.
+                con.execute(
+                    "UPDATE interest_event SET topic_text=? WHERE topic_text=?",
+                    (str(keep["topic"]), str(absorb["topic"])),
+                )
+            for parent_id, children in split_list:
+                parent = by_id[parent_id]
+                for child_id, topic in children:
+                    con.execute(
+                        """INSERT INTO interest(
+                          interest_id,topic,parent_id,raw_score,last_evidence_at,evidence_count,
+                          valence,half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
+                        ) VALUES(?,?,?,0,?,0,?,?,'candidate',1,1,?,?,NULL)""",
+                        (
+                            child_id, topic, parent_id, timestamp, parent["valence"],
+                            float(parent["half_life_days"]), timestamp, timestamp,
+                        ),
+                    )
+            for interest_id, days in half_lives.items():
+                con.execute(
+                    "UPDATE interest SET half_life_days=?,updated_at=? WHERE interest_id=?",
+                    (float(days), timestamp, interest_id),
+                )
+            deterministic = self._apply_deterministic_interest_maintenance_in(
+                con, timestamp=timestamp
+            )
+        return {
+            "merged": [absorb for _, absorb in merge_list],
+            "split_parents": [parent for parent, _ in split_list],
+            **deterministic,
+        }
+
+    def apply_deterministic_interest_maintenance(
+        self, *, now: float | None = None
+    ) -> dict[str, list[str]]:
+        """Promote, retire, and iteratively cap the taxonomy in one transaction."""
+        timestamp = _finite_timestamp(now)
+        with self._immediate() as con:
+            return self._apply_deterministic_interest_maintenance_in(
+                con, timestamp=timestamp
+            )
 
     def put_interest(self, interest: Interest) -> Interest:
         """Create or replace ledger source state; effective score remains derived."""
