@@ -135,6 +135,24 @@ def test_burst_second_slot_is_usually_observation_not_question():
     assert questions / bursts <= .16
 
 
+def test_burst_probability_controls_semantic_burst_shape():
+    eligible = 0
+    for index in range(500):
+        off = compile_turn_guidance(
+            message="wait no way!!", history=[], session_key=f"burst-knob-{index}",
+            config=cfg(burst_probability=0.0),
+        )
+        on = compile_turn_guidance(
+            message="wait no way!!", history=[], session_key=f"burst-knob-{index}",
+            config=cfg(burst_probability=1.0),
+        )
+        assert field(off, "bubble_count") == "1"
+        if field(on, "response_class") == "reaction":
+            eligible += 1
+            assert field(on, "bubble_count") == "2"
+    assert eligible > 100
+
+
 def test_task_continuation_requires_unresolved_assistant_state():
     unresolved = rows(
         ("user", "remind me to call the pharmacy", {}),
@@ -172,9 +190,49 @@ def test_untriggered_casual_reaction_never_splits_randomly():
     for index in range(200):
         guidance = compile_turn_guidance(
             message="thinking thai", history=[], session_key=f"plain-{index}",
-            config=cfg(burst_probability=1.0),
+            config=cfg(burst_probability=1.0, follow_through_probability=0.0),
         )
         assert field(guidance, "bubble_count") == "1"
+
+
+def test_follow_through_adds_related_observation_without_interviewing():
+    found = 0
+    for index in range(500):
+        guidance = compile_turn_guidance(
+            message="what is the real thing then?", history=[],
+            session_key=f"follow-{index}",
+            config=cfg(follow_through_probability=1.0),
+        )
+        slots = [line for line in guidance.splitlines() if line.startswith("slot_")]
+        if field(guidance, "response_class") in {"answer", "observation"}:
+            found += 1
+            assert field(guidance, "bubble_count") == "2"
+            assert "class=observation" in slots[1]
+            assert "class=question" not in slots[1]
+            assert "Make it a statement, not a question" in guidance
+    assert found > 100
+
+
+def test_follow_through_keeps_disposable_reactions_single_bubble():
+    found = 0
+    for index in range(500):
+        guidance = compile_turn_guidance(
+            message="lol same", history=[], session_key=f"reaction-{index}",
+            config=cfg(follow_through_probability=1.0),
+        )
+        if field(guidance, "response_class") == "reaction":
+            found += 1
+            assert field(guidance, "bubble_count") == "1"
+    assert found > 100
+
+
+@pytest.mark.parametrize("message", ["thanks", "my aunt died", "remind me to call tomorrow"])
+def test_follow_through_respects_closure_serious_and_task_turns(message):
+    guidance = compile_turn_guidance(
+        message=message, history=[], session_key="excluded",
+        config=cfg(follow_through_probability=1.0),
+    )
+    assert field(guidance, "bubble_count") == "1"
 
 
 def test_response_plan_never_contradicts_slot_count_or_class():

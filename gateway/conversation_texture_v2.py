@@ -89,6 +89,7 @@ class TextureConfig:
     medium_weight: int = 25
     high_weight: int = 7
     burst_probability: float = 0.22
+    follow_through_probability: float = 0.0
     exemplar_count: int = 3
     exemplar_path: str | None = None
 
@@ -104,6 +105,9 @@ class TextureConfig:
             medium_weight=max(0, int(raw.get("medium_weight", 25))),
             high_weight=max(0, int(raw.get("high_weight", 7))),
             burst_probability=min(1.0, max(0.0, float(raw.get("burst_probability", .22)))),
+            follow_through_probability=min(
+                1.0, max(0.0, float(raw.get("follow_through_probability", 0.0)))
+            ),
             exemplar_count=max(0, min(8, int(raw.get("exemplar_count", 3)))),
             exemplar_path=str(raw["exemplar_path"]) if raw.get("exemplar_path") else None,
         )
@@ -135,6 +139,7 @@ class ResponsePlan:
     register: str
     slots: tuple[ResponseSlot, ...]
     craft_allowed: bool
+    follow_through: bool = False
 
     @property
     def response_class(self) -> str:
@@ -381,7 +386,14 @@ def _replay_prior_class(history: Sequence[Mapping[str, Any]], session_key: str, 
     return prior_class
 
 
-def _make_plan(features: TurnFeatures, chosen: str, session_key: str, turn_index: int, burst_probability: float) -> ResponsePlan:
+def _make_plan(
+    features: TurnFeatures,
+    chosen: str,
+    session_key: str,
+    turn_index: int,
+    burst_probability: float,
+    follow_through_probability: float,
+) -> ResponsePlan:
     caps = {"reaction": 5, "ack": 10, "answer": 24, "question": 10, "next_step": 16, "observation": 24, "craft": 18, "task": 0}
     slots = [ResponseSlot(chosen, caps[chosen])]
     # Bursts need a semantic trigger in the incoming message. Randomly splitting
@@ -392,11 +404,26 @@ def _make_plan(features: TurnFeatures, chosen: str, session_key: str, turn_index
         and chosen == "reaction"
         and not features.closure
         and features.burst_signal
+        and _unit_interval(session_key, turn_index, "burst") < burst_probability
     )
     if burst:
         second = "question" if features.question is False and _unit_interval(session_key, turn_index, "burst-role") < .10 else "observation"
         slots = [ResponseSlot("reaction", 3), ResponseSlot(second, 8)]
-    return ResponsePlan(features.register, tuple(slots), any(slot.response_class == "craft" for slot in slots))
+    follow_through = (
+        not burst
+        and features.register == "casual"
+        and chosen in {"answer", "observation"}
+        and not features.closure
+        and _unit_interval(session_key, turn_index, "follow-through") < follow_through_probability
+    )
+    if follow_through:
+        slots.append(ResponseSlot("observation", 12))
+    return ResponsePlan(
+        features.register,
+        tuple(slots),
+        any(slot.response_class == "craft" for slot in slots),
+        follow_through=follow_through,
+    )
 
 
 def load_exemplars(path: str | Path | None) -> list[dict[str, Any]]:
@@ -505,7 +532,14 @@ def compile_turn_guidance(
             "Task plan: perform every required tool call. Ask only for a missing required parameter, or confirm in one short sentence after tool success. Never claim completion before tool success or invent parameters.",
         ]
     else:
-        plan = _make_plan(features, chosen, session_key, seed_ordinal, config.burst_probability)
+        plan = _make_plan(
+            features,
+            chosen,
+            session_key,
+            seed_ordinal,
+            config.burst_probability,
+            config.follow_through_probability,
+        )
         lines.append(f"bubble_count: {len(plan.slots)}")
         for index, slot in enumerate(plan.slots, 1):
             lines.append(f"slot_{index}: class={slot.response_class}; max_words={slot.max_words}")
@@ -517,6 +551,11 @@ def compile_turn_guidance(
         )
         if not plan.craft_allowed:
             lines.append("Use literal everyday wording only; no metaphor, aphorism, setup/punchline, or quotable balanced line.")
+        if plan.follow_through:
+            lines.append(
+                "Second bubble: keep the thread alive with one related detail or natural next thought. "
+                "Make it a statement, not a question, offer, summary, or second punchline."
+            )
 
     if features.serious_tier:
         lines.append("Serious thread: no jokes. Be present in plain words; do not narrate, poetically interpret, explain their feelings back, or turn support into an interview.")
