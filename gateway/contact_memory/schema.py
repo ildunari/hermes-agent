@@ -102,6 +102,41 @@ class ProactiveOutcome(StrEnum):
     DISMISSED = "dismissed"
 
 
+# Deterministic fold weights (plan §"Signal weights"). These are the single
+# source of truth for both the store fold and the maintenance module; changing a
+# number here changes ledger scoring everywhere. ``ts_*`` deltas feed the
+# Thompson-sampling bandit that Phase 3 reads.
+INTEREST_SIGNAL_WEIGHTS: dict[SignalType, float] = {
+    SignalType.SPONTANEOUS_RAISE: 1.0,
+    SignalType.ENTHUSIASM: 0.8,
+    SignalType.LONG_REPLY: 0.6,
+    SignalType.ENGAGED_MENTION: 0.4,
+    SignalType.NEUTRAL_ACK: 0.1,
+    SignalType.PROACTIVE_ENGAGED: 1.2,
+    SignalType.PROACTIVE_IGNORED: -0.3,
+    SignalType.DISMISSIVE: -0.8,
+    SignalType.EXPLICIT_NEGATIVE: -2.0,
+}
+INTEREST_SIGNAL_BANDIT: dict[SignalType, tuple[float, float]] = {
+    SignalType.PROACTIVE_ENGAGED: (1.0, 0.0),
+    SignalType.PROACTIVE_IGNORED: (0.0, 1.0),
+    SignalType.DISMISSIVE: (0.0, 1.0),
+}
+
+# Promotion / retirement thresholds (plan §"Signal weights", promotion rules).
+INTEREST_PROMOTE_MIN_SCORE = 1.5
+INTEREST_PROMOTE_MIN_DISTINCT_DAYS = 2
+INTEREST_RETIRE_MAX_SCORE = 0.2
+INTEREST_ELIGIBLE_MIN_SCORE = 2.0
+
+# Half-life classes the maintenance model may assign (transient / hobby / identity).
+INTEREST_HALF_LIFE_CLASSES = frozenset({14.0, 90.0, 365.0})
+
+# Taxonomy caps enforced by the maintenance validator.
+INTEREST_MAX_LIVE_TOPICS = 40
+INTEREST_MAX_TAXONOMY_DEPTH = 2
+
+
 @dataclass(frozen=True)
 class InterestEvent:
     event_id: str

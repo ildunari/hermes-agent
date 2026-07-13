@@ -58,14 +58,17 @@ _TOPIC_STOPWORDS = frozenset({
 })
 _TOPIC_JUNK = frozenset({"anything", "misc", "other", "something", "stuff", "thing", "things", "topic"})
 _SENSITIVE_INTEREST_RE = re.compile(
-    r"\b(?:abortion|abuse|addiction|affair|allerg(?:y|ies)|anxiety|arrest|bank|"
-    r"assault|bereavement|cancer|contraception|crime|death|debt|depress\w*|"
-    r"diabet\w*|diagnos\w*|disease|disorder|divorc\w*|domestic|doctor|dying|"
-    r"fetish\w*|funeral|grief|harm|health|hiv|hospital|illness|income|"
-    r"immigration|lawsuit|lawyer|legal|medical|medication\w*|mental|money|opioid|"
-    r"overdose|passport|password|pregnan\w*|prescription|rape|rehab|salary|secret|"
-    r"sex(?:ual)?|ssn|std|sti|suicid\w*|surgery|tax(?:es)?|therapy|token|trauma|"
-    r"violence|visa)\b",
+    r"\b(?:abortion|abuse|addiction|affair|aids|allerg\w*|anxiety|api[ -]?key|"
+    r"arrest|assault|bank\w*|bereavement|break[ -]?up|cancer|contraception|court|custody|"
+    r"credential\w*|credit(?: card)?|crime|death|debt|depress\w*|diabet\w*|"
+    r"diagnos\w*|disease\w*|disorder\w*|divorc\w*|domestic|doctor|dying|estate|"
+    r"fertility|fetish\w*|financ\w*|funeral|grief|harm|health\w*|hiv|hospital|"
+    r"illness|income|immigration|investment\w*|kink\w*|lawsuit|lawyer|legal|"
+    r"loan\w*|login|marriage|medical|medication\w*|mental|money|mortgage|opioid|"
+    r"overdose|passcode|passport|password|pin|porn\w*|pregnan\w*|prescription\w*|probation|"
+    r"private key|rape|rehab|relationship\w*|salary|secret|seed phrase|sex\w*|"
+    r"social security|spouse|ssn|std|sti|suicid\w*|surgery|tax\w*|therapy|token|"
+    r"trauma|treatment|violence|visa)\b",
     re.IGNORECASE,
 )
 _MESSAGE_LENGTH_META_KEY = "contact_message_lengths_v1"
@@ -820,6 +823,22 @@ class ContactMemoryStore:
             raise ValueError("event_id already belongs to a different interest event")
         return event
 
+    def interest_evidence_days(self, topic_text: object) -> int:
+        """Count distinct UTC evidence days for a topic across all its events.
+
+        Promotion requires evidence spread over separate days, which a single
+        chatty session must never satisfy on its own. The count spans folded and
+        unfolded rows so a promotion decision is stable across maintenance runs.
+        """
+        topic = normalize_interest_topic(topic_text)
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT DISTINCT CAST(created_at / 86400 AS INTEGER) AS day "
+                "FROM interest_event WHERE topic_text=?",
+                (topic,),
+            ).fetchall()
+        return len(rows)
+
     def unfolded_interest_events(self, *, limit: int | None = None) -> list[InterestEvent]:
         sql = "SELECT * FROM interest_event WHERE folded_at IS NULL ORDER BY created_at,event_id"
         params: tuple[object, ...] = ()
@@ -845,6 +864,126 @@ class ContactMemoryStore:
                     (timestamp, event_id),
                 ).rowcount
         return changed
+
+    def fold_unfolded_interest_events(self, *, now: float | None = None) -> dict[str, object]:
+        """Deterministically fold every unfolded signal into ledger raw scores.
+
+        This is the maintenance "step 1" from the plan. It runs in one writer
+        transaction so a crash cannot half-apply, and it is idempotent: the
+        ``folded_at`` guard means a rerun after a completed fold consumes nothing
+        and mutates nothing. New topic strings materialize as ``candidate``
+        interests; ``explicit_negative`` flips valence to a permanent block.
+        Score/bandit deltas come from ``schema.INTEREST_SIGNAL_WEIGHTS`` /
+        ``INTEREST_SIGNAL_BANDIT`` — the single source of truth for weights.
+        """
+        from .schema import INTEREST_SIGNAL_BANDIT, INTEREST_SIGNAL_WEIGHTS
+
+        timestamp = _finite_timestamp(now)
+        affected: dict[str, str] = {}
+        folded = 0
+        with self._immediate() as con:
+            rows = con.execute(
+                "SELECT event_id,topic_text,signal_type,valence,created_at "
+                "FROM interest_event WHERE folded_at IS NULL "
+                "ORDER BY created_at,event_id"
+            ).fetchall()
+            grouped: dict[str, list[sqlite3.Row]] = {}
+            for row in rows:
+                grouped.setdefault(str(row["topic_text"]), []).append(row)
+            for topic, events in grouped.items():
+                existing = con.execute(
+                    "SELECT * FROM interest WHERE topic=? AND retired_at IS NULL",
+                    (topic,),
+                ).fetchone()
+                score_delta = 0.0
+                alpha_delta = 0.0
+                beta_delta = 0.0
+                latest = 0.0
+                turned_negative = False
+                for event in events:
+                    signal = SignalType(str(event["signal_type"]))
+                    score_delta += INTEREST_SIGNAL_WEIGHTS.get(signal, 0.0)
+                    da, db = INTEREST_SIGNAL_BANDIT.get(signal, (0.0, 0.0))
+                    alpha_delta += da
+                    beta_delta += db
+                    latest = max(latest, float(event["created_at"]))
+                    if signal is SignalType.EXPLICIT_NEGATIVE:
+                        turned_negative = True
+                if existing is None:
+                    interest_id = uuid.uuid4().hex
+                    valence = (
+                        InterestValence.NEGATIVE.value if turned_negative
+                        else InterestValence.POSITIVE.value
+                    )
+                    con.execute(
+                        """INSERT INTO interest(
+                          interest_id,topic,parent_id,raw_score,last_evidence_at,evidence_count,
+                          valence,half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
+                        ) VALUES(?,?,NULL,?,?,?,?,?, 'candidate', ?,?,?,?,NULL)""",
+                        (
+                            interest_id, topic, score_delta, latest, len(events),
+                            valence, 90.0, max(1.0, 1.0 + alpha_delta),
+                            max(1.0, 1.0 + beta_delta), timestamp, timestamp,
+                        ),
+                    )
+                    affected[interest_id] = topic
+                else:
+                    interest_id = str(existing["interest_id"])
+                    new_score = float(existing["raw_score"]) + score_delta
+                    new_count = int(existing["evidence_count"]) + len(events)
+                    new_last = max(float(existing["last_evidence_at"]), latest)
+                    # Valence is sticky: an explicit negative is a permanent block.
+                    valence = (
+                        InterestValence.NEGATIVE.value
+                        if turned_negative or existing["valence"] == InterestValence.NEGATIVE.value
+                        else str(existing["valence"])
+                    )
+                    new_alpha = max(0.0001, float(existing["ts_alpha"]) + alpha_delta)
+                    new_beta = max(0.0001, float(existing["ts_beta"]) + beta_delta)
+                    con.execute(
+                        "UPDATE interest SET raw_score=?,evidence_count=?,last_evidence_at=?,"
+                        "valence=?,ts_alpha=?,ts_beta=?,updated_at=? WHERE interest_id=?",
+                        (
+                            new_score, new_count, new_last, valence,
+                            new_alpha, new_beta, timestamp, interest_id,
+                        ),
+                    )
+                    affected[interest_id] = topic
+                for event in events:
+                    folded += con.execute(
+                        "UPDATE interest_event SET folded_at=? WHERE event_id=? AND folded_at IS NULL",
+                        (timestamp, event["event_id"]),
+                    ).rowcount
+        return {"folded_events": folded, "affected_interests": affected}
+
+    _MAINTENANCE_META_KEY = "interest_maintenance_v1"
+
+    def interest_maintenance_state(self) -> dict[str, object]:
+        """Return the last maintenance run bookkeeping (text-free)."""
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT value FROM schema_meta WHERE key=?", (self._MAINTENANCE_META_KEY,)
+            ).fetchone()
+        if not row:
+            return {}
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def record_interest_maintenance_run(
+        self, *, now: float | None = None, folded_events: int = 0
+    ) -> dict[str, object]:
+        timestamp = _finite_timestamp(now)
+        payload = {"last_run_at": timestamp, "last_folded_events": int(folded_events)}
+        with self._immediate() as con:
+            con.execute(
+                "INSERT INTO schema_meta(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (self._MAINTENANCE_META_KEY, json.dumps(payload, separators=(",", ":"))),
+            )
+        return payload
 
     def put_interest(self, interest: Interest) -> Interest:
         """Create or replace ledger source state; effective score remains derived."""
@@ -881,7 +1020,7 @@ class ContactMemoryStore:
                   last_evidence_at=excluded.last_evidence_at,evidence_count=excluded.evidence_count,
                   valence=excluded.valence,half_life_days=excluded.half_life_days,
                   state=excluded.state,ts_alpha=excluded.ts_alpha,ts_beta=excluded.ts_beta,
-                      updated_at=excluded.updated_at,retired_at=excluded.retired_at""",
+                  updated_at=excluded.updated_at,retired_at=excluded.retired_at""",
                     (
                         interest.interest_id, interest.topic, interest.parent_id,
                         interest.raw_score, interest.last_evidence_at, interest.evidence_count,
@@ -977,6 +1116,105 @@ class ContactMemoryStore:
             ).fetchone()
         assert updated is not None
         return self._row_to_interest(updated)
+
+    def set_interest_half_life(
+        self, interest_id: str, half_life_days: float, *, now: float | None = None
+    ) -> Interest:
+        """Apply a maintenance-assigned decay class; must stay strictly positive."""
+        value = float(half_life_days)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("half_life_days must be positive and finite")
+        timestamp = _finite_timestamp(now)
+        with self._immediate() as con:
+            if con.execute(
+                "SELECT 1 FROM interest WHERE interest_id=?", (interest_id,)
+            ).fetchone() is None:
+                raise KeyError(f"unknown interest: {interest_id}")
+            con.execute(
+                "UPDATE interest SET half_life_days=?,updated_at=? WHERE interest_id=?",
+                (value, timestamp, interest_id),
+            )
+            updated = con.execute(
+                "SELECT * FROM interest WHERE interest_id=?", (interest_id,)
+            ).fetchone()
+        assert updated is not None
+        return self._row_to_interest(updated)
+
+    def set_interest_state(
+        self, interest_id: str, state: InterestState | str, *, now: float | None = None
+    ) -> Interest:
+        """Move an interest between candidate/active/retired; sets retired_at atomically."""
+        target = InterestState(_enum_text(state))
+        timestamp = _finite_timestamp(now)
+        with self._immediate() as con:
+            row = con.execute(
+                "SELECT retired_at FROM interest WHERE interest_id=?", (interest_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown interest: {interest_id}")
+            retired_at = timestamp if target is InterestState.RETIRED else None
+            con.execute(
+                "UPDATE interest SET state=?,retired_at=?,updated_at=? WHERE interest_id=?",
+                (target.value, retired_at, timestamp, interest_id),
+            )
+            updated = con.execute(
+                "SELECT * FROM interest WHERE interest_id=?", (interest_id,)
+            ).fetchone()
+        assert updated is not None
+        return self._row_to_interest(updated)
+
+    def merge_interests(
+        self, keep_id: str, absorb_id: str, *, discount: float = 0.5, now: float | None = None
+    ) -> Interest:
+        """Fold ``absorb_id`` into ``keep_id`` with a discounted score transfer.
+
+        The absorbed interest is retired (never deleted, preserving its event
+        provenance). Score transfers at ``discount`` (plan: 0.5). Both interests
+        must be live and share valence polarity; the caller (validator) enforces
+        the cross-polarity ban before reaching here, but this is a second guard.
+        """
+        transfer_discount = float(discount)
+        if not 0.0 <= transfer_discount <= 1.0:
+            raise ValueError("discount must be in [0, 1]")
+        if keep_id == absorb_id:
+            raise ValueError("cannot merge an interest into itself")
+        timestamp = _finite_timestamp(now)
+        with self._immediate() as con:
+            keep = con.execute(
+                "SELECT * FROM interest WHERE interest_id=?", (keep_id,)
+            ).fetchone()
+            absorb = con.execute(
+                "SELECT * FROM interest WHERE interest_id=?", (absorb_id,)
+            ).fetchone()
+            if keep is None or absorb is None:
+                raise KeyError("both interests must exist to merge")
+            if keep["retired_at"] is not None or absorb["retired_at"] is not None:
+                raise ValueError("cannot merge a retired interest")
+            if keep["valence"] != absorb["valence"]:
+                raise ValueError("cannot merge across valence polarity")
+            if con.execute(
+                "SELECT 1 FROM interest WHERE parent_id=? LIMIT 1", (absorb_id,)
+            ).fetchone() is not None:
+                raise ValueError("cannot merge an interest that still has children")
+            new_score = float(keep["raw_score"]) + transfer_discount * float(absorb["raw_score"])
+            new_count = int(keep["evidence_count"]) + int(absorb["evidence_count"])
+            new_last = max(float(keep["last_evidence_at"]), float(absorb["last_evidence_at"]))
+            new_alpha = float(keep["ts_alpha"]) + max(0.0, float(absorb["ts_alpha"]) - 1.0)
+            new_beta = float(keep["ts_beta"]) + max(0.0, float(absorb["ts_beta"]) - 1.0)
+            con.execute(
+                "UPDATE interest SET raw_score=?,evidence_count=?,last_evidence_at=?,"
+                "ts_alpha=?,ts_beta=?,updated_at=? WHERE interest_id=?",
+                (new_score, new_count, new_last, new_alpha, new_beta, timestamp, keep_id),
+            )
+            con.execute(
+                "UPDATE interest SET state='retired',retired_at=?,updated_at=? WHERE interest_id=?",
+                (timestamp, timestamp, absorb_id),
+            )
+            merged = con.execute(
+                "SELECT * FROM interest WHERE interest_id=?", (keep_id,)
+            ).fetchone()
+        assert merged is not None
+        return self._row_to_interest(merged)
 
     def record_proactive_send(self, send: ProactiveSend) -> ProactiveSend:
         if not send.send_id.strip() or not send.gate_reason.strip():
