@@ -429,6 +429,26 @@ def _wait_for_safe_restart(
         time.sleep(max(0.1, interval))
 
 
+def _wait_for_webui_safe_restart(
+    target: RestartTarget,
+    *,
+    timeout: float = DEFAULT_SAFE_WAIT_TIMEOUT,
+    interval: float = DEFAULT_SAFE_WAIT_INTERVAL,
+) -> tuple[bool, list[str]]:
+    """Re-check only WebUI work at its immediate restart boundary."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    last_busy: list[str] = []
+    while True:
+        last_busy = _webui_busy_details((target,))
+        if not last_busy:
+            _append_log("final WebUI safe restart check passed")
+            return True, []
+        _append_log("final WebUI safe restart waiting: " + " | ".join(last_busy))
+        if time.monotonic() >= deadline:
+            return False, last_busy
+        time.sleep(max(0.1, interval))
+
+
 def _completion_message(scope: str, exit_code: int) -> str:
     normalized = normalize_scope(scope)
     label = "Hermes gateways" if normalized == "gateways" else "Hermes surfaces"
@@ -634,6 +654,21 @@ def restart_scope(
     restarted_services: set[str] = set()
     active_labels: set[str] = set()
     for target in targets:
+        # The scope-level drain above can be followed by many slow launchd
+        # operations before the WebUI target is reached. Re-check at the
+        # destructive boundary so a chat run that started in that gap is not
+        # killed by this restart.
+        if target.label in WEBUI_BUSY_LABELS:
+            safe, busy = _wait_for_webui_safe_restart(
+                target,
+                timeout=safe_wait_timeout,
+                interval=safe_wait_interval,
+            )
+            if not safe:
+                msg = "final WebUI safe restart wait timed out: " + " | ".join(busy)
+                failures.append(msg)
+                _append_log(msg)
+                break
         requested_service = target.service_name(uid)
         service, before = _resolve_loaded_service(requested_service)
         if before.returncode != 0:

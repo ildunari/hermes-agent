@@ -639,6 +639,7 @@ def test_restart_scope_waits_for_webui_active_runs_before_launchctl(monkeypatch,
     webui_busy_sequence = [
         ["ai.hermes.webui: active_runs=1"],
         [],
+        [],
     ]
 
     def fake_run(cmd, *, timeout=30):
@@ -662,3 +663,57 @@ def test_restart_scope_waits_for_webui_active_runs_before_launchctl(monkeypatch,
 
     assert restart_scope("hermes", delay=0, safe_wait_timeout=10, safe_wait_interval=0.1) == 0
     assert calls
+
+
+def test_restart_scope_rechecks_webui_immediately_before_kick(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    events = []
+    webui_target = _webui_target()
+    targets = (
+        RestartTarget("user/{uid}", "ai.hermes.gateway", required=True),
+        webui_target,
+        RestartTarget("user/{uid}", "ai.hermes.after-webui", required=True),
+    )
+    probe_sequence = [
+        [],  # Initial scope-level drain.
+        ["ai.hermes.webui: active_runs=1"],  # Work began before WebUI was reached.
+        [],  # The new run finished; the final boundary is now safe.
+    ]
+
+    class Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_webui_busy(_targets):
+        events.append("probe")
+        return probe_sequence.pop(0)
+
+    def fake_kickstart(service):
+        events.append(f"kick:{service.rsplit('/', 1)[-1]}")
+        return Proc()
+
+    monkeypatch.setattr("hermes_cli.restart_surfaces.LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr("hermes_cli.restart_surfaces.targets_for_scope", lambda _scope: targets)
+    monkeypatch.setattr("hermes_cli.restart_surfaces._gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr("hermes_cli.restart_surfaces._webui_busy_details", fake_webui_busy)
+    monkeypatch.setattr(
+        "hermes_cli.restart_surfaces._resolve_loaded_service",
+        lambda service: (service, Proc()),
+    )
+    monkeypatch.setattr("hermes_cli.restart_surfaces._kickstart", fake_kickstart)
+    monkeypatch.setattr("hermes_cli.restart_surfaces._launchctl_print", lambda _service: Proc())
+    monkeypatch.setattr("hermes_cli.restart_surfaces._wait_for_scope_health", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    assert restart_scope("hermes", delay=0, safe_wait_timeout=10, safe_wait_interval=0.1) == 0
+    assert probe_sequence == []
+    assert events == [
+        "probe",
+        "kick:ai.hermes.gateway",
+        "probe",
+        "probe",
+        "kick:ai.hermes.webui",
+        "kick:ai.hermes.after-webui",
+    ]
