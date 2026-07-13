@@ -69,7 +69,7 @@ def _historical_rows(path: Path) -> dict[str, list[tuple[object, ...]]]:
         }
 
 
-def test_v2_to_v3_migration_preserves_real_historical_rows_exactly(tmp_path: Path):
+def test_v2_to_current_migration_preserves_real_historical_rows_exactly(tmp_path: Path):
     path = _install_historical_v2(tmp_path)
     before = _historical_rows(path)
 
@@ -92,7 +92,7 @@ def test_v2_to_v3_migration_preserves_real_historical_rows_exactly(tmp_path: Pat
         assert con.execute("PRAGMA foreign_key_list(proactive_send)").fetchone()[2] == "interest"
 
 
-def test_v2_to_v3_migration_rolls_back_and_recovers_after_interruption(tmp_path: Path):
+def test_v2_to_current_migration_rolls_back_and_recovers_after_interruption(tmp_path: Path):
     path = _install_historical_v2(tmp_path)
     before = _historical_rows(path)
 
@@ -154,7 +154,9 @@ def test_concurrent_v1_migration_rechecks_version_under_writer_lock(tmp_path: Pa
     assert errors == []
     assert migration_calls == [1]
     with sqlite3.connect(store.path) as con:
-        assert con.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "3"
+        assert con.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == str(SCHEMA_VERSION)
 
 
 def test_topic_validation_and_event_writes_are_deterministic(tmp_path: Path):
@@ -322,7 +324,9 @@ def test_proactive_send_rejects_impossible_state_transitions(tmp_path: Path):
         for outcome, outcome_at in (("engaged", None), (None, 110.0)):
             with pytest.raises(sqlite3.IntegrityError):
                 con.execute(
-                    "INSERT INTO proactive_send VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    ("INSERT INTO proactive_send(send_id,interest_id,kind,candidate_json,"
+                     "gate_decision,gate_reason,sent_at,outcome,outcome_at,created_at) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?)"),
                     (f"direct-{outcome}", None, "checkin", "{}", "sent", "passed",
                      100.0, outcome, outcome_at, 99.0),
                 )
@@ -332,7 +336,9 @@ def test_proactive_send_rejects_impossible_state_transitions(tmp_path: Path):
         ):
             with pytest.raises(sqlite3.IntegrityError):
                 con.execute(
-                    "INSERT INTO proactive_send VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    ("INSERT INTO proactive_send(send_id,interest_id,kind,candidate_json,"
+                     "gate_decision,gate_reason,sent_at,outcome,outcome_at,created_at) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?)"),
                     (send_id, None, "checkin", "{}", "suppressed", "blocked",
                      sent_at, outcome, outcome_at, 99.0),
                 )
@@ -352,7 +358,9 @@ def test_proactive_send_rejects_orphaned_interest_in_api_and_schema(tmp_path: Pa
         con.execute("PRAGMA foreign_keys=ON")
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
             con.execute(
-                "INSERT INTO proactive_send VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("INSERT INTO proactive_send(send_id,interest_id,kind,candidate_json,"
+                     "gate_decision,gate_reason,sent_at,outcome,outcome_at,created_at) "
+                     "VALUES(?,?,?,?,?,?,?,?,?,?)"),
                 ("direct-orphan", "missing", "interest_share", "{}", "sent",
                  "passed", 100.0, None, None, 99.0),
             )

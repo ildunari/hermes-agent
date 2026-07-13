@@ -43,6 +43,7 @@ from .schema import (
     RetrievalPrincipal,
     SearchResult,
     SignalType,
+    normalized_proactive_item_hash,
 )
 from .security import visibility_sql
 
@@ -193,11 +194,12 @@ class ContactMemoryStore:
             ).fetchone() if con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
             ).fetchone() else None
-            if existing is not None and str(existing[0]) not in {"1", "2", str(SCHEMA_VERSION)}:
+            supported = {"1", "2", "3", str(SCHEMA_VERSION)}
+            if existing is not None and str(existing[0]) not in supported:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {existing[0]}; expected {SCHEMA_VERSION}"
                 )
-            if existing is not None and str(existing[0]) in {"1", "2"}:
+            if existing is not None and str(existing[0]) in {"1", "2", "3"}:
                 self._upgrade_to_current(con)
                 return
             con.executescript(CONTACT_SCHEMA_SQL)
@@ -208,7 +210,7 @@ class ContactMemoryStore:
             )
 
     def _upgrade_to_current(self, con: sqlite3.Connection) -> None:
-        """Atomically migrate a supported historical contact database to v3."""
+        """Atomically migrate a supported historical contact database to v4."""
         con.execute("BEGIN IMMEDIATE")
         try:
             current = con.execute(
@@ -218,12 +220,13 @@ class ContactMemoryStore:
             if from_version == str(SCHEMA_VERSION):
                 con.execute("COMMIT")
                 return
-            if from_version not in {"1", "2"}:
+            if from_version not in {"1", "2", "3"}:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {from_version}; expected {SCHEMA_VERSION}"
                 )
             if from_version == "1":
                 self._migrate_v1_to_v2(con)
+            self._migrate_proactive_item_hash(con)
             self._execute_script(con, CONTACT_SCHEMA_SQL)
             con.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",
@@ -276,6 +279,32 @@ class ContactMemoryStore:
         CREATE INDEX callback_event_cooldown
           ON callback_event(session_key, subject_type, subject_id, created_at, turn_index);
         """)
+
+    @staticmethod
+    def _migrate_proactive_item_hash(con: sqlite3.Connection) -> None:
+        """Add and backfill the all-history novelty key without rebuilding the ledger."""
+        table = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='proactive_send'"
+        ).fetchone()
+        if table is None:
+            return
+        columns = {str(row[1]) for row in con.execute("PRAGMA table_info(proactive_send)")}
+        if "item_hash" not in columns:
+            con.execute("ALTER TABLE proactive_send ADD COLUMN item_hash TEXT")
+        rows = con.execute(
+            "SELECT send_id,candidate_json FROM proactive_send WHERE item_hash IS NULL"
+        )
+        for row in rows:
+            item_hash = ContactMemoryStore._candidate_item_hash(str(row["candidate_json"]))
+            if item_hash is not None:
+                con.execute(
+                    "UPDATE proactive_send SET item_hash=? WHERE send_id=?",
+                    (item_hash, row["send_id"]),
+                )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS proactive_send_item_hash "
+            "ON proactive_send(item_hash) WHERE item_hash IS NOT NULL"
+        )
 
     @contextmanager
     def _immediate(self) -> Iterator[sqlite3.Connection]:
@@ -822,6 +851,18 @@ class ContactMemoryStore:
             outcome_at=float(row["outcome_at"]) if row["outcome_at"] is not None else None,
             created_at=float(row["created_at"]),
         )
+
+    @staticmethod
+    def _candidate_item_hash(candidate_json: str) -> str | None:
+        """Extract the normalized novelty key from a strict or historical payload."""
+        try:
+            candidate = json.loads(candidate_json)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        concrete_item = candidate.get("concrete_item") if isinstance(candidate, dict) else None
+        if not isinstance(concrete_item, str) or not concrete_item.strip():
+            return None
+        return normalized_proactive_item_hash(concrete_item)
 
     def record_interest_event(
         self,
@@ -1640,12 +1681,18 @@ class ContactMemoryStore:
     def record_proactive_send(self, send: ProactiveSend) -> ProactiveSend:
         if not send.send_id.strip() or not send.gate_reason.strip():
             raise ValueError("send_id and gate_reason are required")
+        # This is the hard context boundary for proactive fetch output.  Check-in
+        # payloads and suppressions use the same bounded object contract so no
+        # alternate write path can persist a delegate's raw research dump.
+        if len(send.candidate_json) > 500:
+            raise ValueError("candidate_json cannot exceed 500 characters")
         try:
             candidate = json.loads(send.candidate_json)
         except (TypeError, json.JSONDecodeError) as exc:
             raise ValueError("candidate_json must be valid JSON") from exc
         if not isinstance(candidate, dict):
             raise ValueError("candidate_json must contain an object")
+        item_hash = self._candidate_item_hash(send.candidate_json)
         if send.gate_decision is GateDecision.SENT and send.sent_at is None:
             raise ValueError("sent proactive records require sent_at")
         if send.gate_decision is GateDecision.SUPPRESSED and send.sent_at is not None:
@@ -1665,11 +1712,11 @@ class ContactMemoryStore:
                 raise ValueError("proactive send references an unknown interest")
             con.execute(
                 """INSERT OR IGNORE INTO proactive_send(
-                  send_id,interest_id,kind,candidate_json,gate_decision,gate_reason,
+                  send_id,interest_id,kind,candidate_json,item_hash,gate_decision,gate_reason,
                   sent_at,outcome,outcome_at,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    send.send_id, send.interest_id, send.kind.value, send.candidate_json,
+                    send.send_id, send.interest_id, send.kind.value, send.candidate_json, item_hash,
                     send.gate_decision.value, send.gate_reason, send.sent_at,
                     send.outcome.value if send.outcome is not None else None,
                     send.outcome_at, send.created_at,
@@ -1690,6 +1737,16 @@ class ContactMemoryStore:
                 "SELECT * FROM proactive_send WHERE send_id=?", (send_id,)
             ).fetchone()
         return self._row_to_proactive_send(row) if row is not None else None
+
+    def has_proactive_item_hash(self, item_hash: str) -> bool:
+        """Check sent and suppressed novelty history through the durable index."""
+        value = str(item_hash).strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("item_hash must be a SHA-256 hex digest")
+        with self._connect() as con:
+            return con.execute(
+                "SELECT 1 FROM proactive_send WHERE item_hash=? LIMIT 1", (value,)
+            ).fetchone() is not None
 
     def recent_proactive_sends(
         self, *, since: float = 0.0, decision: GateDecision | str | None = None,

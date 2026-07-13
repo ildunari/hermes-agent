@@ -2062,10 +2062,20 @@ def _run_proactive_tick_once(
     config_raw: Any,
     session_db: Any = None,
     generate: Any = None,
+    fetcher: Any = None,
+    web_fallback: Any = None,
+    gate_verdict: Any = None,
+    compose_interest: Any = None,
+    delivery_adapter: Any = None,
     now: float | None = None,
 ) -> dict[str, int]:
-    """Run one no-transport scheduler tick and optionally persist dry-run children."""
+    """Run one scheduler tick through the structurally dry-run proactive pipeline."""
     from gateway.proactive_scheduler import ProactiveConfig, ProactiveScheduler
+    from gateway.contact_memory.schema import ProactiveSendKind, RetrievalPrincipal
+    from gateway.proactive_fetch import (
+        FetchCoordinator, Last30DaysSubprocessSource, NullWebFallback,
+        ProactiveGate, ProactivePipeline,
+    )
 
     root = Path(profile_home).resolve()
     scheduler = ProactiveScheduler(
@@ -2075,6 +2085,11 @@ def _run_proactive_tick_once(
         config=ProactiveConfig.from_mapping(config_raw),
     )
     initiated = 0
+
+    resolved_fetcher = fetcher or FetchCoordinator(
+        Last30DaysSubprocessSource(profile=str(profile)),
+        web_fallback or NullWebFallback(),
+    )
 
     def _initiate(route, claim) -> None:
         nonlocal initiated
@@ -2099,7 +2114,54 @@ def _run_proactive_tick_once(
         )
         initiated += 1
 
-    result = scheduler.tick(now=now, on_dry_run=_initiate)
+    def _interest_pipeline(route, claim, store):
+        nonlocal initiated
+
+        def _compose(request):
+            nonlocal initiated
+            if compose_interest is not None:
+                return compose_interest(request)
+            if session_db is None or generate is None:
+                raise RuntimeError("compose generator unavailable")
+            parent_session_id = str(claim.payload.get("session_id") or route.session_id or "")
+            if not parent_session_id:
+                raise RuntimeError("parent session unavailable")
+            child = run_proactive_child_turn(
+                session_db=session_db,
+                parent_session_id=parent_session_id,
+                purpose_prompt=request.purpose_prompt + "\n\n" + request.texture_prompt,
+                kind=claim.kind,
+                generate=generate,
+                child_session_id=f"proactive-{claim.slot_id}",
+                now_ts=now,
+            )
+            initiated += 1
+            return child["final_response"]
+
+        pipeline = ProactivePipeline(
+            fetcher=resolved_fetcher,
+            gate=ProactiveGate(verdict=gate_verdict),
+            compose=_compose if (compose_interest is not None or (session_db is not None and generate is not None)) else None,
+            delivery_adapter=delivery_adapter,
+        )
+        interest = store.get_interest(claim.interest_id) if claim.interest_id else None
+        return pipeline.run(
+            send_id=claim.slot_id,
+            topic=str(claim.payload.get("topic") or (interest.topic if interest else "")),
+            interest=interest,
+            store=store,
+            route=route.as_dict(),
+            principal=(
+                RetrievalPrincipal.GUEST if route.principal == "guest"
+                else RetrievalPrincipal.OWNER
+            ),
+            kind=ProactiveSendKind(claim.kind),
+            now=now,
+        )
+
+    result = scheduler.tick(
+        now=now, on_dry_run=_initiate, on_interest_share=_interest_pipeline
+    )
     result["initiated"] = initiated
     return result
 

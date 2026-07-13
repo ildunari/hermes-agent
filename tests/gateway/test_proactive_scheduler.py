@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -136,6 +137,8 @@ def test_config_is_surfaced_but_phase3_forces_dry_run():
     })
     assert cfg.enabled is True
     assert cfg.dry_run is True
+    with pytest.raises(ValueError, match="structurally dry-run"):
+        config(dry_run=False)
     with pytest.raises(ValueError, match="cannot be below 48"):
         config(min_gap_hours=12)
 
@@ -375,6 +378,85 @@ def test_serious_register_arms_only_checkin_and_dry_run_never_sends(tmp_path: Pa
         rows = con.execute("SELECT kind,status FROM proactive_slot").fetchall()
     assert [(row["kind"], row["status"]) for row in rows] == [("checkin", "armed")]
     assert store.recent_proactive_sends() == []
+
+
+def test_500_character_checkin_ticks_with_compact_audit_and_initiates(tmp_path: Path):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    register_messages(state, count=4, start=NOW - 5 * 3600)
+    reason = "r" * 500
+    state.register_inbound(
+        profile="poke", contact_id="contact-a", route=ROUTE,
+        timezone_name="America/New_York", source_id="max-reason",
+        received_at=NOW - 4 * 3600, checkin_kind="open_loop", checkin_reason=reason,
+    )
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(), profile="poke",
+    )
+    assert scheduler.tick(now=NOW)["armed"] == 1
+    with scheduler._connect() as con:
+        slot = con.execute("SELECT slot_id,fire_at FROM proactive_slot").fetchone()
+    initiated = []
+    result = scheduler.tick(
+        now=float(slot["fire_at"]) + 1,
+        on_dry_run=lambda _route, claim: initiated.append(claim),
+    )
+    assert result["fired"] == 1
+    assert initiated[0].payload["reason"] == reason
+    record = ContactMemoryStore(
+        tmp_path / "contact-memory", "contact-a"
+    ).get_proactive_send(str(slot["slot_id"]))
+    assert record is not None
+    audit = json.loads(record.candidate_json)
+    assert len(record.candidate_json) <= 500
+    assert audit == {
+        "audit": "checkin", "dry_run": True, "kind": "open_loop",
+        "reason_sha256": hashlib.sha256(reason.encode()).hexdigest(),
+    }
+    assert reason not in record.candidate_json
+    assert scheduler.get_slot(str(slot["slot_id"]))["status"] == "fired"
+
+
+@pytest.mark.parametrize("failure_edge", ("projection", "initiation"))
+def test_checkin_projection_or_initiation_failure_is_immediately_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_edge: str
+):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    key = register_messages(state)
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(), profile="poke",
+    )
+    slot_id = scheduler.arm_slot(
+        contact_route(), kind="checkin", fire_at=NOW - 1,
+        payload={"kind": "open_loop", "reason": "follow up"}, now=NOW - 2,
+    )
+    original_projection = scheduler._project_action_to_ledger
+
+    def fail_projection(*_args, **_kwargs):
+        raise RuntimeError("projection failed")
+
+    def fail_initiation(_route, _claim):
+        raise RuntimeError("initiation failed")
+
+    callback = fail_initiation if failure_edge == "initiation" else None
+    if failure_edge == "projection":
+        monkeypatch.setattr(scheduler, "_project_action_to_ledger", fail_projection)
+    assert scheduler.tick(now=NOW, on_dry_run=callback)["fired"] == 0
+    assert scheduler.get_slot(slot_id)["status"] == "armed"
+    with scheduler._connect() as con:
+        assert con.execute(
+            "SELECT 1 FROM proactive_action WHERE action_id=?", (slot_id,)
+        ).fetchone() is None
+
+    monkeypatch.setattr(scheduler, "_project_action_to_ledger", original_projection)
+    initiated = []
+    assert scheduler.tick(
+        now=NOW + 1, on_dry_run=lambda _route, claim: initiated.append(claim.slot_id)
+    )["fired"] == 1
+    assert initiated == [slot_id]
+    assert scheduler.get_slot(slot_id)["status"] == "fired"
+    assert key == contact_route().contact_hash
 
 
 def test_open_loop_inbound_arms_contact_local_checkin_not_interest(tmp_path: Path):

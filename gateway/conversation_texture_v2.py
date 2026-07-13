@@ -7,7 +7,7 @@ open when v2 cannot compile.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -394,7 +394,7 @@ def _make_plan(
     burst_probability: float,
     follow_through_probability: float,
 ) -> ResponsePlan:
-    caps = {"reaction": 5, "ack": 10, "answer": 24, "question": 10, "next_step": 16, "observation": 24, "craft": 18, "task": 0}
+    caps = {"reaction": 5, "plain": 16, "ack": 10, "answer": 24, "question": 10, "next_step": 16, "observation": 24, "craft": 18, "task": 0}
     slots = [ResponseSlot(chosen, caps[chosen])]
     # Bursts need a semantic trigger in the incoming message. Randomly splitting
     # an ordinary declarative beat creates paragraph theatre and poor plan
@@ -481,6 +481,9 @@ def compile_turn_guidance(
     timezone_name: str | None = None,
     current_message_id: str | None = None,
     turn_ordinal: int | None = None,
+    forced_register: str | None = None,
+    forced_response_class: str | None = None,
+    force_craft_ineligible: bool = False,
 ) -> str:
     if not config.enabled:
         return ""
@@ -492,11 +495,21 @@ def compile_turn_guidance(
         message, prior_history, now_ts=now_ts, time_awareness=config.time_awareness,
         timezone_name=zone_name,
     )
+    if forced_register is not None:
+        if forced_register not in {"casual", "serious", "task", "advice"}:
+            raise ValueError("invalid forced texture register")
+        features = replace(features, register=forced_register, serious_tier=0)
+    if forced_response_class is not None and forced_response_class not in {"reaction", "plain"}:
+        raise ValueError("proactive forced response class must be reaction or plain")
     assistant_turns = _recent(prior_history, "assistant", 1)
     prior_class = _replay_prior_class(prior_history, session_key, config)
     cooldown = prior_class == "craft" or bool(assistant_turns and _looks_crafted(assistant_turns[-1]))
-    craft_eligible = not (features.serious_tier or features.style_complaint or cooldown)
-    chosen = _select_class(features, session_key, seed_ordinal, craft_eligible)
+    craft_eligible = not (
+        force_craft_ineligible or features.serious_tier or features.style_complaint or cooldown
+    )
+    chosen = forced_response_class or _select_class(
+        features, session_key, seed_ordinal, craft_eligible
+    )
 
     effort = sample_effort(session_key, seed_ordinal, config)
     if features.register == "task":

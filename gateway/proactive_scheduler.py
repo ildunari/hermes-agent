@@ -1,9 +1,8 @@
 """Persistent proactive scheduler for contact-isolated gateway profiles.
 
-The scheduler owns *when*.  Interest-share claims are deliberately dry-run-only
-in Phase 3: they are durably logged as suppressions and can never call a sender.
-Check-ins share the same caps/one-strike/claim machinery but delivery remains an
-explicit caller action through the assistant-first child-session path.
+The scheduler owns *when*.  Phase-4 interest claims pass through the isolated
+fetch/gate/compose callback, but both interest shares and check-ins remain
+structurally dry-run-only pending approval.  No scheduler path calls transport.
 """
 from __future__ import annotations
 
@@ -11,6 +10,7 @@ import asyncio
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import math
 from pathlib import Path
 import random
@@ -35,6 +35,7 @@ _WEEK = 7 * 86_400.0
 _DAY = 86_400.0
 _DIRECT_TYPES = frozenset({"dm", "direct", "private"})
 _NEGATIVE_OUTCOMES = frozenset({"ignored", "dismissed"})
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS proactive_contact (
@@ -209,6 +210,8 @@ class ProactiveConfig:
     serious_suppression_hours: float = 72.0
 
     def validate(self) -> None:
+        if not self.dry_run:
+            raise ValueError("proactive delivery is structurally dry-run pending approval")
         if self.min_gap_hours < 48:
             raise ValueError("min_gap_hours cannot be below 48")
         if self.weekly_interest_cap > self.weekly_total_cap:
@@ -1011,7 +1014,9 @@ class ProactiveScheduler:
             if eligibility:
                 sent = False
                 reason = eligibility
-            status = "dry_run" if self.config.dry_run and sent else ("sent" if sent else "suppressed")
+            # Phase 4 deliberately has no state transition capable of producing
+            # a live ``sent`` action.  Approval must change code as well as config.
+            status = "dry_run" if sent else "suppressed"
             slot_status = "fired" if status in {"sent", "dry_run"} else "suppressed"
             action_id = claim.slot_id
             con.execute(
@@ -1022,13 +1027,13 @@ class ProactiveScheduler:
                     action_id, claim.slot_id, row["contact_hash"], row["interest_id"], row["kind"],
                     status, timestamp if status == "sent" else None,
                     int(row["inbound_version"]),
-                    "phase3_dry_run" if status == "dry_run" else str(reason), timestamp,
+                    str(reason), timestamp,
                 ),
             )
             con.execute(
                 """UPDATE proactive_slot SET status=?,reason=?,claim_token=NULL,claim_until=NULL,
                    updated_at=? WHERE slot_id=?""",
-                (slot_status, "phase3_dry_run" if status == "dry_run" else str(reason), timestamp, claim.slot_id),
+                (slot_status, str(reason), timestamp, claim.slot_id),
             )
             self._finish(con)
             return status
@@ -1036,6 +1041,17 @@ class ProactiveScheduler:
             if con.in_transaction:
                 self._finish(con, exc)
             raise
+
+    def retry_claim(self, claim: SlotClaim, *, reason: str, now: float | None = None) -> bool:
+        """Return a failed projection/initiation lease to the retryable armed state."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        with self._connect() as con:
+            return bool(con.execute(
+                """UPDATE proactive_slot SET status='armed',reason=?,claim_token=NULL,
+                   claim_until=NULL,updated_at=? WHERE slot_id=? AND status='claimed'
+                   AND claim_token=?""",
+                (str(reason), timestamp, claim.slot_id, claim.claim_token),
+            ).rowcount)
 
     def _total_sent(self, con: sqlite3.Connection, contact_hash: str) -> int:
         return int(con.execute(
@@ -1278,13 +1294,24 @@ class ProactiveScheduler:
         existing = store.get_proactive_send(claim.slot_id)
         if existing is not None:
             return existing
-        candidate = dict(claim.payload)
-        candidate["dry_run"] = True
+        if claim.kind == ProactiveSendKind.CHECKIN.value:
+            raw_reason = str(claim.payload.get("reason") or "")
+            candidate = {
+                "audit": "checkin",
+                "dry_run": True,
+                "kind": str(claim.payload.get("kind") or "checkin")[:32],
+                "reason_sha256": hashlib.sha256(raw_reason.encode("utf-8")).hexdigest(),
+            }
+        else:
+            candidate = dict(claim.payload)
+            candidate["dry_run"] = True
         return store.record_proactive_send(ProactiveSend(
             send_id=claim.slot_id,
             interest_id=claim.interest_id,
             kind=ProactiveSendKind(claim.kind),
-            candidate_json=json.dumps(candidate, ensure_ascii=False, sort_keys=True),
+            candidate_json=json.dumps(
+                candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ),
             gate_decision=GateDecision.SUPPRESSED,
             gate_reason="phase3_dry_run",
             sent_at=None,
@@ -1296,8 +1323,14 @@ class ProactiveScheduler:
     def tick(
         self, *, now: float | None = None,
         on_dry_run: Callable[[ContactRoute, SlotClaim], None] | None = None,
+        on_interest_share: Callable[[ContactRoute, SlotClaim, ContactMemoryStore], Any] | None = None,
     ) -> dict[str, int]:
-        """Run the sole production policy engine; never calls a transport."""
+        """Run the sole production policy engine; never calls a transport.
+
+        ``on_interest_share`` is the Phase-4 isolated pipeline edge.  Its return
+        value must expose ``status`` and ``reason``; only ``status='dry_run'``
+        counts as a simulated fire.  Check-ins retain the Phase-3 flow unchanged.
+        """
         result = {"armed": 0, "fired": 0, "ignored": 0}
         if not self.config.enabled:
             return result
@@ -1329,14 +1362,52 @@ class ProactiveScheduler:
             route = routes.get(claim.contact_hash)
             if route is None:
                 continue
+            if claim.kind in {"interest_share", "exploration"} and on_interest_share is not None:
+                store = self._contact_store(route)
+                try:
+                    pipeline_result = on_interest_share(route, claim, store)
+                    pipeline_status = str(
+                        getattr(pipeline_result, "status", "")
+                        or (pipeline_result.get("status") if isinstance(pipeline_result, Mapping) else "")
+                    )
+                    pipeline_reason = str(
+                        getattr(pipeline_result, "reason", "")
+                        or (pipeline_result.get("reason") if isinstance(pipeline_result, Mapping) else "")
+                        or "pipeline_suppressed"
+                    )
+                except Exception:
+                    logger.warning("Proactive interest pipeline failed", exc_info=True)
+                    pipeline_status, pipeline_reason = "suppressed", "pipeline_error"
+                    if store.get_proactive_send(claim.slot_id) is None:
+                        store.record_proactive_send(ProactiveSend(
+                            send_id=claim.slot_id, interest_id=claim.interest_id,
+                            kind=ProactiveSendKind(claim.kind),
+                            candidate_json=json.dumps({"error": pipeline_reason}, separators=(",", ":")),
+                            gate_decision=GateDecision.SUPPRESSED, gate_reason=pipeline_reason,
+                            sent_at=None, outcome=None, outcome_at=None, created_at=timestamp,
+                        ))
+                status = self.complete_claim(
+                    claim, sent=pipeline_status == "dry_run", reason=pipeline_reason, now=timestamp
+                )
+                if status == "dry_run":
+                    result["fired"] += 1
+                continue
+            try:
+                # Projection and child-turn initiation must both succeed before
+                # the durable action/slot is marked fired.  A failure is re-armed
+                # immediately rather than becoming an unretryable dry-run action.
+                self._project_action_to_ledger(route, claim, now=timestamp)
+                if on_dry_run is not None:
+                    on_dry_run(route, claim)
+            except Exception:
+                logger.warning("Proactive check-in initiation failed", exc_info=True)
+                self.retry_claim(claim, reason="initiation_retry", now=timestamp)
+                continue
             status = self.complete_claim(
                 claim, sent=True, reason="phase3_dry_run", now=timestamp
             )
             if status != "dry_run":
                 continue
-            self._project_action_to_ledger(route, claim, now=timestamp)
-            if on_dry_run is not None:
-                on_dry_run(route, claim)
             result["fired"] += 1
 
         for contact in ProactiveStateStore(self.state_db_path).contacts():

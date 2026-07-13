@@ -8,10 +8,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
 import math
+import re
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+_PROACTIVE_ITEM_WORD_RE = re.compile(r"[a-z0-9]+", re.I)
+
+
+def normalized_proactive_item_hash(concrete_item: str) -> str:
+    """Return the stable, formatting-insensitive identity for a shared item."""
+    words = [word.casefold() for word in _PROACTIVE_ITEM_WORD_RE.findall(str(concrete_item))]
+    normalized = " ".join(
+        word[:-1] if len(word) > 3 and word.endswith("s") else word for word in words
+    )
+    return hashlib.sha256(("proactive-item-v1\0" + normalized).encode("utf-8")).hexdigest()
 
 
 class StrEnum(str, Enum):
@@ -437,6 +450,7 @@ CREATE TABLE IF NOT EXISTS proactive_send (
   interest_id TEXT REFERENCES interest(interest_id),
   kind TEXT NOT NULL CHECK(kind IN ('interest_share','checkin','exploration')),
   candidate_json TEXT NOT NULL,
+  item_hash TEXT,
   gate_decision TEXT NOT NULL CHECK(gate_decision IN ('sent','suppressed')),
   gate_reason TEXT NOT NULL,
   sent_at REAL,
@@ -451,6 +465,8 @@ CREATE TABLE IF NOT EXISTS proactive_send (
 );
 CREATE INDEX IF NOT EXISTS proactive_send_recent
   ON proactive_send(created_at DESC, gate_decision);
+CREATE INDEX IF NOT EXISTS proactive_send_item_hash
+  ON proactive_send(item_hash) WHERE item_hash IS NOT NULL;
 """
 
 REGISTRY_SCHEMA_SQL = """
