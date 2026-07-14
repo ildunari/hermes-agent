@@ -136,7 +136,7 @@ Red-first verification reproduced 27 failures in the focused live-ingress file b
 
 ## Phase D — Semantic projections
 
-Status: Independent Gate D findings repaired and locally verified; parent Gate D rerun is pending. Phase E has not started.
+Status: Final Gate D rerun findings repaired and locally verified; parent Gate D rerun is pending. Phase E has not started.
 
 Commit: Phase D boundary commit containing this progress record (the final SHA is reported by the implementation thread).
 
@@ -161,6 +161,10 @@ Independent Gate D rejected the boundary commit with three P0 defects. The repai
 Reaction removal now deactivates receipts and every semantic projection while applying the canonical retraction transaction, including pending removal-before-add handling. Regression coverage removes the caller-triggered empty reprojection and verifies removal before fold, after fold, and before add. A schema-8 projector-baseline ledger preserves migrated/reviewed/legacy aggregate score, count, valence, bandit, timestamp, state, and identity while projector-owned folded contributions are added, superseded, or retracted.
 
 Repair verification completed the focused extractor/projection/interest set with 65 passed and 0 failed, then the complete 14-file contact-memory plus interest-ledger set with 302 passed and 0 failed. Focused `py_compile`, Ruff, and `git diff --check` passed. No live data was touched, no gateway was restarted, no send mode changed, and Phase E/F did not begin.
+
+The final Gate D rerun found two remaining P0 defects and one P1. Schema-v7 migration now transactionally and idempotently backfills projection baselines for already-folded communication evidence by subtracting active projector-owned score, count, and bandit contributions before the schema-8 version bump; interruption rolls back both DDL and semantic backfill. Supersession and reaction removal restore the legacy aggregate without double counting. Baselines now preserve lifecycle state and `retired_at`, so a projection-promoted `candidate` returns exactly to its prior lifecycle after removal. Standalone GUID/UUID and `sk-...` credential-token labels are rejected while representative artist, show, and place names remain accepted.
+
+Final repair verification completed the focused projection/extractor/interest set with 72 passed and 0 failed, the migration/store/maintenance surrounding set with 88 passed and 0 failed, and the complete 14-file contact-memory plus interest-ledger set with 309 passed and 0 failed. Focused `py_compile`, Ruff, and `git diff --check` passed. Tests use temporary synthetic stores only; no live data was touched, no gateway was restarted, no send mode changed, and Phase E/F did not begin.
 
 ### Current boundaries
 

@@ -292,6 +292,182 @@ def test_same_topic_projection_supersession_preserves_exact_legacy_baseline(tmp_
         assert row is not None
 
 
+def test_v7_migration_backfills_folded_projection_baseline_once(tmp_path: Path) -> None:
+    store = ContactMemoryStore(tmp_path, "contact")
+    target = _event(
+        "migrated-reaction-add", at=2 * DAY, kind=CommunicationKind.REACTION_ADD,
+        reaction=CommunicationReactionSubtype.LOVE,
+    )
+    target_source = _id("migrated-reacted-message")
+    relation = CommunicationRelation(
+        relation_id=_id("migrated-reaction-relation"), event_id=target.event_id,
+        relation_type=CommunicationRelationType.REACTION_TO,
+        target_source_id=target_source, target_actor_role=CommunicationActorRole.COUNTERPART,
+    )
+    with sqlite3.connect(store.path) as con:
+        con.execute(
+            """INSERT INTO interest(
+              interest_id,topic,parent_id,raw_score,last_evidence_at,evidence_count,valence,
+              half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
+            ) VALUES('legacy-music','music',NULL,4.2,?,7,'positive',180,'active',
+                     3.5,2.25,10,?,NULL)""",
+            (DAY, DAY),
+        )
+        con.execute(
+            """INSERT INTO interest_event(
+              event_id,topic_text,signal_type,valence,source_id,created_at,folded_at
+            ) VALUES('legacy-music-event','music','enthusiasm','positive','legacy',?,?)""",
+            (DAY, DAY),
+        )
+    store.ingest_communication_event(target, relations=(relation,))
+    store.project_communication_event(
+        target.event_id,
+        CommunicationProjection(interests=(_interest(
+            "music", SignalType.ENGAGED_MENTION, confidence=1.0,
+            method=ProjectionMethod.DETERMINISTIC,
+        ),)),
+        projector_version="phase-d-v1",
+    )
+    store.fold_unfolded_interest_events(now=3 * DAY)
+    with sqlite3.connect(store.path) as con:
+        assert con.execute(
+            "SELECT raw_score,evidence_count FROM interest WHERE interest_id='legacy-music'"
+        ).fetchone() == pytest.approx((4.6, 8))
+        con.execute("DROP TABLE interest_projection_baseline")
+        con.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+
+    class InterruptedMigration(RuntimeError):
+        pass
+
+    class InterruptedStore(ContactMemoryStore):
+        @staticmethod
+        def _backfill_v7_interest_projection_baselines(con: sqlite3.Connection) -> None:
+            ContactMemoryStore._backfill_v7_interest_projection_baselines(con)
+            raise InterruptedMigration
+
+    with pytest.raises(InterruptedMigration):
+        InterruptedStore(tmp_path, "contact")
+    with sqlite3.connect(store.path) as con:
+        assert con.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0] == "7"
+        assert con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='interest_projection_baseline'"
+        ).fetchone() is None
+
+    migrated = ContactMemoryStore(tmp_path, "contact")
+    ContactMemoryStore(tmp_path, "contact")
+    with sqlite3.connect(store.path) as con:
+        baseline = con.execute(
+            """SELECT raw_score,last_evidence_at,evidence_count,valence,ts_alpha,ts_beta,
+                      state,retired_at FROM interest_projection_baseline WHERE topic='music'"""
+        ).fetchone()
+        assert baseline is not None
+        assert (baseline[0], baseline[1], baseline[2], baseline[4], baseline[5]) == pytest.approx(
+            (4.2, DAY, 7, 3.5, 2.25)
+        )
+        assert (baseline[3], baseline[6], baseline[7]) == ("positive", "active", None)
+        assert con.execute(
+            "SELECT count(*) FROM interest_projection_baseline WHERE topic='music'"
+        ).fetchone()[0] == 1
+
+    migrated.project_communication_event(
+        target.event_id,
+        CommunicationProjection(interests=(_interest(
+            "music", SignalType.ENGAGED_MENTION, confidence=1.0,
+            method=ProjectionMethod.DETERMINISTIC,
+        ),)),
+        projector_version="phase-d-v2",
+    )
+    migrated.fold_unfolded_interest_events(now=4 * DAY)
+    with sqlite3.connect(store.path) as con:
+        assert con.execute(
+            "SELECT raw_score,evidence_count FROM interest WHERE interest_id='legacy-music'"
+        ).fetchone() == pytest.approx((4.6, 8))
+
+    removal = _event(
+        "migrated-reaction-remove", at=5 * DAY, kind=CommunicationKind.REACTION_REMOVE,
+        reaction=CommunicationReactionSubtype.LOVE,
+    )
+    removal_relation = CommunicationRelation(
+        relation_id=_id("migrated-removal-relation"), event_id=removal.event_id,
+        relation_type=CommunicationRelationType.REACTION_TO,
+        target_source_id=target_source, target_actor_role=CommunicationActorRole.COUNTERPART,
+    )
+    migrated.retract_communication_event(
+        removal, target_event_id=target.event_id, relations=(removal_relation,),
+    )
+    restored = migrated.get_interest("legacy-music")
+    assert restored is not None
+    assert (
+        restored.raw_score, restored.last_evidence_at, restored.evidence_count,
+        restored.ts_alpha, restored.ts_beta,
+    ) == pytest.approx((4.2, DAY, 7, 3.5, 2.25))
+    assert (restored.valence.value, restored.state.value, restored.retired_at) == (
+        "positive", "active", None,
+    )
+
+
+def test_retraction_restores_candidate_lifecycle_from_projection_baseline(tmp_path: Path) -> None:
+    store = ContactMemoryStore(tmp_path, "contact")
+    target = _event(
+        "lifecycle-reaction-add", at=2 * DAY, kind=CommunicationKind.REACTION_ADD,
+        reaction=CommunicationReactionSubtype.LOVE,
+    )
+    target_source = _id("lifecycle-reacted-message")
+    relation = CommunicationRelation(
+        relation_id=_id("lifecycle-reaction-relation"), event_id=target.event_id,
+        relation_type=CommunicationRelationType.REACTION_TO,
+        target_source_id=target_source, target_actor_role=CommunicationActorRole.COUNTERPART,
+    )
+    with sqlite3.connect(store.path) as con:
+        con.execute(
+            """INSERT INTO interest(
+              interest_id,topic,parent_id,raw_score,last_evidence_at,evidence_count,valence,
+              half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
+            ) VALUES('candidate-music','music',NULL,1.2,?,7,'positive',180,'candidate',
+                     1,1,10,?,NULL)""",
+            (DAY, DAY),
+        )
+        con.execute(
+            """INSERT INTO interest_event(
+              event_id,topic_text,signal_type,valence,source_id,created_at,folded_at
+            ) VALUES('legacy-day','music','enthusiasm','positive','legacy',?,?)""",
+            (DAY, DAY),
+        )
+    store.ingest_communication_event(target, relations=(relation,))
+    store.project_communication_event(
+        target.event_id,
+        CommunicationProjection(interests=(_interest(
+            "music", SignalType.ENGAGED_MENTION, confidence=1.0,
+            method=ProjectionMethod.DETERMINISTIC,
+        ),)),
+        projector_version="phase-d-v1",
+    )
+    store.fold_unfolded_interest_events(now=3 * DAY)
+    store.apply_interest_maintenance_batch(now=3 * DAY)
+    promoted = store.get_interest("candidate-music")
+    assert promoted is not None and promoted.state.value == "active"
+
+    removal = _event(
+        "lifecycle-reaction-remove", at=4 * DAY, kind=CommunicationKind.REACTION_REMOVE,
+        reaction=CommunicationReactionSubtype.LOVE,
+    )
+    removal_relation = CommunicationRelation(
+        relation_id=_id("lifecycle-removal-relation"), event_id=removal.event_id,
+        relation_type=CommunicationRelationType.REACTION_TO,
+        target_source_id=target_source, target_actor_role=CommunicationActorRole.COUNTERPART,
+    )
+    store.retract_communication_event(
+        removal, target_event_id=target.event_id, relations=(removal_relation,),
+    )
+    restored = store.get_interest("candidate-music")
+    assert restored is not None
+    assert (restored.raw_score, restored.evidence_count, restored.state.value, restored.retired_at) == (
+        1.2, 7, "candidate", None,
+    )
+
+
 def test_actor_reply_reaction_and_confidence_rules_are_mechanical(tmp_path: Path) -> None:
     store = ContactMemoryStore(tmp_path, "contact")
     counterpart = _event("counterpart", actor=CommunicationActorRole.COUNTERPART)
@@ -476,3 +652,38 @@ def test_inferred_fulfillment_unrelated_linkage_and_raw_artifacts_are_rejected(t
             "interest_event", "projected_entity", "recommendation", "semantic_callback",
         ) for row in con.execute(f"SELECT * FROM {table}") for value in row if value is not None)
         assert "https://" not in payload and "/Users/" not in payload and "token=x" not in payload
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["550e8400-e29b-41d4-a716-446655440000", "sk-proj-abcdefghijklmnopqrstuvwxyz012345"],
+)
+def test_semantic_entity_labels_reject_opaque_identifiers(tmp_path: Path, label: str) -> None:
+    store = ContactMemoryStore(tmp_path, "contact")
+    event = _event(f"opaque-label:{label}")
+    store.ingest_communication_event(event)
+    with pytest.raises(ValueError, match="raw artifacts or credentials"):
+        store.project_communication_event(
+            event.event_id,
+            CommunicationProjection(entities=(EntityProjection(
+                canonical_label=label, entity_type="thing", confidence=0.99,
+                source_method=ProjectionMethod.MODEL,
+            ),)),
+            projector_version="phase-d-v1",
+        )
+
+
+@pytest.mark.parametrize("label", ["Massive Attack", "The Bear", "Prospect Park"])
+def test_semantic_entity_labels_preserve_legitimate_names(tmp_path: Path, label: str) -> None:
+    store = ContactMemoryStore(tmp_path, f"contact:{label}")
+    event = _event(f"legitimate-label:{label}")
+    store.ingest_communication_event(event)
+    result = store.project_communication_event(
+        event.event_id,
+        CommunicationProjection(entities=(EntityProjection(
+            canonical_label=label, entity_type="thing", confidence=0.99,
+            source_method=ProjectionMethod.MODEL,
+        ),)),
+        projector_version="phase-d-v1",
+    )
+    assert result.inserted

@@ -914,13 +914,17 @@ CREATE TABLE IF NOT EXISTS interest_projection_baseline (
   valence TEXT CHECK(valence IS NULL OR valence IN ('positive','negative','neutral')),
   ts_alpha REAL,
   ts_beta REAL,
+  state TEXT CHECK(state IS NULL OR state IN ('candidate','active','retired')),
+  retired_at REAL,
   updated_at REAL,
   CHECK((baseline_exists=0 AND interest_id IS NULL AND raw_score IS NULL
          AND last_evidence_at IS NULL AND evidence_count IS NULL AND valence IS NULL
-         AND ts_alpha IS NULL AND ts_beta IS NULL AND updated_at IS NULL) OR
+         AND ts_alpha IS NULL AND ts_beta IS NULL AND state IS NULL
+         AND retired_at IS NULL AND updated_at IS NULL) OR
         (baseline_exists=1 AND interest_id IS NOT NULL AND raw_score IS NOT NULL
          AND last_evidence_at IS NOT NULL AND evidence_count IS NOT NULL AND valence IS NOT NULL
-         AND ts_alpha IS NOT NULL AND ts_beta IS NOT NULL AND updated_at IS NOT NULL))
+         AND ts_alpha IS NOT NULL AND ts_beta IS NOT NULL AND state IS NOT NULL
+         AND updated_at IS NOT NULL))
 );
 CREATE TABLE IF NOT EXISTS proactive_send (
   send_id TEXT PRIMARY KEY,
