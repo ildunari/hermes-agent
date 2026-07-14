@@ -53,6 +53,9 @@ _TAXONOMY: tuple[tuple[str, str, frozenset[str]], ...] = (
     ("vehicles", "vehicles", frozenset({"car", "cars", "vehicle", "tesla", "motorcycle", "truck", "automotive"})),
     ("travel", "travel", frozenset({"travel", "trip", "vacation", "flight", "hotel", "tourism", "destination", "beach"})),
 )
+LINK_INTEREST_TAXONOMY = frozenset(
+    (category, topic) for category, topic, _keywords in _TAXONOMY
+)
 _METADATA_FIELDS = frozenset({"title", "description", "author_name", "provider_name", "type", "platform"})
 
 
@@ -219,6 +222,18 @@ def evidence_id(secret: bytes, namespace: str, value: str) -> str:
     if len(secret) < 16:
         raise ValueError("HMAC secret must be at least 16 bytes")
     return hmac.new(secret, (namespace + "\0" + value).encode(), hashlib.sha256).hexdigest()
+
+
+def verify_review_id(manifest: Mapping[str, Any], secret: bytes) -> bool:
+    """Verify the HMAC binding for an aggregate schema-2 review manifest."""
+    supplied = manifest.get("review_id")
+    if not isinstance(supplied, str) or not re.fullmatch(r"[0-9a-f]{64}", supplied):
+        return False
+    unsigned = dict(manifest)
+    unsigned.pop("review_id", None)
+    payload = json.dumps(unsigned, sort_keys=True, separators=(",", ":"))
+    expected = evidence_id(secret, "review", payload)
+    return hmac.compare_digest(supplied, expected)
 
 
 def _link_id(secret: bytes, signal: LinkSignal) -> str:
@@ -399,6 +414,7 @@ def is_public_url(*args: Any, **kwargs: Any) -> bool:
     return False
 
 
-__all__ = ["FetchError", "LinkSignal", "build_evidence_map", "build_review_manifest", "canonicalize_url",
+__all__ = ["FetchError", "LINK_INTEREST_TAXONOMY", "LinkSignal", "build_evidence_map", "build_review_manifest", "canonicalize_url",
            "classify_url", "evidence_id", "extract_urls", "fetch_public_metadata", "is_public_url",
-           "is_safe_fetch_candidate", "iter_link_signals", "sanitize_metadata_cache", "select_enrichment_queue"]
+           "is_safe_fetch_candidate", "iter_link_signals", "sanitize_metadata_cache", "select_enrichment_queue",
+           "verify_review_id"]
