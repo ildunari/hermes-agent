@@ -86,6 +86,47 @@ def test_positive_reaction_allows_one_distinct_evidence() -> None:
     assert len(validate_manifest(manifest, _SECRET)["stephen-lucier"]) == 1
 
 
+def test_producer_enforces_strength_per_actor() -> None:
+    signals = [
+        LinkSignal("https://example.com/s", "https://example.com/s", "s", 1_735_689_600,
+                   "stephen-lucier", "example.com", None),
+        LinkSignal("https://example.com/k", "https://example.com/k", "k", 1_735_689_600,
+                   "kosta-owner", "example.com", None),
+    ]
+    metadata = {
+        evidence_id(_SECRET, "url", signal.identity_url): {"title": "music song"}
+        for signal in signals
+    }
+    manifest = build_review_manifest(_CHAT, signals, secret=_SECRET, metadata_cache=metadata)
+    assert manifest["candidates"] == []
+    assert manifest["counts"]["excluded"]["insufficient_actor_evidence"] == 2
+
+
+def test_multi_subject_apply_requires_explicit_atomic_subject(tmp_path: Path) -> None:
+    signals = [
+        LinkSignal(f"https://example.com/{actor}/{index}", f"https://example.com/{actor}/{index}",
+                   f"{actor}-{index}", 1_735_689_600, actor, "example.com", None)
+        for actor in ("kosta-owner", "stephen-lucier") for index in range(2)
+    ]
+    metadata = {
+        evidence_id(_SECRET, "url", signal.identity_url): {"title": "music song"}
+        for signal in signals
+    }
+    manifest = build_review_manifest(_CHAT, signals, secret=_SECRET, metadata_cache=metadata)
+    review, key = _files(tmp_path, manifest)
+    args = [
+        "--review-manifest", str(review), "--hmac-key", str(key),
+        "--approved-review-id", manifest["review_id"],
+        "--poke-root", str(tmp_path / "poke"), "--guest-root", str(tmp_path / "guest"),
+        "--apply",
+    ]
+    with pytest.raises(SystemExit) as exc:
+        main(args)
+    assert exc.value.code == 2
+    assert not (tmp_path / "poke" / "contact-memory").exists()
+    assert not (tmp_path / "guest" / "contact-memory").exists()
+
+
 def test_hash_and_exact_approval_mismatch_are_rejected() -> None:
     manifest = _manifest()
     tampered = deepcopy(manifest)

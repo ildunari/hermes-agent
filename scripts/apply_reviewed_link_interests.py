@@ -176,6 +176,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--review-manifest", required=True)
     parser.add_argument("--hmac-key", help="0600 key (default: <manifest>.hmac-key)")
     parser.add_argument("--approved-review-id", help="exact operator-approved review HMAC; required with --apply")
+    parser.add_argument(
+        "--subject", choices=sorted(_SUBJECT_TARGET),
+        help="atomic apply unit; required when an approved manifest contains multiple subjects",
+    )
     parser.add_argument("--poke-root", help="explicit Poke profile root")
     parser.add_argument("--guest-root", help="explicit Guest profile root")
     parser.add_argument("--apply", action="store_true", help="write atomically after explicit approval")
@@ -196,9 +200,25 @@ def main(argv: Iterable[str] | None = None) -> int:
     except (OSError, ValueError, PermissionError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
 
+    populated_subjects = [subject for subject, events in batches.items() if events]
+    selected_subject = args.subject
+    if args.apply:
+        if selected_subject is None and len(populated_subjects) > 1:
+            parser.error("--subject is required to apply a multi-subject manifest atomically")
+        if selected_subject is None and len(populated_subjects) == 1:
+            selected_subject = populated_subjects[0]
+        if selected_subject is not None and not batches[selected_subject]:
+            parser.error("selected subject has no approved candidates")
+        if selected_subject is not None:
+            batches = {
+                subject: events if subject == selected_subject else []
+                for subject, events in batches.items()
+            }
+
     summary: dict[str, Any] = {
         "dry_run": not args.apply,
         "review_id": manifest["review_id"],
+        "atomic_subject": selected_subject,
         "subjects": {subject: len(events) for subject, events in batches.items()},
     }
     if args.apply:

@@ -46,6 +46,21 @@ def test_readonly_strict_attribution_no_drop_and_manifest_has_no_text(tmp_path: 
     assert 'likes cars' not in json.dumps(manifest)
 
 
+def test_modern_direct_chat_style_and_internal_group_id_are_accepted(tmp_path: Path):
+    path = tmp_path / "chat.db"
+    db(path)
+    con = sqlite3.connect(path)
+    con.execute("ALTER TABLE chat ADD COLUMN style INTEGER")
+    con.execute("ALTER TABLE chat ADD COLUMN display_name TEXT")
+    con.execute("ALTER TABLE chat ADD COLUMN group_id TEXT")
+    con.execute("UPDATE chat SET style=45, group_id='internal-direct-id'")
+    con.commit()
+    con.close()
+    with open_messages_readonly(path) as con:
+        chat = resolve_one_to_one_chat(con, ["(401) 555-0100"])
+    assert chat.chat_id == 1
+
+
 def test_group_or_ambiguous_resolution_refused(tmp_path: Path):
     path=tmp_path/'chat.db'; db(path,group=True)
     with open_messages_readonly(path) as con:

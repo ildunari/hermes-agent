@@ -179,12 +179,23 @@ def iter_link_signals(con: Any, chat: ResolvedChat) -> Iterator[LinkSignal]:
               WHERE cmj.chat_id=? ORDER BY m.date,m.ROWID"""
     rows = list(con.execute(sql, (chat.chat_id,)))
     approved_ids = set(chat.approved_handle_ids or (chat.handle_id,))
+    validated_rows = []
     for row in rows:
-        if not bool(row["is_from_me"]):
-            if "handle_id" not in columns:
-                raise ValueError("message.handle_id is required for incoming identity validation")
-            if row["handle_id"] is None or int(row["handle_id"]) not in approved_ids:
-                raise ValueError("incoming message has an unapproved handle_id")
+        if bool(row["is_from_me"]):
+            validated_rows.append(row)
+            continue
+        if "handle_id" not in columns:
+            raise ValueError("message.handle_id is required for incoming identity validation")
+        incoming_id = int(row["handle_id"] or 0)
+        if incoming_id == 0:
+            # Modern Messages contains a small number of service/sync rows with
+            # no sender identity even inside direct chats. They cannot be
+            # attributed, so omit them rather than poisoning the whole review.
+            continue
+        if incoming_id not in approved_ids:
+            raise ValueError("incoming message has an unapproved handle_id")
+        validated_rows.append(row)
+    rows = validated_rows
 
     directions = {str(row["guid"] or ""): bool(row["is_from_me"]) for row in rows}
     reaction_state: dict[tuple[str, str], bool] = {}
@@ -390,9 +401,13 @@ def build_review_manifest(chat: ResolvedChat, signals: Iterable[LinkSignal], *, 
 
     candidates = []
     for (actor, category, topic), ids in sorted(actor_edges.items()):
+        positive = actor_positive[(actor, category, topic)]
+        if len(ids) < 2 and positive <= 0:
+            excluded["insufficient_actor_evidence"] += 1
+            continue
         candidates.append({"candidate_id": evidence_id(secret, "candidate", actor + "\0" + topic),
                            "subject": actor, "category": category, "topic": topic,
-                           "distinct_evidence": len(ids), "positive_reactions": actor_positive[(actor, category, topic)],
+                           "distinct_evidence": len(ids), "positive_reactions": positive,
                            "month_buckets": sorted(months[(actor, category, topic)]),
                            "evidence_ids": sorted(ids)})
     manifest: dict[str, Any] = {"schema": 2, "kind": "imessage-link-interest-review",

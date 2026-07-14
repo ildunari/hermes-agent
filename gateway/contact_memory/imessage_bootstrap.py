@@ -130,11 +130,14 @@ def resolve_one_to_one_chat(
     ).fetchall()
     def direct(row: sqlite3.Row) -> bool:
         guid = str(row["chat_guid"] or "")
-        # '-' is Apple's direct-chat marker; '+' and non-empty group metadata
-        # are rejected even if a stale group currently has one participant.
-        if ";+;" in guid or row["display_name"] or row["group_id"]:
+        # Apple's ``;-;`` GUID marker plus exactly one participant is the
+        # authoritative direct-chat shape. Modern Messages may still populate
+        # ``group_id`` and use style 45 for a direct conversation, so those
+        # overloaded fields cannot be privacy boundaries. Explicit ``;+;``
+        # group GUIDs and named conversations remain rejected.
+        if ";-;" not in guid or ";+;" in guid or row["display_name"]:
             return False
-        if row["style"] is not None and int(row["style"]) not in {0, 43}:
+        if row["style"] is not None and int(row["style"]) not in {0, 43, 45}:
             return False
         return int(row["participants"]) == 1
 

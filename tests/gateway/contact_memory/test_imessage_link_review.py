@@ -92,6 +92,21 @@ def test_visible_text_handle_validation_actor_edges_and_tapback_removal(tmp_path
         _signals(path)
 
 
+def test_unattributed_incoming_service_rows_are_omitted(tmp_path: Path):
+    path = tmp_path / "chat.db"
+    _db(path)
+    con = sqlite3.connect(path)
+    con.execute(
+        "INSERT INTO message VALUES(99,'service',9000000000,0,?,NULL,0,NULL,NULL,0)",
+        ("https://youtube.com/watch?v=must-not-attribute",),
+    )
+    con.execute("INSERT INTO chat_message_join VALUES(1,99)")
+    con.commit()
+    con.close()
+    _, signals = _signals(path)
+    assert not any("must-not-attribute" in signal.identity_url for signal in signals)
+
+
 def test_conservative_url_identity_and_risky_fetch_rejection():
     raw = "HTTPS://Example.COM/a%2Fb?z=2&utm_source=x&a=%2F&b=1#frag"
     assert canonicalize_url(raw) == "https://example.com/a%2Fb?z=2&a=%2F&b=1"
@@ -106,9 +121,10 @@ def test_manifest_uses_metadata_for_actual_topics_and_is_aggregate_only(tmp_path
     chat, signals = _signals(path)
     manifest = build_review_manifest(chat, signals, secret=SECRET, metadata_cache=_metadata(signals))
     topics = {(item["subject"], item["topic"]) for item in manifest["candidates"]}
-    # Single bodybuilding URL is accepted only because Kosta positively reacted.
+    # A positive tapback is evidence for the reactor. The one-time sharer does
+    # not inherit an interest without separate repeated evidence.
     assert ("kosta-owner", "bodybuilding and strength training") in topics
-    assert ("stephen-lucier", "bodybuilding and strength training") in topics
+    assert ("stephen-lucier", "bodybuilding and strength training") not in topics
     # Two distinct movie links establish a repeated content topic; the negative reply adds no valence.
     assert ("stephen-lucier", "film and television") in topics
     assert ("kosta-owner", "film and television") not in topics
