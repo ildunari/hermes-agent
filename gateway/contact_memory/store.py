@@ -13,7 +13,7 @@ import statistics
 import time
 import math
 import re
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 import uuid
 
 try:  # Optional acceleration; base Hermes does not require NumPy.
@@ -2478,6 +2478,141 @@ class ContactMemoryStore:
         return self.project_communication_events(
             [(event_id, projection)], projector_version=projector_version, now=now,
         )[0]
+
+    def import_reviewed_communication_backfill(
+        self,
+        bundles: Sequence[CommunicationBundle],
+        projections: Sequence[tuple[str, CommunicationProjection]],
+        *,
+        projector_version: str,
+        run_id: str,
+        source_hash: str,
+        manifest: Mapping[str, Any],
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """Atomically ingest and project one reviewed, subject-scoped backfill.
+
+        The caller must already have filtered both collections to this physical
+        contact namespace.  The import marker is written last, so an interruption
+        cannot leave canonical evidence without an auditable reviewed run.
+        """
+        version = self._projection_version(projector_version)
+        run_identity, source_identity = str(run_id).strip(), str(source_hash).strip()
+        if not run_identity or not source_identity:
+            raise ValueError("run_id and source_hash are required")
+        canonical = [
+            self._canonical_communication_bundle(
+                bundle.event, urls=bundle.urls, attachments=bundle.attachments,
+                relations=bundle.relations, entity_mentions=bundle.entity_mentions,
+                recommendation_events=bundle.recommendation_events,
+            )
+            for bundle in bundles
+        ]
+        if any(
+            bundle.event.kind is CommunicationKind.REACTION_REMOVE
+            or bundle.event.lifecycle is not CommunicationLifecycle.ACTIVE
+            or bundle.event.retracted_by_event_id is not None
+            for bundle in canonical
+        ):
+            raise ValueError("reviewed backfill accepts only active non-removal evidence")
+        if len({bundle.event.event_id for bundle in canonical}) != len(canonical):
+            raise ValueError("reviewed backfill contains duplicate communication events")
+        supplied = [(str(event_id), projection) for event_id, projection in projections]
+        if len({event_id for event_id, _ in supplied}) != len(supplied):
+            raise ValueError("reviewed backfill contains duplicate projection events")
+        bundle_ids = {bundle.event.event_id for bundle in canonical}
+        if any(event_id not in bundle_ids for event_id, _ in supplied):
+            raise ValueError("reviewed projection lacks subject-scoped canonical evidence")
+        timestamp = _finite_timestamp(now)
+        try:
+            with self._immediate() as con:
+                prior = con.execute(
+                    "SELECT source_hash FROM import_run WHERE run_id=?", (run_identity,),
+                ).fetchone()
+                same_source = con.execute(
+                    "SELECT run_id FROM import_run WHERE source_hash=?", (source_identity,),
+                ).fetchone()
+                if prior is not None or same_source is not None:
+                    if prior is not None and str(prior["source_hash"]) != source_identity:
+                        raise ValueError("run_id already belongs to another source")
+                    return {
+                        "already_applied": True, "inserted_events": 0,
+                        "deduplicated_events": len(canonical),
+                        "projected_events": 0,
+                    }
+
+                candidates = manifest.get("candidates")
+                if not isinstance(candidates, list):
+                    raise ValueError("reviewed subject manifest lacks candidates")
+                for candidate in candidates:
+                    if not isinstance(candidate, Mapping):
+                        raise ValueError("reviewed subject candidate is invalid")
+                    kind, label = candidate.get("kind"), candidate.get("label")
+                    if kind == "topic":
+                        topic = normalize_interest_topic(label)
+                        if con.execute(
+                            "SELECT 1 FROM interest WHERE topic=?", (topic,),
+                        ).fetchone() is not None:
+                            raise ValueError("reviewed topic already exists in target state")
+                    elif kind == "entity":
+                        key = _normalized_entity_key(label)
+                        if con.execute(
+                            "SELECT 1 FROM projected_entity WHERE normalized_key=? AND active=1",
+                            (key,),
+                        ).fetchone() is not None:
+                            raise ValueError("reviewed entity already exists in target state")
+                    elif kind not in {"recommendation", "callback"}:
+                        raise ValueError("reviewed subject candidate kind is invalid")
+
+                inserted = 0
+                for bundle in sorted(
+                    canonical, key=lambda item: (item.event.occurred_at, item.event.event_id),
+                ):
+                    inserted += int(self._ingest_communication_bundle_in(con, bundle))
+                loaded = [
+                    (self._communication_bundle_in(con, event_id), projection)
+                    for event_id, projection in supplied
+                ]
+                if any(bundle is None for bundle, _ in loaded):
+                    raise RuntimeError("reviewed canonical evidence disappeared during import")
+                typed = [(bundle, projection) for bundle, projection in loaded if bundle is not None]
+                typed.sort(key=lambda item: (item[0].event.occurred_at, item[0].event.event_id))
+                share_topics: dict[str, set[str]] = {}
+                for bundle, projection in typed:
+                    if bundle.event.kind not in {
+                        CommunicationKind.LINK_SHARE, CommunicationKind.ATTACHMENT_SHARE,
+                    }:
+                        continue
+                    for proposal in projection.interests:
+                        topic = self._resolve_interest_alias_in(
+                            con, normalize_interest_topic(proposal.topic),
+                        )
+                        share_topics.setdefault(topic, set()).add(bundle.event.event_id)
+                allowed_share_topics = frozenset(
+                    (event_id, topic) for topic, event_ids in share_topics.items()
+                    if len(event_ids) >= 2 for event_id in event_ids
+                )
+                for sequence, (bundle, projection) in enumerate(typed):
+                    self._project_communication_event_in(
+                        con, bundle, projection, projector_version=version,
+                        replay_sequence=sequence, timestamp=timestamp,
+                        allowed_share_topics=allowed_share_topics,
+                    )
+                con.execute(
+                    "INSERT INTO import_run(run_id,source_hash,manifest_json,fact_count,"
+                    "interest_count,created_at) VALUES(?,?,?,?,?,?)",
+                    (run_identity, source_identity, json.dumps(
+                        dict(manifest), sort_keys=True, separators=(",", ":"),
+                    ), 0, sum(len(projection.interests) for _bundle, projection in typed),
+                     timestamp),
+                )
+                return {
+                    "already_applied": False, "inserted_events": inserted,
+                    "deduplicated_events": len(canonical) - inserted,
+                    "projected_events": len(typed),
+                }
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("reviewed communication backfill transaction failed") from exc
 
     @staticmethod
     def _candidate_item_hash(candidate_json: str) -> str | None:

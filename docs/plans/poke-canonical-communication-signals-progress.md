@@ -174,3 +174,30 @@ Follow-up verification completed the focused projection/extractor/interest set w
 
 - Phase D defines and exercises semantic projection only. It does not scan historical messages, apply reviewed evidence to live Poke/Guest stores, run the Phase E backfill, or change observe-only delivery behavior.
 - Parent Gate D rerun remains pending. This phase did not access live stores/messages, restart a gateway, enable sends, push, or open a pull request.
+
+## Phase E — Reviewed backfill preparation
+
+Status: Review preparation complete at the parent-accepted Phase D base. No live apply, maintenance, or Phase F work was performed; the signed manifest awaits parent/user approval.
+
+Commit: Phase E preparation boundary commit containing this progress record (the final SHA is reported by the implementation thread).
+
+### Delivered
+
+- Added a reviewed canonical backfill builder and CLI that bind one read-only historical direct-thread scan to the Phase B evidence commitment and Phase D projector. The manifest carries occurrence-level opaque event IDs, exact subject routing, aggregate topic/entity candidates, explicit zero recommendation/callback lanes when typed linkage is absent, and an exact HMAC review ID.
+- Added a single-transaction per-subject store import that writes canonical evidence, semantic projections, and the subject-filtered import marker atomically. Exact retries do not recount; mixed projection failures roll back the canonical events, semantic rows, receipts, and import marker together.
+- Added WAL-aware read-only discovery of existing interests, projected entities, reviewed import manifests, and canonical event IDs so reviewed seeds and already-ingested events are excluded before proposal. Apply requires the exact signed manifest, exact review ID, and one explicit subject; cross-subject apply is not supported.
+- Added owner-only artifact publication, disposable Poke/Guest stores, live-store SQLite backup, and backup/apply/restore rehearsal confined to temporary coding-profile artifact roots. Raw bodies, URLs, GUIDs, filenames, paths, and internal handle IDs remain only in the `0600` private evidence artifact.
+
+### Historical review evidence
+
+The read-only scan resolved the reviewed Steve direct thread with its explicitly approved historical alias-handle IDs and selected 109,281 source rows. Exact no-drop accounting was `1,827 text + 1 link + 3,613 attachments + 7,992 reactions + 19,601 replies + 75,475 explicit nonsemantic + 772 rejected = 109,281 selected`.
+
+The signed aggregate manifest proposes 12 subject-scoped candidates across 71 projection events: Kosta has five topics and three platform entities across 43 events; Stephen has one topic and three platform entities across 28 events. One existing reviewed topic was excluded, along with eight insufficient-recurrence topic groups and one insufficient-recurrence entity group. Recommendation and callback output remains empty because the Phase B historical events do not provide the typed linkage required by Phase D; the CLI records those exclusions instead of inferring lifecycle or shared-joke semantics.
+
+The final review ID is `8ce521b7cde167ffc581f6b1b639895de84f46b955e42affd51b72041b2aafb1`. Aggregate review, candidate summary, private source evidence, disposable stores, and restore evidence are under `/Users/Kosta/.hermes/profiles/coding/artifacts/phase-e-canonical-review-20260714-162950/`; all JSON and SQLite outputs are owner-only.
+
+### Verification and boundary
+
+Focused red-first coverage proves deterministic signing, subject attribution, duplicate reviewed-seed suppression, exact approval rejection, per-subject transaction rollback, retry idempotency, owner-only CLI output, and restore rehearsal. The final focused/surrounding three-file set completed with 63 passed; the complete contact-memory plus interest-ledger set completed with 316 passed across 15 files. Focused `py_compile`, Ruff, and `git diff --check` passed.
+
+Disposable stores contain 43 Kosta and 28 Stephen canonical events with the same number of Phase D receipts, while target import manifests contain only their own subject. Restore rehearsal produced different post-apply snapshot hashes and then byte-identical restored hashes for both live-store backups. Both Poke and Guest remain `observe`; live stores contain zero Phase E import markers. No live store was applied, no maintenance ran, no Messages row changed, no gateway restarted, no sends were enabled, and no push or PR occurred.
