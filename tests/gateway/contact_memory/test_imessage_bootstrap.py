@@ -7,6 +7,7 @@ from gateway.contact_memory.imessage_bootstrap import (
     build_manifest, chunk_rows, iter_chat_rows, open_messages_readonly,
     resolve_one_to_one_chat, stable_semantic_source_id, validate_semantic_items,
 )
+from scripts.bootstrap_proactive_imessage import main as bootstrap_main
 
 
 def db(path: Path, *, group=False):
@@ -58,3 +59,17 @@ def test_cross_speaker_and_sensitive_semantics(tmp_path: Path):
     assert parsed[0]['suppressed'] is True
     assert parsed[0]['source_id']==stable_semantic_source_id('g1','kosta-owner',sensitive)
     assert parsed[0]['source_id']==stable_semantic_source_id('g1','kosta-owner',sensitive)
+
+
+def test_prompt_only_stages_private_sender_attributed_packets(tmp_path: Path):
+    source=tmp_path/'chat.db'; staging=tmp_path/'private'; db(source)
+    args=['--source-person','Stephen Lucier','--chat-db',str(source),'--handle','+14015550100',
+          '--chunk-size','2','--staging-dir',str(staging),'--prompt-only']
+    assert bootstrap_main(args)==0
+    index=json.loads(next(staging.glob('*/packet-index.json')).read_text())
+    packet=json.loads(Path(index[0]['path']).read_text())
+    assert packet['provider']=='openai-codex' and packet['reasoning_effort']=='medium'
+    assert [row['author'] for row in packet['rows']]==['kosta-owner','stephen-lucier']
+    assert packet['rows'][0]['text']=='Kosta likes cars'
+    assert not (staging.stat().st_mode & 0o077)
+    assert bootstrap_main([*args,'--resume'])==0
