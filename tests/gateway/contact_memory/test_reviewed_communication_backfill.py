@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -17,7 +19,9 @@ from gateway.contact_memory.reviewed_backfill import (
     apply_subject_backfill,
     build_reviewed_backfill,
     restore_rehearsal,
+    subject_review,
     verify_review_manifest,
+    verify_subject_review,
 )
 from gateway.contact_memory.store import ContactMemoryStore
 from scripts.review_canonical_communication_backfill import main as cli_main
@@ -65,6 +69,15 @@ def _scan(path: Path):
         return scan_historical_communication(con, chat, secret=SECRET)
 
 
+def _approval(review, subject: str, *, kinds: set[str] | None = None):
+    snapshot = subject_review(review, subject)
+    candidate_ids = [
+        item["candidate_id"] for item in snapshot["candidates"]
+        if kinds is None or item["kind"] in kinds
+    ]
+    return snapshot, candidate_ids
+
+
 def test_review_manifest_is_deterministic_subject_correct_signed_and_aggregate_only(tmp_path: Path) -> None:
     source = tmp_path / "chat.db"
     _messages(source)
@@ -78,8 +91,15 @@ def test_review_manifest_is_deterministic_subject_correct_signed_and_aggregate_o
     second = build_reviewed_backfill(scan, secret=SECRET, existing=existing)
 
     assert first.manifest == second.manifest
-    assert first.projections == second.projections
     assert verify_review_manifest(first.manifest, secret=SECRET)
+    assert first.manifest["schema"] == 2
+    assert first.manifest["global_review_id"] != (
+        "8ce521b7cde167ffc581f6b1b639895de84f46b955e42affd51b72041b2aafb1"
+    )
+    assert all(
+        verify_subject_review(item, secret=SECRET)
+        for item in first.manifest["subject_reviews"]
+    )
     assert first.manifest["counts"]["by_subject"]["kosta-owner"]["topics"] == 0
     assert first.manifest["counts"]["by_subject"]["stephen-lucier"] == {
         "callbacks": 0, "entities": 1, "recommendations": 0, "topics": 1,
@@ -100,15 +120,18 @@ def test_subject_apply_is_one_transaction_and_exact_retry_does_not_recount(tmp_p
     scan = _scan(source)
     review = build_reviewed_backfill(scan, secret=SECRET)
     store = ContactMemoryStore(tmp_path / "guest", "stephen-lucier")
+    snapshot, candidate_ids = _approval(review, "stephen-lucier")
 
     first = apply_subject_backfill(
         scan, review, subject="stephen-lucier", store=store,
-        approved_review_id=review.manifest["review_id"], secret=SECRET,
+        approved_subject_review_id=snapshot["subject_review_id"],
+        approved_candidate_ids=candidate_ids, secret=SECRET,
     )
     before = store.list_interests()
     second = apply_subject_backfill(
         scan, review, subject="stephen-lucier", store=store,
-        approved_review_id=review.manifest["review_id"], secret=SECRET,
+        approved_subject_review_id=snapshot["subject_review_id"],
+        approved_candidate_ids=candidate_ids, secret=SECRET,
     )
 
     assert first["already_applied"] is False
@@ -126,11 +149,13 @@ def test_subject_apply_rejects_wrong_approval_and_rolls_back_mixed_projection_fa
     scan = _scan(source)
     review = build_reviewed_backfill(scan, secret=SECRET)
     store = ContactMemoryStore(tmp_path / "guest", "stephen-lucier")
+    snapshot, candidate_ids = _approval(review, "stephen-lucier")
 
     with pytest.raises(ValueError, match="exactly match"):
         apply_subject_backfill(
             scan, review, subject="stephen-lucier", store=store,
-            approved_review_id="0" * 64, secret=SECRET,
+            approved_subject_review_id="0" * 64,
+            approved_candidate_ids=candidate_ids, secret=SECRET,
         )
     with sqlite3.connect(store.path) as con:
         con.execute("""CREATE TRIGGER fail_entity BEFORE INSERT ON projected_entity
@@ -138,11 +163,182 @@ def test_subject_apply_rejects_wrong_approval_and_rolls_back_mixed_projection_fa
     with pytest.raises(ValueError):
         apply_subject_backfill(
             scan, review, subject="stephen-lucier", store=store,
-            approved_review_id=review.manifest["review_id"], secret=SECRET,
+            approved_subject_review_id=snapshot["subject_review_id"],
+            approved_candidate_ids=candidate_ids, secret=SECRET,
         )
     with sqlite3.connect(store.path) as con:
         for table in ("communication_event", "interest_event", "projected_entity", "communication_projection_receipt", "import_run"):
             assert con.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_candidate_allowlist_imports_only_selected_occurrences_and_rejects_cross_subject(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "chat.db"
+    _messages(source)
+    scan = _scan(source)
+    review = build_reviewed_backfill(scan, secret=SECRET)
+    store = ContactMemoryStore(tmp_path / "guest", "stephen-lucier")
+    snapshot, topic_ids = _approval(review, "stephen-lucier", kinds={"topic"})
+    _kosta_snapshot, kosta_ids = _approval(review, "kosta-owner")
+
+    with pytest.raises(ValueError, match="unknown or belongs"):
+        apply_subject_backfill(
+            scan, review, subject="stephen-lucier", store=store,
+            approved_subject_review_id=snapshot["subject_review_id"],
+            approved_candidate_ids=kosta_ids, secret=SECRET,
+        )
+    result = apply_subject_backfill(
+        scan, review, subject="stephen-lucier", store=store,
+        approved_subject_review_id=snapshot["subject_review_id"],
+        approved_candidate_ids=topic_ids, secret=SECRET,
+    )
+
+    assert result["projected_candidates"] == 1
+    with sqlite3.connect(store.path) as con:
+        assert con.execute("SELECT count(*) FROM interest_event").fetchone()[0] == 2
+        assert con.execute("SELECT count(*) FROM projected_entity").fetchone()[0] == 0
+        stored = json.loads(con.execute("SELECT manifest_json FROM import_run").fetchone()[0])
+    assert stored["candidate_ids"] == topic_ids
+    assert all(item["kind"] == "topic" for item in stored["candidates"])
+    with pytest.raises(ValueError, match="target snapshot is stale"):
+        apply_subject_backfill(
+            scan, review, subject="stephen-lucier", store=store,
+            approved_subject_review_id=snapshot["subject_review_id"],
+            approved_candidate_ids=[
+                item["candidate_id"] for item in snapshot["candidates"]
+            ], secret=SECRET,
+        )
+    for invalid in ([], [topic_ids[0], topic_ids[0]]):
+        fresh_store = ContactMemoryStore(tmp_path / f"invalid-{len(invalid)}", "stephen-lucier")
+        with pytest.raises(ValueError, match="non-empty duplicate-free"):
+            apply_subject_backfill(
+                scan, review, subject="stephen-lucier", store=fresh_store,
+                approved_subject_review_id=snapshot["subject_review_id"],
+                approved_candidate_ids=invalid, secret=SECRET,
+            )
+
+
+def test_projection_tamper_and_retired_review_id_fail_before_mutation(tmp_path: Path) -> None:
+    source = tmp_path / "chat.db"
+    _messages(source)
+    scan = _scan(source)
+    review = build_reviewed_backfill(scan, secret=SECRET)
+    snapshot, candidate_ids = _approval(review, "stephen-lucier")
+    entity_index = next(
+        index for index, item in enumerate(snapshot["candidates"]) if item["kind"] == "entity"
+    )
+    topic_index = next(
+        index for index, item in enumerate(snapshot["candidates"]) if item["kind"] == "topic"
+    )
+    mutations = [
+        (entity_index, ["semantic_key"], "tampered-key"),
+        (entity_index, ["occurrences", 0, "event_id"], "0" * 64),
+        (entity_index, ["occurrences", 0, "source_id"], "1" * 64),
+        (entity_index, ["occurrences", 0, "projection", "entities", 0, "canonical_label"], "Other"),
+        (entity_index, ["occurrences", 0, "projection", "entities", 0, "entity_type"], "person"),
+        (entity_index, ["occurrences", 0, "projection", "entities", 0, "confidence"], 0.5),
+        (entity_index, ["occurrences", 0, "projection", "entities", 0, "source_method"], "model"),
+        (topic_index, ["occurrences", 0, "projection", "interests", 0, "topic"], "travel"),
+        (topic_index, ["occurrences", 0, "projection", "interests", 0, "signal_type"], "enthusiasm"),
+        (topic_index, ["occurrences", 0, "projection", "interests", 0, "valence"], "negative"),
+        (topic_index, ["occurrences", 0, "projection", "interests", 0, "confidence"], 0.25),
+        (topic_index, ["occurrences", 0, "projection", "interests", 0, "source_method"], "model"),
+    ]
+    for candidate_index, path, value in mutations:
+        changed = deepcopy(review)
+        changed_snapshot = subject_review(changed, "stephen-lucier")
+        target = changed_snapshot["candidates"][candidate_index]
+        for part in path[:-1]:
+            target = target[part]
+        target[path[-1]] = value
+        assert not verify_subject_review(changed_snapshot, secret=SECRET)
+    tampered = deepcopy(review)
+    tampered_snapshot = subject_review(tampered, "stephen-lucier")
+    tampered_snapshot["candidates"][0]["occurrences"][0]["projection"]["entities"][0][
+        "entity_type"
+    ] = "person"
+    assert not verify_subject_review(tampered_snapshot, secret=SECRET)
+    store = ContactMemoryStore(tmp_path / "guest", "stephen-lucier")
+
+    with pytest.raises(ValueError, match="HMAC"):
+        apply_subject_backfill(
+            scan, tampered, subject="stephen-lucier", store=store,
+            approved_subject_review_id=snapshot["subject_review_id"],
+            approved_candidate_ids=candidate_ids, secret=SECRET,
+        )
+    with pytest.raises(ValueError, match="retired"):
+        apply_subject_backfill(
+            scan, review, subject="stephen-lucier", store=store,
+            approved_subject_review_id=(
+                "8ce521b7cde167ffc581f6b1b639895de84f46b955e42affd51b72041b2aafb1"
+            ), approved_candidate_ids=candidate_ids, secret=SECRET,
+        )
+    with sqlite3.connect(store.path) as con:
+        assert con.execute("SELECT count(*) FROM communication_event").fetchone()[0] == 0
+
+
+def test_subject_snapshots_allow_sequential_cross_subject_applies(tmp_path: Path) -> None:
+    source = tmp_path / "chat.db"
+    _messages(source)
+    scan = _scan(source)
+    review = build_reviewed_backfill(scan, secret=SECRET)
+    kosta_store = ContactMemoryStore(tmp_path / "poke", "kosta-owner")
+    stephen_store = ContactMemoryStore(tmp_path / "guest", "stephen-lucier")
+    kosta_snapshot, kosta_ids = _approval(review, "kosta-owner")
+    stephen_snapshot, stephen_ids = _approval(review, "stephen-lucier")
+
+    apply_subject_backfill(
+        scan, review, subject="kosta-owner", store=kosta_store,
+        approved_subject_review_id=kosta_snapshot["subject_review_id"],
+        approved_candidate_ids=kosta_ids, secret=SECRET,
+    )
+    result = apply_subject_backfill(
+        scan, review, subject="stephen-lucier", store=stephen_store,
+        approved_subject_review_id=stephen_snapshot["subject_review_id"],
+        approved_candidate_ids=stephen_ids, secret=SECRET,
+    )
+    assert result["already_applied"] is False
+    assert result["projected_candidates"] == 2
+
+
+def test_apply_rejects_stale_subject_target_and_source_without_partial_writes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "chat.db"
+    _messages(source)
+    scan = _scan(source)
+    review = build_reviewed_backfill(scan, secret=SECRET)
+    snapshot, candidate_ids = _approval(review, "stephen-lucier")
+    store = ContactMemoryStore(tmp_path / "guest", "stephen-lucier")
+    unrelated = next(record.bundle for record in scan.records if record.author == "stephen-lucier")
+    store.ingest_communication_event(
+        unrelated.event, urls=unrelated.urls, attachments=unrelated.attachments,
+        relations=unrelated.relations, entity_mentions=unrelated.entity_mentions,
+        recommendation_events=unrelated.recommendation_events,
+    )
+    with pytest.raises(ValueError, match="target snapshot is stale"):
+        apply_subject_backfill(
+            scan, review, subject="stephen-lucier", store=store,
+            approved_subject_review_id=snapshot["subject_review_id"],
+            approved_candidate_ids=candidate_ids, secret=SECRET,
+        )
+    changed_scan = replace(scan, records=tuple(
+        record for index, record in enumerate(scan.records)
+        if index != next(
+            item for item, candidate in enumerate(scan.records)
+            if candidate.author == "stephen-lucier"
+        )
+    ))
+    clean_store = ContactMemoryStore(tmp_path / "clean-guest", "stephen-lucier")
+    with pytest.raises(ValueError, match="source scan is stale"):
+        apply_subject_backfill(
+            changed_scan, review, subject="stephen-lucier", store=clean_store,
+            approved_subject_review_id=snapshot["subject_review_id"],
+            approved_candidate_ids=candidate_ids, secret=SECRET,
+        )
+    with sqlite3.connect(clean_store.path) as con:
+        assert con.execute("SELECT count(*) FROM communication_event").fetchone()[0] == 0
 
 
 def test_restore_rehearsal_restores_exact_database_bytes_in_temporary_roots(tmp_path: Path) -> None:

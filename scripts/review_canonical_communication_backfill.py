@@ -27,10 +27,12 @@ from gateway.contact_memory.imessage_communication_adapter import (  # noqa: E40
     scan_historical_communication,
 )
 from gateway.contact_memory.reviewed_backfill import (  # noqa: E402
+    ReviewedBackfill,
     apply_subject_backfill,
     build_reviewed_backfill,
     read_existing_reviewed_state,
     restore_rehearsal,
+    subject_review,
 )
 from gateway.contact_memory.store import ContactMemoryStore, opaque_contact_filename  # noqa: E402
 
@@ -107,7 +109,11 @@ def _candidate_summary(manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema": manifest["schema"],
         "kind": "reviewed-canonical-communication-candidate-summary",
-        "review_id": manifest["review_id"],
+        "global_review_id": manifest["global_review_id"],
+        "subject_review_ids": {
+            item["subject"]: item["subject_review_id"]
+            for item in manifest["subject_reviews"]
+        },
         "counts": manifest["counts"],
         "exclusions": manifest["exclusions"],
         "candidates": [
@@ -139,11 +145,21 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--metadata-cache", help="optional bounded owner-only metadata JSON")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--subject", choices=sorted(_SUBJECT_ROOT))
-    parser.add_argument("--approved-review-id")
+    parser.add_argument("--approved-subject-review-id")
+    parser.add_argument(
+        "--approved-candidate-id", action="append", default=[],
+        help="explicitly approved candidate ID for the selected subject (repeatable)",
+    )
     parser.add_argument("--review-manifest", help="exact signed manifest produced by dry-run")
     args = parser.parse_args(list(argv) if argv is not None else None)
-    if args.apply and (not args.subject or not args.approved_review_id or not args.review_manifest):
-        parser.error("--apply requires --subject, --approved-review-id, and --review-manifest")
+    if args.apply and (
+        not args.subject or not args.approved_subject_review_id
+        or not args.approved_candidate_id or not args.review_manifest
+    ):
+        parser.error(
+            "--apply requires --subject, --approved-subject-review-id, at least one "
+            "--approved-candidate-id, and --review-manifest"
+        )
 
     try:
         secret = _read_owner_only(Path(args.hmac_key), label="HMAC key")
@@ -189,10 +205,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             approved_bytes = _read_owner_only(
                 Path(args.review_manifest), label="review manifest",
             )
-            if approved_bytes != _canonical_bytes(review.manifest):
-                raise ValueError("approved manifest is not the exact current deterministic scan")
-            if args.approved_review_id != review.manifest["review_id"]:
-                raise ValueError("approved review ID does not exactly match the manifest")
+            approved_review = ReviewedBackfill(manifest=json.loads(approved_bytes))
+            approved_subject = subject_review(approved_review, args.subject)
+            if args.approved_subject_review_id != approved_subject["subject_review_id"]:
+                raise ValueError("approved subject review ID does not exactly match the snapshot")
             root = roots[args.subject]
             store_path = root / "contacts" / opaque_contact_filename(args.subject)
             if not store_path.is_file():
@@ -203,13 +219,14 @@ def main(argv: Iterable[str] | None = None) -> int:
             _sqlite_backup(store_path, backup)
             store = ContactMemoryStore(root, args.subject)
             result = apply_subject_backfill(
-                scan, review, subject=args.subject, store=store,
-                approved_review_id=args.approved_review_id, secret=secret,
+                scan, approved_review, subject=args.subject, store=store,
+                approved_subject_review_id=args.approved_subject_review_id,
+                approved_candidate_ids=args.approved_candidate_id, secret=secret,
             )
             _write_owner_only(output / "apply-result.json", _canonical_bytes(result))
             print(json.dumps({
                 "dry_run": False, "subject": args.subject,
-                "review_id": review.manifest["review_id"],
+                "subject_review_id": args.approved_subject_review_id,
                 "backup": str(backup), "result": result,
             }, indent=2, sort_keys=True))
             return 0
@@ -226,10 +243,21 @@ def main(argv: Iterable[str] | None = None) -> int:
         disposable = output / "disposable-stores"
         apply_results: dict[str, Any] = {}
         for subject in _SUBJECT_ROOT:
-            store = ContactMemoryStore(disposable / subject, subject)
+            disposable_root = disposable / subject
+            live_path = roots[subject] / "contacts" / opaque_contact_filename(subject)
+            if live_path.is_file():
+                _sqlite_backup(
+                    live_path,
+                    disposable_root / "contacts" / opaque_contact_filename(subject),
+                )
+            store = ContactMemoryStore(disposable_root, subject)
+            target_review = subject_review(review, subject)
             apply_results[subject] = apply_subject_backfill(
                 scan, review, subject=subject, store=store,
-                approved_review_id=review.manifest["review_id"], secret=secret,
+                approved_subject_review_id=target_review["subject_review_id"],
+                approved_candidate_ids=[
+                    item["candidate_id"] for item in target_review["candidates"]
+                ], secret=secret,
             )
         restore_results: dict[str, Any] = {}
         for subject in _SUBJECT_ROOT:
@@ -252,7 +280,11 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     print(json.dumps({
         "dry_run": True,
-        "review_id": review.manifest["review_id"],
+        "global_review_id": review.manifest["global_review_id"],
+        "subject_review_ids": {
+            item["subject"]: item["subject_review_id"]
+            for item in review.manifest["subject_reviews"]
+        },
         "artifact_root": str(output),
         "aggregate_manifest": str(aggregate),
         "private_evidence": str(private),
@@ -262,7 +294,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         "exclusions": review.manifest["exclusions"],
         "apply_requires": (
             "--apply --subject <kosta-owner|stephen-lucier> "
-            "--approved-review-id <exact-review-id> --review-manifest <exact-manifest>"
+            "--approved-subject-review-id <exact-subject-review-id> "
+            "--approved-candidate-id <candidate-id> [repeat] "
+            "--review-manifest <exact-manifest>"
         ),
     }, indent=2, sort_keys=True))
     return 0

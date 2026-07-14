@@ -2488,6 +2488,7 @@ class ContactMemoryStore:
         run_id: str,
         source_hash: str,
         manifest: Mapping[str, Any],
+        expected_target_snapshot: Mapping[str, Any] | None = None,
         now: float | None = None,
     ) -> dict[str, object]:
         """Atomically ingest and project one reviewed, subject-scoped backfill.
@@ -2540,6 +2541,58 @@ class ContactMemoryStore:
                         "deduplicated_events": len(canonical),
                         "projected_events": 0,
                     }
+
+                if expected_target_snapshot is not None:
+                    topics = {
+                        normalize_interest_topic(row[0])
+                        for row in con.execute("SELECT topic FROM interest")
+                    }
+                    imports = list(con.execute("SELECT run_id,manifest_json FROM import_run"))
+                    for _prior_run_id, raw_manifest in imports:
+                        try:
+                            prior_manifest = json.loads(raw_manifest)
+                        except (TypeError, json.JSONDecodeError):
+                            continue
+                        for item in (
+                            prior_manifest.get("events", ())
+                            if isinstance(prior_manifest, dict) else ()
+                        ):
+                            topic = item.get("topic") if isinstance(item, dict) else None
+                            if isinstance(topic, str):
+                                try:
+                                    topics.add(normalize_interest_topic(topic))
+                                except ValueError:
+                                    pass
+                    current_target_snapshot = {
+                        "topics": sorted(topics),
+                        "entities": sorted(
+                            " ".join(str(row[0]).casefold().split())
+                            for row in con.execute(
+                                "SELECT canonical_label FROM projected_entity WHERE active=1"
+                            )
+                        ),
+                        "recommendation_keys": sorted(
+                            str(row[0]) for row in con.execute(
+                                "SELECT semantic_key FROM projected_recommendation WHERE active=1"
+                            )
+                        ),
+                        "callback_keys": sorted(
+                            str(row[0]) for row in con.execute(
+                                "SELECT semantic_key FROM semantic_callback WHERE active=1"
+                            )
+                        ),
+                        "event_ids": sorted(
+                            str(row[0]) for row in con.execute(
+                                "SELECT event_id FROM communication_event"
+                            )
+                        ),
+                        "reviewed_import_runs": sum(
+                            str(prior_run_id).startswith(("reviewed-", "reviewed_"))
+                            for prior_run_id, _raw_manifest in imports
+                        ),
+                    }
+                    if current_target_snapshot != dict(expected_target_snapshot):
+                        raise ValueError("reviewed subject target snapshot is stale")
 
                 candidates = manifest.get("candidates")
                 if not isinstance(candidates, list):
