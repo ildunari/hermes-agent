@@ -60,8 +60,19 @@ def parse_associated_guid(value: object) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    match = re.match(r"^(?:bp|p):(?:(?:\d+)(?:/|:))?(.+)$", raw)
-    return match.group(1) if match else raw
+    if not raw.startswith(("p:", "bp:")):
+        return raw if not any(ord(character) < 32 for character in raw) else ""
+    for pattern in (
+        r"^(?:p|bp):0[/:]([^/:]+)$",
+        r"^p:a/([^/:]+)$",
+        # Legacy wrappers without a numeric component are accepted only for a
+        # GUID-shaped value. Short labels such as ``p:wat`` are malformed.
+        r"^(?:p|bp):([A-Za-z0-9][A-Za-z0-9._-]*-[A-Za-z0-9._-]+)$",
+    ):
+        match = re.fullmatch(pattern, raw)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def _columns(con: Any, table: str) -> set[str]:
@@ -170,6 +181,7 @@ def _attachment_rows(con: Any) -> dict[int, list[dict[str, Any]]]:
     uti = field("uti")
     size = field("total_bytes")
     rows: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    seen: set[tuple[int, int]] = set()
     for row in con.execute(
         f"""SELECT maj.message_id,a.ROWID attachment_rowid,{guid} guid,
                    {filename} filename,{transfer_name} transfer_name,{mime} mime_type,
@@ -178,7 +190,11 @@ def _attachment_rows(con: Any) -> dict[int, list[dict[str, Any]]]:
             JOIN attachment a ON a.ROWID=maj.attachment_id
             ORDER BY maj.message_id,a.ROWID"""
     ):
-        rows[int(row["message_id"])].append(dict(row))
+        key = (int(row["message_id"]), int(row["attachment_rowid"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows[key[0]].append(dict(row))
     return dict(rows)
 
 
@@ -198,6 +214,7 @@ def _message_rows(con: Any, chat: ResolvedChat) -> list[dict[str, Any]]:
                    COALESCE(m.associated_message_type,0) associated_type,
                    {field('associated_message_guid')} associated_guid,
                    {field('thread_originator_guid')} thread_guid,
+                   {field('reply_to_guid')} reply_to_guid,
                    {field('handle_id')} handle_id
             FROM message m JOIN chat_message_join cmj ON cmj.message_id=m.ROWID
             WHERE cmj.chat_id=? ORDER BY m.date,m.ROWID""",
@@ -240,9 +257,12 @@ def scan_historical_communication(
         authenticated.append(row)
 
     attachments_by_message = _attachment_rows(con)
-    by_guid = {
-        _source_key(row): row for row in authenticated
-    }
+    by_guid: dict[str, dict[str, Any]] = {}
+    for row in authenticated:
+        source_key = _source_key(row)
+        if source_key in by_guid:
+            raise ValueError("conflicting historical source rows")
+        by_guid[source_key] = row
     records: list[HistoricalCommunicationRecord] = []
     category_counts: Counter[str] = Counter()
     active_reactions: dict[
@@ -259,8 +279,14 @@ def scan_historical_communication(
         urls = _row_urls(row.get("text"), row.get("attributedBody"))
         raw_attachments = attachments_by_message.get(int(row["rowid"]), [])
         associated_type = int(row.get("associated_type") or 0)
-        associated_target = parse_associated_guid(row.get("associated_guid"))
-        reply_target = parse_associated_guid(row.get("thread_guid"))
+        associated_raw = str(row.get("associated_guid") or "").strip()
+        associated_target = parse_associated_guid(associated_raw)
+        reply_raw_values = [
+            str(row.get(name) or "").strip()
+            for name in ("reply_to_guid", "thread_guid")
+            if str(row.get(name) or "").strip()
+        ]
+        parsed_reply_targets = [parse_associated_guid(value) for value in reply_raw_values]
         private: dict[str, Any] = {
             "source_key": source_key,
             "rowid": int(row["rowid"]),
@@ -268,7 +294,9 @@ def scan_historical_communication(
             "occurred_at": occurred_at,
             "text": text,
             "urls": list(urls),
+            "associated_message_type": associated_type,
             "associated_guid": str(row.get("associated_guid") or ""),
+            "reply_to_guid": str(row.get("reply_to_guid") or ""),
             "thread_originator_guid": str(row.get("thread_guid") or ""),
             "attachments": [
                 {
@@ -286,11 +314,22 @@ def scan_historical_communication(
         category: str
         relations: list[CommunicationRelation] = []
         retraction_target: str | None = None
+        if associated_type and (
+            associated_type not in _REACTION_TYPES
+            and associated_type not in _REACTION_REMOVALS
+        ):
+            rejected.append({**private, "reason": "unsupported_associated_type"})
+            category_counts["rejected"] += 1
+            continue
         if associated_type in _REACTION_TYPES or associated_type in _REACTION_REMOVALS:
             category = "reactions"
             reaction_subtype = (
                 _REACTION_TYPES.get(associated_type) or _REACTION_REMOVALS[associated_type]
             )
+            if associated_raw and not associated_target:
+                rejected.append({**private, "reason": "malformed_associated_target"})
+                category_counts["rejected"] += 1
+                continue
             target_row = by_guid.get(associated_target)
             if target_row is None or _actor(target_row) == author:
                 rejected.append({**private, "reason": "unauthenticated_reaction_target"})
@@ -319,9 +358,19 @@ def scan_historical_communication(
                     continue
                 retraction_target = active_reactions[reaction_key].pop()
             event_text = None
-        elif reply_target:
+        elif reply_raw_values:
+            if any(not target for target in parsed_reply_targets):
+                rejected.append({**private, "reason": "malformed_reply_target"})
+                category_counts["rejected"] += 1
+                continue
+            reply_targets = set(parsed_reply_targets)
+            if len(reply_targets) != 1:
+                rejected.append({**private, "reason": "conflicting_reply_targets"})
+                category_counts["rejected"] += 1
+                continue
+            reply_target = next(iter(reply_targets))
             target_row = by_guid.get(reply_target)
-            if target_row is None or _actor(target_row) == author:
+            if target_row is None:
                 rejected.append({**private, "reason": "unauthenticated_reply_target"})
                 category_counts["rejected"] += 1
                 continue
@@ -333,7 +382,11 @@ def scan_historical_communication(
                 event_id=event_id,
                 relation_type=CommunicationRelationType.REPLY_TO,
                 target_source_id=target_source_id,
-                target_actor_role=CommunicationActorRole.COUNTERPART,
+                target_actor_role=(
+                    CommunicationActorRole.CONTACT
+                    if _actor(target_row) == author
+                    else CommunicationActorRole.COUNTERPART
+                ),
             ))
             event_text = text
         elif raw_attachments:

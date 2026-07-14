@@ -45,7 +45,7 @@ Build the historical direct-thread adapter as a pure emitter into this contract.
 
 ## Phase B — Historical adapter
 
-Status: Complete and locally verified. Phase C has not started.
+Status: Gate B repair complete and locally verified; awaiting independent Gate B rerun. Phase C has not started.
 
 Commit: Phase B boundary commit containing this progress record (the final SHA is reported by the implementation thread).
 
@@ -77,8 +77,16 @@ Synthetic no-drop evidence was exact: `text 2 + links 2 + attachments 1 + reacti
 
 - Historical attachment evidence is deterministic metadata only: media kind, validated MIME/UTI, bounded byte size, and optional caption HMAC. Media content analysis remains out of scope.
 - Batch membership uses consecutive same-actor, non-reaction events no more than 60 seconds apart. This deterministic rule is intentionally narrow and can be revised only with separate reviewed evidence.
-- Reactions and replies whose original target is absent, same-actor, or otherwise unauthenticated are rejected and aggregate-counted. A removal without a matching prior add in the selected history is not guessed into a durable retraction.
+- Reactions whose target is absent, same-actor, or otherwise unauthenticated are rejected and aggregate-counted. Replies preserve authenticated same-speaker targets with the contact role, reject absent/foreign targets, and reject malformed or conflicting `reply_to_guid`/`thread_originator_guid` evidence. A removal without a matching prior add in the selected history is not guessed into a durable retraction.
 - This phase generates review artifacts and disposable canonical stores only. It does not apply historical evidence to live Poke/Guest state or produce semantic projections.
+
+### Gate B repair
+
+The independent Gate B review rejected commit `e741e337b` with three P0 and five P1 findings. The repair binds incoming identity only to the selected direct chat participant, explicitly rejects every unsupported nonzero associated-message type, strictly parses bare/`p:0`/`bp`/`p:a` targets, reconciles both reply GUID columns, preserves authenticated same-speaker replies, deduplicates attachment joins, and prevalidates duplicate source identities before any write.
+
+The review CLI now stages both disposable stores and both artifacts before publication, removes every published output on an injected later failure, rejects default and active external `HERMES_HOME` roots through descendants and symlink equivalents, and emits generic failure text that does not expose approved handles or source identifiers. Focused regressions cover every reproduced finding, the complete supported reaction matrix, known and unknown unsupported associated types, malformed wrappers, reply agreement/conflict/target cases, hostile attachments, duplicate actor/payload identities, injected store/artifact failures, external-home guards, and stderr privacy.
+
+Repair verification passed: the focused adapter suite completed with 48 passed and 0 failed; the historical/store surrounding set completed with 121 passed and 0 failed; and the full contact-memory plus interest-ledger suite completed with 228 passed and 0 failed across 12 files. `py_compile`, focused Ruff checks, and `git diff --check` passed. No live Messages database or profile store was scanned or mutated, and no gateway was restarted.
 
 ### Phase C handoff
 

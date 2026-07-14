@@ -145,13 +145,13 @@ def resolve_one_to_one_chat(
     if chat_id is not None:
         matches = [row for row in matches if int(row["chat_id"]) == int(chat_id)]
     if len(matches) != 1:
-        candidates = sorted({(int(row["chat_id"]), _normalize_handle(row["handle"]), int(row["message_count"])) for row in matches})
-        raise ValueError(f"strict 1:1 resolution requires exactly one chat (use chat_id to disambiguate); matched={candidates}")
+        raise ValueError(
+            "strict 1:1 resolution requires exactly one chat (use chat_id to disambiguate)"
+        )
     row = matches[0]
-    approved_ids = tuple(sorted(
-        int(item["ROWID"]) for item in con.execute("SELECT ROWID,id FROM handle")
-        if _normalize_handle(item["id"]) in approved
-    ))
+    # Approval is scoped to the selected chat participant, never to aliases
+    # attached only to another chat.
+    approved_ids = (int(row["handle_id"]),)
     return ResolvedChat(int(row["chat_id"]), str(row["chat_guid"] or ""), int(row["handle_id"]),
                         _normalize_handle(row["handle"]), int(row["message_count"]), approved_ids)
 

@@ -163,7 +163,7 @@ def test_direct_chat_alias_disambiguation_and_group_rejection(tmp_path: Path):
     with pytest.raises(ValueError, match="use chat_id"):
         resolve_one_to_one_chat(con, ["+14015550100", "steve@example.test"])
     resolved = resolve_one_to_one_chat(con, ["+14015550100", "steve@example.test"], chat_id=2)
-    assert resolved.chat_id == 2 and set(resolved.approved_handle_ids) == {1, 2}
+    assert resolved.chat_id == 2 and resolved.approved_handle_ids == (2,)
     with pytest.raises(ValueError, match="exactly one"):
         resolve_one_to_one_chat(con, ["steve@example.test"], chat_id=3)
     con.close()
