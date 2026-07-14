@@ -27,6 +27,7 @@ except ModuleNotFoundError:
 import asyncio
 import concurrent.futures
 import dataclasses
+import hashlib
 import inspect
 import json
 import logging
@@ -39,6 +40,7 @@ import signal
 import tempfile
 import threading
 import time
+import uuid
 import sqlite3
 from collections import OrderedDict
 from contextvars import copy_context
@@ -1952,8 +1954,12 @@ def _with_conversation_texture(base_prompt: str, texture_prompt: str) -> tuple[s
     return cache_prompt, execution_prompt
 
 
+from gateway.proactive_checkin import ProactiveTurnRequest, run_proactive_child_turn
+
+
 from gateway.contact_memory.runtime import (
     _brokers as _contact_memory_brokers,
+    extraction_health as _contact_memory_extraction_health,
     get_broker as _get_contact_memory_broker,
 )
 
@@ -1965,6 +1971,17 @@ class TrustedContactScope:
     principal: str
     contact_id: str
     source_text: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class ProactiveInboundArrival:
+    """Durable authenticated-ingress fence carried into session handling."""
+
+    config_raw: dict[str, Any]
+    profile_home: Path
+    source_id: str
+    received_at: float
+    sequence: int
 
 
 def _trusted_contact_scope_from_metadata(metadata: Any) -> Optional[TrustedContactScope]:
@@ -1985,6 +2002,229 @@ def _trusted_contact_scope_from_metadata(metadata: Any) -> Optional[TrustedConta
     return TrustedContactScope(
         principal=principal, contact_id=contact_id, source_text=source_text[:4000]
     )
+
+
+async def _record_proactive_inbound(
+    *,
+    config_raw: Any,
+    trusted_scope: Any,
+    profile_home: Any,
+    profile: str,
+    source: Any,
+    session_id: str,
+    source_id: str,
+    text: str,
+    received_at: float,
+    metadata: Any = None,
+    arrival_sequence: int | None = None,
+) -> dict[str, Any] | None:
+    """Cancel slots and close outcomes off-loop for authenticated DM ingress."""
+    if not isinstance(config_raw, dict) or not isinstance(trusted_scope, TrustedContactScope):
+        return None
+    raw = (config_raw.get("agent", {}) or {}).get("proactive", {})
+    if not isinstance(raw, dict) or not raw.get("enabled"):
+        return None
+    if getattr(source, "chat_type", "") != "dm":
+        return None
+    platform = getattr(getattr(source, "platform", None), "value", None)
+    if platform != "bluebubbles":
+        return None
+    try:
+        from gateway.proactive_scheduler import ProactiveConfig, handle_inbound
+
+        cfg = ProactiveConfig.from_mapping(config_raw)
+        scope_meta = metadata.get("_hermes_contact_scope", {}) if isinstance(metadata, dict) else {}
+        timezone_name = str(
+            (metadata.get("_hermes_contact_timezone") if isinstance(metadata, dict) else None)
+            or (scope_meta.get("timezone") if isinstance(scope_meta, dict) else None)
+            or raw.get("timezone")
+            or (config_raw.get("agent", {}) or {}).get("timezone")
+            or config_raw.get("timezone")
+            or cfg.timezone
+        )
+        root = Path(profile_home).resolve()
+        if not isinstance(arrival_sequence, int) or arrival_sequence <= 0:
+            raise RuntimeError("proactive ingress arrival barrier is absent")
+        route = {
+            "platform": platform,
+            "chat_id": str(getattr(source, "chat_id", "") or ""),
+            "chat_type": "dm",
+            "user_id": str(getattr(source, "user_id", "") or ""),
+            "session_id": str(session_id),
+        }
+        return await asyncio.to_thread(
+            handle_inbound,
+            state_db=root / "state.db",
+            contact_memory_root=root / "contact-memory",
+            profile=str(profile or "default"),
+            contact_id=trusted_scope.contact_id,
+            route=route,
+            timezone_name=timezone_name,
+            source_id=str(source_id),
+            text=str(text or ""),
+            received_at=float(received_at),
+            config=cfg,
+        )
+    except Exception as exc:
+        from gateway.proactive_scheduler import ProactiveOwnershipRegistry
+        root = Path(profile_home).resolve()
+        ownership = root.parent.parent / "proactive-contact-ownership.db" if root.parent.name == "profiles" else root.parent / "proactive-contact-ownership.db"
+        await asyncio.to_thread(
+            ProactiveOwnershipRegistry(ownership).open_circuit,
+            "ingress_persistence_failure", now=float(received_at),
+        )
+        raise RuntimeError("proactive inbound persistence failed closed") from exc
+
+
+async def _record_proactive_arrival(
+    *, config_raw: Any, trusted_scope: Any, profile_home: Any, source: Any,
+    source_id: str, received_at: float,
+) -> int | None:
+    """Durably expose arrival order before waiting for a per-contact delivery lock."""
+    if not isinstance(config_raw, dict) or not isinstance(trusted_scope, TrustedContactScope):
+        return None
+    raw = (config_raw.get("agent", {}) or {}).get("proactive", {})
+    if not isinstance(raw, dict) or not raw.get("enabled"):
+        return None
+    platform = getattr(getattr(source, "platform", None), "value", None)
+    if getattr(source, "chat_type", "") != "dm" or platform != "bluebubbles":
+        return None
+    root = Path(profile_home).resolve()
+    ownership = root.parent.parent / "proactive-contact-ownership.db" if root.parent.name == "profiles" else root.parent / "proactive-contact-ownership.db"
+    try:
+        from gateway.proactive_scheduler import ProactiveStateStore
+        return await asyncio.to_thread(
+            ProactiveStateStore(root / "state.db", timeout=180.0).record_ingress_observed,
+            str(source_id), observed_at=float(received_at),
+        )
+    except Exception as exc:
+        from gateway.proactive_scheduler import ProactiveOwnershipRegistry
+        await asyncio.to_thread(
+            ProactiveOwnershipRegistry(ownership).open_circuit,
+            "ingress_arrival_persistence_failure", now=float(received_at),
+        )
+        raise RuntimeError("proactive ingress arrival barrier failed closed") from exc
+
+
+def _run_proactive_tick_once(
+    *,
+    profile_home: Any,
+    profile: str,
+    config_raw: Any,
+    session_db: Any = None,
+    generate: Any = None,
+    fetcher: Any = None,
+    web_fallback: Any = None,
+    gate_verdict: Any = None,
+    compose_interest: Any = None,
+    delivery_adapter: Any = None,
+    prepared_sink: Any = None,
+    now: float | None = None,
+) -> dict[str, int]:
+    """Run one scheduler tick through the structurally dry-run proactive pipeline."""
+    from gateway.proactive_scheduler import ProactiveConfig, ProactiveScheduler
+    from gateway.contact_memory.schema import ProactiveSendKind, RetrievalPrincipal
+    from gateway.proactive_fetch import (
+        FetchCoordinator, Last30DaysSubprocessSource, NullWebFallback,
+        ProactiveGate, ProactivePipeline,
+    )
+
+    root = Path(profile_home).resolve()
+    scheduler = ProactiveScheduler(
+        state_db_path=root / "state.db",
+        profile_home=root,
+        profile_name=str(profile),
+        config=ProactiveConfig.from_mapping(config_raw),
+    )
+    initiated = 0
+
+    resolved_fetcher = fetcher or FetchCoordinator(
+        Last30DaysSubprocessSource(profile=str(profile)),
+        web_fallback or NullWebFallback(),
+    )
+
+    def _initiate(route, claim) -> str:
+        nonlocal initiated
+        if session_db is None or generate is None or claim.kind != "checkin":
+            return ""
+        parent_session_id = str(claim.payload.get("session_id") or route.session_id or "")
+        if not parent_session_id:
+            return ""
+        purpose = (
+            '<checkin_texture private="true">Write one tiny friend-like follow-up about: '
+            + str(claim.payload.get("reason") or "follow up")[:500]
+            + ". Output exactly SKIP_PROACTIVE if it feels forced.</checkin_texture>"
+        )
+        child = run_proactive_child_turn(
+            session_db=session_db,
+            parent_session_id=parent_session_id,
+            purpose_prompt=purpose,
+            kind="checkin",
+            generate=generate,
+            child_session_id=f"proactive-{claim.slot_id}",
+            now_ts=now,
+        )
+        initiated += 1
+        from gateway.proactive_fetch import finalize_proactive_output
+        final = finalize_proactive_output(child["final_response"])
+        return final.text if final.allowed else ""
+
+    def _interest_pipeline(route, claim, store):
+        nonlocal initiated
+
+        def _compose(request):
+            nonlocal initiated
+            if compose_interest is not None:
+                return compose_interest(request)
+            if session_db is None or generate is None:
+                raise RuntimeError("compose generator unavailable")
+            parent_session_id = str(claim.payload.get("session_id") or route.session_id or "")
+            if not parent_session_id:
+                raise RuntimeError("parent session unavailable")
+            child = run_proactive_child_turn(
+                session_db=session_db,
+                parent_session_id=parent_session_id,
+                purpose_prompt=request.purpose_prompt + "\n\n" + request.texture_prompt,
+                kind=claim.kind,
+                generate=generate,
+                child_session_id=f"proactive-{claim.slot_id}",
+                now_ts=now,
+            )
+            initiated += 1
+            return child["final_response"]
+
+        pipeline = ProactivePipeline(
+            fetcher=resolved_fetcher,
+            gate=ProactiveGate(verdict=gate_verdict),
+            compose=_compose if (compose_interest is not None or (session_db is not None and generate is not None)) else None,
+            delivery_adapter=delivery_adapter,
+            mode=scheduler.config.mode.value,
+        )
+        interest = store.get_interest(claim.interest_id) if claim.interest_id else None
+        return pipeline.run(
+            send_id=claim.slot_id,
+            topic=str(claim.payload.get("topic") or (interest.topic if interest else "")),
+            interest=interest,
+            store=store,
+            route=route.as_dict(),
+            principal=(
+                RetrievalPrincipal.GUEST if route.principal == "guest"
+                else RetrievalPrincipal.OWNER
+            ),
+            kind=ProactiveSendKind(claim.kind),
+            now=now,
+        )
+
+    def _prepared(route, claim, pipeline_result):
+        if prepared_sink is not None:
+            prepared_sink.append((route, claim, pipeline_result.composed_text))
+
+    result = scheduler.tick(
+        now=now, on_dry_run=_initiate, on_interest_share=_interest_pipeline,
+        on_prepared=_prepared,
+    )
+    result["initiated"] = initiated
+    return result
 
 
 async def _submit_contact_memory_extraction(
@@ -2117,6 +2357,113 @@ def _compile_contact_memory_candidate(
     except Exception as exc:
         logger.warning("Contact memory prefetch skipped: %s", exc)
         return ""
+
+
+def _snapshot_interest_digest(
+    *,
+    config_raw: Any,
+    trusted_scope: Any,
+    profile_home: Any,
+    session_key: str,
+    session_id: Any,
+    snapshots: Any,
+    lock: Any,
+    now_monotonic: Optional[float] = None,
+    cache_ttl_seconds: Optional[float] = None,
+    cache_max_entries: Optional[int] = None,
+) -> str:
+    """Return the session-frozen interest digest for cache-safe user injection.
+
+    The digest is read from disk ONCE per (session_key, session_id) and cached
+    for the life of that session so a mid-session maintenance regeneration cannot
+    hot-swap it (plan Component 2). A new session_id under the same key (session
+    reset) re-reads. The returned text is appended to the API-only per-turn user
+    context, never the stable cached system prompt, so prompt caching is safe.
+    """
+    if not isinstance(config_raw, dict) or not config_raw.get("enabled"):
+        return ""
+    if not isinstance(trusted_scope, TrustedContactScope):
+        return ""
+    session_identity = session_key or str(session_id or "")
+    if not session_identity:
+        return ""
+    try:
+        from hermes_constants import get_hermes_home
+
+        profile_root = Path(profile_home or get_hermes_home()).resolve()
+    except Exception as exc:
+        logger.warning("Interest digest profile resolution skipped: %s", exc)
+        return ""
+    key = (
+        str(profile_root),
+        trusted_scope.contact_id,
+        session_identity,
+        str(session_id or ""),
+    )
+    # Kept as ignored compatibility parameters for callers/tests from the
+    # earlier TTL/LRU implementation. A live session snapshot must never be
+    # evicted by elapsed wall time or unrelated sessions filling a cache.
+    del now_monotonic, cache_ttl_seconds, cache_max_entries
+    with lock:
+        for cache_key, cache_value in list(snapshots.items()):
+            if not isinstance(cache_value, tuple) or len(cache_value) != 2:
+                snapshots.pop(cache_key, None)
+        cached = snapshots.get(key)
+        if isinstance(cached, tuple) and len(cached) == 2:
+            return str(cached[1] or "")
+    try:
+        from gateway.contact_memory.interest_maintenance import (
+            read_digest,
+            render_digest_for_injection,
+        )
+
+        root = profile_root / "contact-memory"
+        digest = read_digest(root, trusted_scope.contact_id).strip()
+        rendered = render_digest_for_injection(digest) if digest else ""
+    except Exception as exc:
+        logger.warning("Interest digest snapshot skipped: %s", exc)
+        rendered = ""
+    with lock:
+        # Seeing a different durable session_id for this exact
+        # (profile, contact, routing key) proves the prior session is inactive.
+        # Reap only those stale entries; never evict an unrelated live session.
+        for cache_key in list(snapshots):
+            if (
+                isinstance(cache_key, tuple)
+                and len(cache_key) == 4
+                and cache_key[:3] == key[:3]
+                and cache_key[3] != key[3]
+            ):
+                snapshots.pop(cache_key, None)
+        snapshots[key] = (str(session_id or ""), rendered)
+    return rendered
+
+
+def _clear_interest_digest_snapshots(
+    snapshots: Any,
+    lock: Any,
+    *,
+    session_key: str,
+    session_id: Optional[str] = None,
+) -> int:
+    """Drop snapshots only at a proven session boundary."""
+    removed = 0
+    with lock:
+        for key in list(snapshots):
+            if not isinstance(key, tuple) or len(key) != 4 or key[2] != session_key:
+                continue
+            if session_id is not None and key[3] != str(session_id):
+                continue
+            snapshots.pop(key, None)
+            removed += 1
+    return removed
+
+
+def _join_contact_turn_context(recall_prompt: str, interest_digest: str) -> str:
+    """Assemble the API-only current-user context without touching system text."""
+    if recall_prompt and interest_digest:
+        return recall_prompt.rstrip() + "\n\n" + interest_digest
+    return recall_prompt or interest_digest or ""
 
 
 def _contact_memory_lane_b_tools(
@@ -3488,6 +3835,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         import threading as _threading
         self._agent_cache: "OrderedDict[str, tuple]" = OrderedDict()
         self._agent_cache_lock = _threading.Lock()
+
+        # Per-session interest-digest snapshots. The maintenance digest is read
+        # ONCE per session and frozen for that session's lifetime so a mid-session
+        # maintenance regeneration cannot hot-swap the text (plan §Component 2:
+        # accept staleness, do not hot-swap). Injected only on the cache-safe
+        # per-turn user-context side, never into the stable system prefix.
+        # Key: (profile root, contact, session key, session id). Entries are
+        # reaped only when reset/finalization proves the session inactive.
+        self._interest_digest_snapshots: "OrderedDict[tuple, tuple]" = OrderedDict()
+        self._interest_digest_lock = _threading.Lock()
 
         # Per-session model overrides from /model command.
         # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode
@@ -6985,6 +7342,213 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         {"restart_timeout", "shutdown_timeout", "restart_interrupted"}
     )
 
+    @staticmethod
+    def _proactive_model_text(*, task: str, prompt: str, effort: str) -> str:
+        """Call the pinned non-fallback Sol lane; any failure suppresses the slot."""
+        from agent.auxiliary_client import call_llm
+        response = call_llm(
+            task=task, provider="openai-codex", model="gpt-5.6-sol",
+            messages=[{"role": "user", "content": prompt}], max_tokens=500,
+            request_overrides={"reasoning_effort": effort},
+            allow_fallback=False,
+        )
+        if getattr(response, "_hermes_resolved_route", None) != {
+            "provider": "openai-codex", "model": "gpt-5.6-sol"
+        }:
+            raise RuntimeError(f"resolved proactive {task} lane mismatch")
+        choices = getattr(response, "choices", None) or []
+        content = getattr(getattr(choices[0], "message", None), "content", None) if choices else None
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError(f"empty pinned proactive {task} response")
+        return content.strip()
+
+    @classmethod
+    def _proactive_compose_generate(cls, request: ProactiveTurnRequest) -> str:
+        from agent.auxiliary_client import call_llm
+        messages = [{"role": "system", "content": request.execution_system_prompt}, *request.generation_history]
+        response = call_llm(
+            task="proactive_compose", provider="openai-codex", model="gpt-5.6-sol",
+            messages=messages, max_tokens=500,
+            request_overrides={"reasoning_effort": "low"},
+            allow_fallback=False,
+        )
+        if getattr(response, "_hermes_resolved_route", None) != {
+            "provider": "openai-codex", "model": "gpt-5.6-sol"
+        }:
+            raise RuntimeError("resolved proactive compose lane mismatch")
+        choices = getattr(response, "choices", None) or []
+        content = getattr(getattr(choices[0], "message", None), "content", None) if choices else None
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("empty pinned proactive compose response")
+        return content.strip()
+
+    @classmethod
+    def _proactive_gate_verdict(cls, request: Any) -> Any:
+        raw = cls._proactive_model_text(
+            task="proactive_gate", prompt=request.prompt + "\n\n" + request.candidate_json,
+            effort="medium",
+        )
+        return json.loads(raw)
+
+    async def _proactive_scheduler_watcher(self) -> None:
+        """Drive isolated profile policy off-loop and Poke-owned transport on-loop."""
+        from hermes_cli.profiles import get_active_profile_name
+        runner_profile = get_active_profile_name() or os.getenv("HERMES_PROFILE") or "default"
+        if runner_profile != "poke":
+            logger.info("Proactive watcher disabled for non-Poke runner profile=%s", runner_profile)
+            return
+        transport_runner_id = f"poke:{os.getpid()}:{uuid.uuid4().hex}"
+        while self._running:
+            from hermes_cli.profiles import get_active_profile_name, get_profile_dir
+            active = get_active_profile_name() or os.getenv("HERMES_PROFILE") or "default"
+            next_wake_seconds = 1800.0
+            for profile in dict.fromkeys((active, "poke", "guest")):
+                correlation_id = uuid.uuid4().hex
+                try:
+                    from hermes_state import SessionDB
+                    from gateway.proactive_scheduler import ProactiveConfig, ProactiveScheduler
+                    from gateway.proactive_transport import BlueBubblesProactiveDelivery, deliver_prepared_exactly_once
+
+                    config_raw = _load_gateway_config_for_profile(profile)
+                    raw = (config_raw.get("agent", {}) or {}).get("proactive", {})
+                    if not (isinstance(raw, dict) and raw.get("enabled")):
+                        continue
+                    cfg = ProactiveConfig.from_mapping(config_raw)
+                    profile_home = get_profile_dir(profile)
+                    prepared = []
+                    from gateway.proactive_status import probe_alarm_sink_readiness, probe_model_readiness
+                    model_probe = await asyncio.to_thread(probe_model_readiness)
+                    scheduler = ProactiveScheduler(
+                        state_db_path=Path(profile_home) / "state.db",
+                        profile_home=profile_home, profile_name=profile, config=cfg,
+                    )
+                    scheduler.record_health("model_probe", model_probe)
+                    alarm_probe = await asyncio.to_thread(
+                        probe_alarm_sink_readiness, profile_home=profile_home, config=cfg,
+                    )
+                    scheduler.record_health("alarm_sink_probe", alarm_probe)
+                    if cfg.mode.value == "live" and (
+                        not model_probe["ready"] or not alarm_probe["ready"]
+                    ):
+                        reason = "model_probe_unavailable" if not model_probe["ready"] else "alarm_sink_probe_unavailable"
+                        scheduler.ownership_registry.open_circuit(reason, now=time.time())
+                        scheduler.record_health("watcher", {
+                            "completed": False, "correlation_id": correlation_id,
+                            "model_probe": model_probe, "alarm_probe": alarm_probe,
+                            "failure": reason,
+                        })
+                        continue
+
+                    def _tick_profile() -> dict[str, int]:
+                        db = SessionDB(Path(profile_home) / "state.db")
+                        try:
+                            result = _run_proactive_tick_once(
+                                profile_home=profile_home, profile=profile,
+                                config_raw=config_raw, session_db=db,
+                                generate=self._proactive_compose_generate,
+                                gate_verdict=self._proactive_gate_verdict,
+                                prepared_sink=prepared,
+                                web_fallback=__import__("gateway.proactive_fetch", fromlist=["CallableWebFallback"]).CallableWebFallback(
+                                    lambda topic: __import__("tools.web_tools", fromlist=["web_search_tool"]).web_search_tool(topic, limit=5)
+                                ),
+                            )
+                            scheduler = ProactiveScheduler(
+                                state_db_path=Path(profile_home) / "state.db",
+                                profile_home=profile_home, profile_name=profile, config=cfg,
+                            )
+                            scheduler.record_health("watcher", {"result": result, "correlation_id": correlation_id})
+                            return result
+                        finally:
+                            db.close()
+
+                    result = await asyncio.to_thread(_tick_profile)
+                    latest_config = _load_gateway_config_for_profile(profile)
+                    scheduler = ProactiveScheduler(
+                        state_db_path=Path(profile_home) / "state.db",
+                        profile_home=profile_home, profile_name=profile,
+                        config=ProactiveConfig.from_mapping(latest_config),
+                    )
+                    adapter = self.adapters.get(Platform.BLUEBUBBLES)
+                    platform_cfg = getattr(getattr(self, "config", None), "platforms", {}).get(
+                        Platform.BLUEBUBBLES
+                    )
+                    platform_extra = getattr(platform_cfg, "extra", {}) if platform_cfg else {}
+                    registry_path = (
+                        platform_extra.get("guest_contacts_file")
+                        or platform_extra.get("contact_registry")
+                        or os.getenv("HERMES_BLUEBUBBLES_GUEST_CONTACTS")
+                    )
+                    from gateway.guest_access import load_contact_registry
+                    contact_registry = load_contact_registry(registry_path)
+                    participant_identities = {
+                        ("poke", "kosta-owner"): contact_registry.owner_identities,
+                        **{
+                            ("guest", contact.contact_id): contact.bluebubbles_identity_set()
+                            for contact in contact_registry.contacts
+                        },
+                    }
+                    participant_registry_ready = bool(
+                        participant_identities.get(("poke", "kosta-owner"))
+                        and participant_identities.get(("guest", "stephen-lucier"))
+                    )
+                    if prepared:
+                        failure_time = time.time()
+                        if adapter is None or not adapter.is_connected:
+                            scheduler.ownership_registry.open_circuit("adapter_unavailable", now=failure_time)
+                            raise RuntimeError("Poke BlueBubbles adapter unavailable")
+                        if not participant_registry_ready:
+                            scheduler.ownership_registry.open_circuit(
+                                "participant_registry_missing", now=failure_time
+                            )
+                            raise RuntimeError("operator contact registry is incomplete")
+                        adapter_id = f"{type(adapter).__module__}.{type(adapter).__qualname__}:{id(adapter)}"
+                        scheduler.ownership_registry.acquire_transport(
+                            transport_runner_id, adapter_id, now=time.time()
+                        )
+                        delivery = BlueBubblesProactiveDelivery(
+                            adapter, owner_profile="poke", ownership_registry=scheduler.ownership_registry,
+                            runner_id=transport_runner_id, adapter_id=adapter_id,
+                            participant_identities=participant_identities,
+                            scheduler=scheduler,
+                        )
+                        for route, claim, text in prepared[:1]:
+                            barriers = getattr(self, "_proactive_delivery_barriers", None)
+                            if barriers is None:
+                                barriers = self._proactive_delivery_barriers = {}
+                            barrier = barriers.setdefault(route.contact_hash, asyncio.Lock())
+                            async with barrier:
+                                await deliver_prepared_exactly_once(
+                                    scheduler=scheduler, delivery=delivery, route=route,
+                                    claim=claim, text=text, correlation_id=correlation_id,
+                                )
+                    retry_at = scheduler.earliest_retry_at()
+                    if retry_at is not None:
+                        next_wake_seconds = min(next_wake_seconds, max(1.0, retry_at - time.time()))
+                    scheduler.record_health(
+                        "watcher",
+                        {"result": result, "correlation_id": correlation_id,
+                         "adapter_ready": bool(
+                             adapter is not None and adapter.is_connected
+                         ),
+                         "participant_registry_ready": participant_registry_ready,
+                         "model_probe": model_probe,
+                         "alarm_probe": alarm_probe,
+                         "extraction": _contact_memory_extraction_health(
+                             Path(profile_home) / "contact-memory"
+                         ),
+                         "completed": True},
+                    )
+                    logger.info("Proactive tick profile=%s result=%s correlation_id=%s", profile, result, correlation_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Per-profile isolation: a broken Guest tick never hides Poke.
+                    logger.warning("Proactive scheduler tick failed profile=%s correlation_id=%s", profile, correlation_id, exc_info=True)
+            for _ in range(max(1, int(next_wake_seconds))):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
     async def _run_startup_resume_event(
         self,
         adapter: BasePlatformAdapter,
@@ -7895,6 +8459,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         asyncio.create_task(self._platform_reconnect_watcher())
 
+        # Code-owned proactive policy ticker. Phase 3 is structurally dry-run and
+        # this watcher has no adapter/delivery-router reference.
+        asyncio.create_task(self._proactive_scheduler_watcher())
+
         # Start background handoff watcher — picks up CLI sessions marked
         # handoff_state='pending' in state.db and re-binds them to the
         # destination platform's home channel, then forges a synthetic user
@@ -8269,6 +8837,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _update_prompt_pending = getattr(self, "_update_prompt_pending", None)
                         if isinstance(_update_prompt_pending, dict):
                             _update_prompt_pending.pop(key, None)
+                        _digest_snapshots = getattr(self, "_interest_digest_snapshots", None)
+                        _digest_lock = getattr(self, "_interest_digest_lock", None)
+                        if _digest_snapshots is not None and _digest_lock is not None:
+                            _clear_interest_digest_snapshots(
+                                _digest_snapshots,
+                                _digest_lock,
+                                session_key=key,
+                                session_id=entry.session_id,
+                            )
                         # Persist the finalized flag to sessions.json AND
                         # state.db (single write-path, #9006) — also drops
                         # the persisted /model override, since finalization
@@ -9714,6 +10291,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 "session_contact_id": decision.contact_id,
                                 "source_text": event.text or "",
                             }
+                            contact_scope_metadata["_hermes_contact_timezone"] = (
+                                decision.contact_timezone or "UTC"
+                            )
                         source = dataclasses.replace(
                             source,
                             profile=(decision.profile or "guest"),
@@ -9850,6 +10430,49 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Record rate limit so subsequent messages are silently ignored
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
+
+        # The sender and routed contact scope are now authenticated. Establish
+        # the durable arrival fence before command handling, session lookup, or
+        # any other await can let a proactive sender pass it. Carry this exact
+        # identity/sequence to the later full inbound commit; do not re-record.
+        proactive_arrival = None
+        if isinstance(trusted_contact_scope, TrustedContactScope):
+            _proactive_cfg = _load_gateway_config_for_profile(
+                getattr(source, "profile", None)
+            )
+            _event_ts = getattr(event, "timestamp", None)
+            try:
+                _proactive_ts = float(
+                    _event_ts.timestamp() if hasattr(_event_ts, "timestamp") else _event_ts
+                )
+            except (TypeError, ValueError):
+                _proactive_ts = time.time()
+            _proactive_source_id = str(getattr(event, "message_id", None) or "").strip()
+            if not _proactive_source_id:
+                _proactive_source_id = hashlib.sha256(
+                    (
+                        f"{getattr(getattr(source, 'platform', None), 'value', '')}\0"
+                        f"{getattr(source, 'chat_id', '')}\0{getattr(source, 'user_id', '')}\0"
+                        f"{_proactive_ts:.6f}\0{event.text or ''}"
+                    ).encode()
+                ).hexdigest()
+            _proactive_home = self._resolve_profile_home_for_source(source)
+            _arrival_sequence = await _record_proactive_arrival(
+                config_raw=_proactive_cfg,
+                trusted_scope=trusted_contact_scope,
+                profile_home=_proactive_home,
+                source=source,
+                source_id=_proactive_source_id,
+                received_at=_proactive_ts,
+            )
+            if isinstance(_arrival_sequence, int) and _arrival_sequence > 0:
+                proactive_arrival = ProactiveInboundArrival(
+                    config_raw=_proactive_cfg,
+                    profile_home=Path(_proactive_home),
+                    source_id=_proactive_source_id,
+                    received_at=_proactive_ts,
+                    sequence=_arrival_sequence,
+                )
 
         # Shared BlueBubbles groups never inherit an owner-bound approval by
         # backward-compatible open-slash semantics. Approval is admin-only even
@@ -11179,6 +11802,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _quick_key,
                 _run_generation,
                 trusted_contact_scope=trusted_contact_scope,
+                proactive_arrival=proactive_arrival,
             )
             # Goal continuation: after the agent returns a final response
             # for this turn, check any standing /goal — the judge will
@@ -11680,6 +12304,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         run_generation: int,
         *,
         trusted_contact_scope: Optional[TrustedContactScope] = None,
+        proactive_arrival: Optional[ProactiveInboundArrival] = None,
     ):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -11711,6 +12336,35 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+
+        # Complete the authenticated inbound transaction with the exact durable
+        # fence captured before session resolution.  The arrival itself is not
+        # written here, which makes this path idempotent and race-order safe.
+        if (
+            isinstance(trusted_contact_scope, TrustedContactScope)
+            and isinstance(proactive_arrival, ProactiveInboundArrival)
+        ):
+            barriers = getattr(self, "_proactive_delivery_barriers", None)
+            if barriers is None:
+                barriers = self._proactive_delivery_barriers = {}
+            from gateway.contact_memory.store import opaque_contact_filename
+            barrier_key = Path(opaque_contact_filename(trusted_contact_scope.contact_id)).stem
+            barrier = barriers.setdefault(barrier_key, asyncio.Lock())
+            async with barrier:
+                await _record_proactive_inbound(
+                    config_raw=proactive_arrival.config_raw,
+                    trusted_scope=trusted_contact_scope,
+                    profile_home=proactive_arrival.profile_home,
+                    profile=str(getattr(source, "profile", None) or os.getenv("HERMES_PROFILE") or "default"),
+                    source=source,
+                    session_id=session_entry.session_id,
+                    source_id=proactive_arrival.source_id,
+                    text=str(event.text or ""),
+                    received_at=proactive_arrival.received_at,
+                    metadata=getattr(event, "metadata", None),
+                    arrival_sequence=proactive_arrival.sequence,
+                )
+
         pinned_session_id = str(
             (getattr(event, "metadata", None) or {}).get("gateway_session_id") or ""
         ).strip()
@@ -17162,6 +17816,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def _invalidate_session_run_generation(self, session_key: str, *, reason: str = "") -> int:
         """Invalidate any in-flight run token for ``session_key``."""
         generation = self._begin_session_run_generation(session_key)
+        if reason == "session_reset":
+            snapshots = getattr(self, "_interest_digest_snapshots", None)
+            lock = getattr(self, "_interest_digest_lock", None)
+            if snapshots is not None and lock is not None:
+                _clear_interest_digest_snapshots(
+                    snapshots, lock, session_key=session_key
+                )
         if reason:
             logger.info(
                 "Invalidated run generation for %s → %d (%s)",
@@ -19147,6 +19808,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 texture_prompt=_texture_prompt,
                 profile_home=_contact_memory_home,
                 usage_sink=_lane_a_usage,
+            )
+
+            # Session-frozen interest digest (Phase 2). Read once per session and
+            # appended to the same API-only user-context lane as recall — never
+            # the cached system prefix — so prompt caching stays byte-stable and
+            # a mid-session maintenance regen cannot hot-swap it.
+            _digest_snapshots = getattr(self, "_interest_digest_snapshots", None)
+            _digest_lock = getattr(self, "_interest_digest_lock", None)
+            if _digest_snapshots is None or _digest_lock is None:
+                import threading as _threading
+                _digest_snapshots = OrderedDict()
+                _digest_lock = _threading.Lock()
+                self._interest_digest_snapshots = _digest_snapshots
+                self._interest_digest_lock = _digest_lock
+            _interest_digest = _snapshot_interest_digest(
+                config_raw=_contact_memory_raw,
+                trusted_scope=trusted_contact_scope,
+                profile_home=_contact_memory_home,
+                session_key=session_key or session_id or "gateway",
+                session_id=session_id,
+                snapshots=_digest_snapshots,
+                lock=_digest_lock,
+            )
+            _recall_prompt = _join_contact_turn_context(
+                _recall_prompt, _interest_digest
             )
 
             max_iterations = _current_max_iterations()

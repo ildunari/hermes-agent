@@ -10,6 +10,7 @@ downloading from PR #4588 (YuhangLin).
 
 import asyncio
 from collections import OrderedDict
+import hashlib
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ import random
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import quote
 
 import httpx
@@ -584,6 +585,41 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                     return guid
         except Exception:
             pass
+        return None
+
+    async def resolve_authenticated_existing_dm(
+        self, chat_guid: str, expected_participant: object
+    ) -> tuple[str, str] | None:
+        from gateway.guest_access import normalize_identity
+
+        if isinstance(expected_participant, (set, frozenset, list, tuple)):
+            expected = {normalize_identity(item) for item in expected_participant}
+        else:
+            expected = {normalize_identity(expected_participant)}
+        expected.discard("")
+        if not chat_guid or not expected:
+            return None
+        payload = await self._api_post("/api/v1/chat/query", {"limit": 500, "offset": 0})
+        for chat in payload.get("data", []) or []:
+            guid = str(chat.get("guid") or chat.get("chatGuid") or "")
+            if guid != chat_guid:
+                continue
+            raw_participants = chat.get("participants") or chat.get("handles") or []
+            participants = {
+                normalize_identity(
+                    item.get("address") or item.get("handle") or item.get("id")
+                    if isinstance(item, Mapping) else item
+                )
+                for item in raw_participants
+            }
+            participants.discard("")
+            if len(participants) != 1 or not participants <= expected:
+                return None
+            participant = next(iter(participants))
+            fingerprint = hashlib.sha256(
+                f"{guid}\0{participant}".encode("utf-8")
+            ).hexdigest()
+            return guid, fingerprint
         return None
 
     async def _create_chat_for_handle(

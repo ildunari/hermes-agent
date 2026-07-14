@@ -16,7 +16,7 @@ from typing import Any, Iterable
 
 from hermes_constants import get_hermes_home
 
-from .schema import AssertionType, Audience, FactProposal, FactStatus, MentionPolicy
+from .schema import AssertionType, Audience, FactProposal, FactStatus, InterestEvent, MentionPolicy
 from .store import ContactMemoryStore
 
 
@@ -130,6 +130,30 @@ def import_jsonl(path: str | Path, contact_id: str, *, root: str | Path | None =
             counts["imported"] = outcome["inserted"]
             counts["skipped_existing"] = outcome["skipped"]
     return {"dry_run": dry_run, "counts": dict(counts), "source_ids": source_ids, "errors": errors}
+
+
+def import_typed_batch(
+    *, store: ContactMemoryStore, facts: Iterable[FactProposal],
+    interests: Iterable[InterestEvent], run_id: str, source_hash: str,
+    manifest: dict[str, Any], dry_run: bool = True,
+) -> dict[str, Any]:
+    """Validate a mixed bootstrap dossier and atomically apply it when requested."""
+    fact_rows, interest_rows = list(facts), list(interests)
+    if any(f.source_contact_id != store.contact_id for f in fact_rows):
+        raise ValueError("cross-profile/contact fact write refused")
+    source_ids = [f.source_id for f in fact_rows] + [e.source_id for e in interest_rows]
+    if len(source_ids) != len(set(source_ids)):
+        raise ValueError("duplicate source IDs in typed import")
+    summary: dict[str, Any] = {
+        "dry_run": dry_run, "run_id": run_id, "source_hash": source_hash,
+        "facts": len(fact_rows), "interests": len(interest_rows),
+    }
+    if not dry_run:
+        summary["apply"] = store.import_bootstrap_batch(
+            fact_rows, interest_rows, run_id=run_id, source_hash=source_hash,
+            manifest=manifest,
+        )
+    return summary
 
 
 def main(argv: Iterable[str] | None = None) -> int:

@@ -56,6 +56,7 @@ class ContactPolicy:
     allowed_surfaces: frozenset[str] = field(default_factory=lambda: frozenset({"bluebubbles"}))
     allowed_outbound_recipients: frozenset[str] = field(default_factory=lambda: frozenset({"self", "admin"}))
     tool_policy: str = "family_default"
+    timezone: str = "UTC"
 
     def bluebubbles_identity_set(self) -> frozenset[str]:
         return frozenset(
@@ -119,6 +120,7 @@ class ContactRegistry:
                     allowed_surfaces=frozenset(str(x).strip().lower() for x in raw.get("allowed_surfaces", ["bluebubbles"]) if str(x).strip()),
                     allowed_outbound_recipients=frozenset(str(x).strip().lower() for x in raw.get("allowed_outbound_recipients", ["self", "admin"]) if str(x).strip()),
                     tool_policy=str(raw.get("tool_policy") or "family_default"),
+                    timezone=str(raw.get("timezone") or "UTC"),
                 )
             )
         return cls(
@@ -156,6 +158,7 @@ class BlueBubblesRouteDecision:
     contact_display_name: str | None = None
     contact_role: str | None = None
     reason: str = ""
+    contact_timezone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -350,6 +353,10 @@ def classify_bluebubbles_route(source: Any, raw_message: Mapping[str, Any] | Non
     chat_type = (getattr(source, "chat_type", None) or "dm").lower()
 
     if registry.is_owner_identity(sender):
+        if registry.owner_contact_id != "kosta-owner":
+            return BlueBubblesRouteDecision(
+                GuestRoute.DENY, None, reason="owner contact namespace must be kosta-owner"
+            )
         return BlueBubblesRouteDecision(
             GuestRoute.OWNER,
             registry.owner_profile,
@@ -369,6 +376,7 @@ def classify_bluebubbles_route(source: Any, raw_message: Mapping[str, Any] | Non
                 contact.display_name,
                 contact.role,
                 "approved guest in group",
+                contact.timezone,
             )
         return BlueBubblesRouteDecision(GuestRoute.DENY, None, reason="unknown or unapproved sender in group")
 
@@ -380,6 +388,7 @@ def classify_bluebubbles_route(source: Any, raw_message: Mapping[str, Any] | Non
             contact.display_name,
             contact.role,
             "approved guest dm",
+            contact.timezone,
         )
 
     return BlueBubblesRouteDecision(GuestRoute.DENY, None, reason="unknown or unapproved sender")

@@ -24,7 +24,7 @@ UNKNOWN_PHONE = "+12025550999"
 def _registry():
     return ContactRegistry.from_dict({
         "owner_profile": "poke",
-        "owner_contact_id": "stephen-lucier",
+        "owner_contact_id": "kosta-owner",
         "guest_profile": "guest",
         "owner_identities": [OWNER_PHONE, "kosta@example.com"],
         "contacts": {
@@ -58,7 +58,7 @@ def test_owner_dm_routes_to_poke_profile():
     decision = classify_bluebubbles_route(_source("+1 202 555 0123"), {}, _registry())
     assert decision.route is GuestRoute.OWNER
     assert decision.profile == "poke"
-    assert decision.contact_id == "stephen-lucier"
+    assert decision.contact_id == "kosta-owner"
     assert decision.reason == "owner sender"
 
 
