@@ -1,0 +1,32 @@
+agent:
+  proactive:
+    enabled: true
+    mode: observe
+    transport_owner_profile: poke
+    allowed_contacts:
+      - {profile: poke, contact_id: kosta-owner, principal: owner}
+      - {profile: guest, contact_id: stephen-lucier, principal: guest}
+    active_hours: {start: "09:00", end: "21:30"}
+    weekly_interest_cap: 2
+    weekly_total_cap: 3
+    min_gap_hours: 48
+    eligibility_min_messages_14d: 5
+    backoff_after_dismissals: 3
+    backoff_days: 30
+    compose_model:
+      provider: openai-codex
+      model: gpt-5.6-sol
+      reasoning_effort: low
+      fallback: false
+    gate_task: proactive_gate
+auxiliary:
+  proactive_semantic:
+    provider: openai-codex
+    model: gpt-5.6-sol
+    reasoning_effort: medium
+    fallback: false
+  proactive_gate:
+    provider: openai-codex
+    model: gpt-5.6-sol
+    reasoning_effort: medium
+    fallback: false
