@@ -22,6 +22,7 @@ from gateway.contact_memory.imessage_communication_adapter import (
     scan_historical_communication,
     verify_aggregate_manifest,
 )
+from gateway.contact_memory.imessage_link_review import _attributed_visible_string
 from gateway.contact_memory.schema import (
     CommunicationActorRole,
     CommunicationKind,
@@ -32,6 +33,54 @@ from gateway.contact_memory.store import ContactMemoryStore
 from scripts.review_imessage_communication_signals import _temporary_store_root, main
 
 SECRET = b"phase-b-synthetic-hmac-key-0001"
+
+
+def _typed_attributed_fixture(visible: bytes, *, mutable: bool = False) -> bytes:
+    """Real-shaped NSArchiver streamtyped root with a later hidden string."""
+    root = b"NSMutableAttributedString" if mutable else b"NSAttributedString"
+    string_class = b"NSMutableString" if mutable else b"NSString"
+    length = (
+        bytes((len(visible),))
+        if len(visible) <= 0x7f
+        else b"\x81" + len(visible).to_bytes(2, "little")
+    )
+    return (
+        b"\x04\x0bstreamtyped\x81\xe8\x03\x84\x01@\x84\x84"
+        + bytes((len(root),)) + root
+        + b"\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84"
+        + bytes((len(string_class),)) + string_class
+        + b"\x01\x95\x84\x01+" + length + visible
+        + b"\x86\x84\x0ehidden-preview\x84\x18https://cdn.invalid/file\x86"
+    )
+
+
+def test_attributed_body_decoder_accepts_only_root_visible_string() -> None:
+    short = _typed_attributed_fixture(b"visible body")
+    long_text = ("long visible body " * 20).encode()
+    long = _typed_attributed_fixture(long_text, mutable=True)
+
+    assert _attributed_visible_string(short) == "visible body"
+    assert _attributed_visible_string(long) == long_text.decode().strip()
+    assert "hidden-preview" not in (_attributed_visible_string(short) or "")
+    assert "cdn.invalid" not in (_attributed_visible_string(short) or "")
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        b"opaque https://raw-leak.invalid",
+        b"\x04\x0bstreamtyped" + b"\x84\x01+\x10forged raw text",
+        _typed_attributed_fixture(b"\xffinvalid utf8"),
+        _typed_attributed_fixture(b"visible\x00hidden"),
+        _typed_attributed_fixture(b"visible").replace(b"visible\x86", b"visible\x00", 1),
+        plistlib.dumps({"preview": {"NSString": "hidden nested"}}),
+        plistlib.dumps({"$objects": ["$null", "hidden archive string"]}),
+    ],
+)
+def test_attributed_body_decoder_fails_closed_without_recursive_string_fallback(
+    blob: bytes,
+) -> None:
+    assert _attributed_visible_string(blob) is None
 
 
 def _create_messages_db(path: Path, *, group: bool = False) -> None:

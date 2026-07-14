@@ -118,19 +118,99 @@ def extract_urls(text: str | None) -> list[str]:
     return result
 
 
-def _attributed_visible_string(blob: object) -> str | None:
-    """Decode only an explicit attributed string, never arbitrary archive runs."""
-    if not isinstance(blob, (bytes, bytearray, memoryview)):
+_TYPEDSTREAM_HEADER = b"\x04\x0bstreamtyped"
+_ATTRIBUTED_ROOTS = (b"NSAttributedString", b"NSMutableAttributedString")
+_STRING_ROOTS = (b"NSString", b"NSMutableString")
+
+
+def _typedstream_integer(data: bytes, offset: int) -> tuple[int, int]:
+    """Read one non-negative typedstream integer used for bounded blob lengths."""
+    if offset >= len(data):
+        raise ValueError("missing typedstream integer")
+    marker = data[offset]
+    if marker <= 0x7F:
+        return marker, offset + 1
+    widths = {0x81: 2, 0x82: 4, 0x83: 8}
+    width = widths.get(marker)
+    if width is None or offset + 1 + width > len(data):
+        raise ValueError("invalid typedstream integer")
+    value = int.from_bytes(data[offset + 1:offset + 1 + width], "little", signed=True)
+    if value < 0:
+        raise ValueError("negative typedstream length")
+    return value, offset + 1 + width
+
+
+def _typedstream_visible_string(data: bytes) -> str | None:
+    """Decode only the root NSAttributedString's typed NSString payload.
+
+    Apple attributed bodies are legacy NSArchiver ``streamtyped`` objects, not
+    keyed plists.  The visible body is the first NSString/NSMutableString field
+    owned by the attributed-string root.  Preview, CDN, attachment and archive
+    strings occur later in the object graph and are deliberately never walked.
+    """
+    if not data.startswith(_TYPEDSTREAM_HEADER) or len(data) > 16 * 1024 * 1024:
+        return None
+    # The root class declaration is close to the fixed stream header. Requiring
+    # it before looking for a string field prevents marker-only byte scraping.
+    root_positions = [data.find(name, len(_TYPEDSTREAM_HEADER), 160) for name in _ATTRIBUTED_ROOTS]
+    root_positions = [position for position in root_positions if position >= 0]
+    if not root_positions:
+        return None
+    root_position = min(root_positions)
+
+    string_hits: list[tuple[int, bytes]] = []
+    for name in _STRING_ROOTS:
+        position = data.find(name, root_position + 1, min(len(data), root_position + 192))
+        if position >= 0:
+            string_hits.append((position, name))
+    if not string_hits:
+        return None
+    string_position, string_class = min(string_hits)
+    cursor = string_position + len(string_class)
+    # NSString class version 1, a class/back-reference byte, then the single
+    # bytes (`+`) field declaration. The reference byte varies by archive.
+    marker = data.find(b"\x84\x01+", cursor, min(len(data), cursor + 24))
+    if marker < 0:
         return None
     try:
-        value = plistlib.loads(bytes(blob))
+        length, payload_offset = _typedstream_integer(data, marker + 3)
+    except ValueError:
+        return None
+    payload_end = payload_offset + length
+    if (
+        length == 0
+        or length > 4 * 1024 * 1024
+        or payload_end >= len(data)
+        or data[payload_end] != 0x86
+    ):
+        return None
+    payload = data[payload_offset:payload_end]
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    text = text.strip()
+    if not text or "\x00" in text or any(ord(char) < 0x20 and char not in "\n\r\t" for char in text):
+        return None
+    return text
+
+
+def _attributed_visible_string(blob: object) -> str | None:
+    """Decode only a typed visible root; never recursively choose a string."""
+    if not isinstance(blob, (bytes, bytearray, memoryview)):
+        return None
+    data = bytes(blob)
+    typed = _typedstream_visible_string(data)
+    if typed is not None:
+        return typed
+    try:
+        value = plistlib.loads(data)
     except Exception:
         return None
     if not isinstance(value, Mapping):
         return None
-    # Simple archived fixtures and some legacy messages expose NSString at the
-    # attributed-string root.  Do not recursively choose a longest string:
-    # sibling preview/CDN metadata is not visible message text.
+    # Legacy keyed/simple archives are accepted only when the root itself owns
+    # the string. No $objects traversal or recursive choose-a-string fallback.
     for key in ("NSString", "string", "NS.string"):
         text = value.get(key)
         if isinstance(text, str) and text.strip():

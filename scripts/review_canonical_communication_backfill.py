@@ -23,16 +23,17 @@ from gateway.contact_memory.imessage_bootstrap import (  # noqa: E402
     resolve_one_to_one_chat,
 )
 from gateway.contact_memory.imessage_communication_adapter import (  # noqa: E402
-    build_private_evidence_manifest,
     scan_historical_communication,
 )
 from gateway.contact_memory.reviewed_backfill import (  # noqa: E402
     ReviewedBackfill,
     apply_subject_backfill,
+    build_candidate_selection,
     build_reviewed_backfill,
     read_existing_reviewed_state,
     restore_rehearsal,
     subject_review,
+    verify_candidate_selection,
 )
 from gateway.contact_memory.store import ContactMemoryStore, opaque_contact_filename  # noqa: E402
 
@@ -116,12 +117,17 @@ def _candidate_summary(manifest: dict[str, Any]) -> dict[str, Any]:
         },
         "counts": manifest["counts"],
         "exclusions": manifest["exclusions"],
+        "evaluation": manifest["evaluation"],
+        "watchlist": manifest["watchlist"],
         "candidates": [
             {
                 "candidate_id": item["candidate_id"],
                 "subject": item["subject"],
                 "kind": item["kind"],
                 "label": item["label"],
+                "entity_type": item["entity_type"],
+                "polarity": item["polarity"],
+                "eligibility": item["eligibility"],
                 "occurrence_count": item["occurrence_count"],
                 "distinct_days": item["distinct_days"],
             }
@@ -129,6 +135,24 @@ def _candidate_summary(manifest: dict[str, Any]) -> dict[str, Any]:
         ],
         "approval_boundary": manifest["approval_boundary"],
     }
+
+
+def _source_accounting(scan: Any) -> dict[str, Any]:
+    """Aggregate-only report: no text, URL, GUID, handle, or filesystem path."""
+    return {
+        "schema": 2,
+        "kind": "phase-e-v3-aggregate-source-accounting",
+        "accounting": dict(scan.accounting),
+        "rejected_count": len(scan.rejected_evidence),
+        "raw_source_retained": False,
+    }
+
+
+def _lock_down_tree(root: Path) -> None:
+    """Make every generated review artifact owner-only, including directories."""
+    for path in sorted(root.rglob("*"), reverse=True):
+        os.chmod(path, 0o700 if path.is_dir() else 0o600)
+    os.chmod(root, 0o700)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -151,14 +175,16 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="explicitly approved candidate ID for the selected subject (repeatable)",
     )
     parser.add_argument("--review-manifest", help="exact signed manifest produced by dry-run")
+    parser.add_argument("--approved-selection", help="owner-only signed candidate subset artifact")
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.apply and (
         not args.subject or not args.approved_subject_review_id
-        or not args.approved_candidate_id or not args.review_manifest
+        or (not args.approved_candidate_id and not args.approved_selection)
+        or not args.review_manifest
     ):
         parser.error(
             "--apply requires --subject, --approved-subject-review-id, at least one "
-            "--approved-candidate-id, and --review-manifest"
+            "--approved-candidate-id (or --approved-selection), and --review-manifest"
         )
 
     try:
@@ -209,6 +235,19 @@ def main(argv: Iterable[str] | None = None) -> int:
             approved_subject = subject_review(approved_review, args.subject)
             if args.approved_subject_review_id != approved_subject["subject_review_id"]:
                 raise ValueError("approved subject review ID does not exactly match the snapshot")
+            approved_candidate_ids = list(args.approved_candidate_id)
+            if args.approved_selection:
+                selection = json.loads(_read_owner_only(
+                    Path(args.approved_selection), label="candidate selection",
+                ))
+                if not verify_candidate_selection(selection, approved_review, secret=secret):
+                    raise ValueError("candidate selection verification failed")
+                if selection.get("subject") != args.subject:
+                    raise ValueError("candidate selection crosses subject boundary")
+                selected_ids = [item["candidate_id"] for item in selection["candidates"]]
+                if approved_candidate_ids and sorted(approved_candidate_ids) != sorted(selected_ids):
+                    raise ValueError("candidate IDs do not exactly match signed selection")
+                approved_candidate_ids = selected_ids
             root = roots[args.subject]
             store_path = root / "contacts" / opaque_contact_filename(args.subject)
             if not store_path.is_file():
@@ -221,7 +260,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             result = apply_subject_backfill(
                 scan, approved_review, subject=args.subject, store=store,
                 approved_subject_review_id=args.approved_subject_review_id,
-                approved_candidate_ids=args.approved_candidate_id, secret=secret,
+                approved_candidate_ids=approved_candidate_ids, secret=secret,
             )
             _write_owner_only(output / "apply-result.json", _canonical_bytes(result))
             print(json.dumps({
@@ -234,11 +273,26 @@ def main(argv: Iterable[str] | None = None) -> int:
         output = _artifact_root(Path(args.artifact_root))
         output.mkdir(parents=True, mode=0o700)
         aggregate = output / "aggregate-review-manifest.json"
-        private = output / "private-source-evidence.json"
+        source_accounting = output / "source-accounting.json"
         summary = output / "candidate-summary.json"
         _write_owner_only(aggregate, _canonical_bytes(review.manifest))
-        _write_owner_only(private, _canonical_bytes(build_private_evidence_manifest(scan)))
+        _write_owner_only(source_accounting, _canonical_bytes(_source_accounting(scan)))
         _write_owner_only(summary, _canonical_bytes(_candidate_summary(review.manifest)))
+        signed_selections = {
+            "schema": 2,
+            "kind": "phase-e-v3-signed-candidate-subsets",
+            "selections": [
+                build_candidate_selection(
+                    review, subject=subject,
+                    candidate_ids=[item["candidate_id"] for item in subject_review(review, subject)["candidates"]],
+                    secret=secret,
+                )
+                for subject in _SUBJECT_ROOT
+                if subject_review(review, subject)["candidates"]
+            ],
+        }
+        selections_path = output / "signed-candidate-subsets.json"
+        _write_owner_only(selections_path, _canonical_bytes(signed_selections))
 
         disposable = output / "disposable-stores"
         apply_results: dict[str, Any] = {}
@@ -275,6 +329,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "restore": restore_results,
         }
         _write_owner_only(output / "rehearsal-evidence.json", _canonical_bytes(rehearsal))
+        _lock_down_tree(output)
     except (OSError, ValueError, PermissionError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
 
@@ -287,11 +342,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         },
         "artifact_root": str(output),
         "aggregate_manifest": str(aggregate),
-        "private_evidence": str(private),
+        "source_accounting": str(source_accounting),
         "candidate_summary": str(summary),
+        "signed_candidate_subsets": str(selections_path),
         "accounting": review.manifest["accounting"],
         "counts": review.manifest["counts"],
         "exclusions": review.manifest["exclusions"],
+        "evaluation": review.manifest["evaluation"],
         "apply_requires": (
             "--apply --subject <kosta-owner|stephen-lucier> "
             "--approved-subject-review-id <exact-subject-review-id> "

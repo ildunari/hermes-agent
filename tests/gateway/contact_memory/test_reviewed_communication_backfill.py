@@ -49,13 +49,15 @@ def _messages(path: Path) -> None:
     con.execute("INSERT INTO handle VALUES(1,'steve@example.test')")
     con.execute("INSERT INTO chat_handle_join VALUES(1,1)")
     rows = [
-        (1, "k-music-1", 1 * DAY, 1, "techno festival lineup", None, 0, None, None, None),
-        (2, "k-music-2", 3 * DAY, 1, "another techno concert", None, 0, None, None, None),
-        (3, "s-fitness-1", 2 * DAY, 0, "gym lifting workout", None, 0, None, None, 1),
-        (4, "s-fitness-2", 4 * DAY, 0, "bodybuilding workout", None, 0, None, None, 1),
+        (1, "k-music-1", 1 * DAY, 1, "I love this techno festival lineup", None, 0, None, None, None),
+        (2, "k-music-2", 3 * DAY, 1, "I love another techno concert", None, 0, None, None, None),
+        (3, "s-fitness-1", 2 * DAY, 0, "I love my gym lifting workout", None, 0, None, None, 1),
+        (4, "s-fitness-2", 4 * DAY, 0, "I love my bodybuilding workout", None, 0, None, None, 1),
         (5, "s-youtube-1", 5 * DAY, 0, "https://youtube.com/watch?v=one", None, 0, None, None, 1),
         (6, "s-youtube-2", 6 * DAY, 0, "https://youtu.be/two", None, 0, None, None, 1),
-        (7, "service", 7 * DAY, 0, "anonymous", None, 0, None, None, 0),
+        (7, "s-artist-1", 7 * DAY, 0, "Lady Gaga news", None, 0, None, None, 1),
+        (8, "s-artist-2", 8 * DAY, 0, "Lady Gaga update", None, 0, None, None, 1),
+        (9, "service", 9 * DAY, 0, "anonymous", None, 0, None, None, 0),
     ]
     con.executemany("INSERT INTO message VALUES(?,?,?,?,?,?,?,?,?,?)", rows)
     con.executemany("INSERT INTO chat_message_join VALUES(1,?)", [(row[0],) for row in rows])
@@ -100,15 +102,15 @@ def test_review_manifest_is_deterministic_subject_correct_signed_and_aggregate_o
         verify_subject_review(item, secret=SECRET)
         for item in first.manifest["subject_reviews"]
     )
-    assert first.manifest["counts"]["by_subject"]["kosta-owner"]["topics"] == 0
+    assert first.manifest["counts"]["by_subject"]["kosta-owner"]["topics"] == 1
     assert first.manifest["counts"]["by_subject"]["stephen-lucier"] == {
-        "callbacks": 0, "entities": 1, "recommendations": 0, "topics": 1,
+        "callbacks": 0, "entities": 1, "recommendations": 0, "topics": 2,
     }
-    assert all(
-        candidate["subject"] == "stephen-lucier"
-        for candidate in first.manifest["candidates"]
-    )
+    assert {candidate["subject"] for candidate in first.manifest["candidates"]} == {
+        "kosta-owner", "stephen-lucier",
+    }
     assert first.manifest["exclusions"]["existing_reviewed_topic"] == 1
+    assert first.manifest["evaluation"]["platform_entity_candidates"] == 0
     aggregate = json.dumps(first.manifest, sort_keys=True)
     for raw in ("techno festival lineup", "bodybuilding workout", "youtube.com", "k-music-1", "s-fitness-1"):
         assert raw not in aggregate
@@ -135,7 +137,7 @@ def test_subject_apply_is_one_transaction_and_exact_retry_does_not_recount(tmp_p
     )
 
     assert first["already_applied"] is False
-    assert first["projected_candidates"] == 2
+    assert first["projected_candidates"] == 3
     assert second["already_applied"] is True
     assert store.list_interests() == before
     with sqlite3.connect(store.path) as con:
@@ -236,11 +238,11 @@ def test_projection_tamper_and_retired_review_id_fail_before_mutation(tmp_path: 
         (entity_index, ["occurrences", 0, "event_id"], "0" * 64),
         (entity_index, ["occurrences", 0, "source_id"], "1" * 64),
         (entity_index, ["occurrences", 0, "projection", "entities", 0, "canonical_label"], "Other"),
-        (entity_index, ["occurrences", 0, "projection", "entities", 0, "entity_type"], "person"),
+        (entity_index, ["occurrences", 0, "projection", "entities", 0, "entity_type"], "organization"),
         (entity_index, ["occurrences", 0, "projection", "entities", 0, "confidence"], 0.5),
         (entity_index, ["occurrences", 0, "projection", "entities", 0, "source_method"], "model"),
         (topic_index, ["occurrences", 0, "projection", "interests", 0, "topic"], "travel"),
-        (topic_index, ["occurrences", 0, "projection", "interests", 0, "signal_type"], "enthusiasm"),
+        (topic_index, ["occurrences", 0, "projection", "interests", 0, "signal_type"], "long_reply"),
         (topic_index, ["occurrences", 0, "projection", "interests", 0, "valence"], "negative"),
         (topic_index, ["occurrences", 0, "projection", "interests", 0, "confidence"], 0.25),
         (topic_index, ["occurrences", 0, "projection", "interests", 0, "source_method"], "model"),
@@ -255,9 +257,9 @@ def test_projection_tamper_and_retired_review_id_fail_before_mutation(tmp_path: 
         assert not verify_subject_review(changed_snapshot, secret=SECRET)
     tampered = deepcopy(review)
     tampered_snapshot = subject_review(tampered, "stephen-lucier")
-    tampered_snapshot["candidates"][0]["occurrences"][0]["projection"]["entities"][0][
+    tampered_snapshot["candidates"][entity_index]["occurrences"][0]["projection"]["entities"][0][
         "entity_type"
-    ] = "person"
+    ] = "organization"
     assert not verify_subject_review(tampered_snapshot, secret=SECRET)
     store = ContactMemoryStore(tmp_path / "guest", "stephen-lucier")
 
@@ -299,7 +301,7 @@ def test_subject_snapshots_allow_sequential_cross_subject_applies(tmp_path: Path
         approved_candidate_ids=stephen_ids, secret=SECRET,
     )
     assert result["already_applied"] is False
-    assert result["projected_candidates"] == 2
+    assert result["projected_candidates"] == 3
 
 
 def test_apply_rejects_stale_subject_target_and_source_without_partial_writes(
@@ -356,7 +358,7 @@ def test_restore_rehearsal_restores_exact_database_bytes_in_temporary_roots(tmp_
 
     assert evidence["restored_sha256"] == evidence["backup_sha256"]
     assert evidence["mutated_sha256"] != evidence["backup_sha256"]
-    assert evidence["apply_projected_candidates"] == 2
+    assert evidence["apply_projected_candidates"] == 3
     assert hashlib.sha256(store.path.read_bytes()).hexdigest() == before
 
 
@@ -380,10 +382,12 @@ def test_cli_publishes_owner_only_review_and_requires_complete_apply_approval(
     for path in (
         artifacts / "aggregate-review-manifest.json",
         artifacts / "candidate-summary.json",
-        artifacts / "private-source-evidence.json",
+        artifacts / "source-accounting.json",
+        artifacts / "signed-candidate-subsets.json",
         artifacts / "rehearsal-evidence.json",
     ):
         assert path.is_file() and path.stat().st_mode & 0o077 == 0
+    assert not (artifacts / "private-source-evidence.json").exists()
     with pytest.raises(SystemExit) as exc:
         cli_main([*args, "--apply"])
     assert exc.value.code == 2

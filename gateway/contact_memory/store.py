@@ -1879,8 +1879,20 @@ class ContactMemoryStore:
             if event.kind is CommunicationKind.REPLY:
                 if CommunicationRelationType.REPLY_TO not in relations:
                     raise ValueError("reply interest requires authenticated target linkage")
-                if proposal.signal_type not in {SignalType.NEUTRAL_ACK, SignalType.LONG_REPLY}:
-                    raise ValueError("plain replies may emit only neutral deterministic evidence")
+                counterpart_targets = [
+                    relation for relation in bundle.relations
+                    if relation.relation_type is CommunicationRelationType.REPLY_TO
+                    and relation.target_actor_role is CommunicationActorRole.COUNTERPART
+                ]
+                positive_target_reply = (
+                    proposal.signal_type is SignalType.ENGAGED_MENTION
+                    and proposal.source_method is ProjectionMethod.DETERMINISTIC
+                    and len(counterpart_targets) == 1
+                )
+                if proposal.signal_type not in {SignalType.NEUTRAL_ACK, SignalType.LONG_REPLY} and not positive_target_reply:
+                    raise ValueError(
+                        "reply interest requires neutral evidence or authenticated target semantics"
+                    )
             if proposal.signal_type is SignalType.SPONTANEOUS_RAISE and (
                 event.kind is not CommunicationKind.TEXT
                 and (event.event_id, topic) not in allowed_share_topics
@@ -2601,7 +2613,7 @@ class ContactMemoryStore:
                     if not isinstance(candidate, Mapping):
                         raise ValueError("reviewed subject candidate is invalid")
                     kind, label = candidate.get("kind"), candidate.get("label")
-                    if kind == "topic":
+                    if kind in {"topic", "activity"}:
                         topic = normalize_interest_topic(label)
                         if con.execute(
                             "SELECT 1 FROM interest WHERE topic=?", (topic,),

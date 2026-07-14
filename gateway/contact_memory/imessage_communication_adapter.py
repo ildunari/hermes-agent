@@ -299,6 +299,10 @@ def scan_historical_communication(
             "author": author,
             "occurred_at": occurred_at,
             "text": text,
+            "text_source": (
+                "plain" if str(row.get("text") or "").strip()
+                else "attributed_root" if text is not None else "none"
+            ),
             "urls": list(urls),
             "associated_message_type": associated_type,
             "associated_guid": str(row.get("associated_guid") or ""),
