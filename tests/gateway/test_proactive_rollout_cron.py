@@ -185,40 +185,15 @@ def test_real_cron_delivery_path_persists_exact_probe_ack(monkeypatch, tmp_path:
     assert probe_alarm_sink_readiness(profile_home=root, config=cfg)["ready"]
 
 
-def test_guest_bluebubbles_probe_uses_only_poke_owner_and_records_ack(monkeypatch, tmp_path: Path):
-    from cron import scheduler
-    from tools import send_message_tool
-
+def test_guest_bluebubbles_probe_is_rejected_before_job_creation(tmp_path: Path):
     _configure_poke_bluebubbles(tmp_path)
     guest = tmp_path / "guest"
-    install(root=str(guest), alarm_target="bluebubbles:operator-guid")
-    delivered = []
 
-    async def fake_send(platform, pconfig, chat_id, message, **kwargs):
-        delivered.append((platform.value, dict(pconfig.extra), chat_id, message))
-        return {"success": True, "message_id": "owner-message"}
+    with pytest.raises(ValueError, match="BlueBubbles is forbidden"):
+        install(root=str(guest), alarm_target="bluebubbles:operator-guid")
 
-    monkeypatch.setattr(send_message_tool, "_send_to_platform", fake_send)
-    monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: guest)
-    monkeypatch.setattr(scheduler, "save_job_output", lambda *a, **k: guest / "out")
     with use_cron_store(guest):
-        job = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
-        assert job["delivery_profile"] == "poke"
-        assert job["probe_binding"]["delivery_profile"] == "poke"
-        assert scheduler.run_one_job(job)
-        completed = next(j for j in list_jobs(include_disabled=True) if j["id"] == job["id"])
-
-    assert len(delivered) == 1
-    platform, extra, chat_id, message = delivered[0]
-    assert (platform, chat_id) == ("bluebubbles", "operator-guid")
-    assert extra["server_url"] == "http://poke-bluebubbles.invalid"
-    assert extra["password"] == "owner-route-secret"
-    assert extra["webhook_register"] is True  # standalone helper overrides at adapter construction
-    assert job["probe_binding"]["nonce"] in message
-    assert all(
-        completed["last_probe_delivery_ack"].get(key) == value
-        for key, value in job["probe_binding"].items()
-    )
+        assert list_jobs(include_disabled=True) == []
 
 
 def test_guest_alarm_delegates_to_gpt_telegram_outbound_only(monkeypatch, tmp_path: Path):
@@ -274,11 +249,14 @@ def test_delivery_profile_change_invalidates_probe_and_rejects_unauthenticated_t
         install(root=str(guest), alarm_target="telegram:5320274083", delivery_profile="../gpt", dry_run=True)
 
 
-def test_bluebubbles_alarm_owner_rejects_non_owner_target_or_profile(tmp_path: Path):
+def test_internal_proactive_alarm_delivery_to_bluebubbles_is_always_forbidden(tmp_path: Path):
     _configure_poke_bluebubbles(tmp_path)
     guest = tmp_path / "guest"
-    with pytest.raises(ValueError, match="exactly match"):
+    with pytest.raises(ValueError, match="BlueBubbles is forbidden"):
         install(root=str(guest), alarm_target="bluebubbles:not-the-owner", dry_run=True)
+
+    with pytest.raises(ValueError, match="BlueBubbles is forbidden"):
+        install(root=str(guest), alarm_target="bluebubbles:operator-guid", dry_run=True)
 
     from cron import scheduler
     bad_job = {
@@ -291,6 +269,46 @@ def test_bluebubbles_alarm_owner_rejects_non_owner_target_or_profile(tmp_path: P
     finally:
         scheduler.reset_hermes_home_override(token)
     assert error and "restricted to installed Poke/Guest proactive alarms" in error
+
+
+def test_internal_job_without_delivery_profile_cannot_use_bluebubbles(monkeypatch):
+    from cron import scheduler
+
+    called = []
+    monkeypatch.setattr(
+        scheduler,
+        "_resolve_delivery_targets",
+        lambda job: [{"platform": "bluebubbles", "chat_id": "contact-guid"}],
+    )
+    monkeypatch.setattr(
+        "tools.send_message_tool._send_to_platform",
+        lambda *args, **kwargs: called.append((args, kwargs)),
+    )
+    job = {
+        "id": "legacy-probe",
+        "name": "Proactive alarm sink end-to-end probe",
+        "deliver": "bluebubbles:contact-guid",
+    }
+
+    error = scheduler._deliver_result(job, "diagnostic output")
+
+    assert error and "BlueBubbles is forbidden" in error
+    assert called == []
+
+
+def test_ordinary_maintenance_reminder_is_not_classified_as_internal(monkeypatch):
+    from cron import scheduler
+
+    monkeypatch.setattr(scheduler, "_resolve_delivery_targets", lambda job: [])
+    job = {
+        "id": "user-reminder",
+        "name": "Remind me about car maintenance",
+        "deliver": "bluebubbles:contact-guid",
+    }
+
+    error = scheduler._deliver_result(job, "Book service")
+
+    assert error and "BlueBubbles is forbidden" not in error
 
 
 def test_cron_does_not_ack_wrong_probe_output_or_transport_metadata(monkeypatch, tmp_path: Path):

@@ -114,6 +114,30 @@ def test_semantic_reextract_refuses_populated_target_without_explicit_override(t
     assert not staging.exists()
 
 
+def test_semantic_reextract_guard_reads_committed_wal_rows(tmp_path: Path):
+    source=tmp_path/'chat.db'; staging=tmp_path/'private'; db(source)
+    poke=tmp_path/'poke'; guest=tmp_path/'guest'
+    target=poke/'contact-memory'/'contacts'; target.mkdir(parents=True)
+    from gateway.contact_memory.store import opaque_contact_filename
+    path=target/opaque_contact_filename('kosta-owner')
+    writer=sqlite3.connect(path)
+    writer.execute('PRAGMA journal_mode=WAL')
+    writer.execute('PRAGMA wal_autocheckpoint=0')
+    writer.execute('CREATE TABLE fact(fact_id TEXT PRIMARY KEY)')
+    writer.commit()
+    writer.execute("INSERT INTO fact VALUES('committed-in-wal')")
+    writer.commit()
+    args=['--source-person','Stephen Lucier','--chat-db',str(source),'--handle','+140****0100',
+          '--staging-dir',str(staging),'--poke-root',str(poke),'--guest-root',str(guest),'--run-semantic']
+    try:
+        with pytest.raises(SystemExit) as exc:
+            bootstrap_main(args)
+        assert exc.value.code==2
+        assert not staging.exists()
+    finally:
+        writer.close()
+
+
 def test_extraction_merge_coverage_and_review_execute_with_canonical_ids(tmp_path: Path):
     source=tmp_path/'chat.db'; db(source)
     with open_messages_readonly(source) as con:

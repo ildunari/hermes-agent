@@ -1482,6 +1482,30 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     Returns None on success, or an error string on failure.
     """
     targets = _resolve_delivery_targets(job)
+
+    # Fail closed before either the normal-profile or delegated-profile send
+    # path can load an adapter. Internal maintenance/probe/bootstrap output is
+    # operational telemetry, never conversation content. This also covers
+    # old/tampered records that predate ``delivery_profile``.
+    internal_names = {
+        "contact memory interest maintenance",
+        "proactive rollout health watchdog",
+        "proactive alarm sink end-to-end probe",
+    }
+    internal_script_markers = (
+        "maintenance", "watchdog", "bootstrap", "dry_run", "dry-run", "probe",
+    )
+    job_name = str(job.get("name") or "").strip().lower()
+    script_name = Path(str(job.get("script") or "")).name.lower()
+    is_internal = job_name in internal_names or any(
+        marker in script_name for marker in internal_script_markers
+    )
+    if is_internal:
+        if any(str(target.get("platform") or "").lower() == "bluebubbles" for target in targets):
+            msg = "internal maintenance/watchdog/bootstrap/dry-run delivery to BlueBubbles is forbidden"
+            logger.error("Job '%s': %s", job.get("id", "?"), msg)
+            return msg
+
     if not targets:
         deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
         if deliver_value == "local":

@@ -41,7 +41,9 @@ def _existing_target_data(profile_root: Path, contact_id: str) -> dict[str, int]
     )
     if not db_path.is_file():
         return {}
-    uri = f"file:{db_path}?mode=ro&immutable=1"
+    # Do not use immutable=1: live contact stores use WAL, and immutable
+    # readers ignore committed rows that have not yet been checkpointed.
+    uri = f"file:{db_path}?mode=ro"
     with sqlite3.connect(uri, uri=True) as con:
         tables = {
             str(row[0])

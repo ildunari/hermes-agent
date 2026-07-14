@@ -144,14 +144,13 @@ def validate_delegated_alarm_delivery(source_home: Path, delivery_profile: str, 
     config, platform, pconfig = load_delivery_profile_config(home, target["platform"])
     address = target["address"]
 
-    # BlueBubbles remains exclusively owned by Poke and is constrained to its
-    # configured home channel. This preserves the existing Poke/Guest ingress.
+    # Internal proactive alarms must never enter a contact conversation.  Poke
+    # owns BlueBubbles ingress, but that ownership is not permission for cron,
+    # maintenance, watchdog, bootstrap, probe, or dry-run output to use the
+    # transport.  Operator alarms must use an explicitly authenticated
+    # non-contact surface (normally Telegram).
     if platform == Platform.BLUEBUBBLES:
-        if home.name != "poke":
-            raise ValueError("Poke is the sole BlueBubbles transport owner")
-        channel = pconfig.home_channel
-        if not channel or str(channel.chat_id) != address:
-            raise ValueError("BlueBubbles alarm target must exactly match Poke's configured home channel")
+        raise ValueError("internal proactive alarm delivery to BlueBubbles is forbidden")
     elif not (_recent_authenticated_dm(home, target["platform"], address) or _allowed_chat(pconfig, address)):
         raise ValueError(
             "alarm destination must match an authenticated recent DM or explicitly allowed chat "
