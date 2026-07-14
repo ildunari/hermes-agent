@@ -54,12 +54,14 @@ GATEWAY_TARGETS: tuple[RestartTarget, ...] = (
     RestartTarget("user/{uid}", "ai.hermes.gateway-design", required=False, description="design profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-bookie", required=False, description="bookie profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-scientist", required=False, description="scientist profile gateway"),
+    RestartTarget("user/{uid}", "ai.hermes.gateway-poke", required=False, description="Poke/BlueBubbles profile gateway"),
     # Some profile LaunchAgents with LimitLoadToSessionType Aqua/Background load
     # into the gui domain instead of user. Keep both optional targets so a full
     # restart touches whichever domain launchd actually chose.
     RestartTarget("gui/{uid}", "ai.hermes.gateway-design", required=False, description="design profile gateway"),
     RestartTarget("gui/{uid}", "ai.hermes.gateway-bookie", required=False, description="bookie profile gateway"),
     RestartTarget("gui/{uid}", "ai.hermes.gateway-scientist", required=False, description="scientist profile gateway"),
+    RestartTarget("gui/{uid}", "ai.hermes.gateway-poke", required=False, description="Poke/BlueBubbles profile gateway"),
     # The WebUI/dashboard LaunchAgent owns the local dashboard backend on 9119.
     # It must move with /restart-gateways after smart updates; otherwise the
     # gateways can restart on new code while the dashboard keeps an old process.
@@ -105,6 +107,7 @@ GATEWAY_STATUS_PATHS: dict[str, Path] = {
     "ai.hermes.gateway-design": Path.home() / ".hermes" / "profiles" / "design" / "gateway_state.json",
     "ai.hermes.gateway-bookie": Path.home() / ".hermes" / "profiles" / "bookie" / "gateway_state.json",
     "ai.hermes.gateway-scientist": Path.home() / ".hermes" / "profiles" / "scientist" / "gateway_state.json",
+    "ai.hermes.gateway-poke": Path.home() / ".hermes" / "profiles" / "poke" / "gateway_state.json",
 }
 # A queued restart should behave like a staged operation: if another Hermes
 # session is still running, wait for it to drain instead of forcing Kosta to
