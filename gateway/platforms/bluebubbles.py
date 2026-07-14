@@ -64,11 +64,11 @@ DEFAULT_MENTION_PATTERNS = [
 # Tapback reaction codes (BlueBubbles associatedMessageType values)
 _TAPBACK_ADDED = {
     2000: "love", 2001: "like", 2002: "dislike",
-    2003: "laugh", 2004: "emphasize", 2005: "question",
+    2003: "laugh", 2004: "emphasis", 2005: "question",
 }
 _TAPBACK_REMOVED = {
     3000: "love", 3001: "like", 3002: "dislike",
-    3003: "laugh", 3004: "emphasize", 3005: "question",
+    3003: "laugh", 3004: "emphasis", 3005: "question",
 }
 
 # Webhook event types that carry user messages
@@ -1119,7 +1119,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if isinstance(data, dict):
             return [data]
         if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
+            if not all(isinstance(item, dict) for item in data):
+                raise ValueError("data list members must be message records")
+            return data
         if isinstance(payload.get("message"), dict):
             return [payload["message"]]
         return [payload] if isinstance(payload, dict) else []
@@ -1139,18 +1141,22 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         return None
 
     @staticmethod
-    def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    def _coerce_bool(
+        value: Any, *, default: bool = False, field: str = "value"
+    ) -> bool:
         if isinstance(value, bool):
             return value
         if value is None:
             return default
+        if isinstance(value, int) and value in {0, 1}:
+            return bool(value)
         if isinstance(value, str):
             normalized = value.strip().lower()
             if normalized in {"1", "true", "yes", "on"}:
                 return True
             if normalized in {"0", "false", "no", "off"}:
                 return False
-        return default
+        raise ValueError(f"{field} is not a boolean")
 
     @staticmethod
     def _value_or_raw(mapping: Mapping[str, Any], *names: str) -> Any:
@@ -1203,7 +1209,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         return float(received_at), "received_at"
 
     def _normalize_ingress_record(
-        self, record: Mapping[str, Any], *, received_at: float
+        self, record: Mapping[str, Any], *, received_at: float, record_index: int = 0
     ) -> CommunicationIngressEnvelope:
         """Freeze one BlueBubbles record as versioned transport-only facts."""
         from gateway.contact_memory.imessage_communication_adapter import (
@@ -1215,9 +1221,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         from gateway.contact_memory.imessage_link_review import extract_urls
 
         text = self._value(record.get("text"), record.get("message"), record.get("body")) or ""
-        is_from_me = self._coerce_bool(self._value_or_raw(
-            record, "isFromMe", "fromMe", "is_from_me"
-        ))
+        is_from_me = self._coerce_bool(
+            self._value_or_raw(record, "isFromMe", "fromMe", "is_from_me"),
+            field="isFromMe",
+        )
         chat_guid = self._value(record.get("chatGuid"), record.get("chat_guid"))
         chat_identifier = self._value(
             record.get("chatIdentifier"), record.get("chat_identifier"),
@@ -1237,7 +1244,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             record.get("sender"), record.get("from"), record.get("address"),
             chat_identifier,
         ) or "unknown"
-        is_group = self._coerce_bool(self._value_or_raw(record, "isGroup", "is_group"))
+        is_group = self._coerce_bool(
+            self._value_or_raw(record, "isGroup", "is_group"), field="isGroup"
+        )
         is_group = is_group or ";+;" in (chat_guid or "")
         associated_type = self._coerce_int(self._value_or_raw(
             record, "associatedMessageType", "associated_message_type"
@@ -1315,8 +1324,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             str(record.get("id")) if record.get("id") is not None else None,
         )
         if not source_message_id:
+            fallback_record = json.dumps(
+                dict(record), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
             source_message_id = "fallback:" + hashlib.sha256(
-                "\0".join((sender, chat_guid or "", f"{occurred_at:.6f}", text)).encode()
+                f"{record_index}\0{fallback_record}".encode()
             ).hexdigest()
         return CommunicationIngressEnvelope(
             version=1,
@@ -1488,20 +1500,22 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             return web.Response(text="ok")
 
         received_at = datetime.now(timezone.utc).timestamp()
-        records = self._extract_payload_records(payload)
-        if not records:
-            return web.json_response({"error": "missing message records"}, status=400)
-        if _committed_ingress is not None:
-            ingress = _committed_ingress
-        else:
-            try:
+        try:
+            records = self._extract_payload_records(payload)
+            if not records:
+                return web.json_response({"error": "missing message records"}, status=400)
+            if _committed_ingress is not None:
+                ingress = _committed_ingress
+            else:
                 ingress = tuple(
-                    self._normalize_ingress_record(record, received_at=received_at)
-                    for record in records
+                    self._normalize_ingress_record(
+                        record, received_at=received_at, record_index=index
+                    )
+                    for index, record in enumerate(records)
                 )
-            except ValueError as exc:
-                logger.warning("[bluebubbles] rejected malformed ingress: %s", exc)
-                return web.json_response({"error": "invalid message record"}, status=400)
+        except ValueError as exc:
+            logger.warning("[bluebubbles] rejected malformed ingress: %s", exc)
+            return web.json_response({"error": "invalid message record"}, status=400)
         if all(item.direction == "outbound" for item in ingress):
             return web.Response(text="ok")
         if any(item.direction != "inbound" for item in ingress):

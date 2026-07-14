@@ -12,6 +12,7 @@ import hmac
 import os
 from pathlib import Path
 import stat
+import tempfile
 from typing import Sequence
 import urllib.parse
 
@@ -64,18 +65,31 @@ def load_or_create_communication_key(root: str | Path) -> bytes:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
         secret = os.urandom(32)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{_KEY_NAME}.", dir=directory
+        )
         try:
-            fd = os.open(path, flags, 0o600)
-        except FileExistsError:
-            # Another ingress worker won the first-use race. Re-open and
-            # validate that winner rather than failing an otherwise valid ACK.
-            return load_or_create_communication_key(directory)
-        try:
-            os.write(fd, secret)
-            os.fsync(fd)
+            try:
+                written = 0
+                while written < len(secret):
+                    count = os.write(fd, secret[written:])
+                    if count <= 0:
+                        raise OSError("communication HMAC key write made no progress")
+                    written += count
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            try:
+                os.link(temporary_name, path, follow_symlinks=False)
+            except FileExistsError:
+                return load_or_create_communication_key(directory)
         finally:
-            os.close(fd)
+            os.unlink(temporary_name)
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
         return secret
     try:
         info = os.fstat(fd)
@@ -151,6 +165,35 @@ def persist_live_communication_ingress(
     if len(key) < 16:
         raise ValueError("HMAC secret must be at least 16 bytes")
     store = ContactMemoryStore(root, contact_id)
+    target_roles: dict[str, CommunicationActorRole] = {}
+    for envelope in immutable:
+        source_id = _source_identity(key, envelope.source_message_id)
+        existing = store.get_communication_event_by_source("imessage", source_id)
+        target_roles[source_id] = (
+            existing.actor_role if existing is not None else CommunicationActorRole.CONTACT
+        )
+    for envelope in immutable:
+        for relation_name, target in (
+            ("reply", envelope.reply_target),
+            ("reaction", envelope.reaction_target),
+        ):
+            if target is None:
+                continue
+            target_source_id = _source_identity(key, target)
+            target_role = target_roles.get(target_source_id)
+            if target_role is None:
+                target_event = store.get_communication_event_by_source(
+                    "imessage", target_source_id
+                )
+                target_role = target_event.actor_role if target_event is not None else None
+            if target_role is None:
+                raise ValueError(f"unauthenticated {relation_name} target")
+            if (
+                relation_name == "reaction"
+                and target_role is not CommunicationActorRole.COUNTERPART
+            ):
+                raise ValueError("reaction target is not a counterpart")
+            target_roles[target_source_id] = target_role
     batch_id = _batch_identity(key, contact_id, immutable)
     event_ids: list[str] = []
     inserted = deduplicated = 0
@@ -218,20 +261,22 @@ def persist_live_communication_ingress(
             ))
         relations: list[CommunicationRelation] = []
         if envelope.reply_target:
+            reply_source_id = _source_identity(key, envelope.reply_target)
             relations.append(_relation(
                 key,
                 event_id,
                 CommunicationRelationType.REPLY_TO,
-                _source_identity(key, envelope.reply_target),
-                target_actor_role=CommunicationActorRole.COUNTERPART,
+                reply_source_id,
+                target_actor_role=target_roles[reply_source_id],
             ))
         if envelope.reaction_target:
+            reaction_source_id = _source_identity(key, envelope.reaction_target)
             relations.append(_relation(
                 key,
                 event_id,
                 CommunicationRelationType.REACTION_TO,
-                _source_identity(key, envelope.reaction_target),
-                target_actor_role=CommunicationActorRole.COUNTERPART,
+                reaction_source_id,
+                target_actor_role=target_roles[reaction_source_id],
             ))
         if batch_id is not None and reaction_subtype is None:
             relations.append(_relation(

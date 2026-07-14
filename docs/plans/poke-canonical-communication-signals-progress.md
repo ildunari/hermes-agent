@@ -100,7 +100,7 @@ Add the immutable live ingress envelope at the platform boundary, freeze owner/g
 
 ## Phase C — Live ingress parity
 
-Status: Phase C implementation complete and locally verified; parent Gate C review is pending. Phase D has not started.
+Status: Independent Gate C findings repaired and locally verified; parent Gate C rerun is pending. Phase D has not started.
 
 Commit: Phase C boundary commit containing this progress record (the final SHA is reported by the implementation thread).
 
@@ -125,3 +125,11 @@ The requested full `tests/gateway` run was executed but is not globally green on
 
 - Phase C persists authenticated transport evidence only. It does not infer interests, entities, recommendations, follow-through, or callbacks; those remain Phase D.
 - Poke and Guest remain observe-only. This phase did not access live stores/messages, restart a gateway, enable sends, push, or open a pull request.
+
+### Gate C repair
+
+Independent Gate C review rejected boundary commit `88e8b62ff` with six P1 findings. The repair accepts only exact boolean values (including integer `0`/`1`) and rejects malformed direction/group aliases, uses the canonical `emphasis` tapback subtype through all 12 add/remove persistence paths, atomically publishes a fully written first-use HMAC key, and validates reply/reaction targets against the per-contact canonical store before any batch write. Reply relations now preserve authenticated same-speaker versus counterpart roles, while reactions require an authenticated counterpart target exactly as the historical adapter does.
+
+Mixed malformed `data` lists now fail the webhook without ACK or partial ingress. Missing-GUID fallback identities commit to the deterministic full record plus stable list position, keeping same-timestamp attachment-only members distinct across retries. Focused regressions cover exact and alias boolean boundaries, malformed values, the blocked-writer key race, missing/foreign/same-speaker targets, historical/live actor-role parity, all tapback codes through retraction, malformed mixed wrappers, and identical no-GUID list members.
+
+Red-first verification reproduced 27 failures in the focused live-ingress file before implementation. Final verification completed the focused three-file Phase C set with 164 passed and 0 failed, and the 15-file surrounding canonical/contact-memory/BlueBubbles set with 406 passed and 0 failed. The broad `tests/gateway` run again reported the same pre-existing boundary as the original Phase C run: 130 failures across 37 files, with all Phase C focused and surrounding files green. Focused `py_compile`, Ruff, and `git diff --check` passed. No live data was touched, no gateway was restarted, no send mode was changed, and no Phase D work began.

@@ -897,6 +897,17 @@ contacts:
 
 @pytest.mark.asyncio
 async def test_live_reaction_persists_without_agent_dispatch(tmp_path):
+    from gateway.contact_memory.live_ingress import (
+        _event_identity,
+        _source_identity,
+        load_or_create_communication_key,
+    )
+    from gateway.contact_memory.schema import (
+        CommunicationActorRole,
+        CommunicationDirection,
+        CommunicationEvent,
+        CommunicationKind,
+    )
     from gateway.contact_memory.store import ContactMemoryStore
 
     registry = tmp_path / "contacts.yaml"
@@ -918,6 +929,22 @@ contacts:
     profile_home = tmp_path / "guest-profile"
     runner._resolve_profile_home_for_source = lambda source: profile_home
     runner._handle_message_with_agent = AsyncMock(return_value=None)
+    store_root = profile_home / "contact-memory"
+    key = load_or_create_communication_key(store_root)
+    ContactMemoryStore(store_root, "stephen-lucier").ingest_communication_event(
+        CommunicationEvent(
+            event_id=_event_identity(key, "stephen-lucier", "target-guid-1"),
+            platform="imessage",
+            source_id=_source_identity(key, "target-guid-1"),
+            occurred_at=1720961999.0,
+            direction=CommunicationDirection.INBOUND,
+            kind=CommunicationKind.TEXT,
+            actor_role=CommunicationActorRole.COUNTERPART,
+            text_present=False,
+            text_length=0,
+            provenance="synthetic-counterpart-v1",
+        )
+    )
     envelope = _live_envelope(
         source_id="tapback-guid",
         text="",
@@ -940,7 +967,7 @@ contacts:
 
     runner._handle_message_with_agent.assert_not_awaited()
     hook.assert_not_called()
-    store = ContactMemoryStore(profile_home / "contact-memory", "stephen-lucier")
+    store = ContactMemoryStore(store_root, "stephen-lucier")
     with sqlite3.connect(store.path) as con:
         assert con.execute(
             "SELECT COUNT(*) FROM communication_event WHERE kind='reaction_add'"

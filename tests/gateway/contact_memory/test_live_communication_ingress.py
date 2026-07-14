@@ -13,12 +13,19 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.contact_memory.live_ingress import (
+    _event_identity,
+    _source_identity,
     load_or_create_communication_key,
     persist_live_communication_ingress,
 )
 from gateway.contact_memory.schema import (
+    CommunicationActorRole,
+    CommunicationDirection,
+    CommunicationEvent,
     CommunicationKind,
     CommunicationLifecycle,
+    CommunicationPrivacy,
+    CommunicationReactionSubtype,
     CommunicationRelationType,
 )
 from gateway.contact_memory.store import ContactMemoryStore
@@ -69,7 +76,8 @@ def test_envelope_is_frozen_and_versioned(monkeypatch):
 def test_payload_wrappers_and_multi_record_lists_are_not_truncated(monkeypatch):
     adapter = _adapter(monkeypatch)
 
-    assert [item["guid"] for item in adapter._extract_payload_records({"data": [_record("a"), "bad", _record("b")]})] == ["a", "b"]
+    with pytest.raises(ValueError, match="data list members must be message records"):
+        adapter._extract_payload_records({"data": [_record("a"), "bad", _record("b")]})
     assert [item["guid"] for item in adapter._extract_payload_records({"data": _record("c")})] == ["c"]
     assert [item["guid"] for item in adapter._extract_payload_records({"message": _record("d")})] == ["d"]
     assert [item["guid"] for item in adapter._extract_payload_records(_record("e"))] == ["e"]
@@ -95,6 +103,46 @@ def test_alias_boolean_reaction_and_timestamp_normalization(monkeypatch):
     assert envelope.reaction_kind == "laugh"
     assert envelope.reaction_target == "target-guid-1"
     assert envelope.occurred_at == 1720962000.0
+
+
+@pytest.mark.parametrize(
+    ("field", "alias", "zero_expected", "one_expected"),
+    [
+        ("isFromMe", "isFromMe", "inbound", "outbound"),
+        ("isFromMe", "fromMe", "inbound", "outbound"),
+        ("isFromMe", "is_from_me", "inbound", "outbound"),
+        ("isGroup", "isGroup", "dm", "group"),
+        ("isGroup", "is_group", "dm", "group"),
+    ],
+)
+def test_exact_integer_boolean_aliases_are_accepted(
+    monkeypatch, field, alias, zero_expected, one_expected
+):
+    adapter = _adapter(monkeypatch)
+    zero = _record(f"{field}-zero")
+    zero.pop(field)
+    zero[alias] = 0
+    one = _record(f"{field}-one")
+    one.pop(field)
+    one[alias] = 1
+
+    zero_envelope = adapter._normalize_ingress_record(zero, received_at=1.0)
+    one_envelope = adapter._normalize_ingress_record(one, received_at=1.0)
+
+    attribute = "direction" if field == "isFromMe" else "chat_type"
+    assert getattr(zero_envelope, attribute) == zero_expected
+    assert getattr(one_envelope, attribute) == one_expected
+
+
+@pytest.mark.parametrize("field", ["isFromMe", "isGroup"])
+@pytest.mark.parametrize("malformed", [2, -1, 0.0, 1.0, "maybe", [], {}])
+def test_malformed_boolean_values_fail_closed(monkeypatch, field, malformed):
+    adapter = _adapter(monkeypatch)
+
+    with pytest.raises(ValueError, match=f"{field} is not a boolean"):
+        adapter._normalize_ingress_record(
+            _record(f"malformed-{field}", **{field: malformed}), received_at=1.0
+        )
 
 
 def test_unsupported_associated_type_and_conflicting_reply_aliases_fail_closed(monkeypatch):
@@ -208,31 +256,203 @@ def test_batch_members_persist_in_order_without_collapsing(tmp_path, monkeypatch
     )
 
 
-def test_reaction_add_remove_persist_and_retract_without_text(tmp_path, monkeypatch):
+def _persist_counterpart_target(root, contact_id: str, source_key: str) -> CommunicationEvent:
+    source_id = _source_identity(_SECRET, source_key)
+    event = CommunicationEvent(
+        event_id=_event_identity(_SECRET, contact_id, source_key),
+        platform="imessage",
+        source_id=source_id,
+        occurred_at=0.5,
+        direction=CommunicationDirection.INBOUND,
+        kind=CommunicationKind.TEXT,
+        actor_role=CommunicationActorRole.COUNTERPART,
+        privacy=CommunicationPrivacy.PRIVATE,
+        text_present=False,
+        text_length=0,
+        provenance="synthetic-counterpart-v1",
+    )
+    ContactMemoryStore(root, contact_id).ingest_communication_event(event)
+    return event
+
+
+def test_all_twelve_tapback_codes_normalize_and_persist_through_retraction(
+    tmp_path, monkeypatch
+):
     adapter = _adapter(monkeypatch)
-    target = adapter._normalize_ingress_record(_record("target-guid-1", "target"), received_at=1.0)
-    add = adapter._normalize_ingress_record(_record(
-        "tap-add", "", associatedMessageType="2001", associatedMessageGuid="bp:4/target-guid-1"
-    ), received_at=2.0)
-    remove = adapter._normalize_ingress_record(_record(
-        "tap-remove", "", associatedMessageType=3001, associatedMessageGuid="p:4/target-guid-1"
-    ), received_at=3.0)
     root = tmp_path / "contact-memory"
+    contact_id = "stephen-lucier"
+    expected = {
+        0: CommunicationReactionSubtype.LOVE,
+        1: CommunicationReactionSubtype.LIKE,
+        2: CommunicationReactionSubtype.DISLIKE,
+        3: CommunicationReactionSubtype.LAUGH,
+        4: CommunicationReactionSubtype.EMPHASIS,
+        5: CommunicationReactionSubtype.QUESTION,
+    }
+    add_ids = []
 
-    initial = persist_live_communication_ingress(
-        root=root, contact_id="stephen-lucier", principal="guest",
-        envelopes=(target, add), secret=_SECRET,
-    )
-    removed = persist_live_communication_ingress(
-        root=root, contact_id="stephen-lucier", principal="guest",
-        envelopes=(remove,), secret=_SECRET,
+    for subtype, expected_subtype in expected.items():
+        target = f"target-guid-{subtype}"
+        _persist_counterpart_target(root, contact_id, target)
+        add = adapter._normalize_ingress_record(_record(
+            f"tap-add-{subtype}", "", associatedMessageType=2000 + subtype,
+            associatedMessageGuid=f"bp:4/{target}",
+        ), received_at=2.0 + subtype)
+        remove = adapter._normalize_ingress_record(_record(
+            f"tap-remove-{subtype}", "", associatedMessageType=str(3000 + subtype),
+            associatedMessageGuid=f"p:4/{target}",
+        ), received_at=20.0 + subtype)
+        initial = persist_live_communication_ingress(
+            root=root, contact_id=contact_id, principal="guest",
+            envelopes=(add,), secret=_SECRET,
+        )
+        removed = persist_live_communication_ingress(
+            root=root, contact_id=contact_id, principal="guest",
+            envelopes=(remove,), secret=_SECRET,
+        )
+        add_ids.append(initial.event_ids[0])
+        remove_event = ContactMemoryStore(root, contact_id).get_communication_event(
+            removed.event_ids[0]
+        )
+        assert remove_event is not None
+        assert remove_event.kind is CommunicationKind.REACTION_REMOVE
+        assert remove_event.reaction_subtype is expected_subtype
+
+    store = ContactMemoryStore(root, contact_id)
+    add_events = [store.get_communication_event(event_id) for event_id in add_ids]
+    assert all(event is not None for event in add_events)
+    assert all(
+        event.lifecycle is CommunicationLifecycle.RETRACTED
+        for event in add_events if event is not None
     )
 
-    store = ContactMemoryStore(root, "stephen-lucier")
-    add_event = store.get_communication_event(initial.event_ids[1])
-    remove_event = store.get_communication_event(removed.event_ids[0])
-    assert add_event is not None and add_event.lifecycle is CommunicationLifecycle.RETRACTED
-    assert remove_event is not None and remove_event.kind is CommunicationKind.REACTION_REMOVE
+
+def test_live_reply_target_roles_match_historical_same_and_counterpart_semantics(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(monkeypatch)
+    root = tmp_path / "contact-memory"
+    contact_id = "stephen-lucier"
+    same_target = adapter._normalize_ingress_record(
+        _record("same-speaker-target", "same"), received_at=1.0
+    )
+    persist_live_communication_ingress(
+        root=root, contact_id=contact_id, principal="guest",
+        envelopes=(same_target,), secret=_SECRET,
+    )
+    counterpart = _persist_counterpart_target(root, contact_id, "counterpart-target")
+
+    replies = tuple(
+        adapter._normalize_ingress_record(_record(
+            f"reply-{index}", "reply", replyToGuid=f"p:0/{target}"
+        ), received_at=2.0 + index)
+        for index, target in enumerate(("same-speaker-target", "counterpart-target"))
+    )
+    result = persist_live_communication_ingress(
+        root=root, contact_id=contact_id, principal="guest",
+        envelopes=replies, secret=_SECRET,
+    )
+    store = ContactMemoryStore(root, contact_id)
+    bundles = [store.get_communication_bundle(event_id) for event_id in result.event_ids]
+    assert all(bundle is not None for bundle in bundles)
+    relations = [
+        next(
+            relation for relation in bundle.relations
+            if relation.relation_type is CommunicationRelationType.REPLY_TO
+        )
+        for bundle in bundles if bundle is not None
+    ]
+
+    assert relations[0].target_actor_role is CommunicationActorRole.CONTACT
+    assert relations[1].target_actor_role is CommunicationActorRole.COUNTERPART
+    assert relations[1].target_source_id == counterpart.source_id
+
+
+@pytest.mark.parametrize("kind", ["reply", "reaction"])
+@pytest.mark.parametrize("target_scope", ["missing", "foreign"])
+def test_missing_and_foreign_live_targets_fail_before_any_batch_write(
+    tmp_path, monkeypatch, kind, target_scope
+):
+    adapter = _adapter(monkeypatch)
+    root = tmp_path / "contact-memory"
+    contact_id = "stephen-lucier"
+    target = f"{target_scope}-target"
+    if target_scope == "foreign":
+        _persist_counterpart_target(root, "other-contact", target)
+    valid = adapter._normalize_ingress_record(_record("valid-before-invalid"), received_at=1.0)
+    overrides = (
+        {"replyToGuid": f"p:0/{target}"}
+        if kind == "reply"
+        else {"associatedMessageType": 2001, "associatedMessageGuid": f"p:0/{target}"}
+    )
+    invalid = adapter._normalize_ingress_record(
+        _record("invalid-target", "", **overrides), received_at=2.0
+    )
+
+    with pytest.raises(ValueError, match=f"unauthenticated {kind} target"):
+        persist_live_communication_ingress(
+            root=root, contact_id=contact_id, principal="guest",
+            envelopes=(valid, invalid), secret=_SECRET,
+        )
+
+    assert ContactMemoryStore(root, contact_id).get_communication_event_by_source(
+        "imessage", _source_identity(_SECRET, "valid-before-invalid")
+    ) is None
+
+
+def test_same_speaker_live_reaction_target_is_rejected_like_historical_ingress(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(monkeypatch)
+    root = tmp_path / "contact-memory"
+    contact_id = "stephen-lucier"
+    target = adapter._normalize_ingress_record(
+        _record("same-speaker-reaction-target"), received_at=1.0
+    )
+    persist_live_communication_ingress(
+        root=root, contact_id=contact_id, principal="guest",
+        envelopes=(target,), secret=_SECRET,
+    )
+    reaction = adapter._normalize_ingress_record(_record(
+        "same-speaker-reaction", "", associatedMessageType=2000,
+        associatedMessageGuid="p:0/same-speaker-reaction-target",
+    ), received_at=2.0)
+
+    with pytest.raises(ValueError, match="reaction target is not a counterpart"):
+        persist_live_communication_ingress(
+            root=root, contact_id=contact_id, principal="guest",
+            envelopes=(reaction,), secret=_SECRET,
+        )
+
+
+def test_no_guid_fallback_is_deterministic_and_unique_per_list_member(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(monkeypatch)
+    records = []
+    for _ in range(2):
+        record = _record("unused", "", attachments=[{"mimeType": "image/jpeg"}])
+        record.pop("guid")
+        records.append(record)
+    first = tuple(
+        adapter._normalize_ingress_record(record, received_at=10.0, record_index=index)
+        for index, record in enumerate(records)
+    )
+    replay = tuple(
+        adapter._normalize_ingress_record(record, received_at=99.0, record_index=index)
+        for index, record in enumerate(records)
+    )
+
+    assert len({item.source_message_id for item in first}) == 2
+    assert [item.source_message_id for item in replay] == [
+        item.source_message_id for item in first
+    ]
+    result = persist_live_communication_ingress(
+        root=tmp_path / "contact-memory", contact_id="stephen-lucier",
+        principal="guest", envelopes=first, secret=_SECRET,
+    )
+    assert result.inserted == 2
+    assert len(set(result.event_ids)) == 2
 
 
 def test_principal_selects_actor_identity_and_physical_store(tmp_path, monkeypatch):
@@ -300,6 +520,39 @@ def test_concurrent_first_ingress_creates_one_shared_hmac_key(tmp_path, monkeypa
     assert keys[0] == keys[1]
 
 
+def test_first_use_key_is_not_visible_until_fully_written(tmp_path, monkeypatch):
+    root = tmp_path / "contact-memory"
+    import os
+
+    real_write = os.write
+    writer_blocked = threading.Event()
+    release_writer = threading.Event()
+    guard = threading.Lock()
+    blocked_once = False
+
+    def blocked_write(fd, data):
+        nonlocal blocked_once
+        with guard:
+            should_block = not blocked_once
+            if should_block:
+                blocked_once = True
+        if should_block:
+            writer_blocked.set()
+            assert release_writer.wait(timeout=2)
+        return real_write(fd, data)
+
+    monkeypatch.setattr("gateway.contact_memory.live_ingress.os.write", blocked_write)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(load_or_create_communication_key, root)
+        assert writer_blocked.wait(timeout=2)
+        reader = pool.submit(load_or_create_communication_key, root)
+        reader_key = reader.result(timeout=2)
+        release_writer.set()
+        writer_key = writer.result(timeout=2)
+
+    assert writer_key == reader_key
+
+
 class _Request:
     query = {"password": "secret"}
     headers = {}
@@ -339,6 +592,26 @@ async def test_webhook_persists_all_list_members_before_reactive_dispatch(monkey
     assert order[1] == ("reactive", "first\nsecond")
     assert handled[0].communication_ingress[0].visible_text == "first"
     assert handled[0].communication_ingress[1].visible_text == "second"
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_mixed_malformed_data_list_without_ack_or_ingress(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    called = False
+
+    async def ingress(_event):
+        nonlocal called
+        called = True
+        return ()
+
+    adapter.set_ingress_handler(ingress)
+    response = await adapter._handle_webhook(_Request({
+        "type": "new-message",
+        "data": [_record("valid-member"), "malformed-member"],
+    }))
+
+    assert response.status == 400
+    assert called is False
 
 
 @pytest.mark.asyncio
