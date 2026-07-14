@@ -15,15 +15,47 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from gateway.contact_memory.admin import resolve_contact_memory_root
-from gateway.contact_memory.interest_maintenance import (
-    _auxiliary_maintenance_model,
-    run_profile_maintenance,
-)
-
 # Replaced in the profile-owned copy by install_contact_memory_maintenance_cron.py.
 INSTALLED_ROOT: str | None = None
 INSTALLED_TASK: str | None = None
+INSTALLED_SOURCE_ROOT: str | None = None
+
+
+def _bootstrap_installed_source_root() -> None:
+    """Import an installed runner from the checkout which installed it.
+
+    Profile scripts live outside the Python source tree, and cron intentionally
+    does not rely on an ambient ``PYTHONPATH``.  The installer pins its own
+    resolved checkout root here.  Validate the pin before putting it first on
+    ``sys.path`` so a stale/tampered runner fails closed instead of importing a
+    same-named package from another Hermes checkout.
+    """
+    if INSTALLED_SOURCE_ROOT is None:
+        return
+    source_root = Path(INSTALLED_SOURCE_ROOT).expanduser().resolve()
+    required = (
+        source_root / "gateway" / "__init__.py",
+        source_root / "cron" / "scheduler.py",
+        source_root / "scripts" / "contact_memory_interest_maintenance.py",
+    )
+    if not all(path.is_file() for path in required):
+        raise RuntimeError(f"installed Hermes source root is invalid: {source_root}")
+    source = str(source_root)
+    if not sys.path or sys.path[0] != source:
+        try:
+            sys.path.remove(source)
+        except ValueError:
+            pass
+        sys.path.insert(0, source)
+
+
+_bootstrap_installed_source_root()
+
+from gateway.contact_memory.admin import resolve_contact_memory_root  # noqa: E402
+from gateway.contact_memory.interest_maintenance import (  # noqa: E402
+    _auxiliary_maintenance_model,
+    run_profile_maintenance,
+)
 
 
 def _resolve_root(args: argparse.Namespace, parser: argparse.ArgumentParser) -> Path:

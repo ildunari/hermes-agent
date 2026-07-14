@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,6 +47,7 @@ def test_install_is_idempotent_profile_isolated_and_exact(tmp_path, monkeypatch)
     installed_source = installed.read_text(encoding="utf-8")
     assert str((profile / "contact-memory").resolve()) in installed_source
     assert "INSTALLED_TASK: str | None = 'monitor'" in installed_source
+    assert f"INSTALLED_SOURCE_ROOT: str | None = {str(Path(installer.__file__).resolve().parents[1])!r}" in installed_source
 
 
 def test_dry_run_does_not_write(tmp_path):
@@ -61,16 +65,41 @@ def test_installed_no_agent_script_executes_silently_through_scheduler(
 ):
     profile = tmp_path / "scheduled-profile"
     ambient_decoy = tmp_path / "ambient-profile"
+    import_decoy = tmp_path / "import-decoy"
+    (import_decoy / "gateway").mkdir(parents=True)
+    (import_decoy / "gateway" / "__init__.py").write_text(
+        "raise RuntimeError('cross-checkout gateway import')\n", encoding="utf-8"
+    )
     installer.install(root=str(profile))
     # A profile-scoped scheduler may use a context/module override while the
     # process-global environment still points at another live profile.  The
     # child must inherit the same profile used to resolve its script.
     monkeypatch.setenv("HERMES_HOME", str(ambient_decoy))
+    monkeypatch.setenv("PYTHONPATH", str(import_decoy))
     monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: profile)
 
     success, output = scheduler._run_job_script(installer.JOB_SCRIPT)
     assert (success, output) == (True, "")
     assert not ambient_decoy.exists()
+
+
+def test_installed_runner_rejects_an_invalid_pinned_checkout(tmp_path):
+    profile = tmp_path / "scheduled-profile"
+    installer.install(root=str(profile))
+    installed = profile / "scripts" / installer.JOB_SCRIPT
+    source = installed.read_text(encoding="utf-8")
+    pinned = str(Path(installer.__file__).resolve().parents[1])
+    installed.write_text(source.replace(repr(pinned), repr(str(tmp_path / "missing"))), encoding="utf-8")
+
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [sys.executable, str(installed)], capture_output=True, text=True,
+        cwd=tmp_path, env=env,
+    )
+    assert result.returncode != 0
+    assert "installed Hermes source root is invalid" in result.stderr
+    assert "No module named 'gateway'" not in result.stderr
 
 
 def test_runner_enumerates_profile_and_stays_silent_on_success(tmp_path, monkeypatch, capsys):

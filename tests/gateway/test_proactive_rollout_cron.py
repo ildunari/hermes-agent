@@ -1,5 +1,8 @@
 from pathlib import Path
 import copy
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -37,6 +40,32 @@ def test_rollout_cron_dry_run_and_idempotent_reconcile(tmp_path: Path):
         mark_job_run(probe_job['id'],True,None,delivery_error=None,
                      delivery_ack_metadata=probe_job['probe_binding'])
     assert probe_alarm_sink_readiness(profile_home=root,config=cfg)['ready']
+
+
+def test_installed_watchdog_imports_its_installing_checkout_with_hostile_pythonpath(
+    tmp_path: Path,
+):
+    root = tmp_path / "poke"
+    install(root=str(root), alarm_target="telegram:operator")
+    decoy = tmp_path / "other-checkout"
+    (decoy / "gateway").mkdir(parents=True)
+    (decoy / "gateway" / "__init__.py").write_text(
+        "raise RuntimeError('cross-checkout gateway import')\n", encoding="utf-8"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(decoy)
+    env["HERMES_HOME"] = str(tmp_path / "ambient-profile")
+
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "proactive_health_watchdog.py")],
+        capture_output=True, text=True, cwd=tmp_path, env=env,
+    )
+    # The exact checkout's status command sees the freshly installed rollout
+    # as healthy and stays silent. Importing the hostile same-named package
+    # instead would make the wrapper fail nonzero with its fallback alert.
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
 
 
 def test_rollout_cron_rejects_arbitrary_or_non_operator_sink(tmp_path: Path):

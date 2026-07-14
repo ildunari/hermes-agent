@@ -19,6 +19,7 @@ JOB_DELIVERY = "local"
 JOB_TASK = "monitor"
 _ROOT_MARKER = "INSTALLED_ROOT: str | None = None"
 _TASK_MARKER = "INSTALLED_TASK: str | None = None"
+_SOURCE_ROOT_MARKER = "INSTALLED_SOURCE_ROOT: str | None = None"
 
 
 def resolve_profile_home(*, root: str | None = None, profile: str | None = None) -> Path:
@@ -34,13 +35,19 @@ def resolve_profile_home(*, root: str | None = None, profile: str | None = None)
 
 def _installed_runner_source(contact_root: Path, *, task: str) -> str:
     source_path = Path(__file__).with_name(JOB_SCRIPT)
+    source_root = Path(__file__).resolve().parents[1]
     source = source_path.read_text(encoding="utf-8")
-    if source.count(_ROOT_MARKER) != 1 or source.count(_TASK_MARKER) != 1:
+    markers = (_ROOT_MARKER, _TASK_MARKER, _SOURCE_ROOT_MARKER)
+    if any(source.count(marker) != 1 for marker in markers):
         raise RuntimeError(f"runner installation markers are missing or ambiguous in {source_path}")
     source = source.replace(
         _ROOT_MARKER, f"INSTALLED_ROOT: str | None = {str(contact_root)!r}"
     )
-    return source.replace(_TASK_MARKER, f"INSTALLED_TASK: str | None = {task!r}")
+    source = source.replace(_TASK_MARKER, f"INSTALLED_TASK: str | None = {task!r}")
+    return source.replace(
+        _SOURCE_ROOT_MARKER,
+        f"INSTALLED_SOURCE_ROOT: str | None = {str(source_root)!r}",
+    )
 
 
 def _write_runner(profile_home: Path, content: str) -> Path:
