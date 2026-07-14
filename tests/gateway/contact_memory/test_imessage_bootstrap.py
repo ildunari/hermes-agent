@@ -7,7 +7,7 @@ from gateway.contact_memory.imessage_bootstrap import (
     authoritative_source_map, build_manifest, chunk_rows, iter_chat_rows, open_messages_readonly,
     resolve_one_to_one_chat, stable_semantic_source_id, validate_semantic_items,
 )
-from scripts.bootstrap_proactive_imessage import main as bootstrap_main
+from scripts.bootstrap_proactive_imessage import _operator_approval, main as bootstrap_main, run_semantic_workflow
 
 
 def db(path: Path, *, group=False):
@@ -87,5 +87,67 @@ def test_prompt_only_stages_private_sender_attributed_packets(tmp_path: Path):
     assert packet['provider']=='openai-codex' and packet['reasoning_effort']=='medium'
     assert [row['author'] for row in packet['rows']]==['kosta-owner','stephen-lucier']
     assert packet['rows'][0]['text']=='Kosta likes cars'
+    assert len(packet['rows'][0]['source_content_hash'])==64
     assert not (staging.stat().st_mode & 0o077)
     assert bootstrap_main([*args,'--resume'])==0
+
+
+def test_extraction_merge_coverage_and_review_execute_with_canonical_ids(tmp_path: Path):
+    source=tmp_path/'chat.db'; db(source)
+    with open_messages_readonly(source) as con:
+        chat=resolve_one_to_one_chat(con,['+14015550100'])
+        chunks=list(chunk_rows(iter_chat_rows(con,chat),chunk_size=2))
+    sources=authoritative_source_map(chunks)
+    manifest=build_manifest(chat,chunks,source_path=source)
+    calls=[]
+
+    def model(prompt):
+        calls.append(prompt)
+        if prompt.startswith('Untrusted iMessage rows'):
+            rows=json.loads(prompt.split('\n',1)[1])
+            return {'items': [
+                {'kind':'fact','source_key':row['source'],'source_content_hash':sources[row['source']].content_hash,
+                 'author':row['author'],'text':row['text'],'predicate':'context','confidence':.9}
+                for row in rows if row['text']!='[NON_TEXT]'
+            ]}
+        if prompt.startswith('Merge these'):
+            candidates=json.loads(prompt.split('\n',1)[1])
+            return {'dossiers':{
+                'kosta-owner':[item for item in candidates if item['author']=='kosta-owner'],
+                'stephen-lucier':[item for item in candidates if item['author']=='stephen-lucier'],
+            },'coverage':{'accounted_source_ids':[item['source_id'] for item in candidates]}}
+        dossiers=json.loads(prompt.split('\n',1)[1])
+        ids=[item['source_id'] for items in dossiers.values() for item in items]
+        return {'accepted_source_ids':ids,'rejected_source_ids':[]}
+
+    review=run_semantic_workflow(chunks,sources,manifest,tmp_path/'private',call_model=model)
+    value=json.loads(review.read_text())
+    assert value['coverage']=={'extracted':3,'merged':3,'reviewed':3}
+    assert {item['author'] for items in value['dossiers'].values() for item in items}=={'kosta-owner','stephen-lucier'}
+    assert len(calls)==4
+    assert not (review.stat().st_mode & 0o077)
+
+
+def test_semantic_validator_rejects_forged_derived_source_id():
+    from gateway.contact_memory.imessage_bootstrap import AuthoritativeSource
+    source=AuthoritativeSource('kosta-owner',__import__('hashlib').sha256(b'evidence').hexdigest())
+    item={'kind':'fact','source_key':'g1','source_content_hash':source.content_hash,'source_id':'forged',
+          'author':'kosta-owner','text':'evidence','predicate':'context','confidence':.9}
+    with pytest.raises(ValueError,match='source ID'):
+        validate_semantic_items([item],subject='kosta-owner',sources={'g1':source})
+
+
+def test_guest_visibility_requires_operator_file_bound_to_review_bytes(tmp_path: Path):
+    import hashlib
+    review=tmp_path/'review.json'; review.write_text('{"dossiers":{}}')
+    manifest={'rowset_sha256':'rows'}
+    approval=tmp_path/'approval.json'
+    approval.write_text(json.dumps({
+        'operator_approved':True,'rowset_sha256':'rows',
+        'review_sha256':hashlib.sha256(review.read_bytes()).hexdigest(),
+        'guest_visible_source_ids':['approved-source'],
+    }))
+    assert _operator_approval(approval,review,manifest)=={'approved-source'}
+    review.write_text('{"dossiers":{"changed":true}}')
+    with pytest.raises(ValueError,match='reviewed dossiers'):
+        _operator_approval(approval,review,manifest)

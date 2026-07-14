@@ -52,6 +52,7 @@ class BootstrapChunk:
     def prompt_rows(self) -> list[dict[str, object]]:
         return [
             {"source": row.source_key, "author": row.author, "created_at": row.created_at,
+             "source_content_hash": content_hash(row),
              "text": row.text if row.text is not None else "[NON_TEXT]"}
             for row in self.rows if row.rejection_reason is None
         ]
@@ -261,7 +262,7 @@ def validate_semantic_items(
         raise ValueError("invalid semantic subject or output")
     allowed = {"kind", "guid", "source_key", "source_content_hash", "author", "predicate", "text",
                "topic", "signal_type", "valence", "confidence", "sensitive", "third_party",
-               "audience", "created_at"}
+               "audience", "created_at", "source_id"}
     result: list[dict[str, Any]] = []
     for raw in items:
         if not isinstance(raw, Mapping) or not set(raw) <= allowed:
@@ -288,7 +289,11 @@ def validate_semantic_items(
             raise ValueError("fact text is required")
         if item["kind"] == "interest" and not str(item.get("topic") or "").strip():
             raise ValueError("interest topic is required")
-        item["source_id"] = stable_semantic_source_id(str(item["guid"]), subject, item)
+        canonical_source_id = stable_semantic_source_id(str(item["guid"]), subject, item)
+        supplied_source_id = str(item.get("source_id") or "").strip()
+        if supplied_source_id and supplied_source_id != canonical_source_id:
+            raise ValueError("semantic evidence source ID mismatch")
+        item["source_id"] = canonical_source_id
         if item.get("sensitive") or item.get("third_party") or str(item.get("valence")) == "negative":
             # Negative/sensitive evidence is retained only as suppression context,
             # never promoted into proactive positive-interest candidates.

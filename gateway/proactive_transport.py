@@ -26,12 +26,16 @@ class BlueBubblesProactiveDelivery:
 
     def __init__(self, adapter: Any, *, owner_profile: str = "poke",
                  ownership_registry: ProactiveOwnershipRegistry | None = None,
-                 runner_id: str = "", adapter_id: str = "") -> None:
+                 runner_id: str = "", adapter_id: str = "",
+                 participant_identities: Mapping[tuple[str, str], frozenset[str]] | None = None,
+                 scheduler: ProactiveScheduler | None = None) -> None:
         self.adapter = adapter
         self.owner_profile = owner_profile
         self.ownership_registry = ownership_registry
         self.runner_id = runner_id
         self.adapter_id = adapter_id
+        self.participant_identities = dict(participant_identities or {})
+        self.scheduler = scheduler
 
     async def deliver(self, *, route: ContactRoute, text: str, slot_id: str,
                       correlation_id: str) -> ProactiveTransportResult:
@@ -41,6 +45,8 @@ class BlueBubblesProactiveDelivery:
         if self.ownership_registry is None or not self.ownership_registry.validate_transport(
             self.runner_id, self.adapter_id, now=now
         ):
+            if self.ownership_registry is not None:
+                self.ownership_registry.open_circuit("transport_owner_invalid", now=now)
             raise RuntimeError("proactive transport owner lease is not current")
         if (route.profile_name, route.contact_id, route.principal) not in _ALLOWED:
             if self.ownership_registry is not None:
@@ -50,14 +56,24 @@ class BlueBubblesProactiveDelivery:
             raise ValueError("proactive delivery requires an existing DM route")
         platform = getattr(getattr(self.adapter, "platform", None), "value", getattr(self.adapter, "platform", None))
         if str(platform).lower() != "bluebubbles":
+            self.ownership_registry.open_circuit("adapter_invariant_failed", now=now)
             raise ValueError("live adapter is not BlueBubbles")
         resolver = getattr(self.adapter, "resolve_authenticated_existing_dm", None)
         if resolver is None:
+            self.ownership_registry.open_circuit("adapter_auth_preflight_missing", now=now)
             raise RuntimeError("BlueBubbles authenticated-DM preflight unavailable")
-        authenticated = await resolver(route.chat_id, route.user_id)
+        expected = self.participant_identities.get((route.profile_name, route.contact_id))
+        if not expected:
+            self.ownership_registry.open_circuit("participant_registry_missing", now=now)
+            raise RuntimeError("operator contact registry has no approved participant identity")
+        authenticated = await resolver(route.chat_id, expected)
         if not authenticated:
+            self.ownership_registry.open_circuit("participant_auth_failed", now=now)
             return ProactiveTransportResult("failed", False, retryable=False, error_class="route_auth_failed")
-        guid, _fingerprint = authenticated
+        guid, fingerprint = authenticated
+        if self.scheduler is None or not self.scheduler.bind_route_fingerprint(route, fingerprint):
+            self.ownership_registry.open_circuit("route_fingerprint_mismatch", now=now)
+            raise RuntimeError("authenticated proactive route fingerprint changed")
         if not self.ownership_registry.reserve_global_send(slot_id, now=now):
             raise RuntimeError("global proactive send lease unavailable")
         # Pass the resolved GUID so send() cannot enter its address/new-chat path.
@@ -109,8 +125,14 @@ async def deliver_prepared_exactly_once(
     if not await asyncio.to_thread(scheduler.begin_delivery_attempt, claim, now=now):
         row = scheduler.get_slot(claim.slot_id)
         return str((row or {}).get("reason") or "attempt_not_available")
-    result = await delivery.deliver(route=route, text=text, slot_id=claim.slot_id,
-                                    correlation_id=correlation_id)
+    try:
+        result = await delivery.deliver(route=route, text=text, slot_id=claim.slot_id,
+                                        correlation_id=correlation_id)
+    except Exception as exc:
+        return await asyncio.to_thread(
+            scheduler.finish_delivery, claim, state="failed",
+            reason=f"pre_send_invariant:{type(exc).__name__}", now=now,
+        )
     return await asyncio.to_thread(
         scheduler.finish_delivery, claim, state=result.state,
         reason=result.error_class or result.state, message_id=result.message_id,

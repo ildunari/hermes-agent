@@ -4,8 +4,9 @@ import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
+from gateway.contact_memory.store import ContactMemoryStore
 from gateway.platforms.base import SendResult
-from gateway.proactive_scheduler import ContactRoute, ProactiveConfig, ProactiveMode, ProactiveScheduler, ProactiveStateStore
+from gateway.proactive_scheduler import ContactRoute, ProactiveConfig, ProactiveMode, ProactiveOwnershipRegistry, ProactiveScheduler, ProactiveStateStore
 from gateway.proactive_transport import BlueBubblesProactiveDelivery, deliver_prepared_exactly_once
 
 NOW=1_800_000_000.0
@@ -14,8 +15,9 @@ ALLOW=(('poke','kosta-owner','owner'),('guest','stephen-lucier','guest'))
 
 class Adapter:
     platform=SimpleNamespace(value='bluebubbles')
-    def __init__(self,result): self.result=result; self.calls=0; self.texts=[]
+    def __init__(self,result): self.result=result; self.calls=0; self.texts=[]; self.auth_requests=[]
     async def resolve_authenticated_existing_dm(self,chat_id,user_id):
+        self.auth_requests.append((chat_id,user_id))
         return ('iMessage;-;existing','fingerprint') if chat_id and user_id else None
     async def send(self,*args,**kwargs): self.calls+=1; self.texts.append(args[1]); await asyncio.sleep(0); return self.result
 
@@ -35,7 +37,9 @@ def setup(tmp_path: Path):
 def transport(adapter, scheduler):
     scheduler.ownership_registry.acquire_transport('runner','adapter',now=NOW)
     return BlueBubblesProactiveDelivery(adapter,ownership_registry=scheduler.ownership_registry,
-                                        runner_id='runner',adapter_id='adapter')
+                                        runner_id='runner',adapter_id='adapter',
+                                        participant_identities={('poke','kosta-owner'):frozenset({'owner'})},
+                                        scheduler=scheduler)
 
 @pytest.mark.asyncio
 async def test_exactly_once_concurrent_delivery(tmp_path: Path):
@@ -46,6 +50,8 @@ async def test_exactly_once_concurrent_delivery(tmp_path: Path):
     with scheduler._connect() as con:
         row=con.execute('SELECT state,attempt_count,transport_message_id FROM proactive_delivery WHERE slot_id=?',(slot,)).fetchone()
     assert tuple(row)==('sent',1,'guid')
+    projected=ContactMemoryStore(tmp_path/'contact-memory','kosta-owner').get_proactive_send(slot)
+    assert projected is not None and projected.sent_at==NOW
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(('send_result','expected','calls'),[(SendResult(False,error='timeout'), 'delivery_unknown',1),(SendResult(False,error='connect',retryable=True),'retry_wait',1),(SendResult(False,error='partial',raw_response={'partial_delivery':True}),'partial_delivery',1)])
@@ -61,6 +67,40 @@ async def test_nonallowlisted_refused_before_adapter(tmp_path: Path):
     with pytest.raises(ValueError,match='non-allowlisted'):
         await transport(adapter,scheduler).deliver(route=bad,text='x',slot_id=claim.slot_id,correlation_id='c')
     assert adapter.calls==0
+
+
+@pytest.mark.asyncio
+async def test_final_participant_auth_uses_operator_registry_not_stored_route_user(tmp_path: Path):
+    scheduler,claim,_=setup(tmp_path); adapter=Adapter(SendResult(True,message_id='sent'))
+    stale=dataclasses.replace(ROUTE,user_id='stale-or-corrupt-route-user')
+    result=await deliver_prepared_exactly_once(
+        scheduler=scheduler,delivery=transport(adapter,scheduler),route=stale,claim=claim,
+        text='one',correlation_id='registry',now=NOW,
+    )
+    assert result=='sent'
+    assert adapter.auth_requests==[('existing',frozenset({'owner'}))]
+
+
+@pytest.mark.asyncio
+async def test_missing_operator_participant_registry_fails_closed(tmp_path: Path):
+    scheduler,claim,_=setup(tmp_path); adapter=Adapter(SendResult(True,message_id='sent'))
+    scheduler.ownership_registry.acquire_transport('runner','adapter',now=NOW)
+    delivery=BlueBubblesProactiveDelivery(
+        adapter,ownership_registry=scheduler.ownership_registry,runner_id='runner',adapter_id='adapter',
+        scheduler=scheduler,
+    )
+    result = await deliver_prepared_exactly_once(
+        scheduler=scheduler,delivery=delivery,route=ROUTE,claim=claim,
+        text='one',correlation_id='missing',now=NOW,
+    )
+    assert result == 'failed'
+    assert adapter.calls==0
+    with scheduler._connect() as con:
+        row = con.execute(
+            'SELECT state,last_error_class FROM proactive_delivery WHERE slot_id=?',
+            (claim.slot_id,),
+        ).fetchone()
+    assert tuple(row) == ('failed', 'pre_send_invariant:RuntimeError')
 
 
 def test_final_check_refuses_outside_active_hours(tmp_path: Path):
@@ -95,3 +135,34 @@ async def test_retry_replays_immutable_payload_without_recomposition(tmp_path: P
     second=Adapter(SendResult(True,message_id='sent'))
     assert await deliver_prepared_exactly_once(scheduler=scheduler,delivery=transport(second,scheduler),route=ROUTE,claim=retry,text='recomposed',correlation_id='two',now=NOW+301)=='sent'
     assert first.texts==['original'] and second.texts==['original']
+
+
+def test_global_send_lease_and_operator_reset_are_durable(tmp_path: Path):
+    registry=ProactiveOwnershipRegistry(tmp_path/'ownership.db')
+    assert registry.reserve_global_send('one',now=NOW)
+    assert not registry.reserve_global_send('one',now=NOW+1)
+    assert not registry.reserve_global_send('two',now=NOW+1)
+    registry.finish_global_send('one',sent=True,now=NOW+2)
+    assert not registry.reserve_global_send('two',now=NOW+301)
+    assert registry.reserve_global_send('two',now=NOW+302)
+    registry.open_circuit('operator_test',now=NOW+303)
+    assert not ProactiveOwnershipRegistry(tmp_path/'ownership.db').reserve_global_send('three',now=NOW+500)
+    with pytest.raises(PermissionError):
+        registry.operator_reset_circuit(confirmed=False,now=NOW+501)
+    registry.operator_reset_circuit(confirmed=True,now=NOW+502)
+    assert ProactiveOwnershipRegistry(tmp_path/'ownership.db').reserve_global_send('three',now=NOW+503)
+
+
+def test_transport_owner_conflict_opens_durable_global_circuit(tmp_path: Path):
+    registry=ProactiveOwnershipRegistry(tmp_path/'ownership.db')
+    registry.acquire_transport('runner-a','adapter-a',now=NOW)
+    with pytest.raises(RuntimeError,match='owner lease conflict'):
+        registry.acquire_transport('runner-b','adapter-b',now=NOW+1)
+    assert not ProactiveOwnershipRegistry(tmp_path/'ownership.db').reserve_global_send('slot',now=NOW+2)
+
+
+def test_authenticated_route_fingerprint_is_immutable(tmp_path: Path):
+    scheduler,_,_=setup(tmp_path)
+    assert scheduler.bind_route_fingerprint(ROUTE,'fingerprint-one')
+    assert scheduler.bind_route_fingerprint(ROUTE,'fingerprint-one')
+    assert not scheduler.bind_route_fingerprint(ROUTE,'fingerprint-two')

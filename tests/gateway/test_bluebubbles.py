@@ -108,6 +108,29 @@ class TestBlueBubblesConfigLoading:
 
 
 class TestBlueBubblesHelpers:
+    @pytest.mark.asyncio
+    async def test_authenticated_existing_dm_requires_exact_current_participant(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+
+        async def exact(path, payload):
+            return {"data": [{"guid": "iMessage;-;one", "participants": [{"address": "owner@example.com"}]}]}
+
+        monkeypatch.setattr(adapter, "_api_post", exact)
+        resolved = await adapter.resolve_authenticated_existing_dm(
+            "iMessage;-;one", "owner@example.com"
+        )
+        assert resolved is not None and resolved[0] == "iMessage;-;one"
+
+        async def group(path, payload):
+            return {"data": [{"guid": "iMessage;-;one", "participants": [
+                {"address": "owner@example.com"}, {"address": "other@example.com"},
+            ]}]}
+
+        monkeypatch.setattr(adapter, "_api_post", group)
+        assert await adapter.resolve_authenticated_existing_dm(
+            "iMessage;-;one", "owner@example.com"
+        ) is None
+
     def test_check_requirements(self, monkeypatch):
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
         monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")

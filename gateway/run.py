@@ -1959,6 +1959,7 @@ from gateway.proactive_checkin import ProactiveTurnRequest, run_proactive_child_
 
 from gateway.contact_memory.runtime import (
     _brokers as _contact_memory_brokers,
+    extraction_health as _contact_memory_extraction_health,
     get_broker as _get_contact_memory_broker,
 )
 
@@ -2017,7 +2018,7 @@ async def _record_proactive_inbound(
     if platform != "bluebubbles":
         return None
     try:
-        from gateway.proactive_scheduler import ProactiveConfig, handle_inbound
+        from gateway.proactive_scheduler import ProactiveConfig, ProactiveStateStore, handle_inbound
 
         cfg = ProactiveConfig.from_mapping(config_raw)
         scope_meta = metadata.get("_hermes_contact_scope", {}) if isinstance(metadata, dict) else {}
@@ -2037,6 +2038,10 @@ async def _record_proactive_inbound(
             "user_id": str(getattr(source, "user_id", "") or ""),
             "session_id": str(session_id),
         }
+        await asyncio.to_thread(
+            ProactiveStateStore(root / "state.db").record_ingress_observed,
+            str(source_id), observed_at=float(received_at),
+        )
         return await asyncio.to_thread(
             handle_inbound,
             state_db=root / "state.db",
@@ -7382,16 +7387,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             db.close()
 
                     result = await asyncio.to_thread(_tick_profile)
+                    latest_config = _load_gateway_config_for_profile(profile)
+                    scheduler = ProactiveScheduler(
+                        state_db_path=Path(profile_home) / "state.db",
+                        profile_home=profile_home, profile_name=profile,
+                        config=ProactiveConfig.from_mapping(latest_config),
+                    )
+                    adapter = self.adapters.get(Platform.BLUEBUBBLES)
+                    platform_cfg = getattr(getattr(self, "config", None), "platforms", {}).get(
+                        Platform.BLUEBUBBLES
+                    )
+                    platform_extra = getattr(platform_cfg, "extra", {}) if platform_cfg else {}
+                    registry_path = (
+                        platform_extra.get("guest_contacts_file")
+                        or platform_extra.get("contact_registry")
+                        or os.getenv("HERMES_BLUEBUBBLES_GUEST_CONTACTS")
+                    )
+                    from gateway.guest_access import load_contact_registry
+                    contact_registry = load_contact_registry(registry_path)
+                    participant_identities = {
+                        ("poke", "kosta-owner"): contact_registry.owner_identities,
+                        **{
+                            ("guest", contact.contact_id): contact.bluebubbles_identity_set()
+                            for contact in contact_registry.contacts
+                        },
+                    }
+                    participant_registry_ready = bool(
+                        participant_identities.get(("poke", "kosta-owner"))
+                        and participant_identities.get(("guest", "stephen-lucier"))
+                    )
                     if prepared:
-                        adapter = self.adapters.get(Platform.BLUEBUBBLES)
-                        if adapter is None:
+                        failure_time = time.time()
+                        if adapter is None or not adapter.is_connected:
+                            scheduler.ownership_registry.open_circuit("adapter_unavailable", now=failure_time)
                             raise RuntimeError("Poke BlueBubbles adapter unavailable")
-                        latest_config = _load_gateway_config_for_profile(profile)
-                        scheduler = ProactiveScheduler(
-                            state_db_path=Path(profile_home) / "state.db",
-                            profile_home=profile_home, profile_name=profile,
-                            config=ProactiveConfig.from_mapping(latest_config),
-                        )
+                        if not participant_registry_ready:
+                            scheduler.ownership_registry.open_circuit(
+                                "participant_registry_missing", now=failure_time
+                            )
+                            raise RuntimeError("operator contact registry is incomplete")
                         adapter_id = f"{type(adapter).__module__}.{type(adapter).__qualname__}:{id(adapter)}"
                         scheduler.ownership_registry.acquire_transport(
                             transport_runner_id, adapter_id, now=time.time()
@@ -7399,6 +7433,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         delivery = BlueBubblesProactiveDelivery(
                             adapter, owner_profile="poke", ownership_registry=scheduler.ownership_registry,
                             runner_id=transport_runner_id, adapter_id=adapter_id,
+                            participant_identities=participant_identities,
+                            scheduler=scheduler,
                         )
                         for route, claim, text in prepared[:1]:
                             barriers = getattr(self, "_proactive_delivery_barriers", None)
@@ -7416,7 +7452,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     scheduler.record_health(
                         "watcher",
                         {"result": result, "correlation_id": correlation_id,
-                         "adapter_ready": self.adapters.get(Platform.BLUEBUBBLES) is not None,
+                         "adapter_ready": bool(
+                             adapter is not None and adapter.is_connected
+                         ),
+                         "participant_registry_ready": participant_registry_ready,
+                         "extraction": _contact_memory_extraction_health(
+                             Path(profile_home) / "contact-memory"
+                         ),
                          "completed": True},
                     )
                     logger.info("Proactive tick profile=%s result=%s correlation_id=%s", profile, result, correlation_id)

@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS proactive_contact (
   serious_until REAL,
   pending_checkin_kind TEXT CHECK(pending_checkin_kind IN ('serious','open_loop')),
   pending_checkin_reason TEXT,
+  route_fingerprint TEXT,
   disabled_until REAL,
   negative_streak INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL,
@@ -64,6 +65,10 @@ CREATE TABLE IF NOT EXISTS proactive_inbound (
 );
 CREATE INDEX IF NOT EXISTS proactive_inbound_recent
   ON proactive_inbound(contact_hash, received_at DESC);
+CREATE TABLE IF NOT EXISTS proactive_ingress_observed (
+  message_id TEXT PRIMARY KEY,
+  observed_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS proactive_slot (
   slot_id TEXT PRIMARY KEY,
   contact_hash TEXT NOT NULL REFERENCES proactive_contact(contact_hash) ON DELETE CASCADE,
@@ -159,6 +164,9 @@ def _initialize_schema(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE proactive_delivery ADD COLUMN prepared_payload TEXT")
     if "kill_generation" not in columns:
         con.execute("ALTER TABLE proactive_delivery ADD COLUMN kill_generation INTEGER NOT NULL DEFAULT 0")
+    contact_columns = {str(row[1]) for row in con.execute("PRAGMA table_info(proactive_contact)")}
+    if "route_fingerprint" not in contact_columns:
+        con.execute("ALTER TABLE proactive_contact ADD COLUMN route_fingerprint TEXT")
     con.execute("BEGIN IMMEDIATE")
     try:
         duplicates = con.execute(
@@ -248,7 +256,11 @@ class ProactiveOwnershipRegistry:
             if row is not None and float(row["lease_until"]) > now and (
                 row["runner_id"] != runner_id or row["adapter_id"] != adapter_id
             ):
-                con.execute("ROLLBACK")
+                con.execute(
+                    "INSERT INTO proactive_global_circuit VALUES(1,'open','transport_owner_conflict',1,?) ON CONFLICT(singleton) DO UPDATE SET state='open',reason='transport_owner_conflict',generation=proactive_global_circuit.generation+1,updated_at=excluded.updated_at",
+                    (now,),
+                )
+                con.execute("COMMIT")
                 raise RuntimeError("proactive transport owner lease conflict")
             con.execute(
                 "INSERT INTO proactive_transport_owner VALUES(1,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET runner_id=excluded.runner_id,adapter_id=excluded.adapter_id,lease_until=excluded.lease_until,updated_at=excluded.updated_at",
@@ -270,7 +282,7 @@ class ProactiveOwnershipRegistry:
                 return False
             row = con.execute("SELECT * FROM proactive_global_send WHERE singleton=1").fetchone()
             if row is not None and (
-                (row["reserved_until"] is not None and float(row["reserved_until"]) > now and row["slot_id"] != slot_id)
+                (row["reserved_until"] is not None and float(row["reserved_until"]) > now)
                 or (row["last_visible_at"] is not None and now - float(row["last_visible_at"]) < 300)
             ):
                 con.execute("ROLLBACK")
@@ -591,6 +603,16 @@ class ProactiveStateStore:
             float(row["disabled_until"]) if row["disabled_until"] else None,
             int(row["inbound_version"]),
         ) for row in rows]
+
+    def record_ingress_observed(self, message_id: str, *, observed_at: float) -> bool:
+        source_id = str(message_id).strip()
+        if not source_id:
+            raise ValueError("message_id is required")
+        with self._connect() as con:
+            return bool(con.execute(
+                "INSERT OR IGNORE INTO proactive_ingress_observed(message_id,observed_at) VALUES(?,?)",
+                (source_id, _finite(observed_at, "observed_at")),
+            ).rowcount)
 
     def set_backoff(self, contact_key: str, until: float) -> None:
         with self._connect() as con:
@@ -1400,6 +1422,32 @@ class ProactiveScheduler:
         with self._connect() as con:
             con.execute("INSERT INTO proactive_health(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
                         (str(key), json.dumps(dict(value), sort_keys=True), timestamp))
+
+    def bind_route_fingerprint(self, route: ContactRoute, fingerprint: str) -> bool:
+        value = str(fingerprint).strip()
+        if not value:
+            return False
+        con = self._begin()
+        try:
+            row = con.execute(
+                "SELECT profile_name,contact_id,route_fingerprint FROM proactive_contact WHERE contact_hash=?",
+                (route.contact_hash,),
+            ).fetchone()
+            valid = bool(
+                row and row["profile_name"] == route.profile_name
+                and row["contact_id"] == route.contact_id
+                and (row["route_fingerprint"] is None or row["route_fingerprint"] == value)
+            )
+            if valid and row["route_fingerprint"] is None:
+                con.execute(
+                    "UPDATE proactive_contact SET route_fingerprint=? WHERE contact_hash=? AND route_fingerprint IS NULL",
+                    (value, route.contact_hash),
+                )
+            self._finish(con)
+            return valid
+        except BaseException as exc:
+            self._finish(con, exc)
+            raise
 
     def earliest_retry_at(self) -> float | None:
         with self._connect() as con:

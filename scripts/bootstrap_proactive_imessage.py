@@ -230,8 +230,14 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "rows": [
                 {"guid": row.source_key, "author": row.author, "created_at": row.created_at,
+                 "source_content_hash": sources[row.source_key].content_hash,
                  "text": row.text, "explicit_non_text": row.non_text}
                 for row in chunk.rows
+                if row.source_key in sources
+            ],
+            "excluded_rows": [
+                {"guid": row.source_key, "author": row.author, "reason": row.rejection_reason}
+                for row in chunk.rows if row.rejection_reason is not None
             ],
         }
         if args.resume and packet_path.exists():
@@ -241,7 +247,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _atomic_private_json(packet_path, packet)
         packet_index.append({"index": chunk.index, "chunk_hash": chunk.chunk_hash,
-                             "path": str(packet_path), "rows": len(chunk.rows)})
+                             "path": str(packet_path), "selected_rows": len(chunk.rows),
+                             "prompt_rows": len(packet["rows"]),
+                             "excluded_rows": len(packet["excluded_rows"])})
     _atomic_private_json(staging / manifest["rowset_sha256"] / "packet-index.json", packet_index)
 
     if args.prompt_only:

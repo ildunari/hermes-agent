@@ -78,6 +78,33 @@ def get_extraction_runtime(
         return runtime
 
 
+def extraction_health(root: str | Path) -> dict[str, Any]:
+    prefix = f"{Path(root).expanduser().resolve()}\0"
+    with _extractors_lock:
+        runtimes = [runtime for key, runtime in _extractors.items() if key.startswith(prefix)]
+    snapshots = [{
+        "configured_workers": runtime.worker_count,
+        "live_workers": sum(not task.done() for task in runtime._tasks),
+        "dead_workers": sum(task.done() and not task.cancelled() for task in runtime._tasks),
+        "queue_depth": runtime.queue.qsize(),
+        "queue_capacity": runtime.queue.maxsize,
+        "queue_full": runtime.queue.full(),
+        "failures": runtime.failures,
+        "dropped": runtime.dropped,
+    } for runtime in runtimes]
+    return {
+        "runtime_count": len(snapshots),
+        "configured_workers": sum(int(item["configured_workers"]) for item in snapshots),
+        "live_workers": sum(int(item["live_workers"]) for item in snapshots),
+        "dead_workers": sum(int(item["dead_workers"]) for item in snapshots),
+        "queue_depth": sum(int(item["queue_depth"]) for item in snapshots),
+        "queue_capacity": sum(int(item["queue_capacity"]) for item in snapshots),
+        "queue_full": any(bool(item["queue_full"]) for item in snapshots),
+        "failures": sum(int(item["failures"]) for item in snapshots),
+        "dropped": sum(int(item["dropped"]) for item in snapshots),
+    }
+
+
 async def close_extraction_runtimes(*, timeout: float = 10.0) -> None:
     """Drain and stop all local extractor workers without hanging shutdown."""
     with _extractors_lock:

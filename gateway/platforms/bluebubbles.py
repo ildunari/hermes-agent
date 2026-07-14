@@ -588,11 +588,15 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         return None
 
     async def resolve_authenticated_existing_dm(
-        self, chat_guid: str, expected_participant: str
+        self, chat_guid: str, expected_participant: object
     ) -> tuple[str, str] | None:
         from gateway.guest_access import normalize_identity
 
-        expected = normalize_identity(expected_participant)
+        if isinstance(expected_participant, (set, frozenset, list, tuple)):
+            expected = {normalize_identity(item) for item in expected_participant}
+        else:
+            expected = {normalize_identity(expected_participant)}
+        expected.discard("")
         if not chat_guid or not expected:
             return None
         payload = await self._api_post("/api/v1/chat/query", {"limit": 500, "offset": 0})
@@ -609,10 +613,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 for item in raw_participants
             }
             participants.discard("")
-            if participants != {expected}:
+            if len(participants) != 1 or not participants <= expected:
                 return None
+            participant = next(iter(participants))
             fingerprint = hashlib.sha256(
-                f"{guid}\0{expected}".encode("utf-8")
+                f"{guid}\0{participant}".encode("utf-8")
             ).hexdigest()
             return guid, fingerprint
         return None
