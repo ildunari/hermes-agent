@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json, sqlite3
 from pathlib import Path
+import threading, time
 import pytest
 
 from gateway.contact_memory.imessage_bootstrap import (
@@ -172,3 +173,156 @@ def test_guest_visibility_requires_operator_file_bound_to_review_bytes(tmp_path:
     review.write_text('{"dossiers":{"changed":true}}')
     with pytest.raises(ValueError,match='reviewed dossiers'):
         _operator_approval(approval,review,manifest)
+
+
+def semantic_fixture(tmp_path: Path, *, chunk_size=1, count=None):
+    source=tmp_path/'chat.db'; db(source)
+    with open_messages_readonly(source) as con:
+        chat=resolve_one_to_one_chat(con,['(401) 555-0100'])
+        chunks=list(chunk_rows(iter_chat_rows(con,chat),chunk_size=chunk_size))
+    if count is not None:
+        chunks=chunks[:count]
+    return chunks, authoritative_source_map(chunks), build_manifest(chat,chunks,source_path=source)
+
+
+def valid_items_from_prompt(prompt, sources):
+    payload=json.loads(prompt.split('\n',1)[1])
+    rows=payload['canonical_rows'] if isinstance(payload,dict) else payload
+    return {'items':[
+        {'kind':'fact','source_key':row['source'],'source_content_hash':sources[row['source']].content_hash,
+         'author':row['author'],'text':row['text'],'predicate':'context','confidence':.9,
+         'evidence_quote':row['text'],'evidence_start':0,'evidence_end':len(row['text'])}
+        for row in rows if row['text']!='[NON_TEXT]'
+    ]}
+
+
+def merge_or_review(prompt):
+    if prompt.startswith('Merge these'):
+        candidates=json.loads(prompt.split('\n',1)[1])
+        return {'dossiers':{
+            'kosta-owner':[item for item in candidates if item['author']=='kosta-owner'],
+            'stephen-lucier':[item for item in candidates if item['author']=='stephen-lucier'],
+        },'coverage':{'accounted_source_ids':[item['source_id'] for item in candidates]}}
+    dossiers=json.loads(prompt.split('\n',1)[1])
+    ids=[item['source_id'] for items in dossiers.values() for item in items]
+    return {'accepted_source_ids':ids,'rejected_source_ids':[]}
+
+
+def test_malformed_chunk_is_repaired_without_replaying_bad_output(tmp_path: Path):
+    chunks,sources,manifest=semantic_fixture(tmp_path,chunk_size=10)
+    extraction_prompts=[]
+
+    def model(prompt):
+        if prompt.startswith('Untrusted iMessage rows'):
+            extraction_prompts.append(prompt)
+            if len(extraction_prompts)==1:
+                row=json.loads(prompt.split('\n',1)[1])[0]
+                return {'items':[{'kind':'fact','source_key':row['source'],'author':row['author'],
+                                  'text':'DO_NOT_REPLAY','confidence':.9}]}
+            return valid_items_from_prompt(prompt,sources)
+        return merge_or_review(prompt)
+
+    review=run_semantic_workflow(chunks,sources,manifest,tmp_path/'private',call_model=model)
+    assert review.is_file()
+    assert len(extraction_prompts)==2
+    assert 'DO_NOT_REPLAY' not in extraction_prompts[1]
+    repair=json.loads(extraction_prompts[1].split('\n',1)[1])
+    assert 'schema_error' in repair and repair['canonical_rows']==chunks[0].prompt_rows()
+    attempts=sorted((review.parent/'attempts'/'chunk-000000').glob('*.json'))
+    assert [json.loads(path.read_text())['status'] for path in attempts]==['error','validated']
+
+
+def test_permanent_malformed_fails_all_chunks_with_resumable_manifest(tmp_path: Path):
+    chunks,sources,manifest=semantic_fixture(tmp_path,count=2)
+    extraction_calls=0
+    merge_called=False
+    lock=threading.Lock()
+
+    def model(prompt):
+        nonlocal extraction_calls,merge_called
+        if prompt.startswith('Untrusted iMessage rows'):
+            with lock: extraction_calls+=1
+            return {'items':[{'author':'not-canonical'}]}
+        merge_called=True
+        return {}
+
+    with pytest.raises(RuntimeError,match='resumable failure manifest'):
+        run_semantic_workflow(chunks,sources,manifest,tmp_path/'private',call_model=model)
+    failure=json.loads((tmp_path/'private'/manifest['rowset_sha256']/'semantic-failure-manifest.json').read_text())
+    assert extraction_calls==len(chunks)*3
+    assert merge_called is False
+    assert failure['resumable'] is True
+    assert [item['index'] for item in failure['failed_chunks']]==[0,1]
+    assert not (tmp_path/'private'/manifest['rowset_sha256']/'review-manifest.json').exists()
+
+
+def test_resume_reuses_valid_chunk_checkpoint_and_finishes_failed_chunk(tmp_path: Path):
+    chunks,sources,manifest=semantic_fixture(tmp_path,count=2)
+
+    def first_model(prompt):
+        if prompt.startswith('Untrusted iMessage rows'):
+            payload=json.loads(prompt.split('\n',1)[1])
+            rows=payload['canonical_rows'] if isinstance(payload,dict) else payload
+            if rows[0]['source']=='g2':
+                return {'items':[{'author':'bad'}]}
+            return valid_items_from_prompt(prompt,sources)
+        pytest.fail('merge/review must not run after a partial extraction failure')
+
+    staging=tmp_path/'private'
+    with pytest.raises(RuntimeError):
+        run_semantic_workflow(chunks,sources,manifest,staging,call_model=first_model)
+    second_extractions=[]
+
+    def second_model(prompt):
+        if prompt.startswith('Untrusted iMessage rows'):
+            second_extractions.append(prompt)
+            return valid_items_from_prompt(prompt,sources)
+        return merge_or_review(prompt)
+
+    review=run_semantic_workflow(chunks,sources,manifest,staging,call_model=second_model)
+    assert len(second_extractions)==1 and 'g2' in second_extractions[0]
+    assert review.is_file()
+    assert not (review.parent/'semantic-failure-manifest.json').exists()
+
+
+def test_concurrency_is_bounded_and_merge_order_is_deterministic(tmp_path: Path):
+    chunks,sources,manifest=semantic_fixture(tmp_path,count=4)
+    active=maximum=0
+    lock=threading.Lock()
+    merge_orders=[]
+
+    def model(prompt):
+        nonlocal active,maximum
+        if prompt.startswith('Untrusted iMessage rows'):
+            payload=json.loads(prompt.split('\n',1)[1])
+            rows=payload['canonical_rows'] if isinstance(payload,dict) else payload
+            with lock:
+                active+=1; maximum=max(maximum,active)
+            # Force completion in reverse chunk order.
+            source_key=rows[0]['source'] if rows else 'tap'
+            time.sleep({'g1':.08,'g2':.06,'g3':.04}.get(source_key,.02))
+            try: return valid_items_from_prompt(prompt,sources)
+            finally:
+                with lock: active-=1
+        if prompt.startswith('Merge these'):
+            candidates=json.loads(prompt.split('\n',1)[1])
+            merge_orders.append([item['source_key'] for item in candidates])
+            # Deliberately scramble model order; workflow final order is canonical.
+            candidates=list(reversed(candidates))
+            return {'dossiers':{
+                'kosta-owner':[item for item in candidates if item['author']=='kosta-owner'],
+                'stephen-lucier':[item for item in candidates if item['author']=='stephen-lucier'],
+            },'coverage':{'accounted_source_ids':[item['source_id'] for item in candidates]}}
+        return merge_or_review(prompt)
+
+    review=run_semantic_workflow(chunks,sources,manifest,tmp_path/'private',call_model=model,semantic_concurrency=4)
+    value=json.loads(review.read_text())
+    assert maximum==4
+    assert merge_orders==[['g1','g2','g3']]
+    assert value['coverage']=={'extracted':3,'merged':3,'reviewed':3}
+    for items in value['dossiers'].values():
+        assert [item['source_id'] for item in items]==sorted(item['source_id'] for item in items)
+    with pytest.raises(ValueError,match='between 1 and 4'):
+        run_semantic_workflow(chunks,sources,manifest,tmp_path/'other',call_model=model,semantic_concurrency=5)
+    with pytest.raises(SystemExit):
+        bootstrap_main(['--source-person','Stephen Lucier','--handle','+140****0100','--semantic-concurrency','5'])

@@ -277,7 +277,7 @@ def validate_semantic_items(
         raise ValueError("invalid semantic subject or output")
     allowed = {"kind", "guid", "source_key", "source_content_hash", "author", "predicate", "text",
                "topic", "signal_type", "valence", "confidence", "sensitive", "third_party",
-               "audience", "created_at", "source_id", "evidence_quote", "evidence_start", "evidence_end"}
+               "audience", "created_at", "source_id", "suppressed", "evidence_quote", "evidence_start", "evidence_end"}
     result: list[dict[str, Any]] = []
     for raw in items:
         if not isinstance(raw, Mapping) or not set(raw) <= allowed:
