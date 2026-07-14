@@ -3,8 +3,13 @@ agent:
     enabled: true
     mode: observe
     transport_owner_profile: poke
-    # Live delivery fails closed until an operator verifies a monitored sink.
-    alarm_sink: {configured: false, type: operator}
+    # Installer creates this exact cron target and live remains closed until a
+    # recent probe has a successful transport ACK.
+    alarm_sink:
+      configured: false
+      type: hermes_cron
+      target: "telegram:REPLACE_WITH_VALIDATED_OPERATOR_CHAT_ID"
+      probe_max_age_seconds: 25200
     allowed_contacts:
       - {profile: poke, contact_id: kosta-owner, principal: owner}
       - {profile: guest, contact_id: stephen-lucier, principal: guest}

@@ -68,8 +68,10 @@ agent:
     mode: observe                 # changed to live only at Gate 7
     transport_owner_profile: poke
     alarm_sink:
-      configured: false              # set true only after monitored delivery is proven
-      type: operator
+      configured: false              # true only after the installed probe has a recent delivery ACK
+      type: hermes_cron
+      target: telegram:VALIDATED_OPERATOR_CHAT_ID
+      probe_max_age_seconds: 25200
     allowed_contacts:
       - {profile: poke, contact_id: kosta-owner, principal: owner}
       - {profile: guest, contact_id: stephen-lucier, principal: guest}
@@ -287,8 +289,8 @@ python scripts/bootstrap_proactive_imessage.py ... --apply --review-manifest /se
 
 python scripts/install_contact_memory_maintenance_cron.py --profile poke --task proactive_semantic --dry-run
 python scripts/install_contact_memory_maintenance_cron.py --profile guest --task proactive_semantic --dry-run
-python scripts/install_proactive_rollout_cron.py --profile poke --dry-run
-python scripts/install_proactive_rollout_cron.py --profile guest --dry-run
+python scripts/install_proactive_rollout_cron.py --profile poke --alarm-target telegram:VALIDATED_OPERATOR_CHAT_ID --dry-run
+python scripts/install_proactive_rollout_cron.py --profile guest --alarm-target telegram:VALIDATED_OPERATOR_CHAT_ID --dry-run
 
 python scripts/proactive_status.py --profile poke --json --fail-on-dead
 python scripts/proactive_status.py --profile guest --json --fail-on-dead

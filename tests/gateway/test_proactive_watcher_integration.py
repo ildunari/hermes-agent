@@ -51,6 +51,13 @@ async def test_poke_watcher_runs_real_loop_records_health_and_wires_web(monkeypa
     monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "poke")
     monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda profile: profile_home if profile == "poke" else tmp_path / "profiles" / profile)
     monkeypatch.setattr("gateway.run._load_gateway_config_for_profile", lambda profile: raw if profile == "poke" else {})
+    monkeypatch.setattr("gateway.proactive_status.probe_model_readiness",lambda:{
+        'ready':True,'sent_request':True,'provider':'openai-codex','resolved_model':'gpt-5.6-sol',
+        'response_model':'gpt-5.6-sol','private_history_used':False,'checked_at':1,
+    })
+    monkeypatch.setattr("gateway.proactive_status.probe_alarm_sink_readiness",lambda **kwargs:{
+        'ready':False,'delivery_ack':False,'type':'','target':'','checked_at':1,
+    })
     monkeypatch.setattr("tools.web_tools.web_search_tool", lambda topic, limit: [{"title": topic, "limit": limit}])
 
     def tick(**kwargs):
@@ -96,7 +103,7 @@ def _proactive_config(mode="observe"):
         "allowed_contacts":[
             {"profile":"poke","contact_id":"kosta-owner","principal":"owner"},
             {"profile":"guest","contact_id":"stephen-lucier","principal":"guest"},
-        ],"alarm_sink":{"configured":True,"type":"operator"}}}}
+        ],"alarm_sink":{"configured":True,"type":"hermes_cron","target":"telegram:operator"}}}}
 
 
 @pytest.mark.asyncio
@@ -185,7 +192,14 @@ async def test_live_watcher_traverses_real_tick_final_checks_and_authenticated_a
     monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name",lambda:'poke')
     monkeypatch.setattr("hermes_cli.profiles.get_profile_dir",lambda profile: home if profile=='poke' else tmp_path/'profiles'/profile)
     monkeypatch.setattr("gateway.run._load_gateway_config_for_profile",lambda profile: raw if profile=='poke' else {})
-    monkeypatch.setattr("gateway.proactive_status.probe_model_readiness",lambda:{'ready':True,'checked_at':time.time(),'tasks':{},'sent_request':False})
+    monkeypatch.setattr("gateway.proactive_status.probe_model_readiness",lambda:{
+        'ready':True,'checked_at':time.time(),'sent_request':True,'provider':'openai-codex',
+        'resolved_model':'gpt-5.6-sol','response_model':'gpt-5.6-sol','private_history_used':False,
+    })
+    monkeypatch.setattr("gateway.proactive_status.probe_alarm_sink_readiness",lambda **kwargs:{
+        'ready':True,'delivery_ack':True,'type':'hermes_cron','target':'telegram:operator',
+        'checked_at':time.time(),
+    })
     monkeypatch.setattr(GatewayRunner,"_proactive_compose_generate",staticmethod(lambda request:"safe prepared text"))
     runner=GatewayRunner.__new__(GatewayRunner); runner._running=True
     runner.adapters={Platform.BLUEBUBBLES:adapter}

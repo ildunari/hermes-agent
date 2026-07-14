@@ -2083,7 +2083,7 @@ async def _record_proactive_arrival(
     try:
         from gateway.proactive_scheduler import ProactiveStateStore
         return await asyncio.to_thread(
-            ProactiveStateStore(root / "state.db").record_ingress_observed,
+            ProactiveStateStore(root / "state.db", timeout=180.0).record_ingress_observed,
             str(source_id), observed_at=float(received_at),
         )
     except Exception as exc:
@@ -7405,20 +7405,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     cfg = ProactiveConfig.from_mapping(config_raw)
                     profile_home = get_profile_dir(profile)
                     prepared = []
-                    from gateway.proactive_status import probe_model_readiness
+                    from gateway.proactive_status import probe_alarm_sink_readiness, probe_model_readiness
                     model_probe = await asyncio.to_thread(probe_model_readiness)
+                    scheduler = ProactiveScheduler(
+                        state_db_path=Path(profile_home) / "state.db",
+                        profile_home=profile_home, profile_name=profile, config=cfg,
+                    )
+                    scheduler.record_health("model_probe", model_probe)
+                    alarm_probe = await asyncio.to_thread(
+                        probe_alarm_sink_readiness, profile_home=profile_home, config=cfg,
+                    )
+                    scheduler.record_health("alarm_sink_probe", alarm_probe)
                     if cfg.mode.value == "live" and (
-                        not model_probe["ready"] or not cfg.alarm_sink_configured
+                        not model_probe["ready"] or not alarm_probe["ready"]
                     ):
-                        scheduler = ProactiveScheduler(
-                            state_db_path=Path(profile_home) / "state.db",
-                            profile_home=profile_home, profile_name=profile, config=cfg,
-                        )
-                        reason = "model_probe_unavailable" if not model_probe["ready"] else "alarm_sink_unconfigured"
+                        reason = "model_probe_unavailable" if not model_probe["ready"] else "alarm_sink_probe_unavailable"
                         scheduler.ownership_registry.open_circuit(reason, now=time.time())
                         scheduler.record_health("watcher", {
                             "completed": False, "correlation_id": correlation_id,
-                            "model_probe": model_probe, "alarm_sink_configured": cfg.alarm_sink_configured,
+                            "model_probe": model_probe, "alarm_probe": alarm_probe,
                             "failure": reason,
                         })
                         continue
@@ -7516,7 +7521,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                          ),
                          "participant_registry_ready": participant_registry_ready,
                          "model_probe": model_probe,
-                         "alarm_sink_configured": cfg.alarm_sink_configured,
+                         "alarm_probe": alarm_probe,
                          "extraction": _contact_memory_extraction_health(
                              Path(profile_home) / "contact-memory"
                          ),

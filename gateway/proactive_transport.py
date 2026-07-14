@@ -160,15 +160,33 @@ async def deliver_prepared_exactly_once(
             reason=transport_refusal.error_class or transport_refusal.state,
             message_id=transport_refusal.message_id, now=now,
         )
-    if not await asyncio.to_thread(scheduler.begin_delivery_attempt, claim, now=now):
+    # Authentication above is asynchronous. Re-authorize after it, then take
+    # a SQLite write fence immediately before adapter.send. The ingress path
+    # writes its observed sequence to the same DB, so arrival-vs-send has one
+    # durable order instead of a check/use gap.
+    refusal = await asyncio.to_thread(scheduler.final_delivery_check, route, claim, now=now)
+    if refusal:
         delivery.ownership_registry.finish_global_send(
             claim.slot_id, sent=False, now=__import__("time").time()
         )
-        row = scheduler.get_slot(claim.slot_id)
-        return str((row or {}).get("reason") or "attempt_not_available")
+        return await asyncio.to_thread(
+            scheduler.finish_delivery, claim, state="suppressed", reason=refusal, now=now,
+        )
+    fence, fence_refusal = scheduler.begin_atomic_send_fence(claim, now=now)
+    if fence is None:
+        delivery.ownership_registry.finish_global_send(
+            claim.slot_id, sent=False, now=__import__("time").time()
+        )
+        return await asyncio.to_thread(
+            scheduler.finish_delivery, claim, state="suppressed",
+            reason=str(fence_refusal or "send_fence_refused"), now=now,
+        )
     try:
-        result = await delivery.deliver(route=route, text=text, slot_id=claim.slot_id,
-                                        correlation_id=correlation_id, prepared_guid=prepared_guid)
+        try:
+            result = await delivery.deliver(route=route, text=text, slot_id=claim.slot_id,
+                                            correlation_id=correlation_id, prepared_guid=prepared_guid)
+        finally:
+            scheduler.finish_atomic_send_fence(fence)
     except Exception as exc:
         return await asyncio.to_thread(
             scheduler.finish_delivery, claim, state="failed",

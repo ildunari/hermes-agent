@@ -7,17 +7,30 @@ from gateway.proactive_status import health_snapshot, probe_model_readiness
 
 def config(mode='observe'):
     lane={'provider':'openai-codex','model':'gpt-5.6-sol','reasoning_effort':'medium','fallback':False}
-    proactive={'enabled':True,'mode':mode,'transport_owner_profile':'poke','allowed_contacts':[{'profile':'poke','contact_id':'kosta-owner','principal':'owner'},{'profile':'guest','contact_id':'stephen-lucier','principal':'guest'}], 'alarm_sink':{'configured':True,'type':'operator'}, 'compose_model':{'provider':'openai-codex','model':'gpt-5.6-sol','reasoning_effort':'low','fallback':False}}
+    proactive={'enabled':True,'mode':mode,'transport_owner_profile':'poke','allowed_contacts':[{'profile':'poke','contact_id':'kosta-owner','principal':'owner'},{'profile':'guest','contact_id':'stephen-lucier','principal':'guest'}], 'alarm_sink':{'configured':True,'type':'hermes_cron','target':'telegram:operator'}, 'compose_model':{'provider':'openai-codex','model':'gpt-5.6-sol','reasoning_effort':'low','fallback':False}}
     return {'auxiliary':{'proactive_gate':lane,'proactive_semantic':lane},'agent':{'proactive':proactive}}
+
+
+def record_probes(scheduler, when):
+    scheduler.record_health('model_probe',{
+        'ready':True,'sent_request':True,'provider':'openai-codex',
+        'resolved_model':'gpt-5.6-sol','response_model':'gpt-5.6-sol',
+        'private_history_used':False,
+    },now=when)
+    scheduler.record_health('alarm_sink_probe',{
+        'ready':True,'delivery_ack':True,'type':'hermes_cron','target':'telegram:operator',
+    },now=when)
 
 
 def test_stale_then_recovered_watcher_and_model_mismatch(tmp_path: Path):
     raw=config(); cfg=ProactiveConfig.from_mapping(raw)
     scheduler=ProactiveScheduler(state_db_path=tmp_path/'state.db',profile_home=tmp_path,profile_name='poke',config=cfg)
     scheduler.record_health('watcher',{'ok':True,'participant_registry_ready':True,'model_probe':{'ready':True,'checked_at':100}},now=100)
+    record_probes(scheduler,100)
     stale=health_snapshot(profile_home=tmp_path,profile='poke',config=raw,now=100+3901,adapter_ready=True,cron_fresh=True)
     assert stale['dead'] and 'watcher_stale' in stale['reasons']
     scheduler.record_health('watcher',{'ok':True,'participant_registry_ready':True,'model_probe':{'ready':True,'checked_at':5000}},now=5000)
+    record_probes(scheduler,5000)
     healthy=health_snapshot(profile_home=tmp_path,profile='poke',config=raw,now=5001,adapter_ready=True,cron_fresh=True)
     assert not healthy['dead']
     broken=config(); broken['auxiliary']['proactive_gate']['model']='other'
@@ -49,6 +62,7 @@ def test_real_ingress_drift_and_extraction_health_fail_closed(tmp_path: Path):
         'model_probe':{'ready':True,'checked_at':5000},
         'extraction':{'dead_workers':1,'queue_full':True},
     },now=5000)
+    record_probes(scheduler,5000)
     from gateway.proactive_scheduler import ProactiveStateStore
     ProactiveStateStore(tmp_path/'state.db').record_ingress_observed('untracked',observed_at=5000)
     status=health_snapshot(profile_home=tmp_path,profile='poke',config=raw,now=5001,cron_fresh=True)
@@ -59,6 +73,7 @@ def test_status_reads_real_contact_store_and_matching_digest_paths(tmp_path: Pat
     raw=config(); cfg=ProactiveConfig.from_mapping(raw)
     scheduler=ProactiveScheduler(state_db_path=tmp_path/'state.db',profile_home=tmp_path,profile_name='poke',config=cfg)
     scheduler.record_health('watcher',{'adapter_ready':True,'participant_registry_ready':True,'extraction':{},'model_probe':{'ready':True,'checked_at':5000}},now=5000)
+    record_probes(scheduler,5000)
     scheduler.record_health('planning_attempt',{'state':'completed'},now=5000)
     store=ContactMemoryStore(tmp_path/'contact-memory','kosta-owner')
     store.put_interest(Interest(
@@ -76,15 +91,45 @@ def test_status_reads_real_contact_store_and_matching_digest_paths(tmp_path: Pat
     assert 'digest_missing' not in status['reasons']
 
 
-def test_model_probe_uses_real_resolver_contract_without_sending_history():
+def test_model_probe_uses_strict_minimal_request_without_private_history():
     calls=[]
     class Completions:
         def create(self, **kwargs):
-            raise AssertionError('probe must not send')
+            calls.append(kwargs)
+            return type('Response',(),{
+                'model':'gpt-5.6-sol',
+                'usage':type('Usage',(),{'completion_tokens':2})(),
+            })()
     client=type('Client',(),{'chat':type('Chat',(),{'completions':Completions()})()})()
     def resolver(provider, **kwargs):
         calls.append((provider,kwargs))
         return client,'gpt-5.6-sol'
     probe=probe_model_readiness(now=123,resolver=resolver)
-    assert probe['ready'] and probe['sent_request'] is False and len(calls)==3
-    assert all(call[0]=='openai-codex' and call[1]['model']=='gpt-5.6-sol' for call in calls)
+    assert probe['ready'] and probe['sent_request'] is True and probe['private_history_used'] is False
+    assert calls[0][0]=='openai-codex' and calls[0][1]['model']=='gpt-5.6-sol'
+    request=calls[1]
+    assert request['max_completion_tokens']==4 and request['messages']==[{'role':'user','content':'Reply exactly OK.'}]
+
+
+def test_model_probe_invalid_credentials_and_wrong_resolved_model_fail_closed():
+    def invalid(*args,**kwargs):
+        raise PermissionError('revoked')
+    assert not probe_model_readiness(resolver=invalid)['ready']
+    def wrong(*args,**kwargs):
+        return object(),'other-model'
+    probe=probe_model_readiness(resolver=wrong)
+    assert not probe['ready'] and probe['error_class']=='StrictRouteResolutionError'
+
+
+def test_default_ownership_registry_is_isolated_between_standalone_roots(tmp_path: Path):
+    from gateway.proactive_scheduler import ContactRoute
+    poke_root=tmp_path/'case-a'; guest_root=tmp_path/'case-b'
+    poke=ProactiveScheduler(state_db_path=poke_root/'state.db',profile_home=poke_root,
+                            profile_name='poke',config=ProactiveConfig())
+    guest=ProactiveScheduler(state_db_path=guest_root/'state.db',profile_home=guest_root,
+                             profile_name='guest',config=ProactiveConfig())
+    poke.register_contact(ContactRoute('same-id','poke'))
+    guest.register_contact(ContactRoute('same-id','guest',principal='guest'))
+    assert (poke_root/'proactive-contact-ownership.db').is_file()
+    assert (guest_root/'proactive-contact-ownership.db').is_file()
+    assert not (tmp_path/'proactive-contact-ownership.db').exists()

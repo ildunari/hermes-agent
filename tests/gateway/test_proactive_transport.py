@@ -8,6 +8,7 @@ from gateway.contact_memory.store import ContactMemoryStore
 from gateway.platforms.base import SendResult
 from gateway.proactive_scheduler import ContactRoute, ProactiveConfig, ProactiveMode, ProactiveOwnershipRegistry, ProactiveScheduler, ProactiveStateStore
 from gateway.proactive_transport import BlueBubblesProactiveDelivery, deliver_prepared_exactly_once
+from gateway.proactive_status import health_snapshot
 
 NOW=1_800_000_000.0
 ROUTE=ContactRoute('kosta-owner','poke','UTC','owner','dm','existing','owner','parent')
@@ -27,9 +28,18 @@ def setup(tmp_path: Path):
     route={'platform':'bluebubbles','chat_type':'dm','chat_id':'existing','user_id':'owner','session_id':'parent'}
     for i in range(5): state.register_inbound(profile='poke',contact_id='kosta-owner',route=route,timezone_name='UTC',source_id=f'm{i}',received_at=NOW-100+i)
     cfg=ProactiveConfig(enabled=True,dry_run=False,mode=ProactiveMode.LIVE,allowed_contacts=ALLOW,
-                        active_start='00:00',active_end='23:59',alarm_sink_configured=True)
+                        active_start='00:00',active_end='23:59',alarm_sink_configured=True,
+                        alarm_sink_type='hermes_cron',alarm_sink_target='telegram:operator')
     scheduler=ProactiveScheduler(state_db_path=tmp_path/'state.db',profile_home=tmp_path,profile_name='poke',config=cfg,
                                  ownership_registry_path=tmp_path/'ownership.db')
+    scheduler.record_health('model_probe',{
+        'ready':True,'sent_request':True,'provider':'openai-codex',
+        'resolved_model':'gpt-5.6-sol','response_model':'gpt-5.6-sol',
+        'private_history_used':False,
+    },now=NOW)
+    scheduler.record_health('alarm_sink_probe',{
+        'ready':True,'delivery_ack':True,'type':'hermes_cron','target':'telegram:operator',
+    },now=NOW)
     slot=scheduler.arm_slot(ROUTE,kind='checkin',fire_at=NOW-1,now=NOW-2)
     claim=scheduler.claim_due(worker_id='x',now=NOW)[0]
     return scheduler,claim,slot
@@ -186,3 +196,75 @@ def test_authenticated_route_fingerprint_is_immutable(tmp_path: Path):
     assert scheduler.bind_route_fingerprint(ROUTE,'fingerprint-one')
     assert scheduler.bind_route_fingerprint(ROUTE,'fingerprint-one')
     assert not scheduler.bind_route_fingerprint(ROUTE,'fingerprint-two')
+
+
+@pytest.mark.asyncio
+async def test_arrival_during_async_dm_auth_is_rechecked_before_send(tmp_path: Path):
+    scheduler,claim,_=setup(tmp_path)
+    class ArrivalDuringAuth(Adapter):
+        async def resolve_authenticated_existing_dm(self,chat_id,user_id):
+            ProactiveStateStore(tmp_path/'state.db').record_ingress_observed(
+                'arrived-during-auth',observed_at=NOW,
+            )
+            await asyncio.sleep(0)
+            return ('iMessage;-;existing','fingerprint')
+    adapter=ArrivalDuringAuth(SendResult(True,message_id='must-not-send'))
+    result=await deliver_prepared_exactly_once(
+        scheduler=scheduler,delivery=transport(adapter,scheduler),route=ROUTE,claim=claim,
+        text='one',correlation_id='arrival-race',now=NOW,
+    )
+    assert result=='suppressed' and adapter.calls==0
+    with scheduler._connect() as con:
+        row=con.execute('SELECT last_error_class FROM proactive_delivery WHERE slot_id=?',(claim.slot_id,)).fetchone()
+    assert row[0]=='newer_observed_ingress'
+
+
+@pytest.mark.asyncio
+async def test_atomic_send_fence_serializes_arrival_after_transport(tmp_path: Path):
+    scheduler,claim,_=setup(tmp_path)
+    entered=asyncio.Event(); release=asyncio.Event()
+    class PausedSend(Adapter):
+        async def send(self,*args,**kwargs):
+            self.calls+=1; entered.set(); await release.wait()
+            return self.result
+    adapter=PausedSend(SendResult(True,message_id='sent'))
+    ingress_store=ProactiveStateStore(tmp_path/'state.db')
+    send_task=asyncio.create_task(deliver_prepared_exactly_once(
+        scheduler=scheduler,delivery=transport(adapter,scheduler),route=ROUTE,claim=claim,
+        text='one',correlation_id='linearized',now=NOW,
+    ))
+    await entered.wait()
+    arrival=asyncio.create_task(asyncio.to_thread(
+        ingress_store.record_ingress_observed,
+        'ordered-after-send',observed_at=NOW+1,
+    ))
+    await asyncio.sleep(0.05)
+    assert not arrival.done()
+    release.set()
+    assert await send_task=='sent'
+    assert await arrival>claim.ingress_sequence
+
+
+@pytest.mark.asyncio
+async def test_projection_failure_preserves_confirmed_send_opens_circuit_and_status_counts(monkeypatch,tmp_path: Path):
+    scheduler,claim,slot=setup(tmp_path)
+    monkeypatch.setattr(scheduler,'_project_confirmed_send',lambda *args,**kwargs: (_ for _ in ()).throw(OSError('disk full')))
+    adapter=Adapter(SendResult(True,message_id='remote-confirmed'))
+    assert await deliver_prepared_exactly_once(
+        scheduler=scheduler,delivery=transport(adapter,scheduler),route=ROUTE,claim=claim,
+        text='one',correlation_id='projection-failure',now=NOW,
+    )=='sent'
+    with scheduler._connect() as con:
+        delivery=con.execute('SELECT state,transport_message_id,projection_state FROM proactive_delivery WHERE slot_id=?',(slot,)).fetchone()
+        action=con.execute('SELECT status FROM proactive_action WHERE slot_id=?',(slot,)).fetchone()
+    assert tuple(delivery)==('sent','remote-confirmed','failed') and action[0]=='sent'
+    circuit=scheduler.ownership_registry.global_send_status(now=NOW)
+    assert circuit['circuit_state']=='open' and circuit['circuit_reason']=='confirmed_send_projection_failed'
+    raw={'agent':{'proactive':{'enabled':True,'mode':'live','transport_owner_profile':'poke',
+        'allowed_contacts':[{'profile':'poke','contact_id':'kosta-owner','principal':'owner'},
+                            {'profile':'guest','contact_id':'stephen-lucier','principal':'guest'}],
+        'alarm_sink':{'configured':True,'type':'hermes_cron','target':'telegram:operator'}}}}
+    status=health_snapshot(profile_home=tmp_path,profile='poke',config=raw,now=NOW,
+                           adapter_ready=True,cron_fresh=True)
+    assert status['send_rate_sent']==1 and status['send_rate_total']==1
+    assert 'confirmed_send_projection_incomplete' in status['reasons']

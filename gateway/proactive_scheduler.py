@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS proactive_slot (
   status TEXT NOT NULL CHECK(status IN ('armed','claimed','fired','cancelled','suppressed')),
   fire_at REAL NOT NULL,
   inbound_version INTEGER NOT NULL,
+  ingress_sequence INTEGER NOT NULL DEFAULT 0,
   claim_token TEXT,
   claim_until REAL,
   reason TEXT NOT NULL DEFAULT '',
@@ -116,6 +117,8 @@ CREATE TABLE IF NOT EXISTS proactive_delivery (
   kill_generation INTEGER NOT NULL DEFAULT 0,
   transport_message_id TEXT,
   last_error_class TEXT,
+  projection_state TEXT NOT NULL DEFAULT 'not_required' CHECK(projection_state IN ('not_required','pending','complete','failed')),
+  projection_error TEXT,
   updated_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS proactive_health (
@@ -164,9 +167,16 @@ def _initialize_schema(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE proactive_delivery ADD COLUMN prepared_payload TEXT")
     if "kill_generation" not in columns:
         con.execute("ALTER TABLE proactive_delivery ADD COLUMN kill_generation INTEGER NOT NULL DEFAULT 0")
+    if "projection_state" not in columns:
+        con.execute("ALTER TABLE proactive_delivery ADD COLUMN projection_state TEXT NOT NULL DEFAULT 'not_required'")
+    if "projection_error" not in columns:
+        con.execute("ALTER TABLE proactive_delivery ADD COLUMN projection_error TEXT")
     contact_columns = {str(row[1]) for row in con.execute("PRAGMA table_info(proactive_contact)")}
     if "route_fingerprint" not in contact_columns:
         con.execute("ALTER TABLE proactive_contact ADD COLUMN route_fingerprint TEXT")
+    slot_columns = {str(row[1]) for row in con.execute("PRAGMA table_info(proactive_slot)")}
+    if "ingress_sequence" not in slot_columns:
+        con.execute("ALTER TABLE proactive_slot ADD COLUMN ingress_sequence INTEGER NOT NULL DEFAULT 0")
     con.execute("BEGIN IMMEDIATE")
     try:
         duplicates = con.execute(
@@ -198,7 +208,10 @@ def _initialize_schema(con: sqlite3.Connection) -> None:
 def _default_ownership_registry(profile_home: Path) -> Path:
     parent = profile_home.parent
     root = parent.parent if parent.name == "profiles" else parent
-    return root / "proactive-contact-ownership.db"
+    # Production profile homes share the Hermes-root registry. Standalone
+    # roots (tests/embedders) keep ownership local instead of leaking through
+    # their common parent.
+    return root / "proactive-contact-ownership.db" if parent.name == "profiles" else profile_home / "proactive-contact-ownership.db"
 
 
 class ProactiveOwnershipRegistry:
@@ -374,6 +387,9 @@ class ProactiveConfig:
     circuit_breaker_cooldown_seconds: int = 21_600
     kill_generation: int = 0
     alarm_sink_configured: bool = False
+    alarm_sink_type: str = ""
+    alarm_sink_target: str = ""
+    alarm_probe_max_age_seconds: int = 25_200
 
     def validate(self) -> None:
         if self.mode is ProactiveMode.LIVE and not self.enabled:
@@ -388,6 +404,11 @@ class ProactiveConfig:
             raise ValueError("weekly_interest_cap cannot exceed weekly_total_cap")
         if not (0.0 <= self.exploration_floor <= 1.0):
             raise ValueError("exploration_floor must be in [0, 1]")
+        if self.alarm_sink_configured and (self.alarm_sink_type or self.alarm_sink_target) and (
+            self.alarm_sink_type != "hermes_cron" or not self.alarm_sink_target
+            or self.alarm_sink_target in {"local", "origin", "all"}
+        ):
+            raise ValueError("alarm sink must be hermes_cron with one explicit operator target")
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "ProactiveConfig":
@@ -435,8 +456,15 @@ class ProactiveConfig:
             kill_generation=max(0, int(raw.get("kill_generation", 0))),
             alarm_sink_configured=bool(
                 isinstance(alarm_sink, Mapping) and alarm_sink.get("configured") is True
-                and str(alarm_sink.get("type") or "").strip()
+                and str(alarm_sink.get("type") or "").strip() == "hermes_cron"
+                and str(alarm_sink.get("target") or "").strip()
             ),
+            alarm_sink_type=str(alarm_sink.get("type") or "").strip() if isinstance(alarm_sink, Mapping) else "",
+            alarm_sink_target=str(alarm_sink.get("target") or "").strip() if isinstance(alarm_sink, Mapping) else "",
+            alarm_probe_max_age_seconds=max(300, int(
+                alarm_sink.get("probe_max_age_seconds", 25_200)
+                if isinstance(alarm_sink, Mapping) else 25_200
+            )),
         )
         config.validate()
         return config
@@ -475,6 +503,7 @@ class SlotClaim:
     fire_at: float
     inbound_version: int
     claim_token: str
+    ingress_sequence: int = 0
 
 
 @dataclass(frozen=True)
@@ -648,6 +677,17 @@ class ProactiveStateStore:
                 raise RuntimeError("ingress arrival sequence was not durably visible")
             return int(row[0])
 
+    def current_ingress_sequence(self, *, con: sqlite3.Connection | None = None) -> int:
+        """Return the durable global arrival sequence in this profile state DB."""
+        if con is not None:
+            return int(con.execute(
+                "SELECT COALESCE(max(rowid),0) FROM proactive_ingress_observed"
+            ).fetchone()[0])
+        with self._connect() as owned:
+            return int(owned.execute(
+                "SELECT COALESCE(max(rowid),0) FROM proactive_ingress_observed"
+            ).fetchone()[0])
+
     def set_backoff(self, contact_key: str, until: float) -> None:
         with self._connect() as con:
             con.execute("UPDATE proactive_contact SET disabled_until=?,updated_at=? WHERE contact_hash=?",
@@ -693,11 +733,12 @@ class ProactiveStateStore:
                 raise KeyError("unknown proactive contact")
             con.execute(
                 """INSERT INTO proactive_slot(slot_id,contact_hash,kind,interest_id,payload_json,
-                   status,fire_at,inbound_version,created_at,updated_at)
-                   VALUES(?,?,?,?,?,'armed',?,?,?,?)""",
+                   status,fire_at,inbound_version,ingress_sequence,created_at,updated_at)
+                   VALUES(?,?,?,?,?,'armed',?,?,?,?,?)""",
                 (slot_id, contact_key, kind, interest_id,
                  json.dumps(dict(payload), sort_keys=True), fire_at,
-                 int(contact["inbound_version"]), planned_at, planned_at),
+                 int(contact["inbound_version"]), self.current_ingress_sequence(con=con),
+                 planned_at, planned_at),
             )
             con.execute("COMMIT")
             return slot_id
@@ -714,6 +755,7 @@ class ProactiveStateStore:
             str(row["interest_id"]) if row["interest_id"] else None,
             json.loads(row["payload_json"] or "{}"), float(row["fire_at"]),
             int(row["inbound_version"]), str(row["claim_token"]),
+            int(row["ingress_sequence"] or 0),
         )
 
     def claim_due(self, *, now: float, lease_seconds: int) -> SlotClaim | None:
@@ -1070,12 +1112,14 @@ class ProactiveScheduler:
             con.execute(
                 """INSERT INTO proactive_slot(
                    slot_id,contact_hash,kind,interest_id,payload_json,status,fire_at,
-                   inbound_version,created_at,updated_at)
-                   VALUES(?,?,?,?,?,'armed',?,?,?,?)""",
+                   inbound_version,ingress_sequence,created_at,updated_at)
+                   VALUES(?,?,?,?,?,'armed',?,?,?,?,?)""",
                 (
                     identifier, contact_hash, resolved_kind, interest_id,
                     json.dumps(dict(payload or {}), sort_keys=True, ensure_ascii=False),
-                    fire, int(contact["inbound_version"]), timestamp, timestamp,
+                    fire, int(contact["inbound_version"]),
+                    int(con.execute("SELECT COALESCE(max(rowid),0) FROM proactive_ingress_observed").fetchone()[0]),
+                    timestamp, timestamp,
                 ),
             )
             self._finish(con)
@@ -1202,7 +1246,7 @@ class ProactiveScheduler:
                         str(row["slot_id"]), str(row["contact_hash"]), str(row["kind"]),
                         str(row["interest_id"]) if row["interest_id"] is not None else None,
                         json.loads(row["payload_json"] or "{}"), float(row["fire_at"]),
-                        int(row["inbound_version"]), token,
+                        int(row["inbound_version"]), token, int(row["ingress_sequence"] or 0),
                     ))
             self._finish(con)
             return claims
@@ -1323,6 +1367,12 @@ class ProactiveScheduler:
             return "allowlist_mismatch"
         if not self.config.alarm_sink_configured:
             return "alarm_sink_unconfigured"
+        if not self.model_probe_is_fresh(now=timestamp):
+            return "model_probe_unavailable_or_stale"
+        if not self.alarm_sink_probe_is_fresh(now=timestamp):
+            return "alarm_sink_probe_unavailable_or_stale"
+        if not self.reconcile_confirmed_sends(now=timestamp):
+            return "confirmed_send_projection_failed"
         if self.ownership_registry.global_send_status(now=timestamp)["circuit_state"] == "open":
             return "global_circuit_open"
         with self._connect() as con:
@@ -1337,7 +1387,9 @@ class ProactiveScheduler:
                 return "transport_circuit_open"
             row = con.execute(
                 """SELECT s.status,s.claim_token,s.inbound_version,c.inbound_version current_inbound,
-                          c.disabled_until,c.timezone,d.kill_generation FROM proactive_slot s
+                          s.ingress_sequence,c.disabled_until,c.timezone,d.kill_generation,
+                          (SELECT COALESCE(max(rowid),0) FROM proactive_ingress_observed) current_ingress
+                   FROM proactive_slot s
                    JOIN proactive_contact c USING(contact_hash)
                    LEFT JOIN proactive_delivery d USING(slot_id)
                    WHERE s.slot_id=?""", (claim.slot_id,),
@@ -1346,6 +1398,8 @@ class ProactiveScheduler:
             return "claim_not_current"
         if int(row["current_inbound"]) != int(row["inbound_version"]):
             return "newer_inbound"
+        if int(row["current_ingress"] or 0) > int(row["ingress_sequence"] or 0):
+            return "newer_observed_ingress"
         if row["disabled_until"] is not None and float(row["disabled_until"]) > timestamp:
             return "backoff_active"
         if int(row["kill_generation"] or 0) != self.config.kill_generation:
@@ -1359,6 +1413,86 @@ class ProactiveScheduler:
         if not (start_h * 60 + start_m <= current <= end_h * 60 + end_m):
             return "outside_active_hours"
         return self.eligibility_reason(claim.contact_hash, claim.kind, now=timestamp)
+
+    def alarm_sink_probe_is_fresh(self, *, now: float | None = None) -> bool:
+        timestamp = _finite(time.time() if now is None else now, "now")
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT value_json,updated_at FROM proactive_health WHERE key='alarm_sink_probe'"
+            ).fetchone()
+        if row is None or timestamp - float(row["updated_at"]) > self.config.alarm_probe_max_age_seconds:
+            return False
+        try:
+            value = json.loads(row["value_json"] or "{}")
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            value.get("ready") is True
+            and value.get("type") == self.config.alarm_sink_type
+            and value.get("target") == self.config.alarm_sink_target
+            and value.get("delivery_ack") is True
+        )
+
+    def model_probe_is_fresh(self, *, now: float | None = None) -> bool:
+        timestamp = _finite(time.time() if now is None else now, "now")
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT value_json,updated_at FROM proactive_health WHERE key='model_probe'"
+            ).fetchone()
+        if row is None or timestamp - float(row["updated_at"]) > 3900:
+            return False
+        try:
+            value = json.loads(row["value_json"] or "{}")
+        except (TypeError, ValueError):
+            return False
+        return bool(
+            value.get("ready") is True and value.get("sent_request") is True
+            and value.get("provider") == "openai-codex"
+            and value.get("resolved_model") == "gpt-5.6-sol"
+            and value.get("response_model") == "gpt-5.6-sol"
+            and value.get("private_history_used") is False
+        )
+
+    def begin_atomic_send_fence(self, claim: SlotClaim, *, now: float | None = None) -> tuple[sqlite3.Connection | None, str | None]:
+        """Linearize arrival vs transport and consume one attempt.
+
+        The write transaction remains open only across the bounded adapter send.
+        Ingress observation uses the same SQLite DB, so an arrival is either
+        visible here (and cancels) or is durably ordered after the transport.
+        """
+        timestamp = _finite(time.time() if now is None else now, "now")
+        con = self._begin()
+        try:
+            row = con.execute(
+                """SELECT s.status,s.claim_token,s.ingress_sequence,d.state,d.not_before,d.attempt_count,
+                          (SELECT COALESCE(max(rowid),0) FROM proactive_ingress_observed) current_ingress
+                   FROM proactive_slot s JOIN proactive_delivery d USING(slot_id) WHERE s.slot_id=?""",
+                (claim.slot_id,),
+            ).fetchone()
+            if row is None or row["status"] != "claimed" or row["claim_token"] != claim.claim_token:
+                self._finish(con, RuntimeError("claim_not_current"))
+                return None, "claim_not_current"
+            if int(row["current_ingress"] or 0) > int(row["ingress_sequence"] or 0):
+                self._finish(con, RuntimeError("newer_observed_ingress"))
+                return None, "newer_observed_ingress"
+            if row["state"] != "sending" or (row["not_before"] is not None and float(row["not_before"]) > timestamp):
+                self._finish(con, RuntimeError("attempt_not_available"))
+                return None, "attempt_not_available"
+            if int(row["attempt_count"]) >= self.config.max_retry_attempts:
+                self._finish(con, RuntimeError("attempt_budget_exhausted"))
+                return None, "attempt_budget_exhausted"
+            con.execute(
+                "UPDATE proactive_delivery SET attempt_count=attempt_count+1,updated_at=? WHERE slot_id=?",
+                (timestamp, claim.slot_id),
+            )
+            return con, None
+        except BaseException as exc:
+            if con.in_transaction:
+                self._finish(con, exc)
+            raise
+
+    def finish_atomic_send_fence(self, con: sqlite3.Connection) -> None:
+        self._finish(con)
 
     def begin_delivery_attempt(self, claim: SlotClaim, *, now: float | None = None) -> bool:
         timestamp = _finite(time.time() if now is None else now, "now")
@@ -1421,8 +1555,8 @@ class ProactiveScheduler:
                 self._finish(con)
                 return "retry_wait"
             final = state if state in terminal else "delivery_unknown"
-            con.execute("UPDATE proactive_delivery SET state=?,transport_message_id=?,last_error_class=?,updated_at=? WHERE slot_id=?",
-                        (final, message_id, reason[:120], timestamp, claim.slot_id))
+            con.execute("UPDATE proactive_delivery SET state=?,transport_message_id=?,last_error_class=?,projection_state=?,projection_error=NULL,updated_at=? WHERE slot_id=?",
+                        (final, message_id, reason[:120], "pending" if final == "sent" else "not_required", timestamp, claim.slot_id))
             action_status = "sent" if final == "sent" else "suppressed"
             con.execute("INSERT OR IGNORE INTO proactive_action(action_id,slot_id,contact_hash,interest_id,kind,status,sent_at,inbound_version,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                         (claim.slot_id, claim.slot_id, claim.contact_hash, claim.interest_id, claim.kind,
@@ -1431,7 +1565,22 @@ class ProactiveScheduler:
                         ("fired" if final == "sent" else "suppressed", reason, timestamp, claim.slot_id))
             self._finish(con)
             if final == "sent":
-                self._project_confirmed_send(claim, timestamp=timestamp, reason=reason)
+                try:
+                    self._project_confirmed_send(claim, timestamp=timestamp, reason=reason)
+                except Exception as exc:
+                    with self._connect() as projection_con:
+                        projection_con.execute(
+                            "UPDATE proactive_delivery SET projection_state='failed',projection_error=?,updated_at=? WHERE slot_id=?",
+                            (type(exc).__name__, timestamp, claim.slot_id),
+                        )
+                    self.ownership_registry.open_circuit("confirmed_send_projection_failed", now=timestamp)
+                    logger.exception("Confirmed proactive send projection failed slot=%s", claim.slot_id)
+                else:
+                    with self._connect() as projection_con:
+                        projection_con.execute(
+                            "UPDATE proactive_delivery SET projection_state='complete',projection_error=NULL WHERE slot_id=?",
+                            (claim.slot_id,),
+                        )
             return final
         except BaseException as exc:
             if con.in_transaction:
@@ -1492,22 +1641,57 @@ class ProactiveScheduler:
         if suppression_metrics(store, since=timestamp - _WEEK).alarm:
             self.ownership_registry.open_circuit("send_rate_above_40_percent", now=timestamp)
 
+    def reconcile_confirmed_sends(self, *, now: float | None = None) -> bool:
+        """Repair every durable confirmed-send projection before more transport."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        with self._connect() as con:
+            rows = con.execute(
+                """SELECT s.*,d.last_error_class FROM proactive_slot s JOIN proactive_delivery d USING(slot_id)
+                   WHERE d.state='sent' AND d.projection_state!='complete' ORDER BY d.updated_at"""
+            ).fetchall()
+        ok = True
+        for row in rows:
+            claim = SlotClaim(
+                str(row["slot_id"]), str(row["contact_hash"]), str(row["kind"]),
+                str(row["interest_id"]) if row["interest_id"] else None,
+                json.loads(row["payload_json"] or "{}"), float(row["fire_at"]),
+                int(row["inbound_version"]), str(row["claim_token"] or "reconcile"),
+                int(row["ingress_sequence"] or 0),
+            )
+            try:
+                self._project_confirmed_send(
+                    claim, timestamp=float(row["updated_at"]),
+                    reason=str(row["last_error_class"] or "sent"),
+                )
+            except Exception as exc:
+                ok = False
+                with self._connect() as con:
+                    con.execute(
+                        "UPDATE proactive_delivery SET projection_state='failed',projection_error=? WHERE slot_id=?",
+                        (type(exc).__name__, claim.slot_id),
+                    )
+            else:
+                with self._connect() as con:
+                    con.execute(
+                        "UPDATE proactive_delivery SET projection_state='complete',projection_error=NULL WHERE slot_id=?",
+                        (claim.slot_id,),
+                    )
+        if not ok:
+            self.ownership_registry.open_circuit("confirmed_send_projection_failed", now=timestamp)
+        return ok
+
     def enforce_send_rate_circuit(self, *, now: float | None = None) -> dict[str, Any]:
         """Atomically open the durable global circuit when trailing sends exceed 40%."""
         timestamp = _finite(time.time() if now is None else now, "now")
-        total = sent = 0
+        # state.db is canonical after transport confirmation. The contact
+        # ledger is a durable projection and may temporarily be pending.
         with self._connect() as con:
-            contacts = [str(row[0]) for row in con.execute(
-                "SELECT contact_id FROM proactive_contact WHERE contact_id IS NOT NULL"
-            )]
-        from gateway.proactive_fetch import suppression_metrics
-        for contact_id in contacts:
-            metrics = suppression_metrics(
-                ContactMemoryStore(self.profile_home / "contact-memory", contact_id),
-                since=timestamp - _WEEK,
-            )
-            total += metrics.total
-            sent += metrics.sent
+            row = con.execute(
+                """SELECT count(*),COALESCE(sum(CASE WHEN status='sent' THEN 1 ELSE 0 END),0)
+                   FROM proactive_action WHERE created_at>=?""",
+                (timestamp - _WEEK,),
+            ).fetchone()
+        total, sent = int(row[0]), int(row[1])
         rate = sent / total if total else 0.0
         if total and rate > 0.40:
             self.ownership_registry.open_circuit("send_rate_above_40_percent", now=timestamp)

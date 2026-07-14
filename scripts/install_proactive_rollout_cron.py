@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Idempotently install proactive maintenance and silent health watchdog cron."""
+"""Install proactive maintenance, watchdog, and a proven operator alarm sink."""
 from __future__ import annotations
-import argparse, os, stat, tempfile
+import argparse
+import json
+import os
+import secrets
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +15,13 @@ from scripts.install_contact_memory_maintenance_cron import install as install_m
 
 WATCHDOG_NAME = "Proactive rollout health watchdog"
 WATCHDOG_SCRIPT = "proactive_health_watchdog.py"
+ALARM_PROBE_NAME = "Proactive alarm sink end-to-end probe"
+ALARM_PROBE_SCRIPT = "proactive_alarm_sink_probe.py"
 SCHEDULE = "every 30m"
+ALARM_PROBE_SCHEDULE = "every 6h"
+_SUPPORTED_ALARM_PLATFORMS = frozenset({
+    "telegram", "discord", "slack", "email", "bluebubbles", "signal", "matrix",
+})
 
 
 def _runner(root: Path, profile: str) -> str:
@@ -21,53 +32,124 @@ def _runner(root: Path, profile: str) -> str:
             "raise SystemExit(p.returncode)\n")
 
 
-def _atomic(path: Path, content: str) -> None:
+def _atomic(path: Path, content: str, *, executable: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp = tempfile.mkstemp(prefix=".watchdog.", dir=path.parent)
+    fd, temp = tempfile.mkstemp(prefix=".proactive.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content); handle.flush(); os.fsync(handle.fileno())
-        os.chmod(temp, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        mode = stat.S_IRUSR | stat.S_IWUSR | (stat.S_IXUSR if executable else 0)
+        os.chmod(temp, mode)
         os.replace(temp, path)
     except BaseException:
-        try: os.unlink(temp)
-        except OSError: pass
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
         raise
 
 
-def install(*, profile: str | None = None, root: str | None = None, dry_run: bool = False) -> dict[str, Any]:
+def validate_alarm_target(target: str) -> dict[str, str]:
+    value = str(target or "").strip()
+    if ":" not in value or "," in value:
+        raise ValueError("alarm target must be one explicit platform:chat target")
+    platform, address = value.split(":", 1)
+    if platform.lower() not in _SUPPORTED_ALARM_PLATFORMS or not address.strip():
+        raise ValueError("alarm target platform is not a supported Hermes delivery sink")
+    return {"platform": platform.lower(), "address": address.strip(), "target": value}
+
+
+def install(*, profile: str | None = None, root: str | None = None,
+            alarm_target: str | None = None, dry_run: bool = False) -> dict[str, Any]:
     home = resolve_profile_home(profile=profile, root=root)
     profile_name = str(profile or home.name)
     if profile_name not in {"poke", "guest"}:
         raise ValueError("rollout cron is limited to poke and guest")
-    plan: dict[str, Any] = {"profile_home": str(home), "profile": profile_name,
-                            "schedule": SCHEDULE, "dry_run": dry_run,
-                            "jobs": ["maintenance", "watchdog"], "task": "proactive_semantic"}
-    if dry_run: return plan
+    target = validate_alarm_target(alarm_target or "")
+    plan: dict[str, Any] = {
+        "profile_home": str(home), "profile": profile_name, "schedule": SCHEDULE,
+        "dry_run": dry_run, "jobs": ["maintenance", "watchdog", "alarm_probe"],
+        "alarm_target": target["target"], "task": "proactive_semantic",
+    }
+    if dry_run:
+        return plan
+
     maintenance = install_maintenance(root=str(home), task="proactive_semantic", dry_run=False)
-    _atomic(home/"scripts"/WATCHDOG_SCRIPT, _runner(home, profile_name))
+    _atomic(home / "scripts" / WATCHDOG_SCRIPT, _runner(home, profile_name))
+    manifest_path = home / "proactive-alarm-sink.json"
+    nonce = secrets.token_hex(16)
+    if manifest_path.is_file():
+        try:
+            previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if previous.get("target") == target["target"] and previous.get("nonce"):
+                nonce = str(previous["nonce"])
+        except (OSError, ValueError):
+            pass
+    _atomic(home / "scripts" / ALARM_PROBE_SCRIPT,
+            "#!/usr/bin/env python3\n"
+            f"print('HERMES_PROACTIVE_ALARM_PROBE_ACK_REQUEST {nonce}')\n")
+    _atomic(manifest_path, json.dumps({
+        "version": 1, "type": "hermes_cron", "target": target["target"],
+        "nonce": nonce, "probe_schedule": ALARM_PROBE_SCHEDULE,
+    }, sort_keys=True) + "\n", executable=False)
+
     desired = {"name": WATCHDOG_NAME, "prompt": "", "schedule": SCHEDULE,
-               "script": WATCHDOG_SCRIPT, "no_agent": True, "deliver": "local", "enabled": True}
+               "script": WATCHDOG_SCRIPT, "no_agent": True,
+               "deliver": target["target"], "enabled": True}
+    probe_desired = {"name": ALARM_PROBE_NAME, "prompt": "",
+                     "schedule": ALARM_PROBE_SCHEDULE, "script": ALARM_PROBE_SCRIPT,
+                     "no_agent": True, "deliver": target["target"], "enabled": True}
     with use_cron_store(home):
         matches = [j for j in list_jobs(include_disabled=True) if j.get("name") == WATCHDOG_NAME]
         if matches:
             job = update_job(matches[0]["id"], desired)
-            for duplicate in matches[1:]: remove_job(duplicate["id"])
+            for duplicate in matches[1:]:
+                remove_job(duplicate["id"])
         else:
             job = create_job(prompt=None, name=WATCHDOG_NAME, schedule=SCHEDULE,
-                             script=WATCHDOG_SCRIPT, no_agent=True, deliver="local")
-    plan.update({"dry_run": False, "maintenance_job_id": maintenance["job_id"],
-                 "watchdog_job_id": job["id"]})
+                             script=WATCHDOG_SCRIPT, no_agent=True, deliver=target["target"])
+        probes = [j for j in list_jobs(include_disabled=True) if j.get("name") == ALARM_PROBE_NAME]
+        if probes:
+            probe_job = update_job(probes[0]["id"], probe_desired)
+            for duplicate in probes[1:]:
+                remove_job(duplicate["id"])
+        else:
+            probe_job = create_job(prompt=None, name=ALARM_PROBE_NAME,
+                                   schedule=ALARM_PROBE_SCHEDULE, script=ALARM_PROBE_SCRIPT,
+                                   no_agent=True, deliver=target["target"])
+
+    plan.update({
+        "dry_run": False, "maintenance_job_id": maintenance["job_id"],
+        "watchdog_job_id": job["id"], "alarm_probe_job_id": probe_job["id"],
+        "alarm_probe_structurally_verified": bool(
+            probe_job.get("deliver") == target["target"]
+            and probe_job.get("script") == ALARM_PROBE_SCRIPT
+            and job.get("deliver") == target["target"]
+        ),
+        # This becomes true only after cron transport reports an actual delivery
+        # success. Live authorization independently requires this recent ACK.
+        "alarm_probe_delivery_ack": bool(
+            probe_job.get("last_status") == "ok" and not probe_job.get("last_delivery_error")
+        ),
+    })
     return plan
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--profile", choices=("poke", "guest")); group.add_argument("--root")
+    group.add_argument("--profile", choices=("poke", "guest"))
+    group.add_argument("--root")
+    parser.add_argument("--alarm-target", required=True,
+                        help="Explicit supported Hermes target, e.g. telegram:123456")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    print(install(profile=args.profile, root=args.root, dry_run=args.dry_run))
+    print(install(profile=args.profile, root=args.root, alarm_target=args.alarm_target,
+                  dry_run=args.dry_run))
     return 0
 
-if __name__ == "__main__": raise SystemExit(main())
+
+if __name__ == "__main__":
+    raise SystemExit(main())

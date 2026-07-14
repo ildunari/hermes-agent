@@ -45,7 +45,7 @@ def config():
     proactive = {
         "enabled": True, "mode": "live", "dry_run": False,
         "transport_owner_profile": "poke",
-        "alarm_sink": {"configured": True, "type": "eval"},
+        "alarm_sink": {"configured": True, "type": "hermes_cron", "target": "telegram:eval-operator"},
         "allowed_contacts": [
             {"profile": "poke", "contact_id": "kosta-owner", "principal": "owner"},
             {"profile": "guest", "contact_id": "stephen-lucier", "principal": "guest"},
@@ -68,9 +68,19 @@ async def transport_eval(root: Path, result) -> str:
         state_db_path=root / "state.db", profile_home=root, profile_name="poke",
         config=ProactiveConfig(enabled=True, dry_run=False, mode=ProactiveMode.LIVE,
                                allowed_contacts=ALLOW, active_start="00:00", active_end="23:59",
-                               alarm_sink_configured=True),
+                               alarm_sink_configured=True, alarm_sink_type="hermes_cron",
+                               alarm_sink_target="telegram:eval-operator"),
         ownership_registry_path=root / "ownership.db",
     )
+    scheduler.record_health("model_probe", {
+        "ready": True, "sent_request": True, "provider": "openai-codex",
+        "resolved_model": "gpt-5.6-sol", "response_model": "gpt-5.6-sol",
+        "private_history_used": False,
+    }, now=now)
+    scheduler.record_health("alarm_sink_probe", {
+        "ready": True, "delivery_ack": True, "type": "hermes_cron",
+        "target": "telegram:eval-operator",
+    }, now=now)
     slot = scheduler.arm_slot(ROUTE, kind="checkin", fire_at=now-1, now=now-2)
     claim = scheduler.claim_due(worker_id="eval", now=now)[0]
     scheduler.ownership_registry.acquire_transport("eval-runner", "eval-adapter", now=now)

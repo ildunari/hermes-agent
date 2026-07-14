@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from datetime import datetime
 from typing import Any, Mapping
 
 from gateway.proactive_scheduler import ProactiveConfig, ProactiveMode
@@ -13,31 +15,111 @@ from gateway.proactive_scheduler import ProactiveConfig, ProactiveMode
 _REQUIRED_MODEL = {"provider": "openai-codex", "model": "gpt-5.6-sol", "reasoning_effort": "medium"}
 
 
-def probe_model_readiness(*, now: float | None = None, resolver: Any = None) -> dict[str, Any]:
-    """Resolve real authenticated clients without sending prompts or private history."""
+def probe_model_readiness(*, now: float | None = None, resolver: Any = None,
+                          timeout_seconds: float = 15.0) -> dict[str, Any]:
+    """Issue one tiny strict-lane request with no conversation/private history."""
     timestamp = float(time.time() if now is None else now)
     if resolver is None:
         from agent.auxiliary_client import resolve_provider_client
         resolver = resolve_provider_client
-    tasks: dict[str, Any] = {}
-    for task in ("proactive_gate", "proactive_semantic", "proactive_compose"):
-        try:
-            client, model = resolver("openai-codex", model="gpt-5.6-sol", task=task)
-            ready = bool(
-                client is not None and model == "gpt-5.6-sol"
-                and callable(getattr(getattr(getattr(client, "chat", None), "completions", None), "create", None))
-            )
-            tasks[task] = {"ready": ready, "provider": "openai-codex", "model": model}
-        except Exception as exc:
-            tasks[task] = {"ready": False, "provider": "openai-codex", "model": None,
-                           "error_class": type(exc).__name__}
-    return {"checked_at": timestamp, "ready": all(item["ready"] for item in tasks.values()),
-            "tasks": tasks, "sent_request": False}
+    result: dict[str, Any] = {
+        "checked_at": timestamp, "ready": False, "provider": "openai-codex",
+        "requested_model": "gpt-5.6-sol", "resolved_model": None,
+        "response_model": None, "sent_request": False, "max_completion_tokens": 4,
+        "timeout_seconds": float(timeout_seconds), "private_history_used": False,
+    }
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="proactive-model-probe")
+    try:
+        client, model = resolver(
+            "openai-codex", model="gpt-5.6-sol", task="proactive_gate",
+            api_mode="codex_responses",
+        )
+        result["resolved_model"] = model
+        create = getattr(getattr(getattr(client, "chat", None), "completions", None), "create", None)
+        if client is None or model != "gpt-5.6-sol" or not callable(create):
+            result["error_class"] = "StrictRouteResolutionError"
+            return result
+        future = executor.submit(
+            create,
+            model="gpt-5.6-sol",
+            messages=[{"role": "user", "content": "Reply exactly OK."}],
+            max_completion_tokens=4,
+            timeout=float(timeout_seconds),
+            extra_body={"reasoning": {"effort": "low"}},
+        )
+        result["sent_request"] = True
+        response = future.result(timeout=float(timeout_seconds) + 1.0)
+        response_model = str(getattr(response, "model", "") or "")
+        result["response_model"] = response_model
+        usage = getattr(response, "usage", None)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        result["completion_tokens"] = completion_tokens
+        result["ready"] = bool(response_model == "gpt-5.6-sol" and completion_tokens <= 64)
+        if not result["ready"]:
+            result["error_class"] = "ResolvedRouteVerificationError"
+    except FutureTimeout:
+        result["error_class"] = "ProbeTimeout"
+    except Exception as exc:
+        result["error_class"] = type(exc).__name__
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    return result
 
 
 def _lane_ok(config: Mapping[str, Any], task: str) -> bool:
     lane = (config.get("auxiliary", {}) or {}).get(task, {})
     return isinstance(lane, Mapping) and all(lane.get(k) == v for k, v in _REQUIRED_MODEL.items()) and lane.get("fallback") is False
+
+
+def probe_alarm_sink_readiness(*, profile_home: str | Path, config: ProactiveConfig,
+                               now: float | None = None) -> dict[str, Any]:
+    """Verify installed cron target plus a recent transport delivery ACK."""
+    timestamp = float(time.time() if now is None else now)
+    root = Path(profile_home).expanduser().resolve()
+    result = {"checked_at": timestamp, "ready": False, "delivery_ack": False,
+              "type": config.alarm_sink_type, "target": config.alarm_sink_target}
+    if not config.alarm_sink_configured:
+        result["error_class"] = "AlarmSinkConfigError"
+        return result
+    try:
+        from cron.jobs import list_jobs, use_cron_store
+        from scripts.install_proactive_rollout_cron import (
+            ALARM_PROBE_NAME, ALARM_PROBE_SCRIPT, WATCHDOG_NAME, WATCHDOG_SCRIPT,
+        )
+        manifest = json.loads((root / "proactive-alarm-sink.json").read_text(encoding="utf-8"))
+        nonce = str(manifest.get("nonce") or "")
+        script = (root / "scripts" / ALARM_PROBE_SCRIPT).read_text(encoding="utf-8")
+        with use_cron_store(root):
+            all_jobs = list_jobs(include_disabled=True)
+            jobs = [job for job in all_jobs if job.get("name") == ALARM_PROBE_NAME]
+            watchdogs = [job for job in all_jobs if job.get("name") == WATCHDOG_NAME]
+        if len(jobs) != 1:
+            raise RuntimeError("alarm probe job count mismatch")
+        if len(watchdogs) != 1:
+            raise RuntimeError("alarm watchdog job count mismatch")
+        job = jobs[0]
+        watchdog = watchdogs[0]
+        structural = bool(
+            manifest.get("type") == "hermes_cron"
+            and manifest.get("target") == config.alarm_sink_target
+            and job.get("enabled", True) and job.get("no_agent") is True
+            and job.get("script") == ALARM_PROBE_SCRIPT
+            and job.get("deliver") == config.alarm_sink_target
+            and nonce and nonce in script
+            and watchdog.get("enabled", True) and watchdog.get("no_agent") is True
+            and watchdog.get("script") == WATCHDOG_SCRIPT
+            and watchdog.get("deliver") == config.alarm_sink_target
+        )
+        last_run = job.get("last_run_at")
+        run_at = datetime.fromisoformat(str(last_run)).timestamp() if last_run else None
+        fresh = bool(run_at is not None and 0 <= timestamp - run_at <= config.alarm_probe_max_age_seconds)
+        ack = bool(job.get("last_status") == "ok" and not job.get("last_delivery_error"))
+        result.update({"structural": structural, "last_ack_at": run_at,
+                       "ack_age_seconds": timestamp - run_at if run_at is not None else None,
+                       "delivery_ack": ack and fresh, "ready": structural and ack and fresh})
+    except Exception as exc:
+        result["error_class"] = type(exc).__name__
+    return result
 
 
 def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[str, Any],
@@ -61,7 +143,7 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
         "profile": profile, "enabled": cfg.enabled, "mode": cfg.mode.value,
         "model_lane_match": _lane_ok(config, "proactive_gate") and _lane_ok(config, "proactive_semantic") and compose_ok,
         "model_probe": None, "model_probe_age_seconds": None,
-        "alarm_sink_configured": cfg.alarm_sink_configured,
+        "alarm_sink_configured": cfg.alarm_sink_configured, "alarm_probe": None,
         "send_rate": 0.0, "send_rate_total": 0, "send_rate_sent": 0,
         "adapter_ready": adapter_ready, "cron_fresh": cron_fresh,
         "participant_registry_ready": None,
@@ -110,6 +192,11 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
                     if last["state"] == "sent": result["last_success_at"] = float(last["updated_at"])
                     result["last_error_class"] = last["last_error_class"]
                 if result["deliveries"].get("failed", 0): result["reasons"].append("transport_failure_exhaustion")
+                projection_failures = int(con.execute(
+                    "SELECT count(*) FROM proactive_delivery WHERE state='sent' AND projection_state!='complete'"
+                ).fetchone()[0])
+                if projection_failures:
+                    result["reasons"].append("confirmed_send_projection_incomplete")
             if "proactive_action" in tables:
                 result["actions"] = {str(r[0]): int(r[1]) for r in con.execute(
                     "SELECT status,count(*) FROM proactive_action GROUP BY status"
@@ -117,6 +204,12 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
                 result["outcomes"] = {str(r[0]): int(r[1]) for r in con.execute(
                     "SELECT outcome,count(*) FROM proactive_action WHERE outcome IS NOT NULL GROUP BY outcome"
                 )}
+                canonical = con.execute(
+                    """SELECT count(*),COALESCE(sum(CASE WHEN status='sent' THEN 1 ELSE 0 END),0)
+                       FROM proactive_action WHERE created_at>=?""", (timestamp - 7 * 86400,)
+                ).fetchone()
+                result["send_rate_total"] = int(canonical[0])
+                result["send_rate_sent"] = int(canonical[1])
             if "proactive_health" in tables:
                 heartbeat = con.execute("SELECT value_json,updated_at FROM proactive_health WHERE key='watcher' LIMIT 1").fetchone()
                 if heartbeat:
@@ -131,6 +224,13 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
                     probe = result["model_probe"]
                     if isinstance(probe, Mapping) and probe.get("checked_at") is not None:
                         result["model_probe_age_seconds"] = max(0.0, timestamp - float(probe["checked_at"]))
+                model_probe_row = con.execute("SELECT value_json,updated_at FROM proactive_health WHERE key='model_probe'").fetchone()
+                if model_probe_row:
+                    result["model_probe"] = json.loads(model_probe_row["value_json"] or "{}")
+                    result["model_probe_age_seconds"] = max(0.0, timestamp - float(model_probe_row["updated_at"]))
+                alarm_probe_row = con.execute("SELECT value_json,updated_at FROM proactive_health WHERE key='alarm_sink_probe'").fetchone()
+                if alarm_probe_row:
+                    result["alarm_probe"] = json.loads(alarm_probe_row["value_json"] or "{}")
                 planning = con.execute("SELECT value_json,updated_at FROM proactive_health WHERE key='planning_attempt' LIMIT 1").fetchone()
                 if planning:
                     result["planning_attempt_at"] = float(planning["updated_at"])
@@ -140,7 +240,9 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
             result["reasons"].append("state_db_unreadable")
     elif cfg.enabled:
         result["reasons"].append("state_db_missing")
-    ownership_db = root.parent.parent / "proactive-contact-ownership.db" if root.parent.name == "profiles" else root.parent / "proactive-contact-ownership.db"
+    ownership_db = (root.parent.parent / "proactive-contact-ownership.db"
+                    if root.parent.name == "profiles"
+                    else root / "proactive-contact-ownership.db")
     if ownership_db.is_file():
         try:
             ownership = sqlite3.connect(f"file:{ownership_db.as_posix()}?mode=ro", uri=True)
@@ -168,12 +270,8 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
         try:
             memory = sqlite3.connect(f"file:{contact_db.as_posix()}?mode=ro", uri=True)
             result["interest_count"] += int(memory.execute("SELECT count(*) FROM interest").fetchone()[0])
-            send_counts = memory.execute(
-                "SELECT count(*),sum(CASE WHEN gate_decision='sent' THEN 1 ELSE 0 END) FROM proactive_send WHERE created_at>=?",
-                (timestamp - 7 * 86400,),
-            ).fetchone()
-            result["send_rate_total"] += int(send_counts[0] or 0)
-            result["send_rate_sent"] += int(send_counts[1] or 0)
+            # The state DB is canonical for confirmed transport. Contact-memory
+            # send rows are a projection and are not used for safety accounting.
             result["unfolded_interest_events"] += int(memory.execute(
                 "SELECT count(*) FROM interest_event WHERE folded_at IS NULL"
             ).fetchone()[0])
@@ -229,6 +327,12 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
         result["reasons"].append("digest_stale")
     if cfg.enabled and not cfg.alarm_sink_configured:
         result["reasons"].append("alarm_sink_unconfigured")
+    if cfg.enabled and (
+        not isinstance(result["alarm_probe"], Mapping)
+        or result["alarm_probe"].get("ready") is not True
+        or result["alarm_probe"].get("delivery_ack") is not True
+    ):
+        result["reasons"].append("alarm_sink_probe_unavailable_or_stale")
     result["send_rate"] = (
         result["send_rate_sent"] / result["send_rate_total"] if result["send_rate_total"] else 0.0
     )
@@ -239,4 +343,4 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
     return result
 
 
-__all__ = ["health_snapshot", "probe_model_readiness"]
+__all__ = ["health_snapshot", "probe_alarm_sink_readiness", "probe_model_readiness"]
