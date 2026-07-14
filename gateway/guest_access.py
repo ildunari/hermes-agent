@@ -353,6 +353,10 @@ def classify_bluebubbles_route(source: Any, raw_message: Mapping[str, Any] | Non
     chat_type = (getattr(source, "chat_type", None) or "dm").lower()
 
     if registry.is_owner_identity(sender):
+        if registry.owner_contact_id != "kosta-owner":
+            return BlueBubblesRouteDecision(
+                GuestRoute.DENY, None, reason="owner contact namespace must be kosta-owner"
+            )
         return BlueBubblesRouteDecision(
             GuestRoute.OWNER,
             registry.owner_profile,

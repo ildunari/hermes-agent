@@ -582,7 +582,7 @@ async def test_bluebubbles_owner_registry_sender_is_authorized_and_routed(tmp_pa
 owner_identities:
   - kosta@example.com
 owner_profile: poke
-owner_contact_id: stephen-lucier
+owner_contact_id: kosta-owner
 guest_profile: guest
 contacts:
   steve:
@@ -643,7 +643,7 @@ async def test_bluebubbles_owner_dm_passes_trusted_contact_scope(tmp_path):
 owner_identities:
   - kosta@example.com
 owner_profile: poke
-owner_contact_id: stephen-lucier
+owner_contact_id: kosta-owner
 contacts: {}
 """.strip(),
         encoding="utf-8",
@@ -668,7 +668,7 @@ contacts: {}
     assert handler_call is not None
     trusted_scope = handler_call.kwargs["trusted_contact_scope"]
     assert trusted_scope.principal == "owner"
-    assert trusted_scope.contact_id == "stephen-lucier"
+    assert trusted_scope.contact_id == "kosta-owner"
 
 
 @pytest.mark.asyncio

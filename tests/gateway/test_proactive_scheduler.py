@@ -126,19 +126,21 @@ def sent(
     ))
 
 
-def test_config_is_surfaced_but_phase3_forces_dry_run():
+def test_config_modes_default_disabled_and_live_requires_explicit_allowlist():
     cfg = ProactiveConfig.from_mapping({
         "agent": {"proactive": {
             "enabled": True,
-            "dry_run": False,
-            "transport": "bluebubbles",
+            "mode": "live",
+            "transport_owner_profile": "poke",
+            "allowed_contacts": [
+                {"profile": "poke", "contact_id": "kosta-owner", "principal": "owner"},
+                {"profile": "guest", "contact_id": "stephen-lucier", "principal": "guest"},
+            ],
             "active_hours": {"start": "09:00", "end": "21:30"},
         }}
     })
-    assert cfg.enabled is True
-    assert cfg.dry_run is True
-    with pytest.raises(ValueError, match="structurally dry-run"):
-        config(dry_run=False)
+    assert cfg.enabled is True and cfg.mode.value == "live" and cfg.dry_run is False
+    assert ProactiveConfig.from_mapping({"enabled": True}).mode.value == "disabled"
     with pytest.raises(ValueError, match="cannot be below 48"):
         config(min_gap_hours=12)
 

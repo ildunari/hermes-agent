@@ -18,6 +18,7 @@ import sqlite3
 import time
 from typing import Any, Callable, Iterable, Mapping, Sequence
 import uuid
+from enum import Enum
 
 from gateway.contact_memory.schema import (
     GateDecision,
@@ -100,6 +101,21 @@ CREATE TABLE IF NOT EXISTS proactive_action (
 );
 CREATE INDEX IF NOT EXISTS proactive_action_recent
   ON proactive_action(contact_hash, sent_at DESC, created_at DESC);
+CREATE TABLE IF NOT EXISTS proactive_delivery (
+  slot_id TEXT PRIMARY KEY REFERENCES proactive_slot(slot_id),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  not_before REAL,
+  state TEXT NOT NULL CHECK(state IN ('prepared','sending','retry_wait','sent','suppressed','delivery_unknown','partial_delivery','failed')),
+  payload_hash TEXT NOT NULL,
+  transport_message_id TEXT,
+  last_error_class TEXT,
+  updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proactive_health (
+  key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at REAL NOT NULL
+);
 """
 
 _OWNERSHIP_SCHEMA = """
@@ -192,10 +208,22 @@ class ProactiveOwnershipRegistry:
             con.close()
 
 
+class ProactiveMode(str, Enum):
+    DISABLED = "disabled"
+    OBSERVE = "observe"
+    LIVE = "live"
+
+
+_EXACT_ALLOWLIST = frozenset({("poke", "kosta-owner", "owner"), ("guest", "stephen-lucier", "guest")})
+
+
 @dataclass(frozen=True)
 class ProactiveConfig:
     enabled: bool = False
     dry_run: bool = True
+    mode: ProactiveMode = ProactiveMode.OBSERVE
+    transport_owner_profile: str = "poke"
+    allowed_contacts: tuple[tuple[str, str, str], ...] = ()
     timezone: str = "UTC"
     active_start: str = "09:00"
     active_end: str = "21:30"
@@ -210,8 +238,12 @@ class ProactiveConfig:
     serious_suppression_hours: float = 72.0
 
     def validate(self) -> None:
-        if not self.dry_run:
-            raise ValueError("proactive delivery is structurally dry-run pending approval")
+        if self.mode is ProactiveMode.LIVE and not self.enabled:
+            raise ValueError("live mode requires enabled=true")
+        if self.transport_owner_profile != "poke":
+            raise ValueError("Poke must own proactive transport")
+        if self.allowed_contacts and frozenset(self.allowed_contacts) != _EXACT_ALLOWLIST:
+            raise ValueError("proactive allowlist must contain exactly Kosta owner and Stephen")
         if self.min_gap_hours < 48:
             raise ValueError("min_gap_hours cannot be below 48")
         if self.weekly_interest_cap > self.weekly_total_cap:
@@ -226,11 +258,21 @@ class ProactiveConfig:
             nested = raw.get("agent", {}).get("proactive", {})
             raw = nested if isinstance(nested, Mapping) else {}
         active = raw.get("active_hours") if isinstance(raw.get("active_hours"), Mapping) else {}
+        try:
+            mode = ProactiveMode(str(raw.get("mode") or "disabled").strip().lower())
+        except ValueError:
+            mode = ProactiveMode.DISABLED
+        allowlist = []
+        values = raw.get("allowed_contacts", ())
+        for item in values if isinstance(values, Sequence) else ():
+            if isinstance(item, Mapping):
+                allowlist.append((str(item.get("profile") or ""), str(item.get("contact_id") or ""), str(item.get("principal") or "")))
         config = cls(
             enabled=bool(raw.get("enabled", False)),
-            # Phase 3 is structurally dry-run for interest shares even if a
-            # caller hands us a future-looking false value.
-            dry_run=True,
+            dry_run=mode is not ProactiveMode.LIVE,
+            mode=mode,
+            transport_owner_profile=str(raw.get("transport_owner_profile") or "poke"),
+            allowed_contacts=tuple(allowlist),
             timezone=str(raw.get("timezone") or "UTC"),
             active_start=str(active.get("start") or "09:00"),
             active_end=str(active.get("end") or "21:30"),
@@ -291,6 +333,13 @@ class TopicSelection:
     interest: Interest
     kind: ProactiveSendKind
     exploration_probability: float
+
+
+@dataclass(frozen=True)
+class PreparedOutput:
+    composed_text: str
+    reason: str = "prepared_for_async_transport"
+    status: str = "prepared"
 
 
 def assert_unique_contact_ownership(routes: Iterable[ContactRoute]) -> None:
@@ -654,6 +703,10 @@ class ProactiveScheduler:
             raise ValueError("contact route belongs to a different profile")
         if route.principal not in {"owner", "guest"}:
             raise ValueError("principal must be owner or guest")
+        if self.config.allowed_contacts and (
+            route.profile_name, route.contact_id, route.principal
+        ) not in self.config.allowed_contacts:
+            raise ValueError("contact is not in the exact proactive allowlist")
         # Validate through the check-in zoneinfo path without using host local time.
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
         try:
@@ -918,6 +971,20 @@ class ProactiveScheduler:
             raise ValueError("worker_id is required")
         con = self._begin()
         try:
+            # A process loss while transport was in-flight is delivery-unknown,
+            # never evidence that it is safe to resend.
+            con.execute(
+                """UPDATE proactive_delivery SET state='delivery_unknown',last_error_class='process_interrupted',updated_at=?
+                   WHERE state='sending' AND slot_id IN
+                   (SELECT slot_id FROM proactive_slot WHERE status='claimed' AND claim_until<=?)""",
+                (timestamp, timestamp),
+            )
+            con.execute(
+                """UPDATE proactive_slot SET status='suppressed',claim_token=NULL,claim_until=NULL,
+                   reason='delivery_unknown',updated_at=? WHERE status='claimed' AND claim_until<=?
+                   AND slot_id IN (SELECT slot_id FROM proactive_delivery WHERE state='delivery_unknown')""",
+                (timestamp, timestamp),
+            )
             # Restart safety: expired leases become armable again.  Very stale
             # slots die silently instead of producing automation-smelling sends.
             con.execute(
@@ -986,8 +1053,10 @@ class ProactiveScheduler:
         reason: str,
         now: float | None = None,
     ) -> str:
-        """Complete a lease; interest shares are forcibly converted to dry-run."""
+        """Complete an observe/suppression lease; live sends use delivery ledger APIs."""
         timestamp = _finite(time.time() if now is None else now, "now")
+        if sent and self.config.mode is ProactiveMode.LIVE:
+            raise RuntimeError("live completion requires the durable async delivery ledger")
         con = self._begin()
         try:
             row = con.execute(
@@ -1014,9 +1083,10 @@ class ProactiveScheduler:
             if eligibility:
                 sent = False
                 reason = eligibility
-            # Phase 4 deliberately has no state transition capable of producing
-            # a live ``sent`` action.  Approval must change code as well as config.
-            status = "dry_run" if sent else "suppressed"
+            status = (
+                "sent" if sent and self.config.mode is ProactiveMode.LIVE
+                else "dry_run" if sent else "suppressed"
+            )
             slot_status = "fired" if status in {"sent", "dry_run"} else "suppressed"
             action_id = claim.slot_id
             con.execute(
@@ -1052,6 +1122,119 @@ class ProactiveScheduler:
                    AND claim_token=?""",
                 (str(reason), timestamp, claim.slot_id, claim.claim_token),
             ).rowcount)
+
+    def reserve_delivery(self, claim: SlotClaim, text: str, *, now: float | None = None) -> dict[str, Any]:
+        """Durably reserve a unique slot/payload before transport I/O."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        payload_hash = hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+        con = self._begin()
+        try:
+            row = con.execute("SELECT * FROM proactive_delivery WHERE slot_id=?", (claim.slot_id,)).fetchone()
+            if row is not None:
+                if row["payload_hash"] != payload_hash:
+                    raise ValueError("slot payload changed after durable preparation")
+                self._finish(con)
+                return dict(row)
+            current = con.execute(
+                "SELECT 1 FROM proactive_slot WHERE slot_id=? AND status='claimed' AND claim_token=?",
+                (claim.slot_id, claim.claim_token),
+            ).fetchone()
+            if current is None:
+                raise ValueError("claim is no longer current")
+            con.execute("INSERT INTO proactive_delivery(slot_id,state,payload_hash,updated_at) VALUES(?,'prepared',?,?)",
+                        (claim.slot_id, payload_hash, timestamp))
+            self._finish(con)
+            return {"state": "prepared", "payload_hash": payload_hash, "attempt_count": 0, "not_before": None}
+        except BaseException as exc:
+            if con.in_transaction:
+                self._finish(con, exc)
+            raise
+
+    def final_delivery_check(self, route: ContactRoute, claim: SlotClaim, *, now: float | None = None) -> str | None:
+        """Revalidate code-owned fuses at the last responsible moment."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        if not self.config.enabled or self.config.mode is not ProactiveMode.LIVE:
+            return "mode_not_live"
+        if self.config.allowed_contacts and (route.profile_name, route.contact_id, route.principal) not in self.config.allowed_contacts:
+            return "allowlist_mismatch"
+        with self._connect() as con:
+            row = con.execute(
+                """SELECT s.status,s.claim_token,s.inbound_version,c.inbound_version current_inbound,
+                          c.disabled_until FROM proactive_slot s JOIN proactive_contact c USING(contact_hash)
+                   WHERE s.slot_id=?""", (claim.slot_id,),
+            ).fetchone()
+        if row is None or row["status"] != "claimed" or row["claim_token"] != claim.claim_token:
+            return "claim_not_current"
+        if int(row["current_inbound"]) != int(row["inbound_version"]):
+            return "newer_inbound"
+        if row["disabled_until"] is not None and float(row["disabled_until"]) > timestamp:
+            return "backoff_active"
+        return self.eligibility_reason(claim.contact_hash, claim.kind, now=timestamp)
+
+    def begin_delivery_attempt(self, claim: SlotClaim, *, now: float | None = None) -> bool:
+        timestamp = _finite(time.time() if now is None else now, "now")
+        con = self._begin()
+        try:
+            row = con.execute("SELECT * FROM proactive_delivery WHERE slot_id=?", (claim.slot_id,)).fetchone()
+            allowed = bool(row and row["state"] in {"prepared", "retry_wait"} and
+                           (row["not_before"] is None or float(row["not_before"]) <= timestamp) and
+                           int(row["attempt_count"]) < 3)
+            changed = 0
+            if allowed:
+                changed = con.execute(
+                    "UPDATE proactive_delivery SET state='sending',attempt_count=attempt_count+1,updated_at=? WHERE slot_id=? AND state IN ('prepared','retry_wait')",
+                    (timestamp, claim.slot_id),
+                ).rowcount
+            self._finish(con)
+            return bool(changed)
+        except BaseException as exc:
+            self._finish(con, exc)
+            raise
+
+    def finish_delivery(self, claim: SlotClaim, *, state: str, reason: str,
+                        message_id: str | None = None, retryable: bool = False,
+                        now: float | None = None) -> str:
+        """Finalize exactly once; only definite zero-delivery failures retry."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        terminal = {"sent", "suppressed", "delivery_unknown", "partial_delivery", "failed"}
+        con = self._begin()
+        try:
+            row = con.execute("SELECT * FROM proactive_delivery WHERE slot_id=?", (claim.slot_id,)).fetchone()
+            if row is None:
+                raise ValueError("delivery was not reserved")
+            if row["state"] in terminal:
+                self._finish(con)
+                return str(row["state"])
+            attempts = int(row["attempt_count"])
+            if retryable and state == "failed" and attempts < 3:
+                delay = (300, 1200)[min(max(attempts - 1, 0), 1)]
+                con.execute("UPDATE proactive_delivery SET state='retry_wait',not_before=?,last_error_class=?,updated_at=? WHERE slot_id=?",
+                            (timestamp + delay, reason[:120], timestamp, claim.slot_id))
+                con.execute("UPDATE proactive_slot SET status='armed',fire_at=?,claim_token=NULL,claim_until=NULL,reason='transport_retry',updated_at=? WHERE slot_id=?",
+                            (timestamp + delay, timestamp, claim.slot_id))
+                self._finish(con)
+                return "retry_wait"
+            final = state if state in terminal else "delivery_unknown"
+            con.execute("UPDATE proactive_delivery SET state=?,transport_message_id=?,last_error_class=?,updated_at=? WHERE slot_id=?",
+                        (final, message_id, reason[:120], timestamp, claim.slot_id))
+            action_status = "sent" if final == "sent" else "suppressed"
+            con.execute("INSERT OR IGNORE INTO proactive_action(action_id,slot_id,contact_hash,interest_id,kind,status,sent_at,inbound_version,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (claim.slot_id, claim.slot_id, claim.contact_hash, claim.interest_id, claim.kind,
+                         action_status, timestamp if final == "sent" else None, claim.inbound_version, reason, timestamp))
+            con.execute("UPDATE proactive_slot SET status=?,reason=?,claim_token=NULL,claim_until=NULL,updated_at=? WHERE slot_id=?",
+                        ("fired" if final == "sent" else "suppressed", reason, timestamp, claim.slot_id))
+            self._finish(con)
+            return final
+        except BaseException as exc:
+            if con.in_transaction:
+                self._finish(con, exc)
+            raise
+
+    def record_health(self, key: str, value: Mapping[str, Any], *, now: float | None = None) -> None:
+        timestamp = _finite(time.time() if now is None else now, "now")
+        with self._connect() as con:
+            con.execute("INSERT INTO proactive_health(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+                        (str(key), json.dumps(dict(value), sort_keys=True), timestamp))
 
     def _total_sent(self, con: sqlite3.Connection, contact_hash: str) -> int:
         return int(con.execute(
@@ -1322,8 +1505,9 @@ class ProactiveScheduler:
 
     def tick(
         self, *, now: float | None = None,
-        on_dry_run: Callable[[ContactRoute, SlotClaim], None] | None = None,
+        on_dry_run: Callable[[ContactRoute, SlotClaim], Any] | None = None,
         on_interest_share: Callable[[ContactRoute, SlotClaim, ContactMemoryStore], Any] | None = None,
+        on_prepared: Callable[[ContactRoute, SlotClaim, Any], None] | None = None,
     ) -> dict[str, int]:
         """Run the sole production policy engine; never calls a transport.
 
@@ -1386,6 +1570,12 @@ class ProactiveScheduler:
                             gate_decision=GateDecision.SUPPRESSED, gate_reason=pipeline_reason,
                             sent_at=None, outcome=None, outcome_at=None, created_at=timestamp,
                         ))
+                if pipeline_status == "prepared":
+                    composed_text = str(getattr(pipeline_result, "composed_text", "") or "")
+                    self.reserve_delivery(claim, composed_text, now=timestamp)
+                    if on_prepared is not None:
+                        on_prepared(route, claim, pipeline_result)
+                    continue
                 status = self.complete_claim(
                     claim, sent=pipeline_status == "dry_run", reason=pipeline_reason, now=timestamp
                 )
@@ -1396,12 +1586,23 @@ class ProactiveScheduler:
                 # Projection and child-turn initiation must both succeed before
                 # the durable action/slot is marked fired.  A failure is re-armed
                 # immediately rather than becoming an unretryable dry-run action.
-                self._project_action_to_ledger(route, claim, now=timestamp)
+                if self.config.mode is not ProactiveMode.LIVE:
+                    self._project_action_to_ledger(route, claim, now=timestamp)
+                composed_text = ""
                 if on_dry_run is not None:
-                    on_dry_run(route, claim)
+                    composed_text = str(on_dry_run(route, claim) or "").strip()
             except Exception:
                 logger.warning("Proactive check-in initiation failed", exc_info=True)
                 self.retry_claim(claim, reason="initiation_retry", now=timestamp)
+                continue
+            if self.config.mode is ProactiveMode.LIVE:
+                if not composed_text:
+                    self.complete_claim(claim, sent=False, reason="compose_unavailable", now=timestamp)
+                    continue
+                prepared = PreparedOutput(composed_text)
+                self.reserve_delivery(claim, composed_text, now=timestamp)
+                if on_prepared is not None:
+                    on_prepared(route, claim, prepared)
                 continue
             status = self.complete_claim(
                 claim, sent=True, reason="phase3_dry_run", now=timestamp

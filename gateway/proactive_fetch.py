@@ -42,7 +42,6 @@ MAX_RESEARCH_BYTES = 2_000_000
 MAX_RESEARCH_STDERR_BYTES = 64_000
 _SUBPROCESS_READ_BYTES = 64 * 1024
 FRESHNESS_SECONDS = 10 * 86_400.0
-DRY_RUN_ONLY = True  # Removal requires the post-dry-run approval change, not config.
 
 _REQUIRED_FIELDS = frozenset({"topic", "concrete_item", "why_now", "source_url", "freshness_ts"})
 _ALLOWED_FIELDS = _REQUIRED_FIELDS | {"optional_image_url"}
@@ -762,12 +761,16 @@ def deliver_with_hard_gate(
     text: str,
     image_url: str | None = None,
     dry_run: bool = True,
+    mode: str | None = None,
 ) -> DeliveryResult:
-    """Structurally refuse transport even if config/caller asks for live delivery."""
-    del adapter, route, text, image_url, dry_run
-    if not DRY_RUN_ONLY:  # pragma: no cover - approval change must replace this fuse.
-        raise RuntimeError("live proactive delivery requires a reviewed implementation change")
-    return DeliveryResult("dry_run", "dry_run_pending_approval")
+    """Prepare only; the reviewed transport edge is async and invoked separately."""
+    del adapter, route, text, image_url
+    resolved = str(mode or ("observe" if dry_run else "disabled")).lower()
+    if resolved == "live":
+        return DeliveryResult("prepared", "prepared_for_async_transport")
+    if resolved == "observe":
+        return DeliveryResult("dry_run", "observe_mode")
+    return DeliveryResult("suppressed", "proactive_disabled")
 
 
 class ProactivePipeline:
@@ -780,11 +783,13 @@ class ProactivePipeline:
         gate: ProactiveGate,
         compose: Callable[[ComposeRequest], object] | None,
         delivery_adapter: ProactiveDeliveryAdapter | None = None,
+        mode: str = "observe",
     ) -> None:
         self.fetcher = fetcher
         self.gate = gate
         self.compose = compose
         self.delivery_adapter = delivery_adapter
+        self.mode = str(mode).lower()
 
     def _metrics(self, store: ContactMemoryStore) -> SuppressionMetrics:
         metrics = suppression_metrics(store)
@@ -808,15 +813,14 @@ class ProactivePipeline:
         now: float | None = None,
     ) -> PipelineResult:
         timestamp = float(time.time() if now is None else now)
+        if self.mode not in {"observe", "live"}:
+            return PipelineResult("suppressed", "proactive_disabled")
         existing = store.get_proactive_send(send_id)
         if existing is not None:
             # The contact ledger is the durable terminal marker.  A worker that
             # lost its state.db lease after this write resumes without fetching,
             # composing, or approaching transport a second time.
-            status = (
-                "dry_run" if existing.gate_reason == "dry_run_pending_approval"
-                else "suppressed"
-            )
+            status = "dry_run" if existing.gate_reason in {"dry_run_pending_approval", "observe_mode"} else "suppressed"
             metrics = self._metrics(store)
             try:
                 prior_candidate = ProactiveCandidate.parse(existing.candidate_json)
@@ -874,13 +878,12 @@ class ProactivePipeline:
             return PipelineResult(
                 "suppressed", composed.reason, candidate, composed_text="", alarm=metrics.alarm
             )
-        if self.delivery_adapter is None:
-            delivery = DeliveryResult("dry_run", "dry_run_pending_approval")
-        else:
-            delivery = deliver_with_hard_gate(
-                self.delivery_adapter, route=route, text=composed.text,
-                image_url=candidate.optional_image_url, dry_run=True,
-            )
+        delivery = deliver_with_hard_gate(
+            self.delivery_adapter, route=route, text=composed.text,
+            image_url=candidate.optional_image_url, mode=self.mode,
+        )
+        if delivery.status == "prepared":
+            return PipelineResult("prepared", delivery.reason, candidate, composed.text)
         # A dry-run is a suppression in the contact ledger.  It is still a fired
         # scheduler action for cap/one-strike simulation in state.db.
         _record_terminal(
@@ -895,7 +898,7 @@ class ProactivePipeline:
 
 __all__ = [
     "CallableWebFallback", "CandidateValidationError", "ComposeRequest", "ComposeResult",
-    "DRY_RUN_ONLY", "DeliveryResult", "FetchCoordinator", "FetchError", "GateModelRequest",
+    "DeliveryResult", "FetchCoordinator", "FetchError", "GateModelRequest",
     "GateResult", "Last30DaysSubprocessSource", "MAX_CANDIDATE_CHARS", "NullWebFallback",
     "PipelineResult", "ProactiveCandidate", "ProactiveDeliveryAdapter", "ProactiveGate",
     "ProactivePipeline", "ResearchMaterial", "SuppressionMetrics", "build_proactive_compose_block",

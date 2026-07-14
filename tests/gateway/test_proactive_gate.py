@@ -368,12 +368,12 @@ def test_suppression_metrics_alarm_only_when_send_rate_exceeds_forty_percent(tmp
     assert metrics.alarm is True
 
 
-def test_delivery_adapter_is_never_called_in_structural_dry_run(tmp_path: Path):
+def test_modes_prepare_without_synchronous_transport(tmp_path: Path):
     transport = SpyTransport()
     direct = deliver_with_hard_gate(
-        transport, route={"chat_id": "dm"}, text="wild specs", dry_run=False,
+        transport, route={"chat_id": "dm"}, text="wild specs", mode="live",
     )
-    assert direct.status == "dry_run" and transport.calls == []
+    assert direct.status == "prepared" and transport.calls == []
 
     store = ContactMemoryStore(tmp_path, "contact")
     item = interest(store)
@@ -387,7 +387,7 @@ def test_delivery_adapter_is_never_called_in_structural_dry_run(tmp_path: Path):
         route={"chat_id": "dm"}, principal=RetrievalPrincipal.OWNER, now=NOW,
     )
     assert result.status == "dry_run"
-    assert result.reason == "dry_run_pending_approval"
+    assert result.reason == "observe_mode"
     assert transport.calls == []
     assert seen and "register: casual" in seen[0].texture_prompt
     record = store.get_proactive_send("dry")

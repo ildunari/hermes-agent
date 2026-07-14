@@ -2067,6 +2067,7 @@ def _run_proactive_tick_once(
     gate_verdict: Any = None,
     compose_interest: Any = None,
     delivery_adapter: Any = None,
+    prepared_sink: Any = None,
     now: float | None = None,
 ) -> dict[str, int]:
     """Run one scheduler tick through the structurally dry-run proactive pipeline."""
@@ -2091,19 +2092,19 @@ def _run_proactive_tick_once(
         web_fallback or NullWebFallback(),
     )
 
-    def _initiate(route, claim) -> None:
+    def _initiate(route, claim) -> str:
         nonlocal initiated
         if session_db is None or generate is None or claim.kind != "checkin":
-            return
+            return ""
         parent_session_id = str(claim.payload.get("session_id") or route.session_id or "")
         if not parent_session_id:
-            return
+            return ""
         purpose = (
-            '<checkin_texture private="true">Dry-run one tiny follow-up about: '
+            '<checkin_texture private="true">Write one tiny friend-like follow-up about: '
             + str(claim.payload.get("reason") or "follow up")[:500]
-            + ". Do not send it to transport.</checkin_texture>"
+            + ". Output exactly SKIP_PROACTIVE if it feels forced.</checkin_texture>"
         )
-        run_proactive_child_turn(
+        child = run_proactive_child_turn(
             session_db=session_db,
             parent_session_id=parent_session_id,
             purpose_prompt=purpose,
@@ -2113,6 +2114,9 @@ def _run_proactive_tick_once(
             now_ts=now,
         )
         initiated += 1
+        from gateway.proactive_fetch import finalize_proactive_output
+        final = finalize_proactive_output(child["final_response"])
+        return final.text if final.allowed else ""
 
     def _interest_pipeline(route, claim, store):
         nonlocal initiated
@@ -2143,6 +2147,7 @@ def _run_proactive_tick_once(
             gate=ProactiveGate(verdict=gate_verdict),
             compose=_compose if (compose_interest is not None or (session_db is not None and generate is not None)) else None,
             delivery_adapter=delivery_adapter,
+            mode=scheduler.config.mode.value,
         )
         interest = store.get_interest(claim.interest_id) if claim.interest_id else None
         return pipeline.run(
@@ -2159,8 +2164,13 @@ def _run_proactive_tick_once(
             now=now,
         )
 
+    def _prepared(route, claim, pipeline_result):
+        if prepared_sink is not None:
+            prepared_sink.append((route, claim, pipeline_result.composed_text))
+
     result = scheduler.tick(
-        now=now, on_dry_run=_initiate, on_interest_share=_interest_pipeline
+        now=now, on_dry_run=_initiate, on_interest_share=_interest_pipeline,
+        on_prepared=_prepared,
     )
     result["initiated"] = initiated
     return result
@@ -7282,44 +7292,103 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     )
 
     @staticmethod
-    def _proactive_dry_run_generate(request: ProactiveTurnRequest) -> str:
-        """Persist an auditable assistant-first artifact without model/transport I/O."""
-        return f"[dry-run proactive {request.kind}; transport suppressed]"
+    def _proactive_model_text(*, task: str, prompt: str, effort: str) -> str:
+        """Call the pinned non-fallback Sol lane; any failure suppresses the slot."""
+        from agent.auxiliary_client import call_llm
+        response = call_llm(
+            task=task, provider="openai-codex", model="gpt-5.6-sol",
+            messages=[{"role": "user", "content": prompt}], max_tokens=500,
+            request_overrides={"reasoning_effort": effort},
+        )
+        choices = getattr(response, "choices", None) or []
+        content = getattr(getattr(choices[0], "message", None), "content", None) if choices else None
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError(f"empty pinned proactive {task} response")
+        return content.strip()
+
+    @classmethod
+    def _proactive_compose_generate(cls, request: ProactiveTurnRequest) -> str:
+        from agent.auxiliary_client import call_llm
+        messages = [{"role": "system", "content": request.execution_system_prompt}, *request.generation_history]
+        response = call_llm(
+            task="proactive_compose", provider="openai-codex", model="gpt-5.6-sol",
+            messages=messages, max_tokens=500,
+            request_overrides={"reasoning_effort": "low"},
+        )
+        choices = getattr(response, "choices", None) or []
+        content = getattr(getattr(choices[0], "message", None), "content", None) if choices else None
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("empty pinned proactive compose response")
+        return content.strip()
+
+    @classmethod
+    def _proactive_gate_verdict(cls, request: Any) -> Any:
+        raw = cls._proactive_model_text(
+            task="proactive_gate", prompt=request.prompt + "\n\n" + request.candidate_json,
+            effort="medium",
+        )
+        return json.loads(raw)
 
     async def _proactive_scheduler_watcher(self) -> None:
-        """Drive enabled profile schedulers every 30 minutes; never send transport."""
+        """Drive isolated profile policy off-loop and Poke-owned transport on-loop."""
         while self._running:
-            try:
-                from hermes_cli.profiles import get_active_profile_name, get_profile_dir
-                from hermes_state import SessionDB
+            from hermes_cli.profiles import get_active_profile_name, get_profile_dir
+            active = get_active_profile_name() or os.getenv("HERMES_PROFILE") or "default"
+            for profile in dict.fromkeys((active, "poke", "guest")):
+                correlation_id = uuid.uuid4().hex
+                try:
+                    from hermes_state import SessionDB
+                    from gateway.proactive_scheduler import ProactiveConfig, ProactiveScheduler
+                    from gateway.proactive_transport import BlueBubblesProactiveDelivery, deliver_prepared_exactly_once
 
-                active = get_active_profile_name() or os.getenv("HERMES_PROFILE") or "default"
-                for profile in dict.fromkeys((active, "poke", "guest")):
                     config_raw = _load_gateway_config_for_profile(profile)
                     raw = (config_raw.get("agent", {}) or {}).get("proactive", {})
                     if not (isinstance(raw, dict) and raw.get("enabled")):
                         continue
+                    cfg = ProactiveConfig.from_mapping(config_raw)
                     profile_home = get_profile_dir(profile)
+                    prepared = []
 
                     def _tick_profile() -> dict[str, int]:
                         db = SessionDB(Path(profile_home) / "state.db")
                         try:
-                            return _run_proactive_tick_once(
-                                profile_home=profile_home,
-                                profile=profile,
-                                config_raw=config_raw,
-                                session_db=db,
-                                generate=self._proactive_dry_run_generate,
+                            result = _run_proactive_tick_once(
+                                profile_home=profile_home, profile=profile,
+                                config_raw=config_raw, session_db=db,
+                                generate=self._proactive_compose_generate,
+                                gate_verdict=self._proactive_gate_verdict,
+                                prepared_sink=prepared,
                             )
+                            scheduler = ProactiveScheduler(
+                                state_db_path=Path(profile_home) / "state.db",
+                                profile_home=profile_home, profile_name=profile, config=cfg,
+                            )
+                            scheduler.record_health("watcher", {"result": result, "correlation_id": correlation_id})
+                            return result
                         finally:
                             db.close()
 
                     result = await asyncio.to_thread(_tick_profile)
-                    logger.info("Proactive dry-run tick (%s): %s", profile, result)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning("Proactive scheduler tick failed", exc_info=True)
+                    if prepared:
+                        adapter = self.adapters.get(Platform.BLUEBUBBLES)
+                        if adapter is None:
+                            raise RuntimeError("Poke BlueBubbles adapter unavailable")
+                        scheduler = ProactiveScheduler(
+                            state_db_path=Path(profile_home) / "state.db",
+                            profile_home=profile_home, profile_name=profile, config=cfg,
+                        )
+                        delivery = BlueBubblesProactiveDelivery(adapter, owner_profile="poke")
+                        for route, claim, text in prepared[:1]:
+                            await deliver_prepared_exactly_once(
+                                scheduler=scheduler, delivery=delivery, route=route,
+                                claim=claim, text=text, correlation_id=correlation_id,
+                            )
+                    logger.info("Proactive tick profile=%s result=%s correlation_id=%s", profile, result, correlation_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Per-profile isolation: a broken Guest tick never hides Poke.
+                    logger.warning("Proactive scheduler tick failed profile=%s correlation_id=%s", profile, correlation_id, exc_info=True)
             for _ in range(1800):
                 if not self._running:
                     return
