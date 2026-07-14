@@ -13,7 +13,7 @@ import math
 import re
 from typing import Any
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _PROACTIVE_ITEM_WORD_RE = re.compile(r"[a-z0-9]+", re.I)
 
@@ -113,6 +113,327 @@ class ProactiveOutcome(StrEnum):
     ACKNOWLEDGED = "acknowledged"
     IGNORED = "ignored"
     DISMISSED = "dismissed"
+
+
+class CommunicationDirection(StrEnum):
+    INBOUND = "inbound"
+    OUTBOUND = "outbound"
+
+
+class CommunicationKind(StrEnum):
+    TEXT = "text"
+    LINK_SHARE = "link_share"
+    ATTACHMENT_SHARE = "attachment_share"
+    REACTION_ADD = "reaction_add"
+    REACTION_REMOVE = "reaction_remove"
+    REPLY = "reply"
+    BATCH_MEMBER = "batch_member"
+    RECOMMENDATION = "recommendation"
+    FOLLOW_THROUGH = "follow_through"
+    CALLBACK = "callback"
+
+
+class CommunicationActorRole(StrEnum):
+    CONTACT = "contact"
+    COUNTERPART = "counterpart"
+    ASSISTANT = "assistant"
+
+
+class CommunicationPrivacy(StrEnum):
+    PRIVATE = "private"
+    SENSITIVE = "sensitive"
+    RESTRICTED = "restricted"
+
+
+class CommunicationLifecycle(StrEnum):
+    ACTIVE = "active"
+    RETRACTED = "retracted"
+
+
+class CommunicationRelationType(StrEnum):
+    REPLY_TO = "reply_to"
+    REACTION_TO = "reaction_to"
+    BATCH_MEMBER_OF = "batch_member_of"
+    RECOMMENDS = "recommends"
+    FOLLOWS_THROUGH = "follows_through"
+    CALLBACK_TO = "callback_to"
+
+
+class CommunicationEnrichmentState(StrEnum):
+    PENDING = "pending"
+    REVIEWED = "reviewed"
+    REJECTED = "rejected"
+    UNAVAILABLE = "unavailable"
+
+
+class CommunicationRecommendationOutcome(StrEnum):
+    PROPOSED = "proposed"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    REVISITED = "revisited"
+    FULFILLED = "fulfilled"
+
+
+_OPAQUE_ID_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _require_opaque_id(value: object, *, name: str) -> str:
+    normalized = str(value or "")
+    if not _OPAQUE_ID_RE.fullmatch(normalized):
+        raise ValueError(f"{name} must be a 64-character lowercase hex identity")
+    return normalized
+
+
+def _require_short_text(value: object, *, name: str, maximum: int) -> str:
+    normalized = str(value or "")
+    if (
+        not normalized
+        or normalized != normalized.strip()
+        or len(normalized) > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+    ):
+        raise ValueError(f"{name} must contain 1-{maximum} characters")
+    return normalized
+
+
+def _require_recommendation_id(value: object) -> str:
+    normalized = str(value or "")
+    if not re.fullmatch(r"(?:[0-9a-f]{32}|[0-9a-f]{64})", normalized):
+        raise ValueError("recommendation_id must be a lowercase opaque identity")
+    return normalized
+
+
+def _reject_raw_artifact_text(value: str, *, name: str) -> None:
+    lowered = value.casefold()
+    if (
+        "://" in lowered or lowered.startswith(("file:", "/", "~"))
+        or "/" in value or "\\" in value
+        or "www." in lowered
+        or re.search(r"(?:^|\s)(?:~?/|[a-z]:\\)\S+", value, re.IGNORECASE)
+        or re.search(r"(?:^|[?&])(token|key|signature|auth)=", lowered)
+    ):
+        raise ValueError(f"{name} cannot contain a raw URL, secret, or local path")
+
+
+def _require_machine_token(value: str, *, name: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise ValueError(f"{name} must be a normalized machine token")
+
+
+@dataclass(frozen=True)
+class CommunicationEvent:
+    event_id: str
+    platform: str
+    source_id: str
+    occurred_at: float
+    direction: CommunicationDirection
+    kind: CommunicationKind
+    actor_role: CommunicationActorRole
+    privacy: CommunicationPrivacy = CommunicationPrivacy.PRIVATE
+    lifecycle: CommunicationLifecycle = CommunicationLifecycle.ACTIVE
+    text_hash: str | None = None
+    text_present: bool = False
+    text_length: int = 0
+    provenance: str = "gateway"
+    provenance_version: int = 1
+    retracted_by_event_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_opaque_id(self.event_id, name="event_id")
+        _require_opaque_id(self.source_id, name="source_id")
+        _require_short_text(self.platform, name="platform", maximum=32)
+        _require_short_text(self.provenance, name="provenance", maximum=64)
+        _require_machine_token(self.platform, name="platform")
+        _require_machine_token(self.provenance, name="provenance")
+        _reject_raw_artifact_text(self.platform, name="platform")
+        _reject_raw_artifact_text(self.provenance, name="provenance")
+        if self.text_hash is not None:
+            _require_opaque_id(self.text_hash, name="text_hash")
+        if self.retracted_by_event_id is not None:
+            _require_opaque_id(self.retracted_by_event_id, name="retracted_by_event_id")
+        if isinstance(self.occurred_at, bool) or not isinstance(self.occurred_at, (int, float)):
+            raise ValueError("occurred_at must be numeric")
+        if not math.isfinite(float(self.occurred_at)):
+            raise ValueError("occurred_at must be finite")
+        if not isinstance(self.direction, CommunicationDirection):
+            raise ValueError("direction is invalid")
+        if not isinstance(self.kind, CommunicationKind):
+            raise ValueError("kind is invalid")
+        if not isinstance(self.actor_role, CommunicationActorRole):
+            raise ValueError("actor_role is invalid")
+        if not isinstance(self.privacy, CommunicationPrivacy):
+            raise ValueError("privacy is invalid")
+        if not isinstance(self.lifecycle, CommunicationLifecycle):
+            raise ValueError("lifecycle is invalid")
+        if not isinstance(self.text_present, bool):
+            raise ValueError("text_present must be boolean")
+        if isinstance(self.text_length, bool) or not isinstance(self.text_length, int):
+            raise ValueError("text_length must be an integer")
+        if self.text_length < 0 or self.text_length > 1_000_000:
+            raise ValueError("text_length is outside the allowed range")
+        if self.text_present != (self.text_hash is not None):
+            raise ValueError("text_present and text_hash must agree")
+        if self.text_present and self.text_length == 0:
+            raise ValueError("text_length must be positive when text is present")
+        if not self.text_present and self.text_length != 0:
+            raise ValueError("text_length requires text evidence")
+        if isinstance(self.provenance_version, bool) or not isinstance(self.provenance_version, int):
+            raise ValueError("provenance_version must be an integer")
+        if self.provenance_version < 1:
+            raise ValueError("provenance_version must be positive")
+        if self.lifecycle is CommunicationLifecycle.ACTIVE and self.retracted_by_event_id is not None:
+            raise ValueError("active events cannot name a retraction event")
+        if self.lifecycle is CommunicationLifecycle.RETRACTED and self.retracted_by_event_id is None:
+            raise ValueError("retracted events require retracted_by_event_id")
+
+
+@dataclass(frozen=True)
+class CommunicationUrl:
+    url_id: str
+    event_id: str
+    url_identity: str
+    domain: str
+    sharer_role: CommunicationActorRole
+    enrichment_state: CommunicationEnrichmentState = CommunicationEnrichmentState.PENDING
+    platform: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("url_id", "event_id", "url_identity"):
+            _require_opaque_id(getattr(self, name), name=name)
+        _require_short_text(self.domain, name="domain", maximum=253)
+        if (
+            "://" in self.domain or any(character in self.domain for character in "/?#@")
+            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", self.domain)
+        ):
+            raise ValueError("domain must be a lowercase hostname without URL material")
+        if self.platform is not None:
+            _require_short_text(self.platform, name="platform", maximum=32)
+            _require_machine_token(self.platform, name="platform")
+            _reject_raw_artifact_text(self.platform, name="platform")
+        if not isinstance(self.sharer_role, CommunicationActorRole):
+            raise ValueError("sharer_role is invalid")
+        if not isinstance(self.enrichment_state, CommunicationEnrichmentState):
+            raise ValueError("enrichment_state is invalid")
+
+
+@dataclass(frozen=True)
+class CommunicationAttachment:
+    attachment_id: str
+    event_id: str
+    attachment_identity: str
+    media_kind: str
+    mime_type: str | None = None
+    uti: str | None = None
+    size_bytes: int | None = None
+    caption_present: bool = False
+    caption_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("attachment_id", "event_id", "attachment_identity"):
+            _require_opaque_id(getattr(self, name), name=name)
+        if self.media_kind not in {"image", "video", "audio", "document", "other"}:
+            raise ValueError("media_kind is invalid")
+        if self.mime_type is not None:
+            _require_short_text(self.mime_type, name="mime_type", maximum=127)
+            if not re.fullmatch(r"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*", self.mime_type):
+                raise ValueError("mime_type must be a normalized media type")
+        if self.uti is not None:
+            _require_short_text(self.uti, name="uti", maximum=127)
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", self.uti):
+                raise ValueError("uti must be a normalized type identifier")
+        if self.size_bytes is not None:
+            if isinstance(self.size_bytes, bool) or not isinstance(self.size_bytes, int):
+                raise ValueError("size_bytes must be an integer")
+            if not 0 <= self.size_bytes <= 10_000_000_000:
+                raise ValueError("size_bytes is outside the allowed range")
+        if self.caption_hash is not None:
+            _require_opaque_id(self.caption_hash, name="caption_hash")
+        if self.caption_present != (self.caption_hash is not None):
+            raise ValueError("caption_present and caption_hash must agree")
+
+
+@dataclass(frozen=True)
+class CommunicationRelation:
+    relation_id: str
+    event_id: str
+    relation_type: CommunicationRelationType
+    target_source_id: str
+    target_actor_role: CommunicationActorRole | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("relation_id", "event_id", "target_source_id"):
+            _require_opaque_id(getattr(self, name), name=name)
+        if not isinstance(self.relation_type, CommunicationRelationType):
+            raise ValueError("relation_type is invalid")
+        if self.target_actor_role is not None and not isinstance(
+            self.target_actor_role, CommunicationActorRole
+        ):
+            raise ValueError("target_actor_role is invalid")
+
+
+@dataclass(frozen=True)
+class EntityMention:
+    mention_id: str
+    event_id: str
+    entity_identity: str
+    entity_type: str
+    canonical_label: str
+    confidence: float
+    source_method: str
+    surface_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("mention_id", "event_id", "entity_identity"):
+            _require_opaque_id(getattr(self, name), name=name)
+        if self.entity_type not in {"person", "place", "organization", "thing", "event"}:
+            raise ValueError("entity_type is invalid")
+        _require_short_text(self.canonical_label, name="canonical_label", maximum=120)
+        _require_short_text(self.source_method, name="source_method", maximum=32)
+        _require_machine_token(self.source_method, name="source_method")
+        _reject_raw_artifact_text(self.canonical_label, name="canonical_label")
+        _reject_raw_artifact_text(self.source_method, name="source_method")
+        if self.surface_hash is not None:
+            _require_opaque_id(self.surface_hash, name="surface_hash")
+        if not math.isfinite(float(self.confidence)) or not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("confidence must be in [0, 1]")
+
+
+@dataclass(frozen=True)
+class CommunicationRecommendationEvent:
+    recommendation_event_id: str
+    recommendation_id: str
+    event_id: str
+    outcome: CommunicationRecommendationOutcome
+    confidence: float
+    explicit_linkage: bool
+
+    def __post_init__(self) -> None:
+        for name in ("recommendation_event_id", "event_id"):
+            _require_opaque_id(getattr(self, name), name=name)
+        _require_recommendation_id(self.recommendation_id)
+        if not isinstance(self.outcome, CommunicationRecommendationOutcome):
+            raise ValueError("outcome is invalid")
+        if not math.isfinite(float(self.confidence)) or not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("confidence must be in [0, 1]")
+        if not isinstance(self.explicit_linkage, bool):
+            raise ValueError("explicit_linkage must be boolean")
+
+
+@dataclass(frozen=True)
+class CommunicationBundle:
+    event: CommunicationEvent
+    urls: tuple[CommunicationUrl, ...] = ()
+    attachments: tuple[CommunicationAttachment, ...] = ()
+    relations: tuple[CommunicationRelation, ...] = ()
+    entity_mentions: tuple[EntityMention, ...] = ()
+    recommendation_events: tuple[CommunicationRecommendationEvent, ...] = ()
+
+
+@dataclass(frozen=True)
+class CommunicationIngestResult:
+    event: CommunicationEvent
+    inserted: bool
+    deduplicated: bool
 
 
 # Deterministic fold weights (plan §"Signal weights"). These are the single
@@ -476,6 +797,98 @@ CREATE INDEX IF NOT EXISTS proactive_send_recent
   ON proactive_send(created_at DESC, gate_decision);
 CREATE INDEX IF NOT EXISTS proactive_send_item_hash
   ON proactive_send(item_hash) WHERE item_hash IS NOT NULL;
+CREATE TABLE IF NOT EXISTS communication_event (
+  event_id TEXT PRIMARY KEY,
+  platform TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  occurred_at REAL NOT NULL,
+  direction TEXT NOT NULL CHECK(direction IN ('inbound','outbound')),
+  kind TEXT NOT NULL CHECK(kind IN (
+    'text','link_share','attachment_share','reaction_add','reaction_remove','reply',
+    'batch_member','recommendation','follow_through','callback')),
+  actor_role TEXT NOT NULL CHECK(actor_role IN ('contact','counterpart','assistant')),
+  privacy TEXT NOT NULL CHECK(privacy IN ('private','sensitive','restricted')),
+  lifecycle TEXT NOT NULL CHECK(lifecycle IN ('active','retracted')),
+  text_hash TEXT,
+  text_present INTEGER NOT NULL CHECK(text_present IN (0,1)),
+  text_length INTEGER NOT NULL CHECK(
+    typeof(text_length)='integer' AND text_length >= 0 AND text_length <= 1000000),
+  provenance TEXT NOT NULL,
+  provenance_version INTEGER NOT NULL CHECK(
+    typeof(provenance_version)='integer' AND provenance_version >= 1),
+  retracted_by_event_id TEXT REFERENCES communication_event(event_id),
+  UNIQUE(platform, source_id),
+  CHECK((text_present=1 AND text_hash IS NOT NULL AND text_length > 0) OR
+        (text_present=0 AND text_hash IS NULL AND text_length=0)),
+  CHECK((lifecycle='active' AND retracted_by_event_id IS NULL) OR
+        (lifecycle='retracted' AND retracted_by_event_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS communication_event_occurred
+  ON communication_event(occurred_at, event_id);
+CREATE INDEX IF NOT EXISTS communication_event_lifecycle
+  ON communication_event(lifecycle, occurred_at);
+CREATE TABLE IF NOT EXISTS communication_url (
+  url_id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL REFERENCES communication_event(event_id) ON DELETE CASCADE,
+  url_identity TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  sharer_role TEXT NOT NULL CHECK(sharer_role IN ('contact','counterpart','assistant')),
+  enrichment_state TEXT NOT NULL CHECK(enrichment_state IN ('pending','reviewed','rejected','unavailable')),
+  platform TEXT,
+  UNIQUE(event_id, url_identity)
+);
+CREATE TABLE IF NOT EXISTS communication_attachment (
+  attachment_id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL REFERENCES communication_event(event_id) ON DELETE CASCADE,
+  attachment_identity TEXT NOT NULL,
+  media_kind TEXT NOT NULL CHECK(media_kind IN ('image','video','audio','document','other')),
+  mime_type TEXT,
+  uti TEXT,
+  size_bytes INTEGER CHECK(size_bytes IS NULL OR (
+    typeof(size_bytes)='integer' AND size_bytes >= 0 AND size_bytes <= 10000000000)),
+  caption_present INTEGER NOT NULL CHECK(caption_present IN (0,1)),
+  caption_hash TEXT,
+  UNIQUE(event_id, attachment_identity),
+  CHECK((caption_present=1 AND caption_hash IS NOT NULL) OR
+        (caption_present=0 AND caption_hash IS NULL))
+);
+CREATE TABLE IF NOT EXISTS communication_relation (
+  relation_id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL REFERENCES communication_event(event_id) ON DELETE CASCADE,
+  relation_type TEXT NOT NULL CHECK(relation_type IN (
+    'reply_to','reaction_to','batch_member_of','recommends','follows_through','callback_to')),
+  target_source_id TEXT NOT NULL,
+  target_actor_role TEXT CHECK(target_actor_role IN ('contact','counterpart','assistant')),
+  UNIQUE(event_id, relation_type, target_source_id)
+);
+CREATE INDEX IF NOT EXISTS communication_relation_target
+  ON communication_relation(target_source_id, relation_type);
+CREATE TABLE IF NOT EXISTS communication_retraction_pending (
+  retraction_event_id TEXT PRIMARY KEY
+    REFERENCES communication_event(event_id) ON DELETE CASCADE,
+  target_event_id TEXT NOT NULL UNIQUE CHECK(
+    length(target_event_id)=64 AND target_event_id NOT GLOB '*[^0-9a-f]*')
+);
+CREATE TABLE IF NOT EXISTS entity_mention (
+  mention_id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL REFERENCES communication_event(event_id) ON DELETE CASCADE,
+  entity_identity TEXT NOT NULL,
+  entity_type TEXT NOT NULL CHECK(entity_type IN ('person','place','organization','thing','event')),
+  canonical_label TEXT NOT NULL,
+  confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+  source_method TEXT NOT NULL,
+  surface_hash TEXT,
+  UNIQUE(event_id, entity_identity, source_method)
+);
+CREATE TABLE IF NOT EXISTS communication_recommendation_event (
+  recommendation_event_id TEXT PRIMARY KEY,
+  recommendation_id TEXT NOT NULL,
+  event_id TEXT NOT NULL REFERENCES communication_event(event_id) ON DELETE CASCADE,
+  outcome TEXT NOT NULL CHECK(outcome IN ('proposed','accepted','rejected','revisited','fulfilled')),
+  confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+  explicit_linkage INTEGER NOT NULL CHECK(explicit_linkage IN (0,1)),
+  UNIQUE(recommendation_id, event_id, outcome)
+);
 """
 
 REGISTRY_SCHEMA_SQL = """

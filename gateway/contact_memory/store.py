@@ -28,6 +28,22 @@ from .schema import (
     INTEREST_MAX_LIVE_TOPICS,
     AssertionType,
     Audience,
+    CommunicationActorRole,
+    CommunicationAttachment,
+    CommunicationBundle,
+    CommunicationDirection,
+    CommunicationEnrichmentState,
+    CommunicationEvent,
+    CommunicationIngestResult,
+    CommunicationKind,
+    CommunicationLifecycle,
+    CommunicationPrivacy,
+    CommunicationRecommendationEvent,
+    CommunicationRecommendationOutcome,
+    CommunicationRelation,
+    CommunicationRelationType,
+    CommunicationUrl,
+    EntityMention,
     FactProposal,
     FactRecord,
     FactStatus,
@@ -194,12 +210,12 @@ class ContactMemoryStore:
             ).fetchone() if con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
             ).fetchone() else None
-            supported = {"1", "2", "3", str(SCHEMA_VERSION)}
+            supported = {"1", "2", "3", "4", str(SCHEMA_VERSION)}
             if existing is not None and str(existing[0]) not in supported:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {existing[0]}; expected {SCHEMA_VERSION}"
                 )
-            if existing is not None and str(existing[0]) in {"1", "2", "3"}:
+            if existing is not None and str(existing[0]) in {"1", "2", "3", "4"}:
                 self._upgrade_to_current(con)
                 return
             con.executescript(CONTACT_SCHEMA_SQL)
@@ -210,7 +226,7 @@ class ContactMemoryStore:
             )
 
     def _upgrade_to_current(self, con: sqlite3.Connection) -> None:
-        """Atomically migrate a supported historical contact database to v4."""
+        """Atomically migrate a supported historical contact database to current."""
         con.execute("BEGIN IMMEDIATE")
         try:
             current = con.execute(
@@ -220,7 +236,7 @@ class ContactMemoryStore:
             if from_version == str(SCHEMA_VERSION):
                 con.execute("COMMIT")
                 return
-            if from_version not in {"1", "2", "3"}:
+            if from_version not in {"1", "2", "3", "4"}:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {from_version}; expected {SCHEMA_VERSION}"
                 )
@@ -999,6 +1015,489 @@ class ContactMemoryStore:
             outcome_at=float(row["outcome_at"]) if row["outcome_at"] is not None else None,
             created_at=float(row["created_at"]),
         )
+
+    @staticmethod
+    def _row_to_communication_event(row: sqlite3.Row) -> CommunicationEvent:
+        return CommunicationEvent(
+            event_id=str(row["event_id"]), platform=str(row["platform"]),
+            source_id=str(row["source_id"]), occurred_at=float(row["occurred_at"]),
+            direction=CommunicationDirection(str(row["direction"])),
+            kind=CommunicationKind(str(row["kind"])),
+            actor_role=CommunicationActorRole(str(row["actor_role"])),
+            privacy=CommunicationPrivacy(str(row["privacy"])),
+            lifecycle=CommunicationLifecycle(str(row["lifecycle"])),
+            text_hash=str(row["text_hash"]) if row["text_hash"] is not None else None,
+            text_present=bool(row["text_present"]), text_length=int(row["text_length"]),
+            provenance=str(row["provenance"]),
+            provenance_version=int(row["provenance_version"]),
+            retracted_by_event_id=(str(row["retracted_by_event_id"])
+                                   if row["retracted_by_event_id"] is not None else None),
+        )
+
+    @staticmethod
+    def _communication_bundle_in(
+        con: sqlite3.Connection, event_id: str
+    ) -> CommunicationBundle | None:
+        row = con.execute(
+            "SELECT * FROM communication_event WHERE event_id=?", (event_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        event = ContactMemoryStore._row_to_communication_event(row)
+        urls = tuple(CommunicationUrl(
+            url_id=str(item["url_id"]), event_id=str(item["event_id"]),
+            url_identity=str(item["url_identity"]), domain=str(item["domain"]),
+            sharer_role=CommunicationActorRole(str(item["sharer_role"])),
+            enrichment_state=CommunicationEnrichmentState(str(item["enrichment_state"])),
+            platform=str(item["platform"]) if item["platform"] is not None else None,
+        ) for item in con.execute(
+            "SELECT * FROM communication_url WHERE event_id=? ORDER BY url_id", (event_id,)
+        ))
+        attachments = tuple(CommunicationAttachment(
+            attachment_id=str(item["attachment_id"]), event_id=str(item["event_id"]),
+            attachment_identity=str(item["attachment_identity"]),
+            media_kind=str(item["media_kind"]),
+            mime_type=str(item["mime_type"]) if item["mime_type"] is not None else None,
+            uti=str(item["uti"]) if item["uti"] is not None else None,
+            size_bytes=int(item["size_bytes"]) if item["size_bytes"] is not None else None,
+            caption_present=bool(item["caption_present"]),
+            caption_hash=str(item["caption_hash"]) if item["caption_hash"] is not None else None,
+        ) for item in con.execute(
+            "SELECT * FROM communication_attachment WHERE event_id=? ORDER BY attachment_id",
+            (event_id,),
+        ))
+        relations = tuple(CommunicationRelation(
+            relation_id=str(item["relation_id"]), event_id=str(item["event_id"]),
+            relation_type=CommunicationRelationType(str(item["relation_type"])),
+            target_source_id=str(item["target_source_id"]),
+            target_actor_role=(CommunicationActorRole(str(item["target_actor_role"]))
+                               if item["target_actor_role"] is not None else None),
+        ) for item in con.execute(
+            "SELECT * FROM communication_relation WHERE event_id=? ORDER BY relation_id",
+            (event_id,),
+        ))
+        mentions = tuple(EntityMention(
+            mention_id=str(item["mention_id"]), event_id=str(item["event_id"]),
+            entity_identity=str(item["entity_identity"]), entity_type=str(item["entity_type"]),
+            canonical_label=str(item["canonical_label"]), confidence=float(item["confidence"]),
+            source_method=str(item["source_method"]),
+            surface_hash=str(item["surface_hash"]) if item["surface_hash"] is not None else None,
+        ) for item in con.execute(
+            "SELECT * FROM entity_mention WHERE event_id=? ORDER BY mention_id", (event_id,)
+        ))
+        recommendations = tuple(CommunicationRecommendationEvent(
+            recommendation_event_id=str(item["recommendation_event_id"]),
+            recommendation_id=str(item["recommendation_id"]), event_id=str(item["event_id"]),
+            outcome=CommunicationRecommendationOutcome(str(item["outcome"])),
+            confidence=float(item["confidence"]), explicit_linkage=bool(item["explicit_linkage"]),
+        ) for item in con.execute(
+            "SELECT * FROM communication_recommendation_event WHERE event_id=? "
+            "ORDER BY recommendation_event_id", (event_id,)
+        ))
+        return CommunicationBundle(event, urls, attachments, relations, mentions, recommendations)
+
+    @staticmethod
+    def _canonical_communication_bundle(
+        event: CommunicationEvent, *, urls: Sequence[CommunicationUrl] = (),
+        attachments: Sequence[CommunicationAttachment] = (),
+        relations: Sequence[CommunicationRelation] = (),
+        entity_mentions: Sequence[EntityMention] = (),
+        recommendation_events: Sequence[CommunicationRecommendationEvent] = (),
+    ) -> CommunicationBundle:
+        groups = (
+            ("url", tuple(urls), "url_id"),
+            ("attachment", tuple(attachments), "attachment_id"),
+            ("relation", tuple(relations), "relation_id"),
+            ("entity mention", tuple(entity_mentions), "mention_id"),
+            ("recommendation event", tuple(recommendation_events), "recommendation_event_id"),
+        )
+        for label, items, identity_field in groups:
+            if any(item.event_id != event.event_id for item in items):
+                raise ValueError(f"{label} child references another communication event")
+            identities = [str(getattr(item, identity_field)) for item in items]
+            if len(identities) != len(set(identities)):
+                raise ValueError(f"duplicate {label} child identity")
+        if any(item.sharer_role is not event.actor_role for item in urls):
+            raise ValueError("URL sharer role must match the authenticated event actor")
+        semantic_groups = (
+            ("url", [(item.event_id, item.url_identity) for item in urls]),
+            ("attachment", [(item.event_id, item.attachment_identity) for item in attachments]),
+            ("relation", [(item.event_id, item.relation_type, item.target_source_id) for item in relations]),
+            ("entity mention", [(item.event_id, item.entity_identity, item.source_method)
+                                for item in entity_mentions]),
+            ("recommendation event", [(item.recommendation_id, item.event_id, item.outcome)
+                                      for item in recommendation_events]),
+        )
+        for label, keys in semantic_groups:
+            if len(keys) != len(set(keys)):
+                raise ValueError(f"duplicate {label} semantic key")
+        return CommunicationBundle(
+            event=event,
+            urls=tuple(sorted(urls, key=lambda item: item.url_id)),
+            attachments=tuple(sorted(attachments, key=lambda item: item.attachment_id)),
+            relations=tuple(sorted(relations, key=lambda item: item.relation_id)),
+            entity_mentions=tuple(sorted(entity_mentions, key=lambda item: item.mention_id)),
+            recommendation_events=tuple(sorted(
+                recommendation_events, key=lambda item: item.recommendation_event_id
+            )),
+        )
+
+    @classmethod
+    def _ingest_communication_bundle_in(
+        cls, con: sqlite3.Connection, bundle: CommunicationBundle
+    ) -> bool:
+        existing = cls._communication_bundle_in(con, bundle.event.event_id)
+        if existing is not None:
+            if not cls._communication_replay_matches(existing, bundle):
+                raise ValueError("event_id already belongs to a different communication event")
+            return False
+        source = con.execute(
+            "SELECT event_id FROM communication_event WHERE platform=? AND source_id=?",
+            (bundle.event.platform, bundle.event.source_id),
+        ).fetchone()
+        if source is not None:
+            raise ValueError("platform source ID already belongs to another communication event")
+        event = bundle.event
+        con.execute(
+            """INSERT INTO communication_event(
+              event_id,platform,source_id,occurred_at,direction,kind,actor_role,privacy,
+              lifecycle,text_hash,text_present,text_length,provenance,provenance_version,
+              retracted_by_event_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (event.event_id, event.platform, event.source_id, event.occurred_at,
+             event.direction.value, event.kind.value, event.actor_role.value,
+             event.privacy.value, event.lifecycle.value, event.text_hash,
+             int(event.text_present), event.text_length, event.provenance,
+             event.provenance_version, event.retracted_by_event_id),
+        )
+        cls._insert_communication_children_in(con, bundle)
+        if event.kind is CommunicationKind.REACTION_ADD:
+            cls._apply_pending_retraction_in(con, bundle)
+        return True
+
+    @staticmethod
+    def _communication_replay_matches(
+        stored: CommunicationBundle, replay: CommunicationBundle
+    ) -> bool:
+        stored_event = stored.event
+        if stored_event.lifecycle is CommunicationLifecycle.RETRACTED:
+            stored_event = replace(
+                stored_event,
+                lifecycle=CommunicationLifecycle.ACTIVE,
+                retracted_by_event_id=None,
+            )
+        if stored_event != replay.event:
+            return False
+
+        def contains_all(stored_items: Sequence[Any], replay_items: Sequence[Any], field: str) -> bool:
+            by_id = {str(getattr(item, field)): item for item in stored_items}
+            return all(by_id.get(str(getattr(item, field))) == item for item in replay_items)
+
+        stored_urls = {item.url_id: item for item in stored.urls}
+        for item in replay.urls:
+            prior = stored_urls.get(item.url_id)
+            if prior == item:
+                continue
+            if not (
+                prior is not None
+                and item.enrichment_state is CommunicationEnrichmentState.PENDING
+                and prior.enrichment_state is not CommunicationEnrichmentState.PENDING
+                and replace(prior, enrichment_state=CommunicationEnrichmentState.PENDING) == item
+            ):
+                return False
+        return (
+            contains_all(stored.attachments, replay.attachments, "attachment_id")
+            and contains_all(stored.relations, replay.relations, "relation_id")
+            and contains_all(stored.entity_mentions, replay.entity_mentions, "mention_id")
+            and contains_all(
+                stored.recommendation_events, replay.recommendation_events,
+                "recommendation_event_id",
+            )
+        )
+
+    @staticmethod
+    def _insert_communication_children_in(
+        con: sqlite3.Connection, bundle: CommunicationBundle
+    ) -> None:
+        for item in bundle.urls:
+            con.execute("INSERT INTO communication_url VALUES(?,?,?,?,?,?,?)", (
+                item.url_id, item.event_id, item.url_identity, item.domain,
+                item.sharer_role.value, item.enrichment_state.value, item.platform,
+            ))
+        for item in bundle.attachments:
+            con.execute("INSERT INTO communication_attachment VALUES(?,?,?,?,?,?,?,?,?)", (
+                item.attachment_id, item.event_id, item.attachment_identity, item.media_kind,
+                item.mime_type, item.uti, item.size_bytes, int(item.caption_present), item.caption_hash,
+            ))
+        for item in bundle.relations:
+            con.execute("INSERT INTO communication_relation VALUES(?,?,?,?,?)", (
+                item.relation_id, item.event_id, item.relation_type.value,
+                item.target_source_id,
+                item.target_actor_role.value if item.target_actor_role is not None else None,
+            ))
+        for item in bundle.entity_mentions:
+            con.execute("INSERT INTO entity_mention VALUES(?,?,?,?,?,?,?,?)", (
+                item.mention_id, item.event_id, item.entity_identity, item.entity_type,
+                item.canonical_label, item.confidence, item.source_method, item.surface_hash,
+            ))
+        for item in bundle.recommendation_events:
+            con.execute("INSERT INTO communication_recommendation_event VALUES(?,?,?,?,?,?)", (
+                item.recommendation_event_id, item.recommendation_id, item.event_id,
+                item.outcome.value, item.confidence, int(item.explicit_linkage),
+            ))
+
+    def ingest_communication_event(
+        self, event: CommunicationEvent, *, urls: Sequence[CommunicationUrl] = (),
+        attachments: Sequence[CommunicationAttachment] = (),
+        relations: Sequence[CommunicationRelation] = (),
+        entity_mentions: Sequence[EntityMention] = (),
+        recommendation_events: Sequence[CommunicationRecommendationEvent] = (),
+    ) -> CommunicationIngestResult:
+        """Atomically append one authenticated event and its typed evidence."""
+        if event.kind is CommunicationKind.REACTION_REMOVE:
+            raise ValueError("reaction removals require retract_communication_event")
+        if event.lifecycle is not CommunicationLifecycle.ACTIVE or event.retracted_by_event_id is not None:
+            raise ValueError("new communication events must be active")
+        bundle = self._canonical_communication_bundle(
+            event, urls=urls, attachments=attachments, relations=relations,
+            entity_mentions=entity_mentions, recommendation_events=recommendation_events,
+        )
+        if event.kind is CommunicationKind.REACTION_ADD:
+            self._reaction_relation(bundle)
+        try:
+            with self._immediate() as con:
+                inserted = self._ingest_communication_bundle_in(con, bundle)
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("communication child conflicts with stored evidence") from exc
+        persisted = self.get_communication_event(event.event_id)
+        assert persisted is not None
+        return CommunicationIngestResult(event=persisted, inserted=inserted, deduplicated=not inserted)
+
+    def enrich_communication_event(
+        self, event_id: str, *, urls: Sequence[CommunicationUrl] = (),
+        attachments: Sequence[CommunicationAttachment] = (),
+        relations: Sequence[CommunicationRelation] = (),
+        entity_mentions: Sequence[EntityMention] = (),
+        recommendation_events: Sequence[CommunicationRecommendationEvent] = (),
+    ) -> CommunicationBundle:
+        """Atomically add typed child evidence without rewriting source ingress."""
+        identity = str(event_id)
+        try:
+            with self._immediate() as con:
+                existing = self._communication_bundle_in(con, identity)
+                if existing is None:
+                    raise KeyError(f"unknown communication event: {identity}")
+                incoming = self._canonical_communication_bundle(
+                    existing.event, urls=urls, attachments=attachments, relations=relations,
+                    entity_mentions=entity_mentions,
+                    recommendation_events=recommendation_events,
+                )
+
+                existing_urls = {item.url_id: item for item in existing.urls}
+                url_additions: list[CommunicationUrl] = []
+                url_updates: list[CommunicationUrl] = []
+                merged_urls = dict(existing_urls)
+                for item in incoming.urls:
+                    prior = existing_urls.get(item.url_id)
+                    if prior is None:
+                        url_additions.append(item)
+                        merged_urls[item.url_id] = item
+                    elif prior == item:
+                        continue
+                    elif (
+                        replace(prior, enrichment_state=item.enrichment_state) == item
+                        and prior.enrichment_state is CommunicationEnrichmentState.PENDING
+                        and item.enrichment_state is not CommunicationEnrichmentState.PENDING
+                    ):
+                        url_updates.append(item)
+                        merged_urls[item.url_id] = item
+                    else:
+                        raise ValueError("URL child identity conflicts with stored evidence")
+
+                def additions(existing_items: Sequence[Any], incoming_items: Sequence[Any], field: str) -> list[Any]:
+                    by_id = {str(getattr(item, field)): item for item in existing_items}
+                    result: list[Any] = []
+                    for item in incoming_items:
+                        prior = by_id.get(str(getattr(item, field)))
+                        if prior is None:
+                            result.append(item)
+                        elif prior != item:
+                            raise ValueError(f"{field} conflicts with stored evidence")
+                    return result
+
+                attachment_additions = additions(
+                    existing.attachments, incoming.attachments, "attachment_id"
+                )
+                relation_additions = additions(existing.relations, incoming.relations, "relation_id")
+                mention_additions = additions(
+                    existing.entity_mentions, incoming.entity_mentions, "mention_id"
+                )
+                recommendation_additions = additions(
+                    existing.recommendation_events, incoming.recommendation_events,
+                    "recommendation_event_id",
+                )
+                combined = self._canonical_communication_bundle(
+                    existing.event,
+                    urls=tuple(merged_urls.values()),
+                    attachments=(*existing.attachments, *attachment_additions),
+                    relations=(*existing.relations, *relation_additions),
+                    entity_mentions=(*existing.entity_mentions, *mention_additions),
+                    recommendation_events=(
+                        *existing.recommendation_events, *recommendation_additions
+                    ),
+                )
+                if existing.event.kind in {
+                    CommunicationKind.REACTION_ADD, CommunicationKind.REACTION_REMOVE
+                }:
+                    self._reaction_relation(combined)
+                additions_bundle = CommunicationBundle(
+                    event=existing.event, urls=tuple(url_additions),
+                    attachments=tuple(attachment_additions), relations=tuple(relation_additions),
+                    entity_mentions=tuple(mention_additions),
+                    recommendation_events=tuple(recommendation_additions),
+                )
+                self._insert_communication_children_in(con, additions_bundle)
+                for item in url_updates:
+                    con.execute(
+                        "UPDATE communication_url SET enrichment_state=? WHERE url_id=?",
+                        (item.enrichment_state.value, item.url_id),
+                    )
+                return combined
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("communication child conflicts with stored evidence") from exc
+
+    def get_communication_event(self, event_id: str) -> CommunicationEvent | None:
+        with self._connect() as con:
+            bundle = self._communication_bundle_in(con, str(event_id))
+        return bundle.event if bundle is not None else None
+
+    def get_communication_event_by_source(
+        self, platform: str, source_id: str
+    ) -> CommunicationEvent | None:
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT * FROM communication_event WHERE platform=? AND source_id=?",
+                (str(platform), str(source_id)),
+            ).fetchone()
+        return self._row_to_communication_event(row) if row is not None else None
+
+    def get_communication_bundle(self, event_id: str) -> CommunicationBundle | None:
+        with self._connect() as con:
+            return self._communication_bundle_in(con, str(event_id))
+
+    @staticmethod
+    def _reaction_relation(bundle: CommunicationBundle) -> CommunicationRelation:
+        matches = [
+            relation for relation in bundle.relations
+            if relation.relation_type is CommunicationRelationType.REACTION_TO
+        ]
+        if len(matches) != 1:
+            raise ValueError("reaction events require exactly one reaction target relation")
+        return matches[0]
+
+    @classmethod
+    def _validate_retraction_pair(
+        cls, target: CommunicationBundle, removal: CommunicationBundle
+    ) -> None:
+        if target.event.kind is not CommunicationKind.REACTION_ADD:
+            raise ValueError("retraction target is not a reaction add")
+        if (
+            target.event.platform != removal.event.platform
+            or target.event.actor_role is not removal.event.actor_role
+            or target.event.direction is not removal.event.direction
+        ):
+            raise ValueError("retraction actor or platform does not match the target")
+        target_relation = cls._reaction_relation(target)
+        removal_relation = cls._reaction_relation(removal)
+        if (
+            target_relation.target_source_id != removal_relation.target_source_id
+            or target_relation.target_actor_role is not removal_relation.target_actor_role
+        ):
+            raise ValueError("retraction target relation does not match")
+
+    @classmethod
+    def _apply_pending_retraction_in(
+        cls, con: sqlite3.Connection, target: CommunicationBundle
+    ) -> None:
+        pending = con.execute(
+            "SELECT retraction_event_id FROM communication_retraction_pending "
+            "WHERE target_event_id=?", (target.event.event_id,),
+        ).fetchone()
+        if pending is None:
+            return
+        removal = cls._communication_bundle_in(con, str(pending["retraction_event_id"]))
+        if removal is None:
+            raise RuntimeError("pending retraction references a missing event")
+        cls._validate_retraction_pair(target, removal)
+        con.execute(
+            "UPDATE communication_event SET lifecycle='retracted',retracted_by_event_id=? "
+            "WHERE event_id=? AND lifecycle='active'",
+            (removal.event.event_id, target.event.event_id),
+        )
+        con.execute(
+            "DELETE FROM communication_retraction_pending WHERE retraction_event_id=?",
+            (removal.event.event_id,),
+        )
+
+    def retract_communication_event(
+        self, event: CommunicationEvent, *, target_event_id: str,
+        relations: Sequence[CommunicationRelation],
+    ) -> CommunicationIngestResult:
+        """Append a reaction removal and retract its authenticated target atomically."""
+        if (
+            event.kind is not CommunicationKind.REACTION_REMOVE
+            or event.lifecycle is not CommunicationLifecycle.ACTIVE
+            or event.retracted_by_event_id is not None
+        ):
+            raise ValueError("retraction event must be a reaction removal")
+        bundle = self._canonical_communication_bundle(event, relations=relations)
+        self._reaction_relation(bundle)
+        target_identity = str(target_event_id)
+        if not re.fullmatch(r"[0-9a-f]{64}", target_identity):
+            raise ValueError("target_event_id must be a lowercase opaque identity")
+        try:
+            with self._immediate() as con:
+                applied = con.execute(
+                    "SELECT event_id FROM communication_event WHERE retracted_by_event_id=?",
+                    (event.event_id,),
+                ).fetchone()
+                if applied is not None and str(applied["event_id"]) != target_identity:
+                    raise ValueError("retraction event already belongs to another target")
+                pending = con.execute(
+                    "SELECT target_event_id FROM communication_retraction_pending "
+                    "WHERE retraction_event_id=?", (event.event_id,),
+                ).fetchone()
+                if pending is not None and str(pending["target_event_id"]) != target_identity:
+                    raise ValueError("retraction event already belongs to another target")
+                target = self._communication_bundle_in(con, target_identity)
+                if target is None:
+                    inserted = self._ingest_communication_bundle_in(con, bundle)
+                    con.execute(
+                        "INSERT INTO communication_retraction_pending("
+                        "retraction_event_id,target_event_id) VALUES(?,?) "
+                        "ON CONFLICT(retraction_event_id) DO NOTHING",
+                        (event.event_id, target_identity),
+                    )
+                    return CommunicationIngestResult(
+                        event=event, inserted=inserted, deduplicated=not inserted
+                    )
+                self._validate_retraction_pair(target, bundle)
+                prior_retractor = target.event.retracted_by_event_id
+                if prior_retractor is not None and prior_retractor != event.event_id:
+                    raise ValueError("target was retracted by another event")
+                inserted = self._ingest_communication_bundle_in(con, bundle)
+                if prior_retractor is None:
+                    con.execute(
+                        "UPDATE communication_event SET lifecycle='retracted',"
+                        "retracted_by_event_id=? WHERE event_id=? AND lifecycle='active'",
+                        (event.event_id, target_identity),
+                    )
+                con.execute(
+                    "DELETE FROM communication_retraction_pending WHERE retraction_event_id=?",
+                    (event.event_id,),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("communication child conflicts with stored evidence") from exc
+        return CommunicationIngestResult(event=event, inserted=inserted, deduplicated=not inserted)
 
     @staticmethod
     def _candidate_item_hash(candidate_json: str) -> str | None:
@@ -2126,7 +2625,10 @@ class ContactMemoryStore:
     def secure_delete_all(self) -> None:
         with self._immediate() as con:
             for table in (
-                "proactive_send", "interest", "interest_event", "callback_event",
+                "communication_recommendation_event", "entity_mention",
+                "communication_retraction_pending", "communication_relation",
+                "communication_attachment", "communication_url",
+                "communication_event", "proactive_send", "interest", "interest_event", "callback_event",
                 "recall_event", "embedding", "edge", "recommendation", "pending_fact", "fact",
             ):
                 con.execute(f"DELETE FROM {table}")
