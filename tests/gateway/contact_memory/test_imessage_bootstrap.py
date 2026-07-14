@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from gateway.contact_memory.imessage_bootstrap import (
-    build_manifest, chunk_rows, iter_chat_rows, open_messages_readonly,
+    authoritative_source_map, build_manifest, chunk_rows, iter_chat_rows, open_messages_readonly,
     resolve_one_to_one_chat, stable_semantic_source_id, validate_semantic_items,
 )
 from scripts.bootstrap_proactive_imessage import main as bootstrap_main
@@ -37,9 +37,10 @@ def test_readonly_strict_attribution_no_drop_and_manifest_has_no_text(tmp_path: 
         chunks=list(chunk_rows(iter_chat_rows(con,chat,limit=0),chunk_size=2))
         with pytest.raises(sqlite3.OperationalError): con.execute("DELETE FROM message")
     rows=[r for c in chunks for r in c.rows]
-    assert [r.author for r in rows]==['kosta-owner','stephen-lucier','stephen-lucier']
+    assert [r.author for r in rows]==['kosta-owner','stephen-lucier','stephen-lucier','stephen-lucier']
     manifest=build_manifest(chat,chunks,source_path=path)
-    assert manifest['represented']+manifest['explicit_non_text']+manifest['rejected']==manifest['selected']==3
+    assert manifest['represented']+manifest['explicit_non_text']+manifest['rejected']==manifest['selected']==4
+    assert manifest['rejection_reasons']=={'associated_message':1}
     assert manifest['directions']=={'kosta-owner':1,'stephen-lucier':2}
     assert 'likes cars' not in json.dumps(manifest)
 
@@ -51,14 +52,29 @@ def test_group_or_ambiguous_resolution_refused(tmp_path: Path):
 
 
 def test_cross_speaker_and_sensitive_semantics(tmp_path: Path):
+    from gateway.contact_memory.imessage_bootstrap import AuthoritativeSource
+    sources={'g1': AuthoritativeSource('kosta-owner', __import__('hashlib').sha256(b'Kosta likes cars').hexdigest())}
     item={'kind':'fact','guid':'g1','author':'kosta-owner','text':'likes cars','predicate':'likes','confidence':.9}
     with pytest.raises(ValueError,match='cross-speaker'):
-        validate_semantic_items([item],subject='stephen-lucier')
+        validate_semantic_items([item],subject='stephen-lucier',sources=sources)
     sensitive={**item,'sensitive':True}
-    parsed=validate_semantic_items([sensitive],subject='kosta-owner')
+    parsed=validate_semantic_items([sensitive],subject='kosta-owner',sources=sources)
     assert parsed[0]['suppressed'] is True
     assert parsed[0]['source_id']==stable_semantic_source_id('g1','kosta-owner',sensitive)
     assert parsed[0]['source_id']==stable_semantic_source_id('g1','kosta-owner',sensitive)
+
+
+def test_semantics_require_authoritative_source_author_and_hash():
+    from gateway.contact_memory.imessage_bootstrap import AuthoritativeSource
+    source = AuthoritativeSource('stephen-lucier', __import__('hashlib').sha256(b'evidence').hexdigest())
+    forged={'kind':'fact','guid':'g2','author':'kosta-owner','text':'forged','confidence':.9}
+    with pytest.raises(ValueError,match='cross-speaker'):
+        validate_semantic_items([forged],subject='kosta-owner',sources={'g2':source})
+    correct={**forged,'author':'stephen-lucier','source_content_hash':'bad'}
+    with pytest.raises(ValueError,match='content hash'):
+        validate_semantic_items([correct],subject='stephen-lucier',sources={'g2':source})
+    with pytest.raises(ValueError,match='unknown source'):
+        validate_semantic_items([{**correct,'guid':'invented','source_content_hash':''}],subject='stephen-lucier',sources={'g2':source})
 
 
 def test_prompt_only_stages_private_sender_attributed_packets(tmp_path: Path):

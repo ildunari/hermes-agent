@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway.contact_memory.imessage_bootstrap import (  # noqa: E402
-    build_manifest, chunk_rows, iter_chat_rows, open_messages_readonly,
+    authoritative_source_map, build_manifest, chunk_rows, iter_chat_rows, open_messages_readonly,
     resolve_one_to_one_chat, validate_semantic_items,
 )
 from gateway.contact_memory.import_contacts import _classify, import_typed_batch  # noqa: E402
@@ -43,19 +43,17 @@ def _atomic_private_json(path: Path, value: object) -> None:
         raise
 
 
-def _load_reviewed(path: Path, manifest: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+def _load_reviewed(path: Path, manifest: dict[str, Any], sources) -> dict[str, list[dict[str, Any]]]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or value.get("rowset_sha256") != manifest["rowset_sha256"]:
         raise ValueError("review manifest does not match the scanned source rowset")
     if value.get("provider") != "openai-codex" or value.get("model") != "gpt-5.6-sol" or value.get("reasoning_effort") != "medium":
         raise ValueError("semantic review must be openai-codex/gpt-5.6-sol/medium")
-    if value.get("approved") is not True:
-        raise ValueError("review manifest is not approved")
     dossiers = value.get("dossiers")
     if not isinstance(dossiers, dict):
         raise ValueError("review manifest has no dossiers")
     return {
-        subject: validate_semantic_items(dossiers.get(subject), subject=subject)
+        subject: validate_semantic_items(dossiers.get(subject), subject=subject, sources=sources)
         for subject in ("kosta-owner", "stephen-lucier")
     }
 
@@ -122,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         chat = resolve_one_to_one_chat(con, args.handle)
         chunks = list(chunk_rows(iter_chat_rows(con, chat, limit=args.limit), chunk_size=args.chunk_size))
     manifest = build_manifest(chat, chunks, source_path=db_path)
+    sources = authoritative_source_map(chunks)
     manifest.update({"task": args.task, "provider": "openai-codex", "model": "gpt-5.6-sol",
                      "reasoning_effort": "medium", "limit": args.limit})
     staging = Path(args.staging_dir).expanduser().resolve()
@@ -176,10 +175,25 @@ def main(argv: list[str] | None = None) -> int:
                          indent=2, sort_keys=True))
         return 0
 
-    dossiers = _load_reviewed(Path(args.review_manifest).expanduser(), manifest)
+    from hermes_cli.profiles import get_profile_dir
+    expected_roots = {
+        "kosta-owner": get_profile_dir("poke").expanduser().absolute(),
+        "stephen-lucier": get_profile_dir("guest").expanduser().absolute(),
+    }
+    supplied_roots = {
+        "kosta-owner": Path(args.poke_root).expanduser().absolute(),
+        "stephen-lucier": Path(args.guest_root).expanduser().absolute(),
+    }
+    for subject, supplied in supplied_roots.items():
+        expected = expected_roots[subject]
+        if supplied != expected or supplied.is_symlink() or supplied.resolve() != expected.resolve():
+            parser.error(f"{subject} root must be the exact canonical profile root: {expected}")
+    if supplied_roots["kosta-owner"].resolve() == supplied_roots["stephen-lucier"].resolve():
+        parser.error("Poke and Guest roots must be distinct")
+
+    dossiers = _load_reviewed(Path(args.review_manifest).expanduser(), manifest, sources)
     results = {}
-    roots = {"kosta-owner": Path(args.poke_root).expanduser().resolve(),
-             "stephen-lucier": Path(args.guest_root).expanduser().resolve()}
+    roots = {key: value.resolve() for key, value in supplied_roots.items()}
     run_id = "imessage-bootstrap:" + manifest["rowset_sha256"]
     for subject, items in dossiers.items():
         facts, interests = _typed(items, subject)

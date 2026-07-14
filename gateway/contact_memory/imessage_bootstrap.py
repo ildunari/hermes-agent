@@ -27,6 +27,7 @@ class IMessageRow:
     author: str
     text: str | None
     non_text: bool
+    rejection_reason: str | None = None
 
     @property
     def source_key(self) -> str:
@@ -52,8 +53,14 @@ class BootstrapChunk:
         return [
             {"source": row.source_key, "author": row.author, "created_at": row.created_at,
              "text": row.text if row.text is not None else "[NON_TEXT]"}
-            for row in self.rows
+            for row in self.rows if row.rejection_reason is None
         ]
+
+
+@dataclass(frozen=True)
+class AuthoritativeSource:
+    canonical_author: str
+    content_hash: str
 
 
 def _normalize_handle(value: str) -> str:
@@ -115,20 +122,22 @@ def _decode_attributed_body(blob: object) -> str | None:
             elif isinstance(item, (list, tuple)):
                 for child in item: visit(child)
         visit(value)
-        useful = [s for s in strings if not s.startswith(("__k", "NS"))]
+        useful: list[str] = [s for s in strings if not s.startswith(("__k", "NS"))]
         if useful:
-            return max(useful, key=len)
+            useful.sort(key=lambda value: len(value))
+            return useful[-1]
     except Exception:
         pass
     # NSAttributedString keyed archives contain readable UTF-8 runs.  This is a
     # conservative recovery fallback; undecodable blobs are explicit non-text.
-    runs = [part.decode("utf-8", "ignore").strip() for part in re.findall(rb"[\x20-\x7e\xc2-\xf4]{2,}", data)]
+    runs: list[str] = [part.decode("utf-8", "ignore").strip() for part in re.findall(rb"[\x20-\x7e\xc2-\xf4]{2,}", data)]
     runs = [r for r in runs if r and not r.startswith(("streamtyped", "NS", "__k"))]
-    return max(runs, key=len) if runs else None
+    runs.sort(key=lambda value: len(value))
+    return runs[-1] if runs else None
 
 
 def _apple_timestamp(raw: object) -> float:
-    value = float(raw or 0)
+    value = float(raw) if isinstance(raw, (int, float, str)) and raw else 0.0
     # Modern chat.db stores nanoseconds since 2001; older DBs store seconds.
     if abs(value) > 10_000_000_000:
         value /= 1_000_000_000.0
@@ -145,17 +154,18 @@ def iter_chat_rows(con: sqlite3.Connection, chat: ResolvedChat, *, limit: int = 
         sql += " LIMIT ?"
         params.append(int(limit))
     for row in con.execute(sql, params):
-        # Tapbacks/reactions are not authored prose and are rejected explicitly.
-        if int(row["associated_type"] or 0) != 0:
-            continue
         text = str(row["text"]).strip() if row["text"] is not None else ""
         if not text:
             text = _decode_attributed_body(row["attributedBody"]) or ""
+        rejection_reason = (
+            "associated_message" if int(row["associated_type"] or 0) != 0 else None
+        )
         yield IMessageRow(
             rowid=int(row["rowid"]), guid=str(row["guid"] or ""),
             created_at=_apple_timestamp(row["date"]),
             author="kosta-owner" if bool(row["is_from_me"]) else "stephen-lucier",
             text=text or None, non_text=not bool(text),
+            rejection_reason=rejection_reason,
         )
 
 
@@ -173,22 +183,51 @@ def chunk_rows(rows: Iterable[IMessageRow], *, chunk_size: int = 200) -> Iterato
 
 
 def _make_chunk(index: int, rows: Sequence[IMessageRow]) -> BootstrapChunk:
-    identity = "\n".join(f"{r.rowid}\0{r.guid}\0{r.author}" for r in rows)
+    identity = "\n".join(
+        f"{r.rowid}\0{r.guid}\0{r.author}\0{content_hash(r)}\0{r.rejection_reason or ''}"
+        for r in rows
+    )
     return BootstrapChunk(index, tuple(rows), hashlib.sha256(identity.encode()).hexdigest())
+
+
+def content_hash(row: IMessageRow) -> str:
+    return hashlib.sha256((row.text or "").encode("utf-8")).hexdigest()
+
+
+def authoritative_source_map(
+    chunks: Sequence[BootstrapChunk],
+) -> dict[str, AuthoritativeSource]:
+    result: dict[str, AuthoritativeSource] = {}
+    for chunk in chunks:
+        for row in chunk.rows:
+            if row.rejection_reason is not None:
+                continue
+            source = AuthoritativeSource(row.author, content_hash(row))
+            previous = result.setdefault(row.source_key, source)
+            if previous != source:
+                raise ValueError(f"conflicting source identity: {row.source_key}")
+    return result
 
 
 def build_manifest(chat: ResolvedChat, chunks: Sequence[BootstrapChunk], *, source_path: str | Path) -> dict[str, Any]:
     rows = [row for chunk in chunks for row in chunk.rows]
-    represented = sum(row.text is not None for row in rows)
-    non_text = sum(row.non_text for row in rows)
-    directions = {author: sum(row.author == author for row in rows) for author in sorted(CANONICAL_AUTHORS)}
+    accepted = [row for row in rows if row.rejection_reason is None]
+    represented = sum(row.text is not None for row in accepted)
+    non_text = sum(row.non_text for row in accepted)
+    rejected = len(rows) - len(accepted)
+    directions = {author: sum(row.author == author for row in accepted) for author in sorted(CANONICAL_AUTHORS)}
     row_identity = "\n".join(f"{row.rowid}\0{row.guid}" for row in rows)
     manifest = {
         "schema": 1, "source_sha256": hashlib.sha256(str(Path(source_path).resolve()).encode()).hexdigest(),
         "chat_guid_sha256": hashlib.sha256(chat.chat_guid.encode()).hexdigest(),
         "handle_sha256": hashlib.sha256(chat.handle.encode()).hexdigest(),
         "selected": len(rows), "represented": represented, "explicit_non_text": non_text,
-        "rejected": 0, "directions": directions, "chunks": [
+        "rejected": rejected,
+        "rejection_reasons": {
+            reason: sum(row.rejection_reason == reason for row in rows)
+            for reason in sorted({row.rejection_reason for row in rows if row.rejection_reason})
+        },
+        "directions": directions, "chunks": [
             {"index": c.index, "rows": len(c.rows), "chunk_hash": c.chunk_hash} for c in chunks
         ],
         "rowset_sha256": hashlib.sha256(row_identity.encode()).hexdigest(),
@@ -203,25 +242,45 @@ def build_manifest(chat: ResolvedChat, chunks: Sequence[BootstrapChunk], *, sour
 def stable_semantic_source_id(guid: str, author: str, item: Mapping[str, object]) -> str:
     if author not in CANONICAL_AUTHORS:
         raise ValueError("unknown canonical author")
-    canonical = json.dumps(dict(item), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    canonical_item = {
+        key: value for key, value in item.items()
+        if key not in {"source_id", "source_key", "source_content_hash", "suppressed"}
+    }
+    canonical = json.dumps(canonical_item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode()).hexdigest()
     return f"imessage:{guid}:{author}:{digest}"
 
 
-def validate_semantic_items(items: object, *, subject: str) -> list[dict[str, Any]]:
+def validate_semantic_items(
+    items: object,
+    *,
+    subject: str,
+    sources: Mapping[str, AuthoritativeSource],
+) -> list[dict[str, Any]]:
     if subject not in CANONICAL_AUTHORS or not isinstance(items, list):
         raise ValueError("invalid semantic subject or output")
-    allowed = {"kind", "guid", "author", "predicate", "text", "topic", "signal_type", "valence",
-               "confidence", "sensitive", "third_party", "audience", "guest_reviewed", "created_at"}
+    allowed = {"kind", "guid", "source_key", "source_content_hash", "author", "predicate", "text",
+               "topic", "signal_type", "valence", "confidence", "sensitive", "third_party",
+               "audience", "created_at"}
     result: list[dict[str, Any]] = []
     for raw in items:
         if not isinstance(raw, Mapping) or not set(raw) <= allowed:
             raise ValueError("semantic item has invalid schema")
         item = dict(raw)
-        if item.get("author") != subject:
+        source_key = str(item.get("source_key") or item.get("guid") or "").strip()
+        source = sources.get(source_key)
+        if source is None:
+            raise ValueError("semantic evidence references an unknown source row")
+        if item.get("author") != subject or source.canonical_author != subject:
             raise ValueError("cross-speaker semantic evidence rejected")
-        if item.get("kind") not in {"fact", "interest"} or not str(item.get("guid") or "").strip():
+        supplied_hash = str(item.get("source_content_hash") or "").strip()
+        if supplied_hash and supplied_hash != source.content_hash:
+            raise ValueError("semantic evidence content hash mismatch")
+        if item.get("kind") not in {"fact", "interest"}:
             raise ValueError("semantic item lacks kind/guid")
+        item["guid"] = source_key
+        item["source_key"] = source_key
+        item["source_content_hash"] = source.content_hash
         confidence = float(item.get("confidence", 0))
         if confidence < 0.7 or confidence > 1:
             raise ValueError("semantic confidence outside accepted range")
@@ -238,6 +297,7 @@ def validate_semantic_items(items: object, *, subject: str) -> list[dict[str, An
     return result
 
 
-__all__ = ["BootstrapChunk", "CANONICAL_AUTHORS", "IMessageRow", "ResolvedChat", "build_manifest",
+__all__ = ["AuthoritativeSource", "BootstrapChunk", "CANONICAL_AUTHORS", "IMessageRow", "ResolvedChat",
+           "authoritative_source_map", "build_manifest", "content_hash",
            "chunk_rows", "iter_chat_rows", "open_messages_readonly", "resolve_one_to_one_chat",
            "stable_semantic_source_id", "validate_semantic_items"]

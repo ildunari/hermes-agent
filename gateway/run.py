@@ -7299,6 +7299,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             task=task, provider="openai-codex", model="gpt-5.6-sol",
             messages=[{"role": "user", "content": prompt}], max_tokens=500,
             request_overrides={"reasoning_effort": effort},
+            allow_fallback=False,
         )
         choices = getattr(response, "choices", None) or []
         content = getattr(getattr(choices[0], "message", None), "content", None) if choices else None
@@ -7314,6 +7315,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             task="proactive_compose", provider="openai-codex", model="gpt-5.6-sol",
             messages=messages, max_tokens=500,
             request_overrides={"reasoning_effort": "low"},
+            allow_fallback=False,
         )
         choices = getattr(response, "choices", None) or []
         content = getattr(getattr(choices[0], "message", None), "content", None) if choices else None

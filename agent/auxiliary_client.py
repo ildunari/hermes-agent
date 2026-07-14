@@ -6709,6 +6709,7 @@ def call_llm(
     api_mode: str = None,
     stream: bool = False,
     stream_options: dict = None,
+    allow_fallback: bool = True,
 ) -> Any:
     """Centralized synchronous LLM call.
 
@@ -6758,7 +6759,7 @@ def call_llm(
             api_key=resolved_api_key or api_key,
             async_mode=False,
         )
-        if client is None and resolved_provider != "auto" and not resolved_base_url:
+        if allow_fallback and client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning(
                 "Vision provider %s unavailable, falling back to auto vision backends",
                 resolved_provider,
@@ -6767,6 +6768,10 @@ def call_llm(
                 provider="auto",
                 model=resolved_model,
                 async_mode=False,
+            )
+        if client is None and not allow_fallback:
+            raise RuntimeError(
+                f"Strict auxiliary route unavailable: {resolved_provider}/{resolved_model}"
             )
         if client is None:
             raise RuntimeError(
@@ -6783,6 +6788,10 @@ def call_llm(
             api_mode=resolved_api_mode,
             main_runtime=main_runtime,
         )
+        if client is None and not allow_fallback:
+            raise RuntimeError(
+                f"Strict auxiliary route unavailable: {resolved_provider}/{resolved_model}"
+            )
         if client is None:
             # When the user explicitly chose a non-OpenRouter provider but no
             # credentials were found, honor the task fallback_chain before
@@ -6816,6 +6825,16 @@ def call_llm(
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
                 f"Run: hermes setup")
+
+    if not allow_fallback:
+        if provider and resolved_provider != provider:
+            raise RuntimeError(
+                f"Strict auxiliary provider mismatch: requested={provider} resolved={resolved_provider}"
+            )
+        if model and final_model != model:
+            raise RuntimeError(
+                f"Strict auxiliary model mismatch: requested={model} resolved={final_model}"
+            )
 
     effective_timeout = _effective_aux_timeout(task, timeout)
 
@@ -7169,6 +7188,8 @@ def call_llm(
         # auxiliary task on the floor (silent compression failure /
         # message loss). Auth is NOT a capacity error: it only bypasses
         # the explicit-provider gate when the user is in auto mode.
+        if not allow_fallback:
+            raise first_err
         should_fallback = (
             _is_auth_error(first_err)
             or _is_payment_error(first_err)

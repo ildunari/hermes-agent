@@ -246,7 +246,7 @@ class ProactiveConfig:
             raise ValueError("live mode requires enabled=true")
         if self.transport_owner_profile != "poke":
             raise ValueError("Poke must own proactive transport")
-        if self.allowed_contacts and frozenset(self.allowed_contacts) != _EXACT_ALLOWLIST:
+        if self.enabled and self.mode is ProactiveMode.LIVE and frozenset(self.allowed_contacts) != _EXACT_ALLOWLIST:
             raise ValueError("proactive allowlist must contain exactly Kosta owner and Stephen")
         if self.min_gap_hours < 48:
             raise ValueError("min_gap_hours cannot be below 48")
@@ -261,7 +261,8 @@ class ProactiveConfig:
         if isinstance(raw.get("agent"), Mapping):
             nested = raw.get("agent", {}).get("proactive", {})
             raw = nested if isinstance(nested, Mapping) else {}
-        active = raw.get("active_hours") if isinstance(raw.get("active_hours"), Mapping) else {}
+        active_raw = raw.get("active_hours")
+        active: Mapping[str, Any] = active_raw if isinstance(active_raw, Mapping) else {}
         try:
             mode = ProactiveMode(str(raw.get("mode") or "disabled").strip().lower())
         except ValueError:
@@ -1163,7 +1164,7 @@ class ProactiveScheduler:
         timestamp = _finite(time.time() if now is None else now, "now")
         if not self.config.enabled or self.config.mode is not ProactiveMode.LIVE:
             return "mode_not_live"
-        if self.config.allowed_contacts and (route.profile_name, route.contact_id, route.principal) not in self.config.allowed_contacts:
+        if (route.profile_name, route.contact_id, route.principal) not in self.config.allowed_contacts:
             return "allowlist_mismatch"
         with self._connect() as con:
             failures = con.execute(
@@ -1663,9 +1664,10 @@ class ProactiveScheduler:
                 ).fetchone() is not None:
                     continue
             try:
-                if contact.pending_checkin_kind:
+                if contact.pending_checkin_kind in {"serious", "open_loop"}:
+                    checkin_kind = "serious" if contact.pending_checkin_kind == "serious" else "open_loop"
                     plan = plan_checkin(
-                        contact_key=contact.contact_key, kind=contact.pending_checkin_kind,
+                        contact_key=contact.contact_key, kind=checkin_kind,
                         last_user_ts=contact.last_inbound_at or timestamp,
                         reason=contact.pending_checkin_reason or "follow up",
                         timezone_name=contact.timezone_name,

@@ -141,6 +141,8 @@ def test_config_modes_default_disabled_and_live_requires_explicit_allowlist():
     })
     assert cfg.enabled is True and cfg.mode.value == "live" and cfg.dry_run is False
     assert ProactiveConfig.from_mapping({"enabled": True}).mode.value == "disabled"
+    with pytest.raises(ValueError, match="allowlist"):
+        ProactiveConfig.from_mapping({"enabled": True, "mode": "live"})
     with pytest.raises(ValueError, match="cannot be below 48"):
         config(min_gap_hours=12)
 
