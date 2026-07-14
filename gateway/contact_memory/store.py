@@ -521,6 +521,80 @@ class ContactMemoryStore:
                 "inserted_events": inserted_events, "skipped_facts": skipped_facts,
                 "skipped_events": skipped_events}
 
+    def import_reviewed_interest_seed(
+        self,
+        events: Sequence[InterestEvent],
+        *,
+        run_id: str,
+        source_hash: str,
+        manifest: dict[str, Any],
+        seed_score: float = 3.0,
+        half_life_days: float = 365.0,
+        now: float | None = None,
+    ) -> dict[str, object]:
+        """Atomically import, fold, and activate one reviewed interest seed."""
+        run_id, source_hash = str(run_id).strip(), str(source_hash).strip()
+        if not run_id or not source_hash:
+            raise ValueError("run_id and source_hash are required")
+        if not events or len({event.event_id for event in events}) != len(events):
+            raise ValueError("reviewed seed requires unique interest events")
+        timestamp = _finite_timestamp(now)
+        score = max(2.0, float(seed_score))
+        half_life = max(1.0, float(half_life_days))
+        activated: list[str] = []
+        with self._immediate() as con:
+            prior = con.execute("SELECT source_hash FROM import_run WHERE run_id=?", (run_id,)).fetchone()
+            same_source = con.execute("SELECT run_id FROM import_run WHERE source_hash=?", (source_hash,)).fetchone()
+            if prior is not None or same_source is not None:
+                if prior is not None and str(prior["source_hash"]) != source_hash:
+                    raise ValueError("run_id already belongs to another source")
+                rows = con.execute(
+                    "SELECT topic FROM interest WHERE state='active' AND retired_at IS NULL"
+                ).fetchall()
+                wanted = {normalize_interest_topic(event.topic_text) for event in events}
+                return {"already_applied": True, "inserted_events": 0,
+                        "skipped_events": len(events), "activated_topics": sorted(
+                            str(row["topic"]) for row in rows if str(row["topic"]) in wanted
+                        )}
+            for event in events:
+                topic = normalize_interest_topic(event.topic_text)
+                changed = con.execute(
+                    "INSERT OR IGNORE INTO interest_event(event_id,topic_text,signal_type,valence,source_id,created_at,folded_at) VALUES(?,?,?,?,?,?,?)",
+                    (event.event_id, topic, event.signal_type.value, event.valence.value,
+                     event.source_id, event.created_at, timestamp),
+                ).rowcount
+                if not changed:
+                    raise ValueError("reviewed seed event already belongs to another import")
+                existing = con.execute(
+                    "SELECT * FROM interest WHERE topic=? AND retired_at IS NULL", (topic,)
+                ).fetchone()
+                if existing is None:
+                    con.execute(
+                        """INSERT INTO interest(
+                          interest_id,topic,parent_id,raw_score,last_evidence_at,evidence_count,
+                          valence,half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
+                        ) VALUES(?,?,NULL,?,?,?,?,?,'active',1.0,1.0,?,?,NULL)""",
+                        (uuid.uuid4().hex, topic, score, timestamp, 1,
+                         InterestValence.POSITIVE.value, half_life, timestamp, timestamp),
+                    )
+                else:
+                    con.execute(
+                        """UPDATE interest SET raw_score=?,last_evidence_at=?,evidence_count=?,
+                           valence=?,half_life_days=?,state='active',updated_at=?,retired_at=NULL
+                           WHERE interest_id=?""",
+                        (max(score, float(existing["raw_score"])), timestamp,
+                         int(existing["evidence_count"]) + 1, InterestValence.POSITIVE.value,
+                         half_life, timestamp, str(existing["interest_id"])),
+                    )
+                activated.append(topic)
+            con.execute(
+                "INSERT INTO import_run(run_id,source_hash,manifest_json,fact_count,interest_count,created_at) VALUES(?,?,?,?,?,?)",
+                (run_id, source_hash, json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+                 0, len(events), timestamp),
+            )
+        return {"already_applied": False, "inserted_events": len(events),
+                "skipped_events": 0, "activated_topics": sorted(activated)}
+
     def active_facts(self, principal: RetrievalPrincipal, *, now: float | None = None) -> list[FactRecord]:
         timestamp = _finite_timestamp(now)
         clause, params = visibility_sql(principal, timestamp)
