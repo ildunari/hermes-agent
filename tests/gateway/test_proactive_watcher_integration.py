@@ -21,7 +21,10 @@ def test_runtime_model_calls_are_exact_and_nonfallback(monkeypatch):
 
     def fake_call(**kwargs):
         seen.append(kwargs)
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"allow": false, "reason": "test"}'))])
+        return SimpleNamespace(
+            _hermes_resolved_route={"provider": "openai-codex", "model": "gpt-5.6-sol"},
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"allow": false, "reason": "test"}'))],
+        )
 
     monkeypatch.setattr("agent.auxiliary_client.call_llm", fake_call)
     assert GatewayRunner._proactive_model_text(task="proactive_gate", prompt="x", effort="medium")

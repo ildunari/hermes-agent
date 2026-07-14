@@ -65,6 +65,10 @@ def _pinned_json(prompt: str) -> dict[str, Any]:
         messages=[{"role": "user", "content": prompt}], max_tokens=4000,
         request_overrides={"reasoning_effort": "medium"}, allow_fallback=False,
     )
+    if getattr(response, "_hermes_resolved_route", None) != {
+        "provider": "openai-codex", "model": "gpt-5.6-sol"
+    }:
+        raise RuntimeError("resolved semantic bootstrap lane mismatch")
     choices = getattr(response, "choices", None) or []
     text = getattr(getattr(choices[0], "message", None), "content", "") if choices else ""
     value = json.loads(str(text))

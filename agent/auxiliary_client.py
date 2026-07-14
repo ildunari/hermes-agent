@@ -6874,6 +6874,20 @@ def call_llm(
             kwargs["stream_options"] = stream_options
         return client.chat.completions.create(**kwargs)
 
+    # Strict callers need provenance they can verify, not merely an assertion
+    # about the requested route. Execute once on the resolved client, attach the
+    # effective route, and bypass every retry/fallback branch below.
+    if not allow_fallback:
+        response = _validate_llm_response(
+            client.chat.completions.create(**kwargs), task
+        )
+        route = {"provider": resolved_provider, "model": final_model}
+        try:
+            setattr(response, "_hermes_resolved_route", route)
+        except Exception as exc:
+            raise RuntimeError("Strict auxiliary response cannot expose route provenance") from exc
+        return response
+
     # Handle unsupported temperature, max_tokens vs max_completion_tokens retry,
     # then payment fallback.
     try:

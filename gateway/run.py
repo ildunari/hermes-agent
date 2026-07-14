@@ -7307,6 +7307,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             request_overrides={"reasoning_effort": effort},
             allow_fallback=False,
         )
+        if getattr(response, "_hermes_resolved_route", None) != {
+            "provider": "openai-codex", "model": "gpt-5.6-sol"
+        }:
+            raise RuntimeError(f"resolved proactive {task} lane mismatch")
         choices = getattr(response, "choices", None) or []
         content = getattr(getattr(choices[0], "message", None), "content", None) if choices else None
         if not isinstance(content, str) or not content.strip():
@@ -7323,6 +7327,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             request_overrides={"reasoning_effort": "low"},
             allow_fallback=False,
         )
+        if getattr(response, "_hermes_resolved_route", None) != {
+            "provider": "openai-codex", "model": "gpt-5.6-sol"
+        }:
+            raise RuntimeError("resolved proactive compose lane mismatch")
         choices = getattr(response, "choices", None) or []
         content = getattr(getattr(choices[0], "message", None), "content", None) if choices else None
         if not isinstance(content, str) or not content.strip():
