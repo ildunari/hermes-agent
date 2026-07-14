@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from gateway.contact_memory.schema import InterestEvent, InterestValence, SignalType
 from gateway.contact_memory.store import ContactMemoryStore
 from scripts.import_reviewed_artifact_interests import (
     _canonical_bytes,
@@ -30,6 +31,18 @@ def _artifacts(tmp_path: Path) -> tuple[Path, Path]:
         {
             "fact_type": "preference", "fact_value": "Stephen prefers oversized clothes.",
             "source_record_id": "1464A261-B77B-48A2-A9A9-6A0ECAFCB485", "sensitivity": "normal", "needs_review": False,
+        },
+        {
+            "fact_id": "stephen_car_volvo", "fact_type": "identity",
+            "fact_value": "Stephen drives a Volvo and is interested in BMW and Lexus SUVs.",
+            "source_record_id": "car", "sensitivity": "normal", "needs_review": False,
+            "source_timestamp": "2026-01-02T12:00:00-05:00",
+        },
+        {
+            "fact_id": "kosta_house_hunting", "fact_type": "open_loop",
+            "fact_value": "Actively house-hunting with Stephen; wants a yard and garage.",
+            "source_record_id": "house", "sensitivity": "normal", "needs_review": False,
+            "source_timestamp": "2026-01-02T13:00:00-05:00",
         },
         {
             "fact_id": "kosta_wrong_speaker", "fact_type": "preference",
@@ -91,7 +104,10 @@ def _artifacts(tmp_path: Path) -> tuple[Path, Path]:
     for raw in facts.read_bytes().splitlines():
         row = json.loads(raw)
         key = str(row.get("fact_id") or row.get("source_record_id"))
-        if key in {"kosta_ai_tech", "1464A261-B77B-48A2-A9A9-6A0ECAFCB485"}:
+        if key in {
+            "kosta_ai_tech", "1464A261-B77B-48A2-A9A9-6A0ECAFCB485",
+            "stephen_car_volvo", "kosta_house_hunting",
+        }:
             converter._CURATED_FACT_SHA256[key] = hashlib.sha256(raw).hexdigest()
     return facts, evidence
 
@@ -104,10 +120,12 @@ def test_converter_is_deterministic_strictly_attributed_and_excludes_unsafe_mate
     assert manifest == manifest_again
     assert _canonical_bytes(manifest) == _canonical_bytes(manifest_again)
     assert [event.topic_text for event in batches["kosta-owner"]] == ["AI agent systems"]
-    assert [event.topic_text for event in batches["stephen-lucier"]] == ["oversized gym clothes"]
+    assert {event.topic_text for event in batches["stephen-lucier"]} == {
+        "oversized gym clothes", "SUVs", "house hunting home plans",
+    }
     assert batches == batches_again
-    assert manifest["counts"]["accepted_topics"] == 2
-    assert manifest["counts"]["accepted_events"] == 2
+    assert manifest["counts"]["accepted_topics"] == 4
+    assert manifest["counts"]["accepted_events"] == 4
     assert manifest["counts"]["excluded"]["artifact_sensitive_or_unreviewed"] == 1
     assert manifest["counts"]["excluded"]["not_curated_for_proactive"] >= 1
     assert all(event.valence.value == "positive" for events in batches.values() for event in events)
@@ -126,13 +144,64 @@ def test_curated_key_cannot_override_contradictory_subject_text(tmp_path: Path):
     assert manifest["counts"]["excluded"]["curated_fact_changed"] == 1
 
 
+def test_shared_projection_requires_exact_relationship_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    facts, evidence = _artifacts(tmp_path)
+    rows = [json.loads(line) for line in facts.read_text().splitlines()]
+    house = next(row for row in rows if row.get("fact_id") == "kosta_house_hunting")
+    house["fact_value"] = "Actively house-hunting alone; wants a yard and garage."
+    _write_jsonl(facts, rows)
+    raw = next(
+        line for line in facts.read_bytes().splitlines()
+        if json.loads(line).get("fact_id") == "kosta_house_hunting"
+    )
+    from scripts import import_reviewed_artifact_interests as converter
+    monkeypatch.setitem(converter._CURATED_FACT_SHA256, "kosta_house_hunting", hashlib.sha256(raw).hexdigest())
+
+    batches, manifest = build_batches(facts, evidence)
+
+    assert "house hunting home plans" not in {
+        event.topic_text for event in batches["stephen-lucier"]
+    }
+    assert manifest["counts"]["excluded"]["shared_subject_mismatch"] == 1
+
+
+def test_atomic_seed_can_expand_an_existing_review_without_recounting_old_events(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path / "contact-memory", "stephen-lucier")
+    old = InterestEvent(
+        event_id="old", topic_text="movie nights", signal_type=SignalType.ENGAGED_MENTION,
+        valence=InterestValence.POSITIVE, source_id="reviewed:old", created_at=100.0,
+    )
+    new = InterestEvent(
+        event_id="new", topic_text="apple ecosystem tech", signal_type=SignalType.ENGAGED_MENTION,
+        valence=InterestValence.POSITIVE, source_id="reviewed:new", created_at=200.0,
+    )
+    first = store.import_reviewed_interest_seed(
+        [old], run_id="seed-v1", source_hash="hash-v1", manifest={"version": 1}, now=300.0,
+    )
+    before = store.list_interests()[0]
+
+    expanded = store.import_reviewed_interest_seed(
+        [old, new], run_id="seed-v2", source_hash="hash-v2", manifest={"version": 2}, now=400.0,
+    )
+
+    assert first["inserted_events"] == 1
+    assert expanded["inserted_events"] == 1
+    assert expanded["skipped_events"] == 1
+    interests = {item.topic: item for item in store.list_interests()}
+    assert set(interests) == {"movie nights", "apple ecosystem tech"}
+    assert interests["movie nights"].evidence_count == before.evidence_count
+    assert interests["movie nights"].updated_at == before.updated_at
+
+
 def test_dry_run_writes_private_review_only_and_apply_requires_exact_integrity_hash(tmp_path: Path):
     facts, evidence = _artifacts(tmp_path)
     review = tmp_path / "review.json"
     assert main(["--facts", str(facts), "--evidence", str(evidence), "--review-manifest", str(review)]) == 0
     payload = review.read_bytes()
     assert not (review.stat().st_mode & 0o077)
-    assert json.loads(payload)["counts"]["accepted_topics"] == 2
+    assert json.loads(payload)["counts"]["accepted_topics"] == 4
 
     with pytest.raises(SystemExit) as exc:
         main([
@@ -163,9 +232,11 @@ def test_integrity_checked_cli_uses_atomic_typed_import_in_isolated_stores(
     assert [event.topic for event in ContactMemoryStore(
         roots["kosta-owner"] / "contact-memory", "kosta-owner"
     ).eligible_interests(now=1767373200)] == ["ai agent systems"]
-    assert [event.topic for event in ContactMemoryStore(
+    assert {event.topic for event in ContactMemoryStore(
         roots["stephen-lucier"] / "contact-memory", "stephen-lucier"
-    ).eligible_interests(now=1767373200)] == ["oversized gym clothes"]
+    ).eligible_interests(now=1767373200)} == {
+        "oversized gym clothes", "suvs", "house hunting home plans",
+    }
 
     poke_store = ContactMemoryStore(roots["kosta-owner"] / "contact-memory", "kosta-owner")
     guest_store = ContactMemoryStore(roots["stephen-lucier"] / "contact-memory", "stephen-lucier")
@@ -173,7 +244,7 @@ def test_integrity_checked_cli_uses_atomic_typed_import_in_isolated_stores(
     guest_before = guest_store.list_interests()[0].updated_at
     assert main([*arguments, "--apply", "--approved-review-sha256", digest]) == 0
     assert len(poke_store.list_interests()) == 1
-    assert len(guest_store.list_interests()) == 1
+    assert len(guest_store.list_interests()) == 3
     assert poke_store.list_interests()[0].updated_at == poke_before
     assert guest_store.list_interests()[0].updated_at == guest_before
 

@@ -542,6 +542,7 @@ class ContactMemoryStore:
         score = max(2.0, float(seed_score))
         half_life = max(1.0, float(half_life_days))
         activated: list[str] = []
+        inserted_events = skipped_events = 0
         with self._immediate() as con:
             prior = con.execute("SELECT source_hash FROM import_run WHERE run_id=?", (run_id,)).fetchone()
             same_source = con.execute("SELECT run_id FROM import_run WHERE source_hash=?", (source_hash,)).fetchone()
@@ -558,13 +559,30 @@ class ContactMemoryStore:
                         )}
             for event in events:
                 topic = normalize_interest_topic(event.topic_text)
-                changed = con.execute(
+                existing_event = con.execute(
+                    "SELECT topic_text,signal_type,valence,source_id,created_at FROM interest_event WHERE event_id=?",
+                    (event.event_id,),
+                ).fetchone()
+                if existing_event is not None:
+                    expected = (
+                        topic, event.signal_type.value, event.valence.value,
+                        event.source_id, float(event.created_at),
+                    )
+                    actual = (
+                        str(existing_event["topic_text"]), str(existing_event["signal_type"]),
+                        str(existing_event["valence"]), str(existing_event["source_id"]),
+                        float(existing_event["created_at"]),
+                    )
+                    if actual != expected:
+                        raise ValueError("reviewed seed event ID conflicts with stored evidence")
+                    skipped_events += 1
+                    continue
+                con.execute(
                     "INSERT OR IGNORE INTO interest_event(event_id,topic_text,signal_type,valence,source_id,created_at,folded_at) VALUES(?,?,?,?,?,?,?)",
                     (event.event_id, topic, event.signal_type.value, event.valence.value,
                      event.source_id, event.created_at, timestamp),
-                ).rowcount
-                if not changed:
-                    raise ValueError("reviewed seed event already belongs to another import")
+                )
+                inserted_events += 1
                 existing = con.execute(
                     "SELECT * FROM interest WHERE topic=? AND retired_at IS NULL", (topic,)
                 ).fetchone()
@@ -592,8 +610,8 @@ class ContactMemoryStore:
                 (run_id, source_hash, json.dumps(manifest, sort_keys=True, separators=(",", ":")),
                  0, len(events), timestamp),
             )
-        return {"already_applied": False, "inserted_events": len(events),
-                "skipped_events": 0, "activated_topics": sorted(activated)}
+        return {"already_applied": False, "inserted_events": inserted_events,
+                "skipped_events": skipped_events, "activated_topics": sorted(activated)}
 
     def active_facts(self, principal: RetrievalPrincipal, *, now: float | None = None) -> list[FactRecord]:
         timestamp = _finite_timestamp(now)

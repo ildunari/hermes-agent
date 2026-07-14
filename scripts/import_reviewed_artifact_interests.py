@@ -67,6 +67,20 @@ _CURATED_TOPICS: dict[str, tuple[str, str]] = {
     "146F06CE-71C9-4DF4-9918-CB0F8BDD6A22": ("stephen-lucier", "cooking tidy home"),
     "09139413-CD1D-49D2-A732-88D3219B1D9E": ("stephen-lucier", "Titanic movie nights"),
     "174ACB70-3BA6-4F40-A7B0-5B684756F13A": ("stephen-lucier", "donuts brownies sour candy"),
+    "stephen_car_volvo": ("stephen-lucier", "SUVs"),
+    "11735B69-04A5-41CF-AC1C-3E8F3C22555C": ("stephen-lucier", "dogs pet stories"),
+    "kosta_house_hunting": ("stephen-lucier", "house hunting home plans"),
+    "kosta_apple_vision_pro": ("stephen-lucier", "Apple ecosystem tech"),
+}
+_CURATED_FACT_TYPES = {
+    "stephen_car_volvo": "identity",
+    "11735B69-04A5-41CF-AC1C-3E8F3C22555C": "anecdote",
+    "kosta_house_hunting": "open_loop",
+    "kosta_apple_vision_pro": "identity",
+}
+_CURATED_SHARED = {
+    "kosta_house_hunting": "with stephen",
+    "kosta_apple_vision_pro": "both he and stephen",
 }
 _CURATED_FACT_SHA256 = {
     "kosta_pbj_obsession": "ab016c056640d935956a07b38e3aa75ba8d5d7c4f072c7b8c4c693d330a902cd",
@@ -82,6 +96,10 @@ _CURATED_FACT_SHA256 = {
     "146F06CE-71C9-4DF4-9918-CB0F8BDD6A22": "a00203efd69c9d5b218c34af0a10eaff440a56d536527476d43313fe57d310d1",
     "09139413-CD1D-49D2-A732-88D3219B1D9E": "47835b1d21b203f3503490fae09ce5ebd1ea65b77f7237fd60ca731392dd1d88",
     "174ACB70-3BA6-4F40-A7B0-5B684756F13A": "6e7294e7c363560b7d8fc6676bf9807568091b41e13ad217cd9628f275dac17e",
+    "stephen_car_volvo": "2d68844928dc902d11e714b1ec5c5920025f2c22bde9ab61f36fa4f81ea63b83",
+    "11735B69-04A5-41CF-AC1C-3E8F3C22555C": "826ead8264c568e8fb4ea4c06d6a7abb5ca3914ee6f275afd0f933ded61ae548",
+    "kosta_house_hunting": "841839dd93d37bcdbcaae091924380061872a8bd69c63b35e6531826e2d2b799",
+    "kosta_apple_vision_pro": "6f4efd5e036c323b90aaf466e817d6391e81d5cf4bb9a6d72bf6dfbb621e985f",
 }
 
 
@@ -165,14 +183,15 @@ def build_batches(
     excluded: Counter[str] = Counter()
     candidates: list[tuple[list[InterestEvent], dict[str, Any]]] = []
     for fact_line, fact, fact_raw in fact_rows:
-        if str(fact.get("fact_type") or "").casefold() != "preference":
+        record_id = str(fact.get("source_record_id") or "").strip()
+        mapping_key = str(fact.get("fact_id") or record_id)
+        expected_type = _CURATED_FACT_TYPES.get(mapping_key, "preference")
+        if str(fact.get("fact_type") or "").casefold() != expected_type:
             excluded["not_explicit_preference"] += 1
             continue
         if str(fact.get("sensitivity") or "").casefold() != "normal" or fact.get("needs_review") is not False:
             excluded["artifact_sensitive_or_unreviewed"] += 1
             continue
-        record_id = str(fact.get("source_record_id") or "").strip()
-        mapping_key = str(fact.get("fact_id") or record_id)
         curated = _CURATED_TOPICS.get(mapping_key)
         if curated is None:
             excluded["not_curated_for_proactive"] += 1
@@ -182,6 +201,10 @@ def build_batches(
             continue
         subject, curated_topic = curated
         fact_text = str(fact.get("fact_value") or "").strip()
+        shared_marker = _CURATED_SHARED.get(mapping_key)
+        if shared_marker and shared_marker not in fact_text.casefold():
+            excluded["shared_subject_mismatch"] += 1
+            continue
         leading_subject = (
             "stephen-lucier" if fact_text.casefold().startswith(("stephen ", "stephen's "))
             else "kosta-owner" if fact_text.casefold().startswith(("kosta ", "kosta's "))
@@ -203,7 +226,7 @@ def build_batches(
         else:
             # Canonical kosta_* facts were already merged and reviewed with an
             # explicit subject. Legacy null-ID rows still require speaker evidence.
-            if _subject_hint(fact) != subject:
+            if shared_marker is None and _subject_hint(fact) != subject:
                 excluded["missing_or_ambiguous_evidence"] += 1
                 continue
             evidence_line, evidence, evidence_raw = 0, {}, b""
