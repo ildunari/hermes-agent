@@ -136,7 +136,7 @@ Red-first verification reproduced 27 failures in the focused live-ingress file b
 
 ## Phase D — Semantic projections
 
-Status: Final Gate D rerun findings repaired and locally verified; parent Gate D rerun is pending. Phase E has not started.
+Status: Final migration-only Gate D findings repaired and locally verified; parent Gate D rerun is pending. Phase E has not started.
 
 Commit: Phase D boundary commit containing this progress record (the final SHA is reported by the implementation thread).
 
@@ -165,6 +165,10 @@ Repair verification completed the focused extractor/projection/interest set with
 The final Gate D rerun found two remaining P0 defects and one P1. Schema-v7 migration now transactionally and idempotently backfills projection baselines for already-folded communication evidence by subtracting active projector-owned score, count, and bandit contributions before the schema-8 version bump; interruption rolls back both DDL and semantic backfill. Supersession and reaction removal restore the legacy aggregate without double counting. Baselines now preserve lifecycle state and `retired_at`, so a projection-promoted `candidate` returns exactly to its prior lifecycle after removal. Standalone GUID/UUID and `sk-...` credential-token labels are rejected while representative artist, show, and place names remain accepted.
 
 Final repair verification completed the focused projection/extractor/interest set with 72 passed and 0 failed, the migration/store/maintenance surrounding set with 88 passed and 0 failed, and the complete 14-file contact-memory plus interest-ledger set with 309 passed and 0 failed. Focused `py_compile`, Ruff, and `git diff --check` passed. Tests use temporary synthetic stores only; no live data was touched, no gateway was restarted, no send mode changed, and Phase E/F did not begin.
+
+The migration-only Gate D follow-up found one remaining lifecycle P0 and one label-validation P1. Schema-v7 backfill no longer copies projector-contaminated lifecycle fields: it derives the projection-free aggregate, preserves a retirement proven to predate projected evidence, restores aggregates that cannot satisfy legacy promotion semantics to `candidate`, and preserves plausible `active` state when incomplete legacy event history makes the distinct-day decision unknowable rather than fabricating missing evidence. Exact migration regressions cover the promoted 1.2/7 candidate retracting to `candidate`, a preexisting active baseline, and a preexisting retired baseline. Compact 32-hex UUID labels are now rejected alongside hyphenated/braced UUIDs and credential tokens without rejecting representative legitimate names.
+
+Follow-up verification completed the focused projection/extractor/interest set with 88 passed and 0 failed, the migration/store/maintenance surrounding set with 110 passed and 0 failed, and the complete 14-file contact-memory plus interest-ledger set with 311 passed and 0 failed. Focused `py_compile`, Ruff, and `git diff --check` passed. Tests used temporary synthetic stores only; no live data was touched, no gateway was restarted, no send mode changed, and Phase E/F did not begin.
 
 ### Current boundaries
 

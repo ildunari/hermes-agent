@@ -408,7 +408,7 @@ def test_v7_migration_backfills_folded_projection_baseline_once(tmp_path: Path) 
     )
 
 
-def test_retraction_restores_candidate_lifecycle_from_projection_baseline(tmp_path: Path) -> None:
+def test_v7_migration_reconstructs_candidate_lifecycle_before_projection(tmp_path: Path) -> None:
     store = ContactMemoryStore(tmp_path, "contact")
     target = _event(
         "lifecycle-reaction-add", at=2 * DAY, kind=CommunicationKind.REACTION_ADD,
@@ -448,6 +448,19 @@ def test_retraction_restores_candidate_lifecycle_from_projection_baseline(tmp_pa
     store.apply_interest_maintenance_batch(now=3 * DAY)
     promoted = store.get_interest("candidate-music")
     assert promoted is not None and promoted.state.value == "active"
+    with sqlite3.connect(store.path) as con:
+        con.execute("DROP TABLE interest_projection_baseline")
+        con.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+
+    migrated = ContactMemoryStore(tmp_path, "contact")
+    with sqlite3.connect(store.path) as con:
+        baseline = con.execute(
+            "SELECT raw_score,evidence_count,state,retired_at "
+            "FROM interest_projection_baseline WHERE topic='music'"
+        ).fetchone()
+        assert baseline is not None
+        assert (baseline[0], baseline[1]) == pytest.approx((1.2, 7))
+        assert (baseline[2], baseline[3]) == ("candidate", None)
 
     removal = _event(
         "lifecycle-reaction-remove", at=4 * DAY, kind=CommunicationKind.REACTION_REMOVE,
@@ -458,13 +471,81 @@ def test_retraction_restores_candidate_lifecycle_from_projection_baseline(tmp_pa
         relation_type=CommunicationRelationType.REACTION_TO,
         target_source_id=target_source, target_actor_role=CommunicationActorRole.COUNTERPART,
     )
-    store.retract_communication_event(
+    migrated.retract_communication_event(
         removal, target_event_id=target.event_id, relations=(removal_relation,),
     )
-    restored = store.get_interest("candidate-music")
+    restored = migrated.get_interest("candidate-music")
     assert restored is not None
-    assert (restored.raw_score, restored.evidence_count, restored.state.value, restored.retired_at) == (
-        1.2, 7, "candidate", None,
+    assert restored.raw_score == pytest.approx(1.2)
+    assert (restored.evidence_count, restored.state.value, restored.retired_at) == (
+        7, "candidate", None,
+    )
+
+
+def test_v7_migration_preserves_preexisting_retired_lifecycle(tmp_path: Path) -> None:
+    store = ContactMemoryStore(tmp_path, "contact")
+    target = _event(
+        "retired-projection", at=2 * DAY, kind=CommunicationKind.REACTION_ADD,
+        reaction=CommunicationReactionSubtype.LOVE,
+    )
+    target_source = _id("retired-projection-target")
+    relation = CommunicationRelation(
+        relation_id=_id("retired-projection-relation"), event_id=target.event_id,
+        relation_type=CommunicationRelationType.REACTION_TO,
+        target_source_id=target_source, target_actor_role=CommunicationActorRole.COUNTERPART,
+    )
+    store.ingest_communication_event(target, relations=(relation,))
+    store.project_communication_event(
+        target.event_id,
+        CommunicationProjection(interests=(_interest(
+            "music", SignalType.ENGAGED_MENTION, confidence=1.0,
+            method=ProjectionMethod.DETERMINISTIC,
+        ),)),
+        projector_version="phase-d-v1",
+    )
+    with sqlite3.connect(store.path) as con:
+        con.execute(
+            """INSERT INTO interest(
+              interest_id,topic,parent_id,raw_score,last_evidence_at,evidence_count,valence,
+              half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
+            ) VALUES('retired-music','music',NULL,4.6,?,8,'positive',180,'retired',
+                     3.5,2.25,10,?,?)""",
+            (2 * DAY, DAY, DAY),
+        )
+        con.execute(
+            "UPDATE interest_event SET folded_at=? WHERE origin_communication_event_id=?",
+            (3 * DAY, target.event_id),
+        )
+        con.execute("DROP TABLE interest_projection_baseline")
+        con.execute("UPDATE schema_meta SET value='7' WHERE key='schema_version'")
+
+    migrated = ContactMemoryStore(tmp_path, "contact")
+    with sqlite3.connect(store.path) as con:
+        baseline = con.execute(
+            "SELECT raw_score,evidence_count,state,retired_at "
+            "FROM interest_projection_baseline WHERE topic='music'"
+        ).fetchone()
+        assert baseline is not None
+        assert (baseline[0], baseline[1]) == pytest.approx((4.2, 7))
+        assert (baseline[2], baseline[3]) == ("retired", DAY)
+
+    removal = _event(
+        "retired-projection-removal", at=4 * DAY, kind=CommunicationKind.REACTION_REMOVE,
+        reaction=CommunicationReactionSubtype.LOVE,
+    )
+    removal_relation = CommunicationRelation(
+        relation_id=_id("retired-projection-removal-relation"), event_id=removal.event_id,
+        relation_type=CommunicationRelationType.REACTION_TO,
+        target_source_id=target_source, target_actor_role=CommunicationActorRole.COUNTERPART,
+    )
+    migrated.retract_communication_event(
+        removal, target_event_id=target.event_id, relations=(removal_relation,),
+    )
+    restored = migrated.get_interest("retired-music")
+    assert restored is not None
+    assert restored.raw_score == pytest.approx(4.2)
+    assert (restored.evidence_count, restored.state.value, restored.retired_at) == (
+        7, "retired", DAY,
     )
 
 
@@ -656,7 +737,11 @@ def test_inferred_fulfillment_unrelated_linkage_and_raw_artifacts_are_rejected(t
 
 @pytest.mark.parametrize(
     "label",
-    ["550e8400-e29b-41d4-a716-446655440000", "sk-proj-abcdefghijklmnopqrstuvwxyz012345"],
+    [
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400e29b41d4a716446655440000",
+        "sk-" + "a" * 20,
+    ],
 )
 def test_semantic_entity_labels_reject_opaque_identifiers(tmp_path: Path, label: str) -> None:
     store = ContactMemoryStore(tmp_path, "contact")

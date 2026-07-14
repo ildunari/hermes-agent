@@ -106,7 +106,7 @@ _RAW_ARTIFACT_RE = re.compile(
     r"\b(?:password|passcode|api[ -]?key|private key|seed phrase)\b)"
 )
 _OPAQUE_SEMANTIC_LABEL_RE = re.compile(
-    r"(?i)^(?:\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"(?i)^(?:[0-9a-f]{32}|\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{12}\}?|sk-[a-z0-9_-]{16,})$"
 )
 
@@ -433,6 +433,56 @@ class ContactMemoryStore:
                     )
 
     @staticmethod
+    def _infer_v7_projection_baseline_lifecycle(
+        interest: sqlite3.Row,
+        ordinary: Sequence[sqlite3.Row],
+        projected: Sequence[sqlite3.Row],
+        *,
+        raw_score: float,
+        evidence_count: int,
+    ) -> tuple[str, float | None]:
+        """Reconstruct lifecycle without treating projector mutations as history.
+
+        Schema 7 stored no lifecycle transition log. A retirement timestamp at
+        or before the first projected event is therefore the only direct proof
+        that a row was already retired. Otherwise we reapply the legacy
+        promotion semantics to the derived, projection-free aggregate. An
+        ineligible aggregate is a candidate; an eligible aggregate remains
+        active when complete day history proves it, or when missing legacy event
+        rows make the distinct-day result unknowable. This ambiguity policy
+        preserves plausible preexisting active rows rather than inventing
+        evidence days. A current candidate is never promoted during migration.
+        """
+        from .schema import (
+            INTEREST_PROMOTE_MIN_DISTINCT_DAYS,
+            INTEREST_PROMOTE_MIN_SCORE,
+        )
+
+        state = str(interest["state"])
+        retired_at = (
+            float(interest["retired_at"])
+            if interest["retired_at"] is not None
+            else None
+        )
+        first_projected_at = min(float(row["created_at"]) for row in projected)
+        if state == InterestState.RETIRED.value and retired_at is not None:
+            if retired_at <= first_projected_at:
+                return state, retired_at
+        if state == InterestState.CANDIDATE.value:
+            return state, None
+
+        if raw_score < INTEREST_PROMOTE_MIN_SCORE:
+            return InterestState.CANDIDATE.value, None
+        history_complete = len(ordinary) == evidence_count
+        if history_complete:
+            distinct_days = {
+                int(float(row["created_at"]) // 86_400) for row in ordinary
+            }
+            if len(distinct_days) < INTEREST_PROMOTE_MIN_DISTINCT_DAYS:
+                return InterestState.CANDIDATE.value, None
+        return InterestState.ACTIVE.value, None
+
+    @staticmethod
     def _backfill_v7_interest_projection_baselines(con: sqlite3.Connection) -> None:
         """Separate already-folded projector evidence from schema-v7 aggregates."""
         from .schema import INTEREST_SIGNAL_BANDIT, INTEREST_SIGNAL_WEIGHTS
@@ -449,7 +499,11 @@ class ContactMemoryStore:
             ).fetchone() is not None:
                 continue
             interest = con.execute(
-                "SELECT * FROM interest WHERE topic=? AND retired_at IS NULL", (topic,),
+                """SELECT * FROM interest WHERE topic=?
+                   ORDER BY (retired_at IS NULL) DESC,
+                            COALESCE(retired_at,updated_at) DESC,interest_id
+                   LIMIT 1""",
+                (topic,),
             ).fetchone()
             projected = con.execute(
                 """SELECT signal_type,created_at,folded_at FROM interest_event
@@ -512,13 +566,17 @@ class ContactMemoryStore:
                 for row in ordinary
             ):
                 valence = InterestValence.POSITIVE.value
+            state, retired_at = ContactMemoryStore._infer_v7_projection_baseline_lifecycle(
+                interest, ordinary, projected,
+                raw_score=raw_score, evidence_count=evidence_count,
+            )
             con.execute(
                 """INSERT INTO interest_projection_baseline(
                   topic,baseline_exists,interest_id,raw_score,last_evidence_at,evidence_count,
                   valence,ts_alpha,ts_beta,state,retired_at,updated_at
                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (topic, 1, interest["interest_id"], raw_score, last_evidence_at, evidence_count,
-                 valence, ts_alpha, ts_beta, interest["state"], interest["retired_at"], updated_at),
+                 valence, ts_alpha, ts_beta, state, retired_at, updated_at),
             )
 
     @contextmanager
