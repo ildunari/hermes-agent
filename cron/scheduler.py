@@ -1574,51 +1574,27 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         if delivery_profile is None:
             config = load_gateway_config()
         else:
-            # Deliberately narrow cross-profile transport delegation.  Guest's
-            # proactive alarms may use Poke's BlueBubbles outbound credentials,
-            # but may not make Guest an ingress owner, select another profile,
-            # or send to any address except Poke's exact configured home target.
-            if delivery_profile != "poke":
-                raise ValueError("delivery_profile must be exactly 'poke'")
-            if not targets or any(t.get("platform") != "bluebubbles" for t in targets):
-                raise ValueError("delivery_profile is restricted to BlueBubbles delivery")
-            current_home = get_hermes_home().resolve()
-            owner_home = current_home if current_home.name == "poke" else current_home.parent / "poke"
-            from dotenv import dotenv_values
-            owner_env = dotenv_values(owner_home / ".env")
-            owner_target = str(owner_env.get("BLUEBUBBLES_HOME_CHANNEL") or "").strip()
-            if not owner_target or any(str(t.get("chat_id")) != owner_target for t in targets):
-                raise ValueError("BlueBubbles target does not match Poke's configured home channel")
-            server_url = str(owner_env.get("BLUEBUBBLES_SERVER_URL") or "").strip()
-            password = str(owner_env.get("BLUEBUBBLES_PASSWORD") or "").strip()
-            if not server_url or not password:
-                raise ValueError("Poke BlueBubbles delivery credentials are incomplete")
-            import yaml
-            owner_yaml = yaml.safe_load(
-                (owner_home / "config.yaml").read_text(encoding="utf-8")
-            ) or {}
-            owner_blocks = [
-                ((owner_yaml.get("gateway") or {}).get("platforms") or {}).get("bluebubbles"),
-                (owner_yaml.get("platforms") or {}).get("bluebubbles"),
-                owner_yaml.get("bluebubbles"),
-            ]
-            if not any(
-                isinstance(block, dict) and block.get("enabled") is True
-                for block in owner_blocks
-            ):
-                raise ValueError("Poke is not explicitly enabled as BlueBubbles transport owner")
-            token = set_hermes_home_override(owner_home)
-            try:
-                config = load_gateway_config()
-            finally:
-                reset_hermes_home_override(token)
-            owner_pconfig = config.platforms.get(Platform.BLUEBUBBLES)
-            if not owner_pconfig or not owner_pconfig.enabled:
-                raise ValueError("Poke is not the enabled BlueBubbles transport owner")
-            owner_pconfig.extra = dict(owner_pconfig.extra or {})
-            owner_pconfig.extra.update({"server_url": server_url, "password": password})
-            # Owner-profile jobs intentionally use standalone delivery.  Never
-            # borrow Guest's live adapter (and never create an ingress adapter).
+            from gateway.cron_delivery_profile import validate_delegated_alarm_delivery
+            source_home = _get_hermes_home().resolve()
+            if source_home.name not in {"poke", "guest"} or job.get("name") not in {
+                "Proactive rollout health watchdog",
+                "Proactive alarm sink end-to-end probe",
+            }:
+                raise ValueError("delivery_profile is restricted to installed Poke/Guest proactive alarms")
+            if not targets:
+                raise ValueError("delegated delivery requires one explicit target")
+            first = targets[0]
+            if any(t.get("platform") != first.get("platform") or t.get("chat_id") != first.get("chat_id") for t in targets):
+                raise ValueError("delegated delivery cannot fan out across destinations")
+            _, config, _, _ = validate_delegated_alarm_delivery(
+                source_home, str(delivery_profile), {
+                    "platform": str(first["platform"]),
+                    "address": str(first["chat_id"]),
+                    "target": str(job.get("deliver") or ""),
+                },
+            )
+            # Never borrow the source profile's live adapter. Delegation is
+            # outbound-only and cannot create a second ingress owner.
             adapters = None
     except Exception as e:
         msg = f"failed to load gateway config: {e}"

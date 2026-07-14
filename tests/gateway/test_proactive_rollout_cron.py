@@ -3,6 +3,7 @@ import copy
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -35,6 +36,26 @@ def _configure_poke_bluebubbles(parent: Path, target: str = "operator-guid") -> 
     return poke
 
 
+def _configure_telegram_operator(parent: Path, name: str = "gpt", target: str = "5320274083") -> Path:
+    home = parent / name
+    (home / "sessions").mkdir(parents=True, exist_ok=True)
+    (home / ".env").write_text("TELEGRAM_BOT_TOKEN=operator-profile-token\n", encoding="utf-8")
+    (home / "config.yaml").write_text(
+        "gateway:\n  platforms:\n    telegram:\n      enabled: true\n", encoding="utf-8",
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    entry = {
+        "session_key": f"agent:main:telegram:dm:{target}", "session_id": f"session-{name}",
+        "created_at": now, "updated_at": now, "platform": "telegram", "chat_type": "dm",
+        "origin": {"platform": "telegram", "chat_id": target, "chat_type": "dm", "user_id": target},
+    }
+    import json
+    (home / "sessions" / "sessions.json").write_text(
+        json.dumps({entry["session_key"]: entry}), encoding="utf-8",
+    )
+    return home
+
+
 def test_guest_profile_config_names_poke_delivery_owner_without_enabling_ingress(tmp_path: Path):
     guest = tmp_path / "guest"
     install_profile_config(profile="guest", root=str(guest), apply=True)
@@ -42,7 +63,7 @@ def test_guest_profile_config_names_poke_delivery_owner_without_enabling_ingress
     config = yaml.safe_load((guest / "config.yaml").read_text(encoding="utf-8"))
     assert config["gateway"]["platforms"]["bluebubbles"]["enabled"] is False
     assert config["agent"]["proactive"]["transport_owner_profile"] == "poke"
-    assert config["agent"]["proactive"]["alarm_sink"]["delivery_profile"] == "poke"
+    assert config["agent"]["proactive"]["alarm_sink"]["delivery_profile"] == "gpt"
 
 
 def test_rollout_cron_dry_run_and_idempotent_reconcile(tmp_path: Path):
@@ -200,6 +221,59 @@ def test_guest_bluebubbles_probe_uses_only_poke_owner_and_records_ack(monkeypatc
     )
 
 
+def test_guest_alarm_delegates_to_gpt_telegram_outbound_only(monkeypatch, tmp_path: Path):
+    from cron import scheduler
+    from tools import send_message_tool
+
+    _configure_telegram_operator(tmp_path)
+    guest = tmp_path / "guest"
+    install_profile_config(profile="guest", root=str(guest), apply=True)
+    install(root=str(guest), alarm_target="telegram:5320274083", delivery_profile="gpt")
+    delivered = []
+
+    async def fake_send(platform, pconfig, chat_id, message, **kwargs):
+        delivered.append((platform.value, pconfig.token, chat_id, message))
+        return {"success": True, "message_id": "telegram-alarm"}
+
+    monkeypatch.setattr(send_message_tool, "_send_to_platform", fake_send)
+    monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: guest)
+    monkeypatch.setattr(scheduler, "save_job_output", lambda *a, **k: guest / "out")
+    with use_cron_store(guest):
+        job = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+        assert job["delivery_profile"] == "gpt"
+        assert job["probe_binding"]["delivery_profile"] == "gpt"
+        assert scheduler.run_one_job(job)
+        completed = next(j for j in list_jobs(include_disabled=True) if j["id"] == job["id"])
+
+    assert len(delivered) == 1
+    assert delivered[0][:3] == ("telegram", "operator-profile-token", "5320274083")
+    assert completed["last_probe_delivery_ack"]["delivery_profile"] == "gpt"
+    import yaml
+    guest_config = yaml.safe_load((guest / "config.yaml").read_text(encoding="utf-8"))
+    assert guest_config["gateway"]["platforms"]["bluebubbles"]["enabled"] is False
+
+
+def test_delivery_profile_change_invalidates_probe_and_rejects_unauthenticated_target(tmp_path: Path):
+    _configure_telegram_operator(tmp_path, "gpt")
+    _configure_telegram_operator(tmp_path, "coding")
+    guest = tmp_path / "guest"
+    install(root=str(guest), alarm_target="telegram:5320274083", delivery_profile="gpt")
+    with use_cron_store(guest):
+        old = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+        mark_job_run(old["id"], True, delivery_ack_metadata=old["probe_binding"])
+    install(root=str(guest), alarm_target="telegram:5320274083", delivery_profile="coding")
+    with use_cron_store(guest):
+        changed = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+    assert changed["probe_binding"]["delivery_profile"] == "coding"
+    assert changed["probe_binding"]["generation"] != old["probe_binding"]["generation"]
+    assert changed.get("last_probe_delivery_ack") is None
+
+    with pytest.raises(ValueError, match="authenticated recent DM"):
+        install(root=str(guest), alarm_target="telegram:999999", delivery_profile="gpt", dry_run=True)
+    with pytest.raises(ValueError, match="operator profile"):
+        install(root=str(guest), alarm_target="telegram:5320274083", delivery_profile="../gpt", dry_run=True)
+
+
 def test_bluebubbles_alarm_owner_rejects_non_owner_target_or_profile(tmp_path: Path):
     _configure_poke_bluebubbles(tmp_path)
     guest = tmp_path / "guest"
@@ -216,7 +290,7 @@ def test_bluebubbles_alarm_owner_rejects_non_owner_target_or_profile(tmp_path: P
         error = scheduler._deliver_result(bad_job, "alarm")
     finally:
         scheduler.reset_hermes_home_override(token)
-    assert error and "delivery_profile must be exactly 'poke'" in error
+    assert error and "restricted to installed Poke/Guest proactive alarms" in error
 
 
 def test_cron_does_not_ack_wrong_probe_output_or_transport_metadata(monkeypatch, tmp_path: Path):

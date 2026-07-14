@@ -11,10 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from dotenv import dotenv_values
-import yaml
-
 from cron.jobs import create_job, list_jobs, remove_job, update_job, use_cron_store
+from gateway.cron_delivery_profile import validate_delegated_alarm_delivery
 from scripts.install_contact_memory_maintenance_cron import install as install_maintenance, resolve_profile_home
 
 WATCHDOG_NAME = "Proactive rollout health watchdog"
@@ -65,31 +63,6 @@ def validate_alarm_target(target: str) -> dict[str, str]:
     return {"platform": platform.lower(), "address": address.strip(), "target": value}
 
 
-def _validate_bluebubbles_delivery_owner(home: Path, target: dict[str, str]) -> Path:
-    """Validate Guest's narrow, outbound-only use of Poke's alarm transport."""
-    owner_home = home if home.name == "poke" else home.parent / "poke"
-    values = dotenv_values(owner_home / ".env")
-    required = (
-        "BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD", "BLUEBUBBLES_HOME_CHANNEL",
-    )
-    missing = [key for key in required if not str(values.get(key) or "").strip()]
-    if missing:
-        raise ValueError(f"Poke BlueBubbles alarm owner is missing {', '.join(missing)}")
-    if str(values["BLUEBUBBLES_HOME_CHANNEL"]).strip() != target["address"]:
-        raise ValueError("BlueBubbles alarm target must exactly match Poke's configured home channel")
-    try:
-        config = yaml.safe_load((owner_home / "config.yaml").read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError) as exc:
-        raise ValueError("Poke BlueBubbles alarm owner config is unavailable") from exc
-    blocks = [
-        ((config.get("gateway") or {}).get("platforms") or {}).get("bluebubbles"),
-        (config.get("platforms") or {}).get("bluebubbles"),
-        config.get("bluebubbles"),
-    ]
-    if not any(isinstance(block, dict) and block.get("enabled") is True for block in blocks):
-        raise ValueError("Poke must be explicitly enabled as the BlueBubbles transport owner")
-    return owner_home
-
 
 def _probe_script(nonce: str, generation: str) -> str:
     return (
@@ -109,16 +82,18 @@ def _probe_binding(*, target: str, nonce: str, generation: str, script: str) -> 
 
 
 def install(*, profile: str | None = None, root: str | None = None,
-            alarm_target: str | None = None, dry_run: bool = False) -> dict[str, Any]:
+            alarm_target: str | None = None, delivery_profile: str | None = None,
+            dry_run: bool = False) -> dict[str, Any]:
     home = resolve_profile_home(profile=profile, root=root)
     profile_name = str(profile or home.name)
     if profile_name not in {"poke", "guest"}:
         raise ValueError("rollout cron is limited to poke and guest")
     target = validate_alarm_target(alarm_target or "")
-    delivery_profile = None
-    if target["platform"] == "bluebubbles":
-        _validate_bluebubbles_delivery_owner(home, target)
+    delivery_profile = str(delivery_profile or "").strip() or None
+    if target["platform"] == "bluebubbles" and delivery_profile is None:
         delivery_profile = "poke"
+    if delivery_profile is not None:
+        validate_delegated_alarm_delivery(home, delivery_profile, target)
     plan: dict[str, Any] = {
         "profile_home": str(home), "profile": profile_name, "schedule": SCHEDULE,
         "dry_run": dry_run, "jobs": ["maintenance", "watchdog", "alarm_probe"],
@@ -229,9 +204,12 @@ def main(argv=None) -> int:
     group.add_argument("--root")
     parser.add_argument("--alarm-target", required=True,
                         help="Explicit supported Hermes target, e.g. telegram:123456")
+    parser.add_argument("--delivery-profile",
+                        help="Existing operator profile whose outbound transport is used")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     print(install(profile=args.profile, root=args.root, alarm_target=args.alarm_target,
+                  delivery_profile=args.delivery_profile,
                   dry_run=args.dry_run))
     return 0
 

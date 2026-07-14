@@ -9,9 +9,9 @@ agent:
       configured: false
       type: hermes_cron
       target: "telegram:REPLACE_WITH_VALIDATED_OPERATOR_CHAT_ID"
-      # BlueBubbles alarms use Poke's outbound-only config. Guest remains a
-      # policy/memory owner, never a BlueBubbles ingress owner.
-      delivery_profile: poke
+      # Alarm delivery may delegate outbound-only to an existing operator
+      # profile. Proactive contact transport ownership remains fixed to Poke.
+      delivery_profile: gpt
       probe_max_age_seconds: 25200
     allowed_contacts:
       - {profile: poke, contact_id: kosta-owner, principal: owner}
