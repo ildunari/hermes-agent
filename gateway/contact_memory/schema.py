@@ -13,7 +13,7 @@ import math
 import re
 from typing import Any
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _PROACTIVE_ITEM_WORD_RE = re.compile(r"[a-z0-9]+", re.I)
 
@@ -182,6 +182,11 @@ class CommunicationRecommendationOutcome(StrEnum):
     REJECTED = "rejected"
     REVISITED = "revisited"
     FULFILLED = "fulfilled"
+
+
+class ProjectionMethod(StrEnum):
+    DETERMINISTIC = "deterministic"
+    MODEL = "model"
 
 
 _OPAQUE_ID_RE = re.compile(r"[0-9a-f]{64}")
@@ -494,6 +499,61 @@ class CommunicationIngestResult:
     deduplicated: bool
 
 
+@dataclass(frozen=True)
+class InterestProjection:
+    topic: str
+    signal_type: SignalType
+    valence: InterestValence
+    confidence: float
+    source_method: ProjectionMethod
+
+
+@dataclass(frozen=True)
+class EntityProjection:
+    canonical_label: str
+    entity_type: str
+    confidence: float
+    source_method: ProjectionMethod
+
+
+@dataclass(frozen=True)
+class RecommendationProjection:
+    semantic_key: str
+    outcome: CommunicationRecommendationOutcome
+    confidence: float
+    source_method: ProjectionMethod
+    explicit_linkage: bool
+    topic: str | None = None
+    recommendation: str | None = None
+
+
+@dataclass(frozen=True)
+class CallbackProjection:
+    semantic_key: str
+    canonical_label: str
+    confidence: float
+    source_method: ProjectionMethod
+    supporting_event_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CommunicationProjection:
+    interests: tuple[InterestProjection, ...] = ()
+    entities: tuple[EntityProjection, ...] = ()
+    recommendations: tuple[RecommendationProjection, ...] = ()
+    callbacks: tuple[CallbackProjection, ...] = ()
+
+
+@dataclass(frozen=True)
+class CommunicationProjectionResult:
+    event_id: str
+    projector_version: str
+    identities: tuple[str, ...]
+    inserted: bool
+    deduplicated: bool
+    retracted: bool = False
+
+
 # Deterministic fold weights (plan §"Signal weights"). These are the single
 # source of truth for both the store fold and the maintenance module; changing a
 # number here changes ledger scoring everywhere. ``ts_*`` deltas feed the
@@ -804,9 +864,20 @@ CREATE TABLE IF NOT EXISTS interest_event (
   valence TEXT NOT NULL CHECK(valence IN ('positive','negative','neutral')),
   source_id TEXT NOT NULL,
   created_at REAL NOT NULL,
-  folded_at REAL
+  folded_at REAL,
+  origin_communication_event_id TEXT REFERENCES communication_event(event_id),
+  projector_version TEXT,
+  projection_kind TEXT,
+  semantic_key TEXT,
+  confidence REAL CHECK(confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+  source_method TEXT CHECK(source_method IS NULL OR source_method IN ('deterministic','model')),
+  active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+  original_topic_text TEXT
 );
 CREATE INDEX IF NOT EXISTS interest_event_unfolded ON interest_event(folded_at, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS communication_interest_projection
+  ON interest_event(origin_communication_event_id,projector_version,projection_kind,semantic_key)
+  WHERE origin_communication_event_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS import_run (
   run_id TEXT PRIMARY KEY,
   source_hash TEXT NOT NULL,
@@ -961,7 +1032,68 @@ CREATE TABLE IF NOT EXISTS communication_recommendation_event (
   outcome TEXT NOT NULL CHECK(outcome IN ('proposed','accepted','rejected','revisited','fulfilled')),
   confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
   explicit_linkage INTEGER NOT NULL CHECK(explicit_linkage IN (0,1)),
+  projector_version TEXT,
+  active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
   UNIQUE(recommendation_id, event_id, outcome)
+);
+CREATE TABLE IF NOT EXISTS projected_entity (
+  projection_id TEXT PRIMARY KEY,
+  origin_communication_event_id TEXT NOT NULL REFERENCES communication_event(event_id),
+  projector_version TEXT NOT NULL,
+  normalized_key TEXT NOT NULL,
+  entity_type TEXT NOT NULL CHECK(entity_type IN ('person','place','organization','thing','event')),
+  canonical_label TEXT NOT NULL,
+  confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+  source_method TEXT NOT NULL CHECK(source_method IN ('deterministic','model')),
+  active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+  created_at REAL NOT NULL,
+  UNIQUE(origin_communication_event_id,projector_version,normalized_key)
+);
+CREATE INDEX IF NOT EXISTS projected_entity_key
+  ON projected_entity(normalized_key,active,created_at);
+CREATE TABLE IF NOT EXISTS projected_recommendation (
+  recommendation_id TEXT PRIMARY KEY REFERENCES recommendation(recommendation_id),
+  origin_communication_event_id TEXT NOT NULL REFERENCES communication_event(event_id),
+  projector_version TEXT NOT NULL,
+  semantic_key TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+  UNIQUE(origin_communication_event_id,projector_version,semantic_key)
+);
+CREATE TABLE IF NOT EXISTS semantic_callback (
+  callback_id TEXT PRIMARY KEY,
+  origin_communication_event_id TEXT NOT NULL REFERENCES communication_event(event_id),
+  projector_version TEXT NOT NULL,
+  semantic_key TEXT NOT NULL,
+  canonical_label TEXT NOT NULL,
+  privacy TEXT NOT NULL CHECK(privacy='restricted'),
+  confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+  source_method TEXT NOT NULL CHECK(source_method IN ('deterministic','model')),
+  active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+  created_at REAL NOT NULL,
+  UNIQUE(origin_communication_event_id,projector_version,semantic_key)
+);
+CREATE INDEX IF NOT EXISTS semantic_callback_active
+  ON semantic_callback(active,created_at);
+CREATE TABLE IF NOT EXISTS semantic_callback_support (
+  callback_id TEXT NOT NULL REFERENCES semantic_callback(callback_id) ON DELETE CASCADE,
+  communication_event_id TEXT NOT NULL REFERENCES communication_event(event_id),
+  PRIMARY KEY(callback_id,communication_event_id)
+);
+CREATE TABLE IF NOT EXISTS communication_projection_receipt (
+  communication_event_id TEXT NOT NULL REFERENCES communication_event(event_id),
+  projector_version TEXT NOT NULL,
+  proposal_hash TEXT NOT NULL,
+  projection_count INTEGER NOT NULL,
+  replay_sequence INTEGER NOT NULL,
+  projected_at REAL NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+  PRIMARY KEY(communication_event_id,projector_version)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_communication_projection
+  ON communication_projection_receipt(communication_event_id) WHERE active=1;
+CREATE TABLE IF NOT EXISTS interest_topic_alias (
+  alias_topic TEXT PRIMARY KEY,
+  canonical_topic TEXT NOT NULL
 );
 """
 

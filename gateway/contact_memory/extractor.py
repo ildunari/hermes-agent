@@ -20,10 +20,10 @@ import threading
 from typing import Any, Awaitable, Callable, Mapping, Protocol, cast
 
 from .schema import (
-    AssertionType, Audience, FactProposal, FactStatus, InterestValence,
-    MentionPolicy, SignalType,
+    AssertionType, Audience, CommunicationProjection, FactProposal, FactStatus,
+    InterestProjection, InterestValence, MentionPolicy, ProjectionMethod, SignalType,
 )
-from .store import ContactMemoryStore
+from .store import ContactMemoryStore, normalize_interest_topic
 
 
 class ExtractorBackend(Protocol):
@@ -358,24 +358,26 @@ async def propose_turn_memories(store: ContactMemoryStore, extractor: Extractor 
         )
         proposal_ids.append(str(result["proposal_id"]))
 
-    # Interest extraction is an advisory sibling lane. Invalid interest output
-    # is dropped item-by-item so it cannot regress durable fact extraction.
+    # Interest extraction is an advisory proposal lane. It may only reach the
+    # existing interest_event ledger through a canonical communication bundle.
+    communication_event_id = str(metadata.get("communication_event_id") or "").strip()
     topic_valences: dict[str, InterestValence] = {}
+    interest_proposals: list[InterestProjection] = []
     for raw in raw_interest_events:
         if not isinstance(raw, Mapping):
             continue
         try:
             topic, signal, valence = validate_interest_event(raw)
-            event = await asyncio.to_thread(
-                store.record_interest_event,
-                topic_text=topic, signal_type=signal, valence=valence,
-                source_id=source_id,
-            )
+            canonical_topic = normalize_interest_topic(topic)
+            interest_proposals.append(InterestProjection(
+                topic=canonical_topic, signal_type=signal, valence=valence,
+                confidence=0.90, source_method=ProjectionMethod.MODEL,
+            ))
         except Exception:
             continue
-        previous = topic_valences.get(event.topic_text)
+        previous = topic_valences.get(canonical_topic)
         if previous is None or valence is InterestValence.NEGATIVE:
-            topic_valences[event.topic_text] = valence
+            topic_valences[canonical_topic] = valence
 
     # The model supplies only the topic. Length classification is deterministic,
     # per-contact, and measured against the median before this message was added.
@@ -383,14 +385,22 @@ async def propose_turn_memories(store: ContactMemoryStore, extractor: Extractor 
         for topic, valence in topic_valences.items():
             if valence is InterestValence.NEGATIVE:
                 continue
-            try:
-                await asyncio.to_thread(
-                    store.record_interest_event,
-                    topic_text=topic, signal_type=SignalType.LONG_REPLY,
-                    valence=valence, source_id=source_id,
-                )
-            except Exception:
-                continue
+            interest_proposals.append(InterestProjection(
+                topic=topic, signal_type=SignalType.LONG_REPLY, valence=valence,
+                confidence=1.0, source_method=ProjectionMethod.DETERMINISTIC,
+            ))
+
+    if communication_event_id and interest_proposals:
+        try:
+            await asyncio.to_thread(
+                store.project_communication_event,
+                communication_event_id,
+                CommunicationProjection(interests=tuple(interest_proposals)),
+                projector_version="qwen-interest-v1",
+            )
+        except Exception:
+            # Model proposals are fail-open and never bypass the projector.
+            pass
     return proposal_ids
 
 

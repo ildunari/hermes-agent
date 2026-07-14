@@ -520,7 +520,7 @@ def _apply_complete_maintenance_locked(
         if item.state is InterestState.CANDIDATE:
             days = int(con.execute(
                 "SELECT count(DISTINCT CAST(created_at / 86400 AS INTEGER)) "
-                "FROM interest_event WHERE topic_text=?", (item.topic,),
+                "FROM interest_event WHERE topic_text=? AND active=1", (item.topic,),
             ).fetchone()[0])
             if effective >= INTEREST_PROMOTE_MIN_SCORE and days >= INTEREST_PROMOTE_MIN_DISTINCT_DAYS:
                 con.execute(
@@ -737,7 +737,7 @@ async def run_maintenance(
             if not force:
                 state = store._interest_maintenance_state_in(con)
                 unfolded = int(con.execute(
-                    "SELECT count(*) FROM interest_event WHERE folded_at IS NULL"
+                    "SELECT count(*) FROM interest_event WHERE folded_at IS NULL AND active=1"
                 ).fetchone()[0])
                 last_run = state.get("last_run_at")
                 due = (

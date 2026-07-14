@@ -146,10 +146,12 @@ async def test_gateway_submission_is_profile_scoped_and_scope_gated(
         config_raw=config, trusted_scope=scope, profile_home=tmp_path,
         source_id="message:7", user_text=scope.source_text,
         assistant_text="Got it.",
+        communication_event_ids=("a" * 64,),
     )
     assert submitted[0].store.root == tmp_path / "contact-memory"
     assert submitted[0].store.contact_id == "contact-a"
     assert submitted[0].metadata["source_id"] == "message:7"
+    assert submitted[0].metadata["communication_event_id"] == "a" * 64
 
     assert not await _submit_contact_memory_extraction(
         config_raw=config, trusted_scope=None, profile_home=tmp_path,

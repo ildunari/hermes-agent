@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import stat
 import sys
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -23,7 +23,10 @@ if str(ROOT) not in sys.path:
 from gateway.contact_memory.imessage_link_review import (  # noqa: E402
     LINK_INTEREST_TAXONOMY, evidence_id, verify_review_id,
 )
-from gateway.contact_memory.schema import InterestEvent, InterestValence, SignalType  # noqa: E402
+from gateway.contact_memory.schema import (  # noqa: E402
+    CommunicationProjection, CommunicationProjectionResult, InterestEvent,
+    InterestProjection, InterestValence, ProjectionMethod, SignalType,
+)
 from gateway.contact_memory.store import ContactMemoryStore, normalize_interest_topic  # noqa: E402
 
 _HEX_ID = re.compile(r"[0-9a-f]{64}")
@@ -166,6 +169,34 @@ def validate_manifest(
     return batches
 
 
+def apply_canonical_link_projections(
+    store: ContactMemoryStore,
+    occurrences: Sequence[tuple[str, str]],
+    *,
+    projector_version: str = "reviewed-link-v1",
+) -> list[CommunicationProjectionResult]:
+    """Apply reviewed occurrence-level topics through the canonical projector.
+
+    Aggregate schema-2 candidates deliberately cannot call this function: each
+    item must name an already-authenticated communication event in the target
+    contact store so attribution, replay, retraction, and distinct-day evidence
+    remain mechanically recoverable.
+    """
+    if not occurrences or len({event_id for event_id, _ in occurrences}) != len(occurrences):
+        raise ValueError("canonical link projections require unique occurrence event IDs")
+    projections = []
+    for event_id, topic in occurrences:
+        canonical_topic = normalize_interest_topic(topic)
+        projections.append((event_id, CommunicationProjection(interests=(InterestProjection(
+            topic=canonical_topic, signal_type=SignalType.SPONTANEOUS_RAISE,
+            valence=InterestValence.POSITIVE, confidence=0.95,
+            source_method=ProjectionMethod.MODEL,
+        ),))))
+    return store.project_communication_events(
+        projections, projector_version=projector_version,
+    )
+
+
 def _default_roots() -> dict[str, Path]:
     from hermes_cli.profiles import get_profile_dir
     return {subject: Path(get_profile_dir(target)) for subject, target in _SUBJECT_TARGET.items()}
@@ -203,6 +234,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     populated_subjects = [subject for subject, events in batches.items() if events]
     selected_subject = args.subject
     if args.apply:
+        parser.error(
+            "aggregate schema-2 reviews cannot apply; use reviewed canonical occurrences "
+            "through apply_canonical_link_projections"
+        )
         if selected_subject is None and len(populated_subjects) > 1:
             parser.error("--subject is required to apply a multi-subject manifest atomically")
         if selected_subject is None and len(populated_subjects) == 1:
@@ -221,33 +256,6 @@ def main(argv: Iterable[str] | None = None) -> int:
         "atomic_subject": selected_subject,
         "subjects": {subject: len(events) for subject, events in batches.items()},
     }
-    if args.apply:
-        roots = {
-            "kosta-owner": Path(args.poke_root).expanduser() if args.poke_root else None,
-            "stephen-lucier": Path(args.guest_root).expanduser() if args.guest_root else None,
-        }
-        if any(root is None for root in roots.values()):
-            defaults = _default_roots()
-            roots = {subject: root or defaults[subject] for subject, root in roots.items()}
-        results = {}
-        for subject, events in batches.items():
-            if not events:
-                continue
-            review_id = manifest["review_id"]
-            store_manifest = {
-                "schema": 1, "kind": "reviewed-link-interest-seed",
-                "review_id": review_id, "candidate_ids": [event.event_id for event in events],
-            }
-            results[subject] = ContactMemoryStore(
-                roots[subject] / "contact-memory", subject,  # type: ignore[operator]
-            ).import_reviewed_interest_seed(
-                events,
-                run_id=f"reviewed-link-interest-seed:{review_id}",
-                source_hash=review_id,
-                manifest=store_manifest,
-                now=max(event.created_at for event in events),
-            )
-        summary["results"] = results
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 

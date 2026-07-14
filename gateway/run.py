@@ -2266,6 +2266,7 @@ async def _submit_contact_memory_extraction(
     source_id: Any,
     user_text: str,
     assistant_text: str,
+    communication_event_ids: tuple[str, ...] = (),
 ) -> bool:
     """Enqueue authenticated direct-turn extraction without awaiting inference."""
     if (
@@ -2295,11 +2296,16 @@ async def _submit_contact_memory_extraction(
         runtime = get_extraction_runtime(root, config_raw)
         if runtime is None:
             return False
+        extraction_metadata = {
+            "source_id": source_id, "principal": trusted_scope.principal,
+        }
+        if len(communication_event_ids) == 1:
+            extraction_metadata["communication_event_id"] = communication_event_ids[0]
         return runtime.submit(ExtractionJob(
             store,
             clean_user,
             str(assistant_text),
-            {"source_id": source_id, "principal": trusted_scope.principal},
+            extraction_metadata,
         ))
     except Exception as exc:
         logger.warning("Contact memory extraction submission skipped: %s", exc)
@@ -10423,11 +10429,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Canonical ingress is frozen by the adapter and authenticated by the
         # owner/guest route above. Persist it before plugins, commands, model
         # dispatch, or any later suppression/failure path can mutate the turn.
+        canonical_event_ids: tuple[str, ...] = ()
         if trusted_contact_scope is not None and getattr(
             event, "communication_ingress", ()
         ):
             try:
-                await _persist_authenticated_communication_ingress(
+                canonical_event_ids = await _persist_authenticated_communication_ingress(
                     trusted_scope=trusted_contact_scope,
                     profile_home=self._resolve_profile_home_for_source(source),
                     source=source,
@@ -13903,6 +13910,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         else ""
                     ),
                     assistant_text=response,
+                    communication_event_ids=canonical_event_ids,
                 )
 
             # Intentional silence is a delivery decision, not a transcript

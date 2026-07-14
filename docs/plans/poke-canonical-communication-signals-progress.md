@@ -133,3 +133,30 @@ Independent Gate C review rejected boundary commit `88e8b62ff` with six P1 findi
 Mixed malformed `data` lists now fail the webhook without ACK or partial ingress. Missing-GUID fallback identities commit to the deterministic full record plus stable list position, keeping same-timestamp attachment-only members distinct across retries. Focused regressions cover exact and alias boolean boundaries, malformed values, the blocked-writer key race, missing/foreign/same-speaker targets, historical/live actor-role parity, all tapback codes through retraction, malformed mixed wrappers, and identical no-GUID list members.
 
 Red-first verification reproduced 27 failures in the focused live-ingress file before implementation. Final verification completed the focused three-file Phase C set with 164 passed and 0 failed, and the 15-file surrounding canonical/contact-memory/BlueBubbles set with 406 passed and 0 failed. The broad `tests/gateway` run again reported the same pre-existing boundary as the original Phase C run: 130 failures across 37 files, with all Phase C focused and surrounding files green. Focused `py_compile`, Ruff, and `git diff --check` passed. No live data was touched, no gateway was restarted, no send mode was changed, and no Phase D work began.
+
+## Phase D — Semantic projections
+
+Status: Phase D implementation complete and locally verified; parent Gate D review is pending. Phase E has not started.
+
+Commit: Phase D boundary commit containing this progress record (the final SHA is reported by the implementation thread).
+
+### Delivered
+
+- Added one transactional, replay-safe projection boundary over complete authenticated communication bundles. Semantic identities are derived from projector version, communication event ID, projection kind, and normalized semantic key; a small receipt/version cursor provides idempotency and deterministic chronological replay without creating another evidence ledger.
+- Kept `interest_event` as the only semantic interest-evidence ledger. Projection provenance, confidence/method, original topic, and active/retracted state support exact version supersession and reversal while preserving existing weights, folding, decay, distinct-day promotion, legacy evidence, and merge aliases.
+- Enforced mechanical actor, initiator, reply, share, reaction, and confidence rules before interest writes. Bounded Qwen output is now an untrusted typed proposal and cannot write an interest without one authenticated canonical event reference.
+- Added per-contact entity projections, explicitly linked recommendation lifecycle/follow-through records, and privacy-restricted recurrent callback evidence with canonical support linkage. Raw bodies, URLs, GUIDs, paths, and credential-like semantic labels are rejected from projection rows.
+- Replaced the aggregate reviewed-link apply path with occurrence-level canonical projection. Legacy schema-2 aggregate reviews remain valid for dry-run review but are refused for direct state application because they cannot preserve actor, retraction, or distinct-day provenance.
+
+### Gate D evidence
+
+Red-first development covered projection idempotency, transaction rollback, versioning, chronological replay, retraction after fold, actor/reply/reaction rules, entity normalization and per-contact isolation, merge aliases, recommendation follow-through, recurrent restricted callbacks, raw-artifact rejection, canonical Qwen routing, and single-ledger behavior.
+
+The final focused projection plus interest-ledger run completed with 41 passed and 0 failed. The complete surrounding set `scripts/run_tests.sh tests/gateway/contact_memory tests/gateway/test_interest_ledger.py -q` completed with 297 passed and 0 failed across 14 files after the final callback and migration edits. Final focused `py_compile`, Ruff, and `git diff --check` passed.
+
+The requested broad `scripts/run_tests.sh tests/gateway -q` run is not globally green on this branch: it completed with 129 failures across 37 files. The failures remain outside the Phase D contact-memory and interest suites and cover the existing async session-store policy, API toolsets, command handlers/config expectations, Telegram metadata/documents, Slack, voice, and other unrelated gateway surfaces; every contact-memory file in the broad run passed.
+
+### Current boundaries
+
+- Phase D defines and exercises semantic projection only. It does not scan historical messages, apply reviewed evidence to live Poke/Guest stores, run the Phase E backfill, or change observe-only delivery behavior.
+- Parent Gate D review remains pending. This phase did not access live stores/messages, restart a gateway, enable sends, push, or open a pull request.

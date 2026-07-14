@@ -3,15 +3,21 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from gateway.contact_memory.imessage_bootstrap import ResolvedChat
 from gateway.contact_memory.imessage_link_review import LinkSignal, build_review_manifest, evidence_id
-from gateway.contact_memory.schema import InterestValence, SignalType
+from gateway.contact_memory.schema import (
+    CommunicationActorRole, CommunicationDirection, CommunicationEvent, CommunicationKind,
+    InterestValence, SignalType,
+)
 from gateway.contact_memory.store import ContactMemoryStore
-from scripts.apply_reviewed_link_interests import main, validate_manifest
+from scripts.apply_reviewed_link_interests import (
+    apply_canonical_link_projections, main, validate_manifest,
+)
 
 _SECRET = b"review-bridge-test-secret-32bytes!"
 _CHAT = ResolvedChat(1, "iMessage;-;+14015550100", 2, "+14015550100", 2, (2,))
@@ -169,41 +175,33 @@ def _apply_args(review: Path, key: Path, root: Path, review_id: str) -> list[str
     ]
 
 
-def test_apply_is_idempotent_and_new_review_expands_without_refreshing_old_topic(tmp_path: Path) -> None:
+def test_legacy_aggregate_apply_is_rejected_without_creating_state(tmp_path: Path) -> None:
     root = tmp_path / "guest"
     first = _manifest()
     review, key = _files(tmp_path, first)
-    assert main(_apply_args(review, key, root, first["review_id"])) == 0
-    store = ContactMemoryStore(root / "contact-memory", "stephen-lucier")
-    old = store.list_interests()[0]
-    assert main(_apply_args(review, key, root, first["review_id"])) == 0
-    assert store.list_interests()[0].updated_at == old.updated_at
-
-    expanded = _manifest(include_tech=True)
-    _private(review, (json.dumps(expanded) + "\n").encode())
-    assert main(_apply_args(review, key, root, expanded["review_id"])) == 0
-    interests = {item.topic: item for item in store.list_interests()}
-    assert set(interests) == {"music", "technology"}
-    assert interests["music"].updated_at == old.updated_at
-    assert interests["music"].evidence_count == old.evidence_count
+    with pytest.raises(SystemExit) as exc:
+        main(_apply_args(review, key, root, first["review_id"]))
+    assert exc.value.code == 2
+    assert not (root / "contact-memory").exists()
 
 
-def test_atomic_conflict_rolls_back_entire_subject_batch(tmp_path: Path) -> None:
-    manifest = _manifest(include_tech=True)
-    events = validate_manifest(manifest, _SECRET)["stephen-lucier"]
+def test_canonical_link_bridge_projects_occurrences_idempotently(tmp_path: Path) -> None:
     store = ContactMemoryStore(tmp_path / "contact-memory", "stephen-lucier")
-    conflict = events[-1]
-    store.record_interest_event(
-        topic_text="vehicles", signal_type=SignalType.ENGAGED_MENTION,
-        valence=InterestValence.POSITIVE, source_id="other:hmac-only",
-        now=conflict.created_at, event_id=conflict.event_id,
-    )
-    with pytest.raises(ValueError, match="conflicts with stored evidence"):
-        store.import_reviewed_interest_seed(
-            events, run_id=f"reviewed-link-interest-seed:{manifest['review_id']}",
-            source_hash=manifest["review_id"], manifest={"review_id": manifest["review_id"]},
-            now=max(event.created_at for event in events),
+    events = []
+    for index, occurred_at in enumerate((100.0, 100.0 + 86_400.0)):
+        event = CommunicationEvent(
+            event_id=hashlib.sha256(f"event:{index}".encode()).hexdigest(),
+            platform="synthetic", source_id=hashlib.sha256(f"source:{index}".encode()).hexdigest(),
+            occurred_at=occurred_at, direction=CommunicationDirection.INBOUND,
+            kind=CommunicationKind.LINK_SHARE, actor_role=CommunicationActorRole.CONTACT,
+            text_hash=hashlib.sha256(f"text:{index}".encode()).hexdigest(),
+            text_present=True, text_length=10, provenance="synthetic-fixture",
         )
-    assert store.list_interests() == []
-    assert store.unfolded_interest_events() == [store.unfolded_interest_events()[0]]
-    assert store.unfolded_interest_events()[0].topic_text == "vehicles"
+        store.ingest_communication_event(event)
+        events.append(event)
+    occurrences = [(event.event_id, "music") for event in events]
+    first = apply_canonical_link_projections(store, occurrences)
+    replay = apply_canonical_link_projections(store, occurrences)
+    assert all(result.inserted for result in first)
+    assert all(result.deduplicated for result in replay)
+    assert [event.topic_text for event in store.unfolded_interest_events()] == ["music", "music"]

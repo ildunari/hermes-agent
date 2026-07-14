@@ -28,6 +28,7 @@ from .schema import (
     INTEREST_MAX_LIVE_TOPICS,
     AssertionType,
     Audience,
+    CallbackProjection,
     CommunicationActorRole,
     CommunicationAttachment,
     CommunicationBundle,
@@ -38,6 +39,8 @@ from .schema import (
     CommunicationKind,
     CommunicationLifecycle,
     CommunicationPrivacy,
+    CommunicationProjection,
+    CommunicationProjectionResult,
     CommunicationReactionSubtype,
     CommunicationRecommendationEvent,
     CommunicationRecommendationOutcome,
@@ -45,18 +48,22 @@ from .schema import (
     CommunicationRelationType,
     CommunicationUrl,
     EntityMention,
+    EntityProjection,
     FactProposal,
     FactRecord,
     FactStatus,
     GateDecision,
     Interest,
     InterestEvent,
+    InterestProjection,
     InterestState,
     InterestValence,
     MentionPolicy,
     ProactiveOutcome,
     ProactiveSend,
     ProactiveSendKind,
+    ProjectionMethod,
+    RecommendationProjection,
     RetrievalPrincipal,
     SearchResult,
     SignalType,
@@ -93,6 +100,11 @@ _SENSITIVE_INTEREST_RE = re.compile(
 )
 _MESSAGE_LENGTH_META_KEY = "contact_message_lengths_v1"
 _MESSAGE_LENGTH_WINDOW = 50
+_SEMANTIC_KEY_RE = re.compile(r"[a-z0-9][a-z0-9:._-]{0,127}")
+_RAW_ARTIFACT_RE = re.compile(
+    r"(?i)(?:://|www\.|(?:^|\s)(?:~?/|[a-z]:\\)|[?&](?:token|key|signature|auth)=|"
+    r"\b(?:password|passcode|api[ -]?key|private key|seed phrase)\b)"
+)
 
 
 def _enum_text(value: object) -> str:
@@ -129,6 +141,31 @@ def normalize_interest_topic(topic: object) -> str:
     if _SENSITIVE_INTEREST_RE.search(value):
         raise ValueError("sensitive text cannot be stored as an interest topic")
     return value
+
+
+def _normalized_semantic_label(value: object, *, name: str, maximum: int = 160) -> str:
+    label = " ".join(str(value or "").split())
+    if not label or len(label) > maximum or any(ord(ch) < 32 or ord(ch) == 127 for ch in label):
+        raise ValueError(f"{name} is invalid")
+    if "/" in label or "\\" in label or _RAW_ARTIFACT_RE.search(label):
+        raise ValueError(f"{name} cannot contain raw artifacts or credentials")
+    return label
+
+
+def _normalized_entity_key(label: object) -> str:
+    value = _normalized_semantic_label(label, name="canonical_label", maximum=120).casefold()
+    normalized = " ".join(re.findall(r"[^\W_]+(?:['-][^\W_]+)*", value, re.UNICODE))
+    if not normalized:
+        raise ValueError("canonical_label has no semantic identity")
+    return normalized
+
+
+def _projection_identity(
+    projector_version: str, event_id: str, projection_kind: str, semantic_key: str,
+) -> str:
+    return hashlib.sha256("\0".join((
+        "communication-projection-v1", projector_version, event_id, projection_kind, semantic_key,
+    )).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -211,7 +248,7 @@ class ContactMemoryStore:
             ).fetchone() if con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
             ).fetchone() else None
-            supported = {"1", "2", "3", "4", "5", str(SCHEMA_VERSION)}
+            supported = {"1", "2", "3", "4", "5", "6", str(SCHEMA_VERSION)}
             if existing is not None and str(existing[0]) not in supported:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {existing[0]}; expected {SCHEMA_VERSION}"
@@ -237,7 +274,7 @@ class ContactMemoryStore:
             if from_version == str(SCHEMA_VERSION):
                 con.execute("COMMIT")
                 return
-            if from_version not in {"1", "2", "3", "4", "5"}:
+            if from_version not in {"1", "2", "3", "4", "5", "6"}:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {from_version}; expected {SCHEMA_VERSION}"
                 )
@@ -245,6 +282,7 @@ class ContactMemoryStore:
                 self._migrate_v1_to_v2(con)
             self._migrate_proactive_item_hash(con)
             self._migrate_communication_reaction_subtype(con)
+            self._migrate_projection_columns(con)
             self._execute_script(con, CONTACT_SCHEMA_SQL)
             con.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",
@@ -344,6 +382,46 @@ class ContactMemoryStore:
             "UPDATE communication_event SET reaction_subtype='legacy_untyped' "
             "WHERE kind IN ('reaction_add','reaction_remove')"
         )
+
+    @staticmethod
+    def _migrate_projection_columns(con: sqlite3.Connection) -> None:
+        """Add Phase-D provenance columns before indexes reference them."""
+        if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='interest_event'"
+        ).fetchone() is not None:
+            interest_columns = {
+                str(row[1]) for row in con.execute("PRAGMA table_info(interest_event)")
+            }
+            additions = {
+                "origin_communication_event_id": "TEXT REFERENCES communication_event(event_id)",
+                "projector_version": "TEXT",
+                "projection_kind": "TEXT",
+                "semantic_key": "TEXT",
+                "confidence": "REAL CHECK(confidence IS NULL OR (confidence >= 0 AND confidence <= 1))",
+                "source_method": "TEXT CHECK(source_method IS NULL OR source_method IN ('deterministic','model'))",
+                "active": "INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1))",
+                "original_topic_text": "TEXT",
+            }
+            for name, definition in additions.items():
+                if name not in interest_columns:
+                    con.execute(f"ALTER TABLE interest_event ADD COLUMN {name} {definition}")
+        if con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='communication_recommendation_event'"
+        ).fetchone() is not None:
+            outcome_columns = {
+                str(row[1])
+                for row in con.execute("PRAGMA table_info(communication_recommendation_event)")
+            }
+            for name, definition in {
+                "projector_version": "TEXT",
+                "active": "INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1))",
+            }.items():
+                if name not in outcome_columns:
+                    con.execute(
+                        f"ALTER TABLE communication_recommendation_event "
+                        f"ADD COLUMN {name} {definition}"
+                    )
 
     @contextmanager
     def _immediate(self) -> Iterator[sqlite3.Connection]:
@@ -882,7 +960,11 @@ class ContactMemoryStore:
                     con.execute("SELECT count(*) FROM fact WHERE version_id=? AND status='active' AND tx_to IS NULL", (fact_id,)).fetchone()[0]
                     for fact_id in basis
                 )
-                if basis and live == len(basis):
+                canonical_origin = con.execute(
+                    "SELECT 1 FROM projected_recommendation WHERE recommendation_id=? AND active=1",
+                    (row["recommendation_id"],),
+                ).fetchone() is not None
+                if (basis and live == len(basis)) or (not basis and canonical_origin):
                     active_rows.append(row)
                 else:
                     con.execute("UPDATE recommendation SET status='withdrawn',updated_at=? WHERE recommendation_id=?", (timestamp, row["recommendation_id"]))
@@ -1272,10 +1354,14 @@ class ContactMemoryStore:
                 item.canonical_label, item.confidence, item.source_method, item.surface_hash,
             ))
         for item in bundle.recommendation_events:
-            con.execute("INSERT INTO communication_recommendation_event VALUES(?,?,?,?,?,?)", (
-                item.recommendation_event_id, item.recommendation_id, item.event_id,
-                item.outcome.value, item.confidence, int(item.explicit_linkage),
-            ))
+            con.execute(
+                """INSERT INTO communication_recommendation_event(
+                  recommendation_event_id,recommendation_id,event_id,outcome,confidence,
+                  explicit_linkage,projector_version,active
+                ) VALUES(?,?,?,?,?,?,NULL,1)""",
+                (item.recommendation_event_id, item.recommendation_id, item.event_id,
+                 item.outcome.value, item.confidence, int(item.explicit_linkage)),
+            )
 
     def ingest_communication_event(
         self, event: CommunicationEvent, *, urls: Sequence[CommunicationUrl] = (),
@@ -1565,6 +1651,579 @@ class ContactMemoryStore:
         return CommunicationIngestResult(event=event, inserted=inserted, deduplicated=not inserted)
 
     @staticmethod
+    def _projection_version(value: object) -> str:
+        version = str(value or "")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", version):
+            raise ValueError("projector_version must be a normalized machine token")
+        return version
+
+    @staticmethod
+    def _projection_confidence(confidence: object, method: ProjectionMethod, *, minimum: float) -> float:
+        if not isinstance(method, ProjectionMethod):
+            raise ValueError("projection source_method is invalid")
+        if isinstance(confidence, bool):
+            raise ValueError("projection confidence is invalid")
+        value = float(confidence)
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("projection confidence must be in [0, 1]")
+        if method is ProjectionMethod.DETERMINISTIC and value != 1.0:
+            raise ValueError("deterministic projection confidence must be 1.0")
+        if method is ProjectionMethod.MODEL and value < minimum:
+            raise ValueError("model projection confidence is below the admission threshold")
+        return value
+
+    @staticmethod
+    def _resolve_interest_alias_in(con: sqlite3.Connection, topic: str) -> str:
+        seen: set[str] = set()
+        current = topic
+        while current not in seen:
+            seen.add(current)
+            row = con.execute(
+                "SELECT canonical_topic FROM interest_topic_alias WHERE alias_topic=?", (current,)
+            ).fetchone()
+            if row is None:
+                return current
+            current = str(row["canonical_topic"])
+        raise ValueError("interest topic alias cycle detected")
+
+    @classmethod
+    def _validated_projection_items_in(
+        cls,
+        con: sqlite3.Connection,
+        bundle: CommunicationBundle,
+        projection: CommunicationProjection,
+        projector_version: str,
+        allowed_share_topics: frozenset[tuple[str, str]] = frozenset(),
+    ) -> list[dict[str, object]]:
+        if not isinstance(projection, CommunicationProjection):
+            raise ValueError("projection must use the typed communication contract")
+        event = bundle.event
+        items: list[dict[str, object]] = []
+        relations = {relation.relation_type for relation in bundle.relations}
+
+        for proposal in projection.interests:
+            if not isinstance(proposal, InterestProjection):
+                raise ValueError("interest proposal is invalid")
+            if event.actor_role is not CommunicationActorRole.CONTACT:
+                raise ValueError("personal-interest evidence must be contact-authored")
+            confidence = cls._projection_confidence(
+                proposal.confidence, proposal.source_method, minimum=0.90,
+            )
+            topic = cls._resolve_interest_alias_in(con, normalize_interest_topic(proposal.topic))
+            if not isinstance(proposal.signal_type, SignalType) or not isinstance(
+                proposal.valence, InterestValence
+            ):
+                raise ValueError("interest signal or valence is invalid")
+            if event.kind is CommunicationKind.REPLY:
+                if CommunicationRelationType.REPLY_TO not in relations:
+                    raise ValueError("reply interest requires authenticated target linkage")
+                if proposal.signal_type not in {SignalType.NEUTRAL_ACK, SignalType.LONG_REPLY}:
+                    raise ValueError("plain replies may emit only neutral deterministic evidence")
+            if proposal.signal_type is SignalType.SPONTANEOUS_RAISE and (
+                event.kind is not CommunicationKind.TEXT
+                and (event.event_id, topic) not in allowed_share_topics
+            ):
+                raise ValueError("spontaneous raises require root or repeated-share evidence")
+            if proposal.signal_type is SignalType.SPONTANEOUS_RAISE and relations & {
+                CommunicationRelationType.REPLY_TO,
+                CommunicationRelationType.BATCH_MEMBER_OF,
+            }:
+                raise ValueError("spontaneous raises cannot come from replies or batch continuations")
+            if event.kind in {CommunicationKind.LINK_SHARE, CommunicationKind.ATTACHMENT_SHARE}:
+                if (event.event_id, topic) not in allowed_share_topics:
+                    raise ValueError("one-time shares cannot directly create interest evidence")
+            if event.kind is CommunicationKind.REACTION_ADD:
+                positive = {
+                    CommunicationReactionSubtype.LIKE, CommunicationReactionSubtype.LOVE,
+                    CommunicationReactionSubtype.LAUGH, CommunicationReactionSubtype.EMPHASIS,
+                }
+                targets = [
+                    relation for relation in bundle.relations
+                    if relation.relation_type is CommunicationRelationType.REACTION_TO
+                ]
+                if (
+                    event.reaction_subtype not in positive
+                    or proposal.signal_type is not SignalType.ENGAGED_MENTION
+                    or proposal.source_method is not ProjectionMethod.DETERMINISTIC
+                    or len(targets) != 1
+                    or targets[0].target_actor_role is not CommunicationActorRole.COUNTERPART
+                ):
+                    raise ValueError("reaction interest requires a positive authenticated response")
+            if event.kind is CommunicationKind.REACTION_REMOVE:
+                raise ValueError("reaction removals cannot create semantic interest evidence")
+            semantic_key = "|".join((topic, proposal.signal_type.value, proposal.valence.value))
+            items.append({
+                "kind": "interest", "semantic_key": semantic_key,
+                "identity": _projection_identity(
+                    projector_version, event.event_id, "interest", semantic_key,
+                ),
+                "topic": topic, "signal_type": proposal.signal_type.value,
+                "valence": proposal.valence.value, "confidence": confidence,
+                "source_method": proposal.source_method.value,
+            })
+
+        for proposal in projection.entities:
+            if not isinstance(proposal, EntityProjection):
+                raise ValueError("entity proposal is invalid")
+            confidence = cls._projection_confidence(
+                proposal.confidence, proposal.source_method, minimum=0.80,
+            )
+            if proposal.entity_type not in {"person", "place", "organization", "thing", "event"}:
+                raise ValueError("entity_type is invalid")
+            label = _normalized_semantic_label(
+                proposal.canonical_label, name="canonical_label", maximum=120,
+            )
+            key = _normalized_entity_key(label)
+            items.append({
+                "kind": "entity", "semantic_key": key,
+                "identity": _projection_identity(projector_version, event.event_id, "entity", key),
+                "canonical_label": label, "entity_type": proposal.entity_type,
+                "confidence": confidence, "source_method": proposal.source_method.value,
+            })
+
+        for proposal in projection.recommendations:
+            if not isinstance(proposal, RecommendationProjection):
+                raise ValueError("recommendation proposal is invalid")
+            confidence = cls._projection_confidence(
+                proposal.confidence, proposal.source_method,
+                minimum=0.90 if not proposal.explicit_linkage else 0.0,
+            )
+            key = str(proposal.semantic_key or "").casefold()
+            if not _SEMANTIC_KEY_RE.fullmatch(key):
+                raise ValueError("recommendation semantic_key is invalid")
+            if not isinstance(proposal.outcome, CommunicationRecommendationOutcome):
+                raise ValueError("recommendation outcome is invalid")
+            if not isinstance(proposal.explicit_linkage, bool):
+                raise ValueError("explicit_linkage must be boolean")
+            if (
+                proposal.outcome is CommunicationRecommendationOutcome.FULFILLED
+                and not proposal.explicit_linkage
+            ):
+                raise ValueError("inferred recommendation fulfillment is forbidden")
+            target_recommendation_id: str | None = None
+            topic: str | None = None
+            recommendation: str | None = None
+            if proposal.outcome is CommunicationRecommendationOutcome.PROPOSED:
+                if event.kind is not CommunicationKind.RECOMMENDATION:
+                    raise ValueError("recommendation proposals require recommendation evidence")
+                topic = normalize_interest_topic(proposal.topic)
+                recommendation = _normalized_semantic_label(
+                    proposal.recommendation, name="recommendation", maximum=240,
+                )
+            else:
+                targets = [
+                    relation for relation in bundle.relations
+                    if relation.relation_type in {
+                        CommunicationRelationType.RECOMMENDS,
+                        CommunicationRelationType.FOLLOWS_THROUGH,
+                    }
+                ]
+                if proposal.explicit_linkage and len(targets) != 1:
+                    raise ValueError("explicit recommendation outcome requires one target linkage")
+                if not targets:
+                    raise ValueError("unrelated messages cannot change recommendation lifecycle")
+                target_event = con.execute(
+                    "SELECT event_id FROM communication_event WHERE source_id=?",
+                    (targets[0].target_source_id,),
+                ).fetchone()
+                if target_event is None:
+                    raise ValueError("recommendation target is unknown")
+                target = con.execute(
+                    """SELECT recommendation.recommendation_id,projection.semantic_key,
+                              recommendation.topic,recommendation.recommendation
+                       FROM recommendation
+                       JOIN projected_recommendation projection
+                         ON projection.recommendation_id=recommendation.recommendation_id
+                       WHERE projection.origin_communication_event_id=?
+                         AND projection.semantic_key=? AND projection.active=1
+                       ORDER BY recommendation.created_at DESC LIMIT 1""",
+                    (str(target_event["event_id"]), key),
+                ).fetchone()
+                if target is None:
+                    raise ValueError("recommendation target has no matching semantic projection")
+                target_recommendation_id = str(target["recommendation_id"])
+                topic = str(target["topic"])
+                recommendation = str(target["recommendation"])
+            projection_kind = f"recommendation_{proposal.outcome.value}"
+            identity = _projection_identity(
+                projector_version, event.event_id, projection_kind, key,
+            )
+            items.append({
+                "kind": "recommendation", "projection_kind": projection_kind,
+                "semantic_key": key, "identity": identity,
+                "recommendation_id": target_recommendation_id or identity,
+                "topic": topic, "recommendation": recommendation,
+                "outcome": proposal.outcome.value, "confidence": confidence,
+                "source_method": proposal.source_method.value,
+                "explicit_linkage": proposal.explicit_linkage,
+            })
+
+        for proposal in projection.callbacks:
+            if not isinstance(proposal, CallbackProjection):
+                raise ValueError("callback proposal is invalid")
+            if event.actor_role is not CommunicationActorRole.CONTACT:
+                raise ValueError("callback evidence must be contact-authored")
+            confidence = cls._projection_confidence(
+                proposal.confidence, proposal.source_method, minimum=0.90,
+            )
+            key = str(proposal.semantic_key or "").casefold()
+            if not _SEMANTIC_KEY_RE.fullmatch(key):
+                raise ValueError("callback semantic_key is invalid")
+            label = _normalized_semantic_label(
+                proposal.canonical_label, name="callback label", maximum=120,
+            )
+            support = tuple(dict.fromkeys(proposal.supporting_event_ids))
+            if len(support) < 2:
+                raise ValueError("callback semantics require recurrent evidence")
+            placeholders = ",".join("?" for _ in support)
+            rows = con.execute(
+                f"SELECT event_id,occurred_at,lifecycle FROM communication_event "
+                f"WHERE event_id IN ({placeholders})", support,
+            ).fetchall()
+            if len(rows) != len(support) or any(row["lifecycle"] != "active" for row in rows):
+                raise ValueError("callback support must reference active canonical evidence")
+            if len({int(float(row["occurred_at"]) // 86_400) for row in rows}) < 2:
+                raise ValueError("callback recurrence must span separate days")
+            items.append({
+                "kind": "callback", "semantic_key": key,
+                "identity": _projection_identity(projector_version, event.event_id, "callback", key),
+                "canonical_label": label, "confidence": confidence,
+                "source_method": proposal.source_method.value,
+                "support_event_ids": tuple(sorted(support)),
+            })
+
+        unique = {(str(item["kind"]), str(item["semantic_key"])) for item in items}
+        if len(unique) != len(items):
+            raise ValueError("projection contains duplicate semantic keys")
+        if sum(item["kind"] == "entity" for item in items) > INTEREST_MAX_LIVE_TOPICS:
+            raise ValueError("entity projection exceeds the per-event taxonomy cap")
+        return items
+
+    @staticmethod
+    def _recompute_projected_interest_topics_in(
+        con: sqlite3.Connection, topics: Iterable[str], *, timestamp: float,
+    ) -> None:
+        from .schema import INTEREST_SIGNAL_BANDIT, INTEREST_SIGNAL_WEIGHTS
+
+        for topic in set(topics):
+            rows = con.execute(
+                "SELECT signal_type,created_at FROM interest_event "
+                "WHERE topic_text=? AND active=1 AND folded_at IS NOT NULL "
+                "ORDER BY created_at,event_id", (topic,),
+            ).fetchall()
+            interest = con.execute(
+                "SELECT * FROM interest WHERE topic=? AND retired_at IS NULL", (topic,),
+            ).fetchone()
+            if not rows:
+                if interest is not None:
+                    con.execute("DELETE FROM interest WHERE interest_id=?", (interest["interest_id"],))
+                continue
+            score = alpha = beta = 0.0
+            negative = False
+            for row in rows:
+                signal = SignalType(str(row["signal_type"]))
+                score += INTEREST_SIGNAL_WEIGHTS.get(signal, 0.0)
+                da, db = INTEREST_SIGNAL_BANDIT.get(signal, (0.0, 0.0))
+                alpha += da
+                beta += db
+                negative = negative or signal is SignalType.EXPLICIT_NEGATIVE
+            latest = max(float(row["created_at"]) for row in rows)
+            if interest is None:
+                con.execute(
+                    """INSERT INTO interest(
+                      interest_id,topic,parent_id,raw_score,last_evidence_at,evidence_count,
+                      valence,half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
+                    ) VALUES(?,?,NULL,?,?,?,?,90,'candidate',?,?,?, ?,NULL)""",
+                    (_projection_identity("aggregate-v1", "0" * 64, "interest", topic), topic,
+                     score, latest, len(rows), "negative" if negative else "positive",
+                     max(1.0, 1.0 + alpha), max(1.0, 1.0 + beta), timestamp, timestamp),
+                )
+            else:
+                con.execute(
+                    "UPDATE interest SET raw_score=?,last_evidence_at=?,evidence_count=?,valence=?,"
+                    "ts_alpha=?,ts_beta=?,updated_at=? WHERE interest_id=?",
+                    (score, latest, len(rows), "negative" if negative else "positive",
+                     max(1.0, 1.0 + alpha), max(1.0, 1.0 + beta), timestamp,
+                     interest["interest_id"]),
+                )
+
+    @staticmethod
+    def _recompute_projected_recommendations_in(
+        con: sqlite3.Connection, recommendation_ids: Iterable[str], *, timestamp: float,
+    ) -> None:
+        status_for = {
+            "proposed": "proposed", "accepted": "active", "revisited": "active",
+            "rejected": "rejected", "fulfilled": "fulfilled",
+        }
+        for recommendation_id in set(recommendation_ids):
+            recommendation = con.execute(
+                "SELECT origin_communication_event_id FROM projected_recommendation "
+                "WHERE recommendation_id=?", (recommendation_id,),
+            ).fetchone()
+            if recommendation is None:
+                continue
+            origin = con.execute(
+                "SELECT lifecycle FROM communication_event WHERE event_id=?",
+                (recommendation["origin_communication_event_id"],),
+            ).fetchone()
+            latest = con.execute(
+                """SELECT outcome.outcome FROM communication_recommendation_event outcome
+                   JOIN communication_event event ON event.event_id=outcome.event_id
+                   WHERE outcome.recommendation_id=? AND outcome.active=1
+                     AND outcome.projector_version IS NOT NULL
+                   ORDER BY event.occurred_at DESC,event.event_id DESC LIMIT 1""",
+                (recommendation_id,),
+            ).fetchone()
+            status = (
+                status_for[str(latest["outcome"])]
+                if latest is not None and origin is not None and origin["lifecycle"] == "active"
+                else "withdrawn"
+            )
+            con.execute(
+                "UPDATE recommendation SET status=?,updated_at=? WHERE recommendation_id=?",
+                (status, timestamp, recommendation_id),
+            )
+
+    @classmethod
+    def _project_communication_event_in(
+        cls,
+        con: sqlite3.Connection,
+        bundle: CommunicationBundle,
+        projection: CommunicationProjection,
+        *,
+        projector_version: str,
+        replay_sequence: int,
+        timestamp: float,
+        allowed_share_topics: frozenset[tuple[str, str]] = frozenset(),
+    ) -> CommunicationProjectionResult:
+        items = cls._validated_projection_items_in(
+            con, bundle, projection, projector_version, allowed_share_topics,
+        ) if bundle.event.lifecycle is CommunicationLifecycle.ACTIVE else []
+        canonical_payload = [
+            {key: value for key, value in item.items() if key != "identity"}
+            for item in items
+        ]
+        proposal_hash = hashlib.sha256(json.dumps(
+            {"lifecycle": bundle.event.lifecycle.value, "items": canonical_payload},
+            sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        prior_same = con.execute(
+            "SELECT proposal_hash,active FROM communication_projection_receipt "
+            "WHERE communication_event_id=? AND projector_version=?",
+            (bundle.event.event_id, projector_version),
+        ).fetchone()
+        identities = tuple(str(item["identity"]) for item in items)
+        if prior_same is not None:
+            if str(prior_same["proposal_hash"]) != proposal_hash:
+                raise ValueError("projector version replay conflicts with its stored proposal")
+            if not int(prior_same["active"]):
+                raise ValueError("cannot reactivate a superseded projector version")
+            return CommunicationProjectionResult(
+                event_id=bundle.event.event_id, projector_version=projector_version,
+                identities=identities, inserted=False, deduplicated=True,
+                retracted=bundle.event.lifecycle is CommunicationLifecycle.RETRACTED,
+            )
+
+        affected_topics = {
+            str(row["topic_text"]) for row in con.execute(
+                "SELECT topic_text FROM interest_event "
+                "WHERE origin_communication_event_id=? AND active=1",
+                (bundle.event.event_id,),
+            )
+        }
+        affected_recommendations = {
+            str(row["recommendation_id"]) for row in con.execute(
+                "SELECT recommendation_id FROM communication_recommendation_event "
+                "WHERE event_id=? AND projector_version IS NOT NULL AND active=1",
+                (bundle.event.event_id,),
+            )
+        }
+        con.execute(
+            "UPDATE communication_projection_receipt SET active=0 "
+            "WHERE communication_event_id=? AND active=1", (bundle.event.event_id,),
+        )
+        con.execute(
+            "UPDATE interest_event SET active=0 WHERE origin_communication_event_id=? AND active=1",
+            (bundle.event.event_id,),
+        )
+        con.execute(
+            "UPDATE projected_entity SET active=0 WHERE origin_communication_event_id=? AND active=1",
+            (bundle.event.event_id,),
+        )
+        con.execute(
+            "UPDATE semantic_callback SET active=0 WHERE origin_communication_event_id=? AND active=1",
+            (bundle.event.event_id,),
+        )
+        con.execute(
+            "UPDATE communication_recommendation_event SET active=0 "
+            "WHERE event_id=? AND projector_version IS NOT NULL AND active=1",
+            (bundle.event.event_id,),
+        )
+        con.execute(
+            "UPDATE recommendation SET status='withdrawn',updated_at=? WHERE recommendation_id IN ("
+            "SELECT recommendation_id FROM projected_recommendation "
+            "WHERE origin_communication_event_id=? AND active=1) "
+            "AND status IN ('proposed','active')",
+            (timestamp, bundle.event.event_id),
+        )
+        con.execute(
+            "UPDATE projected_recommendation SET active=0 "
+            "WHERE origin_communication_event_id=? AND active=1",
+            (bundle.event.event_id,),
+        )
+
+        for item in items:
+            kind = str(item["kind"])
+            if kind == "interest":
+                affected_topics.add(str(item["topic"]))
+                con.execute(
+                    """INSERT INTO interest_event(
+                      event_id,topic_text,signal_type,valence,source_id,created_at,folded_at,
+                      origin_communication_event_id,projector_version,projection_kind,semantic_key,
+                      confidence,source_method,active,original_topic_text
+                    ) VALUES(?,?,?,?,?,?,NULL,?,?,?,?,?,?,1,?)""",
+                    (item["identity"], item["topic"], item["signal_type"], item["valence"],
+                     bundle.event.event_id, bundle.event.occurred_at, bundle.event.event_id,
+                     projector_version, "interest", item["semantic_key"], item["confidence"],
+                     item["source_method"], item["topic"]),
+                )
+            elif kind == "entity":
+                con.execute(
+                    "INSERT INTO projected_entity VALUES(?,?,?,?,?,?,?,?,1,?)",
+                    (item["identity"], bundle.event.event_id, projector_version,
+                     item["semantic_key"], item["entity_type"], item["canonical_label"],
+                     item["confidence"], item["source_method"], bundle.event.occurred_at),
+                )
+            elif kind == "recommendation":
+                recommendation_id = str(item["recommendation_id"])
+                affected_recommendations.add(recommendation_id)
+                outcome = CommunicationRecommendationOutcome(str(item["outcome"]))
+                if outcome is CommunicationRecommendationOutcome.PROPOSED:
+                    con.execute(
+                        """INSERT INTO recommendation(
+                          recommendation_id,topic,recommendation,basis_fact_ids_json,confidence,status,
+                          supersedes_id,created_at,updated_at,expires_at,change_requirements_json,
+                          idempotency_key
+                        ) VALUES(?,?,?,'[]',?,'proposed',NULL,?,?,NULL,'[]',?)""",
+                        (recommendation_id, item["topic"], item["recommendation"], item["confidence"],
+                         bundle.event.occurred_at, timestamp, item["identity"]),
+                    )
+                    con.execute(
+                        "INSERT INTO projected_recommendation VALUES(?,?,?,?,1)",
+                        (recommendation_id, bundle.event.event_id, projector_version,
+                         item["semantic_key"]),
+                    )
+                else:
+                    status = {
+                        CommunicationRecommendationOutcome.ACCEPTED: "active",
+                        CommunicationRecommendationOutcome.REVISITED: "active",
+                        CommunicationRecommendationOutcome.REJECTED: "rejected",
+                        CommunicationRecommendationOutcome.FULFILLED: "fulfilled",
+                    }[outcome]
+                    con.execute(
+                        "UPDATE recommendation SET status=?,updated_at=? WHERE recommendation_id=?",
+                        (status, timestamp, recommendation_id),
+                    )
+                con.execute(
+                    """INSERT INTO communication_recommendation_event(
+                      recommendation_event_id,recommendation_id,event_id,outcome,confidence,
+                      explicit_linkage,projector_version,active
+                    ) VALUES(?,?,?,?,?,?,?,1)""",
+                    (item["identity"], recommendation_id, bundle.event.event_id, outcome.value,
+                     item["confidence"], int(bool(item["explicit_linkage"])), projector_version),
+                )
+            elif kind == "callback":
+                support_event_ids = item["support_event_ids"]
+                if not isinstance(support_event_ids, tuple):
+                    raise AssertionError("validated callback support must be immutable")
+                con.execute(
+                    "INSERT INTO semantic_callback VALUES(?,?,?,?,?,'restricted',?,?,1,?)",
+                    (item["identity"], bundle.event.event_id, projector_version,
+                     item["semantic_key"], item["canonical_label"], item["confidence"],
+                     item["source_method"], bundle.event.occurred_at),
+                )
+                con.executemany(
+                    "INSERT INTO semantic_callback_support VALUES(?,?)",
+                    ((item["identity"], support_id)
+                     for support_id in support_event_ids),
+                )
+        cls._recompute_projected_interest_topics_in(con, affected_topics, timestamp=timestamp)
+        cls._recompute_projected_recommendations_in(
+            con, affected_recommendations, timestamp=timestamp,
+        )
+        con.execute(
+            "INSERT INTO communication_projection_receipt VALUES(?,?,?,?,?,?,1)",
+            (bundle.event.event_id, projector_version, proposal_hash, len(items),
+             replay_sequence, timestamp),
+        )
+        return CommunicationProjectionResult(
+            event_id=bundle.event.event_id, projector_version=projector_version,
+            identities=identities, inserted=True, deduplicated=False,
+            retracted=bundle.event.lifecycle is CommunicationLifecycle.RETRACTED,
+        )
+
+    def project_communication_events(
+        self,
+        projections: Sequence[tuple[str, CommunicationProjection]],
+        *,
+        projector_version: str,
+        now: float | None = None,
+    ) -> list[CommunicationProjectionResult]:
+        """Project complete canonical bundles in deterministic replay order atomically."""
+        version = self._projection_version(projector_version)
+        supplied = [(str(event_id), projection) for event_id, projection in projections]
+        if len({event_id for event_id, _ in supplied}) != len(supplied):
+            raise ValueError("projection batch contains duplicate communication events")
+        timestamp = _finite_timestamp(now)
+        try:
+            with self._immediate() as con:
+                loaded: list[tuple[CommunicationBundle, CommunicationProjection]] = []
+                for event_id, projection in supplied:
+                    bundle = self._communication_bundle_in(con, event_id)
+                    if bundle is None:
+                        raise KeyError(f"unknown communication event: {event_id}")
+                    loaded.append((bundle, projection))
+                loaded.sort(key=lambda item: (item[0].event.occurred_at, item[0].event.event_id))
+                share_topics: dict[str, set[str]] = {}
+                for bundle, projection in loaded:
+                    if bundle.event.kind not in {
+                        CommunicationKind.LINK_SHARE, CommunicationKind.ATTACHMENT_SHARE,
+                    }:
+                        continue
+                    for proposal in projection.interests:
+                        topic = self._resolve_interest_alias_in(
+                            con, normalize_interest_topic(proposal.topic),
+                        )
+                        share_topics.setdefault(topic, set()).add(bundle.event.event_id)
+                allowed_share_topics = frozenset(
+                    (event_id, topic) for topic, event_ids in share_topics.items()
+                    if len(event_ids) >= 2 for event_id in event_ids
+                )
+                return [
+                    self._project_communication_event_in(
+                        con, bundle, projection, projector_version=version,
+                        replay_sequence=index, timestamp=timestamp,
+                        allowed_share_topics=allowed_share_topics,
+                    )
+                    for index, (bundle, projection) in enumerate(loaded)
+                ]
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("projection transaction failed") from exc
+
+    def project_communication_event(
+        self,
+        event_id: str,
+        projection: CommunicationProjection,
+        *,
+        projector_version: str,
+        now: float | None = None,
+    ) -> CommunicationProjectionResult:
+        """Project one complete authenticated bundle through the atomic boundary."""
+        return self.project_communication_events(
+            [(event_id, projection)], projector_version=projector_version, now=now,
+        )[0]
+
+    @staticmethod
     def _candidate_item_hash(candidate_json: str) -> str | None:
         """Extract the normalized novelty key from a strict or historical payload."""
         try:
@@ -1631,13 +2290,16 @@ class ContactMemoryStore:
         with self._connect() as con:
             rows = con.execute(
                 "SELECT DISTINCT CAST(created_at / 86400 AS INTEGER) AS day "
-                "FROM interest_event WHERE topic_text=?",
+                "FROM interest_event WHERE topic_text=? AND active=1",
                 (topic,),
             ).fetchall()
         return len(rows)
 
     def unfolded_interest_events(self, *, limit: int | None = None) -> list[InterestEvent]:
-        sql = "SELECT * FROM interest_event WHERE folded_at IS NULL ORDER BY created_at,event_id"
+        sql = (
+            "SELECT * FROM interest_event WHERE folded_at IS NULL AND active=1 "
+            "ORDER BY created_at,event_id"
+        )
         params: tuple[object, ...] = ()
         if limit is not None:
             sql += " LIMIT ?"
@@ -1657,7 +2319,8 @@ class ContactMemoryStore:
         with self._immediate() as con:
             for event_id in ids:
                 changed += con.execute(
-                    "UPDATE interest_event SET folded_at=? WHERE event_id=? AND folded_at IS NULL",
+                    "UPDATE interest_event SET folded_at=? WHERE event_id=? "
+                    "AND folded_at IS NULL AND active=1",
                     (timestamp, event_id),
                 ).rowcount
         return changed
@@ -1672,7 +2335,7 @@ class ContactMemoryStore:
         folded = 0
         rows = con.execute(
             "SELECT event_id,topic_text,signal_type,valence,created_at "
-            "FROM interest_event WHERE folded_at IS NULL "
+            "FROM interest_event WHERE folded_at IS NULL AND active=1 "
             "ORDER BY created_at,event_id"
         ).fetchall()
         grouped: dict[str, list[sqlite3.Row]] = {}
@@ -1738,7 +2401,8 @@ class ContactMemoryStore:
                 affected[interest_id] = topic
             for event in events:
                 folded += con.execute(
-                    "UPDATE interest_event SET folded_at=? WHERE event_id=? AND folded_at IS NULL",
+                    "UPDATE interest_event SET folded_at=? WHERE event_id=? "
+                    "AND folded_at IS NULL AND active=1",
                     (timestamp, event["event_id"]),
                 ).rowcount
         return {"folded_events": folded, "affected_interests": affected}
@@ -1828,7 +2492,7 @@ class ContactMemoryStore:
             if running and isinstance(updated, (int, float)) and timestamp - float(updated) < lease:
                 return None
             unfolded = int(con.execute(
-                "SELECT count(*) FROM interest_event WHERE folded_at IS NULL"
+                "SELECT count(*) FROM interest_event WHERE folded_at IS NULL AND active=1"
             ).fetchone()[0])
             last_run = state.get("last_run_at")
             recovery = running
@@ -1912,7 +2576,7 @@ class ContactMemoryStore:
             if item.state is InterestState.CANDIDATE:
                 days = int(con.execute(
                     "SELECT count(DISTINCT CAST(created_at / 86400 AS INTEGER)) "
-                    "FROM interest_event WHERE topic_text=?", (item.topic,),
+                    "FROM interest_event WHERE topic_text=? AND active=1", (item.topic,),
                 ).fetchone()[0])
                 if effective >= 1.5 and days >= 2:
                     con.execute(
@@ -2121,6 +2785,11 @@ class ContactMemoryStore:
                 con.execute(
                     "UPDATE interest_event SET topic_text=? WHERE topic_text=?",
                     (str(keep["topic"]), str(absorb["topic"])),
+                )
+                con.execute(
+                    "INSERT INTO interest_topic_alias(alias_topic,canonical_topic) VALUES(?,?) "
+                    "ON CONFLICT(alias_topic) DO UPDATE SET canonical_topic=excluded.canonical_topic",
+                    (str(absorb["topic"]), str(keep["topic"])),
                 )
             for parent_id, children in split_list:
                 parent = by_id[parent_id]

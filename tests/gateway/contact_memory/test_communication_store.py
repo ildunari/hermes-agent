@@ -101,9 +101,13 @@ def test_v4_migration_is_additive_and_idempotent(tmp_path: Path):
         DROP TABLE communication_event;
         """)
         con.execute("UPDATE schema_meta SET value='4' WHERE key='schema_version'")
-        con.execute("INSERT INTO interest_event VALUES(?,?,?,?,?,?,NULL)", (
+        con.execute(
+            "INSERT INTO interest_event("
+            "event_id,topic_text,signal_type,valence,source_id,created_at,folded_at"
+            ") VALUES(?,?,?,?,?,?,NULL)", (
             "legacy-event", "music", "enthusiasm", "positive", "legacy-source", 1.0,
-        ))
+            ),
+        )
 
     reopened = ContactMemoryStore(tmp_path, "contact")
     ContactMemoryStore(tmp_path, "contact")

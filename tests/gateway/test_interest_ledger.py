@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -13,6 +14,10 @@ from gateway.contact_memory.extractor import propose_turn_memories
 from gateway.contact_memory.qwen3_extractor_worker import _parse
 from gateway.contact_memory.schema import (
     SCHEMA_VERSION,
+    CommunicationActorRole,
+    CommunicationDirection,
+    CommunicationEvent,
+    CommunicationKind,
     GateDecision,
     Interest,
     InterestEvent,
@@ -29,6 +34,19 @@ from gateway.contact_memory.store import (
 
 
 DAY = 86_400.0
+
+
+def _canonical_text(store: ContactMemoryStore, source: str, *, at: float = 100.0) -> str:
+    event = CommunicationEvent(
+        event_id=hashlib.sha256(f"canonical:{source}".encode()).hexdigest(),
+        platform="synthetic", source_id=hashlib.sha256(source.encode()).hexdigest(),
+        occurred_at=at, direction=CommunicationDirection.INBOUND,
+        kind=CommunicationKind.TEXT, actor_role=CommunicationActorRole.CONTACT,
+        text_hash="a" * 64, text_present=True, text_length=20,
+        provenance="synthetic-fixture",
+    )
+    store.ingest_communication_event(event)
+    return event.event_id
 
 
 def _raw_fact() -> dict[str, object]:
@@ -458,9 +476,10 @@ async def test_extractor_envelope_keeps_fact_behavior_and_adds_user_interest_eve
                 ],
             }
 
+    communication_event_id = _canonical_text(store, "message:long")
     ids = await propose_turn_memories(
         store, Backend(), "x" * 30, "assistant mentioned private material",
-        {"source_id": "message:long"},
+        {"source_id": "message:long", "communication_event_id": communication_event_id},
     )
     assert len(ids) == 1
     assert store.list_pending()[0]["proposal_id"] == ids[0]
@@ -469,7 +488,7 @@ async def test_extractor_envelope_keeps_fact_behavior_and_adds_user_interest_eve
         (SignalType.ENTHUSIASM, "sports cars"),
         (SignalType.LONG_REPLY, "sports cars"),
     }
-    assert all(event.source_id == "message:long" for event in events)
+    assert all(event.source_id == communication_event_id for event in events)
 
 
 @pytest.mark.asyncio
@@ -484,7 +503,25 @@ async def test_model_cannot_emit_code_owned_or_misvalenced_interest_signals(tmp_
         ]}
 
     await propose_turn_memories(
-        store, backend, "cars", "assistant", {"source_id": "message:invalid-signals"}
+        store, backend, "cars", "assistant", {
+            "source_id": "message:invalid-signals",
+            "communication_event_id": _canonical_text(store, "message:invalid-signals"),
+        }
+    )
+    assert store.unfolded_interest_events() == []
+
+
+@pytest.mark.asyncio
+async def test_model_interest_output_without_canonical_event_cannot_write(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+
+    async def backend(user_text, assistant_text, metadata):
+        return {"proposals": [], "interest_events": [
+            {"topic": "cars", "signal_type": "enthusiasm", "valence": "positive"},
+        ]}
+
+    await propose_turn_memories(
+        store, backend, "cars", "assistant", {"source_id": "raw-platform-guid"},
     )
     assert store.unfolded_interest_events() == []
 
@@ -501,7 +538,10 @@ async def test_negative_topic_does_not_gain_long_reply_signal(tmp_path: Path):
         ]}
 
     await propose_turn_memories(
-        store, backend, "x" * 30, "assistant", {"source_id": "message:negative-long"}
+        store, backend, "x" * 30, "assistant", {
+            "source_id": "message:negative-long",
+            "communication_event_id": _canonical_text(store, "message:negative-long"),
+        }
     )
     assert [event.signal_type for event in store.unfolded_interest_events()] == [
         SignalType.EXPLICIT_NEGATIVE
