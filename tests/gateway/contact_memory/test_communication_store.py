@@ -566,6 +566,22 @@ def test_contract_rejects_raw_artifact_shapes_and_noncanonical_ids():
 
 
 @pytest.mark.parametrize("label", (
+    "secret access key is abc123",
+    "my credential is hunter2",
+    "credentials are hunter2",
+    "AWS's secret access key is abc123",
+))
+def test_entity_semantic_labels_reject_generic_credential_values(label: str):
+    event = _event(f"credential-label-{label}")
+    with pytest.raises(ValueError, match="credential-like"):
+        EntityMention(
+            mention_id=_id(f"credential-label-{label}"), event_id=event.event_id,
+            entity_identity=_id(f"credential-identity-{label}"), entity_type="thing",
+            canonical_label=label, confidence=1.0, source_method="reviewed",
+        )
+
+
+@pytest.mark.parametrize("label", (
     "Secret Garden",
     "Password",
     "The Great British Bake Off",
@@ -575,6 +591,10 @@ def test_contract_rejects_raw_artifact_shapes_and_noncanonical_ids():
     "GitHub",
     "AWS",
     "Database",
+    "My Chemical Romance",
+    "The Secret Garden",
+    "Credential Coffee",
+    "Tokens and Secrets",
 ))
 def test_entity_semantic_labels_allow_legitimate_names(label: str):
     event = _event(f"legitimate-label-{label}")

@@ -225,22 +225,17 @@ def _reject_raw_artifact_text(value: str, *, name: str) -> None:
         raise ValueError(f"{name} cannot contain a raw URL, secret, or local path")
 
 
+_ENTITY_CREDENTIAL_NAME_PATTERN = (
+    r"(?:password|passcode|pin|token|api[ -]?(?:key|secret)|client secret|access token|"
+    r"auth token|bearer token|private key|(?:secret )?access key|credential(?:s)?|seed phrase)"
+)
 _ENTITY_CREDENTIAL_MARKER_RE = re.compile(
-    r"\b(?:password|passcode|api[ -]?(?:key|secret)|client secret|access token|"
-    r"auth token|bearer token|private key|secret access key|credential(?:s)?|seed phrase)\b",
-    re.IGNORECASE,
+    rf"\b{_ENTITY_CREDENTIAL_NAME_PATTERN}\b", re.IGNORECASE
 )
 _ENTITY_CREDENTIAL_VALUE_RE = re.compile(
-    r"\b(?:my|your|our|the)\s+(?:password|passcode|pin)\s+is\s+\S+|"
-    r"\b(?:password|passcode|pin)\s*(?:is\s+|[:=]\s*)\S+|"
-    r"\b(?:password|passcode|pin)\s+\S*[0-9]\S*|"
-    r"\b(?:api[ -]?(?:key|secret)|client secret|access token|auth token|bearer token|"
-    r"private key)(?:(?:\s+is)?\s*[:=]\s*|\s+is\s+)\S+|"
-    r"\b(?:api[ -]?(?:key|secret)|client secret|access token|auth token|bearer token)"
-    r"\s+\S+|"
-    r"\b(?:github|gitlab|aws|amazon|database|db|postgres(?:ql)?|mysql|mongodb|redis|"
-    r"stripe|slack|discord|telegram)\s+(?:token|secret access key|access key|"
-    r"credential(?:s)?)\s+(?:is\s+)?(?::\s*|=\s*)?\S+|"
+    rf"(?<!\w)(?:[a-z0-9][\w.-]*['’]s\s+)?{_ENTITY_CREDENTIAL_NAME_PATTERN}"
+    r"(?:(?:\s+(?:is|are)\s+)|\s*[:=]\s*)\S+|"
+    rf"\b{_ENTITY_CREDENTIAL_NAME_PATTERN}\s+(?!is\b|are\b)\S*[0-9_.=-]\S*|"
     r"\bseed phrase(?:\s+\S+){3,}|\bsk-[A-Za-z0-9_-]{8,}\b",
     re.IGNORECASE,
 )

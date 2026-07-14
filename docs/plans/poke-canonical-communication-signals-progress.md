@@ -2,7 +2,7 @@
 
 ## Phase A — Contract and schema
 
-Status: repair implementation complete; final parent review pending. Phase B has not started.
+Status: Phase A repair complete, including the final parent-review finding. Phase B has not started.
 
 Commit: Phase A boundary commit containing this progress record (the final SHA is reported by the implementation thread).
 
@@ -15,9 +15,9 @@ Commit: Phase A boundary commit containing this progress record (the final SHA i
 
 ### Gate A evidence
 
-Repair verification passed: `scripts/run_tests.sh tests/gateway/contact_memory tests/gateway/test_interest_ledger.py -q` completed with 172 passed and 0 failed across 11 files; `python3 -m py_compile gateway/contact_memory/schema.py gateway/contact_memory/store.py tests/gateway/contact_memory/test_communication_store.py` passed; `python3 -m ruff check gateway/contact_memory/schema.py gateway/contact_memory/store.py tests/gateway/contact_memory/test_communication_store.py` passed; and `git diff --check` passed.
+Final repair verification passed: the focused `scripts/run_tests.sh tests/gateway/contact_memory/test_communication_store.py -q` suite completed with 36 passed and 0 failed; the full Phase A `scripts/run_tests.sh tests/gateway/contact_memory tests/gateway/test_interest_ledger.py -q` suite completed with 180 passed and 0 failed across 11 files; `python3 -m py_compile gateway/contact_memory/schema.py gateway/contact_memory/store.py tests/gateway/contact_memory/test_communication_store.py` passed; `python3 -m ruff check gateway/contact_memory/schema.py gateway/contact_memory/store.py tests/gateway/contact_memory/test_communication_store.py` passed; and `git diff --check` passed.
 
-The parent independently reviewed the pre-repair diff and identified three P1 findings, all covered by focused regressions and repaired below. The parent will run the final independent review; no additional review was launched from this repair turn.
+The parent independently reviewed the pre-repair diff and identified three P1 findings, then found one remaining P1 in the final review. All are covered by focused regressions and repaired below; no delegated or additional review was launched from the repair turns.
 
 ### Review findings fixed
 
@@ -29,6 +29,7 @@ The parent independently reviewed the pre-repair diff and identified three P1 fi
 - Migrated existing v5 reaction rows atomically as `legacy_untyped` historical evidence instead of making databases with reaction history unopenable; reopening the migrated database is idempotent.
 - Reserved `legacy_untyped` for the internal historical-row restoration path. The public event contract and both reaction add/remove ingestion APIs reject it for new events and require a concrete subtype.
 - Strengthened canonical-label credential filtering for service-qualified token, secret-access-key, and database-credential prose while preserving legitimate artist, show, platform, and place-like semantic labels.
+- Closed the final generic credential-value gap for bare and possessive/service-qualified labels, including singular/plural credentials with `is`/`are`, while retaining representative legitimate semantic names.
 - Preserved the accepted exact timestamp normalization and lossless SQLite round-trip boundary checks.
 
 ### Current risks and boundaries
