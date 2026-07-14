@@ -10305,7 +10305,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         event = dataclasses.replace(event, source=source, metadata=contact_scope_metadata) if getattr(event, "observed_only", False) else dataclasses.replace(event, source=source, text=guest_context + event.text, metadata=contact_scope_metadata)
                     elif decision.route is GuestRoute.OWNER:
                         profile = decision.profile or "gpt"
-                        source = dataclasses.replace(source, user_id_alt=f"owner:{profile}", chat_id_alt=f"hermes-profile:{profile}")
+                        source = dataclasses.replace(
+                            source,
+                            profile=profile,
+                            user_id_alt=f"owner:{profile}",
+                            chat_id_alt=f"hermes-profile:{profile}",
+                        )
                         owner_metadata = dict(getattr(event, "metadata", None) or {})
                         _direct_owner_turn = str(
                             getattr(source, "chat_type", "") or ""

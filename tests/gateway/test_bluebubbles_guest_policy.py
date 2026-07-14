@@ -712,6 +712,8 @@ contacts: {}
     trusted_scope = handler_call.kwargs["trusted_contact_scope"]
     assert trusted_scope.principal == "owner"
     assert trusted_scope.contact_id == "kosta-owner"
+    routed_source = handler_call.args[1]
+    assert routed_source.profile == "poke"
 
 
 @pytest.mark.asyncio
