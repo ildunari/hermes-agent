@@ -302,8 +302,6 @@ def validate_semantic_items(
             raise ValueError("semantic evidence quote bounds are invalid")
         if source.canonical_text[start:end] != quote:
             raise ValueError("semantic evidence quote is not verbatim canonical source text")
-        if not _normalized_contains(source.canonical_text, quote):
-            raise ValueError("normalized semantic evidence is not contained in canonical source text")
         if item.get("kind") not in {"fact", "interest"}:
             raise ValueError("semantic item lacks kind/guid")
         item["guid"] = source_key
