@@ -14,10 +14,10 @@ ALLOW=(('poke','kosta-owner','owner'),('guest','stephen-lucier','guest'))
 
 class Adapter:
     platform=SimpleNamespace(value='bluebubbles')
-    def __init__(self,result): self.result=result; self.calls=0
+    def __init__(self,result): self.result=result; self.calls=0; self.texts=[]
     async def resolve_authenticated_existing_dm(self,chat_id,user_id):
         return ('iMessage;-;existing','fingerprint') if chat_id and user_id else None
-    async def send(self,*args,**kwargs): self.calls+=1; await asyncio.sleep(0); return self.result
+    async def send(self,*args,**kwargs): self.calls+=1; self.texts.append(args[1]); await asyncio.sleep(0); return self.result
 
 
 def setup(tmp_path: Path):
@@ -84,3 +84,14 @@ def test_circuit_breaker_and_sprawl_cleanup(tmp_path: Path):
     assert scheduler.final_delivery_check(ROUTE,claim,now=NOW)=='transport_circuit_open'
     cleaned=scheduler.cleanup_sprawl(now=NOW)
     assert cleaned['inbound']==1
+
+
+@pytest.mark.asyncio
+async def test_retry_replays_immutable_payload_without_recomposition(tmp_path: Path):
+    scheduler,claim,_=setup(tmp_path)
+    first=Adapter(SendResult(False,error='connect',retryable=True))
+    assert await deliver_prepared_exactly_once(scheduler=scheduler,delivery=transport(first,scheduler),route=ROUTE,claim=claim,text='original',correlation_id='one',now=NOW)=='retry_wait'
+    retry=scheduler.claim_due(worker_id='retry',now=NOW+301)[0]
+    second=Adapter(SendResult(True,message_id='sent'))
+    assert await deliver_prepared_exactly_once(scheduler=scheduler,delivery=transport(second,scheduler),route=ROUTE,claim=retry,text='recomposed',correlation_id='two',now=NOW+301)=='sent'
+    assert first.texts==['original'] and second.texts==['original']

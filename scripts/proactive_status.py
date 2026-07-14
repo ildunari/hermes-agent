@@ -2,12 +2,35 @@
 """Print text-free proactive status for one rollout profile."""
 from __future__ import annotations
 import argparse, json, sys
+from datetime import datetime, timezone
 from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from gateway.proactive_status import health_snapshot  # noqa: E402
+
+
+def _cron_fresh(root: Path) -> bool:
+    from cron.jobs import list_jobs, use_cron_store
+    with use_cron_store(root):
+        jobs = list_jobs(include_disabled=True)
+    required = [job for job in jobs if job.get("name") in {
+        "Proactive rollout health watchdog", "Contact memory interest maintenance"
+    }]
+    if len(required) != 2 or any(not job.get("enabled", True) for job in required):
+        return False
+    now = datetime.now(timezone.utc)
+    for job in required:
+        value = job.get("last_run_at")
+        if not value:
+            return False
+        try:
+            if (now - datetime.fromisoformat(str(value))).total_seconds() > 3900:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 def main(argv=None) -> int:
@@ -20,7 +43,8 @@ def main(argv=None) -> int:
     root = Path(args.root).expanduser().resolve() if args.root else Path.home()/".hermes"/"profiles"/args.profile
     config_path = root/"config.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
-    status = health_snapshot(profile_home=root, profile=args.profile, config=config or {})
+    status = health_snapshot(profile_home=root, profile=args.profile, config=config or {},
+                             cron_fresh=_cron_fresh(root))
     if args.json:
         print(json.dumps(status, sort_keys=True, indent=2))
     else:

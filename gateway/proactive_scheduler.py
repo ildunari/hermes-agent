@@ -1240,8 +1240,6 @@ class ProactiveScheduler:
         try:
             row = con.execute("SELECT * FROM proactive_delivery WHERE slot_id=?", (claim.slot_id,)).fetchone()
             if row is not None:
-                if row["payload_hash"] != payload_hash:
-                    raise ValueError("slot payload changed after durable preparation")
                 self._finish(con)
                 return dict(row)
             current = con.execute(

@@ -30,6 +30,8 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
         "profile": profile, "enabled": cfg.enabled, "mode": cfg.mode.value,
         "model_lane_match": _lane_ok(config, "proactive_gate") and _lane_ok(config, "proactive_semantic") and compose_ok,
         "adapter_ready": adapter_ready, "cron_fresh": cron_fresh,
+        "ownership_conflict": False, "global_circuit": "unknown",
+        "eligible_interests": 0, "digest_count": 0,
         "contacts": 0, "recent_inbound": 0, "slots": {}, "deliveries": {},
         "attempts": 0, "last_success_at": None, "last_error_class": None,
         "watcher_heartbeat_at": None, "watcher_age_seconds": None,
@@ -57,23 +59,60 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
                     result["last_error_class"] = last["last_error_class"]
                 if result["deliveries"].get("failed", 0): result["reasons"].append("transport_failure_exhaustion")
             if "proactive_health" in tables:
-                heartbeat = con.execute("SELECT updated_at FROM proactive_health WHERE key='watcher' LIMIT 1").fetchone()
+                heartbeat = con.execute("SELECT value_json,updated_at FROM proactive_health WHERE key='watcher' LIMIT 1").fetchone()
                 if heartbeat:
-                    result["watcher_heartbeat_at"] = float(heartbeat[0])
-                    result["watcher_age_seconds"] = max(0.0, timestamp - float(heartbeat[0]))
+                    health = json.loads(heartbeat["value_json"] or "{}")
+                    result["watcher_heartbeat_at"] = float(heartbeat["updated_at"])
+                    result["watcher_age_seconds"] = max(0.0, timestamp - float(heartbeat["updated_at"]))
+                    if result["adapter_ready"] is None:
+                        result["adapter_ready"] = health.get("adapter_ready")
             con.close()
         except sqlite3.Error:
             result["reasons"].append("state_db_unreadable")
     elif cfg.enabled:
         result["reasons"].append("state_db_missing")
+    ownership_db = root.parent.parent / "proactive-contact-ownership.db" if root.parent.name == "profiles" else root.parent / "proactive-contact-ownership.db"
+    if ownership_db.is_file():
+        try:
+            ownership = sqlite3.connect(f"file:{ownership_db.as_posix()}?mode=ro", uri=True)
+            ownership.row_factory = sqlite3.Row
+            circuit = ownership.execute("SELECT state,reason FROM proactive_global_circuit WHERE singleton=1").fetchone()
+            result["global_circuit"] = str(circuit["state"]) if circuit else "closed"
+            if circuit and circuit["state"] == "open":
+                result["reasons"].append("global_circuit_open")
+            conflicts = ownership.execute("SELECT count(*) FROM proactive_contact_owner GROUP BY contact_hash HAVING count(DISTINCT profile_name)>1").fetchall()
+            result["ownership_conflict"] = bool(conflicts)
+            if conflicts:
+                result["reasons"].append("ownership_conflict")
+            ownership.close()
+        except sqlite3.Error:
+            result["reasons"].append("ownership_registry_unreadable")
+    elif cfg.enabled:
+        result["reasons"].append("ownership_registry_missing")
+    memory_root = root / "contact-memory"
+    for contact_db in memory_root.glob("*.sqlite3") if memory_root.is_dir() else ():
+        try:
+            memory = sqlite3.connect(f"file:{contact_db.as_posix()}?mode=ro", uri=True)
+            result["eligible_interests"] += int(memory.execute(
+                "SELECT count(*) FROM interest WHERE state='active' AND valence='positive' AND raw_score>=2.0"
+            ).fetchone()[0])
+            memory.close()
+        except sqlite3.Error:
+            result["reasons"].append("contact_memory_unreadable")
+    digest_dir = memory_root / "digests"
+    result["digest_count"] = sum(1 for item in digest_dir.glob("*.md") if item.is_file()) if digest_dir.is_dir() else 0
     if cfg.enabled and (result["watcher_age_seconds"] is None or result["watcher_age_seconds"] > 65 * 60):
         result["reasons"].append("watcher_stale")
     if cfg.enabled and not result["model_lane_match"]:
         result["reasons"].append("model_lane_mismatch")
-    if cfg.enabled and adapter_ready is False:
+    if cfg.enabled and result["adapter_ready"] is not True:
         result["reasons"].append("adapter_unavailable")
-    if cfg.enabled and cron_fresh is False:
+    if cfg.enabled and result["cron_fresh"] is not True:
         result["reasons"].append("maintenance_cron_stale")
+    if cfg.enabled and result["eligible_interests"] and not result["slots"]:
+        result["reasons"].append("eligible_interests_unplanned")
+    if cfg.enabled and result["eligible_interests"] and result["digest_count"] == 0:
+        result["reasons"].append("digest_missing")
     if cfg.mode.value == "live" and not cfg.allowed_contacts:
         result["reasons"].append("allowlist_missing")
     result["reasons"] = sorted(set(result["reasons"]))

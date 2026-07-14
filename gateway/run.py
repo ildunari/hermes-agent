@@ -7413,6 +7413,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     retry_at = scheduler.earliest_retry_at()
                     if retry_at is not None:
                         next_wake_seconds = min(next_wake_seconds, max(1.0, retry_at - time.time()))
+                    scheduler.record_health(
+                        "watcher",
+                        {"result": result, "correlation_id": correlation_id,
+                         "adapter_ready": self.adapters.get(Platform.BLUEBUBBLES) is not None,
+                         "completed": True},
+                    )
                     logger.info("Proactive tick profile=%s result=%s correlation_id=%s", profile, result, correlation_id)
                 except asyncio.CancelledError:
                     raise

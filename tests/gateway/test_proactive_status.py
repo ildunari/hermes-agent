@@ -20,3 +20,10 @@ def test_stale_then_recovered_watcher_and_model_mismatch(tmp_path: Path):
     assert not healthy['dead']
     broken=config(); broken['auxiliary']['proactive_gate']['model']='other'
     assert 'model_lane_mismatch' in health_snapshot(profile_home=tmp_path,profile='poke',config=broken,now=5001)['reasons']
+
+
+def test_enabled_unknown_adapter_and_cron_fail_closed(tmp_path: Path):
+    raw=config()
+    status=health_snapshot(profile_home=tmp_path,profile='poke',config=raw,now=5001)
+    assert status['dead']
+    assert {'adapter_unavailable','maintenance_cron_stale'} <= set(status['reasons'])
