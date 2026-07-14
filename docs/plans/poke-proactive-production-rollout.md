@@ -67,6 +67,9 @@ agent:
     enabled: true
     mode: observe                 # changed to live only at Gate 7
     transport_owner_profile: poke
+    alarm_sink:
+      configured: false              # set true only after monitored delivery is proven
+      type: operator
     allowed_contacts:
       - {profile: poke, contact_id: kosta-owner, principal: owner}
       - {profile: guest, contact_id: stephen-lucier, principal: guest}

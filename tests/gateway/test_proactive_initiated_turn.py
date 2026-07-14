@@ -172,13 +172,14 @@ def test_parent_history_repairs_adjacent_roles_without_synthetic_rows():
 def test_real_tick_wires_due_checkin_to_dry_run_child_without_peer_hijack(tmp_path: Path):
     db = SessionDB(tmp_path / "state.db")
     parent(db)
-    cfg = ProactiveConfig(enabled=True)
+    allowlist=(('poke','kosta-owner','owner'),('guest','stephen-lucier','guest'))
+    cfg = ProactiveConfig(enabled=True,allowed_contacts=allowlist)
     scheduler = ProactiveScheduler(
         state_db_path=tmp_path / "state.db", profile_home=tmp_path,
         profile_name="poke", config=cfg,
     )
     route = ContactRoute(
-        contact_id="contact-a", profile_name="poke", timezone="America/New_York",
+        contact_id="kosta-owner", profile_name="poke", timezone="America/New_York",
         chat_type="dm", chat_id="iMessage;-;+155****0123", user_id="contact-a",
         session_id="parent",
     )
@@ -196,7 +197,10 @@ def test_real_tick_wires_due_checkin_to_dry_run_child_without_peer_hijack(tmp_pa
     result = _run_proactive_tick_once(
         profile_home=tmp_path,
         profile="poke",
-        config_raw={"agent": {"proactive": {"enabled": True}}},
+        config_raw={"agent": {"proactive": {"enabled": True,"mode":"observe","allowed_contacts":[
+            {"profile":"poke","contact_id":"kosta-owner","principal":"owner"},
+            {"profile":"guest","contact_id":"stephen-lucier","principal":"guest"},
+        ]}}},
         session_db=db,
         generate=lambda request: seen.append(request) or "how'd the interview go",
         now=1_800_000_002.0,

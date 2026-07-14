@@ -3,6 +3,8 @@ agent:
     enabled: true
     mode: observe
     transport_owner_profile: poke
+    # Live delivery fails closed until an operator verifies a monitored sink.
+    alarm_sink: {configured: false, type: operator}
     allowed_contacts:
       - {profile: poke, contact_id: kosta-owner, principal: owner}
       - {profile: guest, contact_id: stephen-lucier, principal: guest}

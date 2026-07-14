@@ -27,7 +27,7 @@ def setup(tmp_path: Path):
     route={'platform':'bluebubbles','chat_type':'dm','chat_id':'existing','user_id':'owner','session_id':'parent'}
     for i in range(5): state.register_inbound(profile='poke',contact_id='kosta-owner',route=route,timezone_name='UTC',source_id=f'm{i}',received_at=NOW-100+i)
     cfg=ProactiveConfig(enabled=True,dry_run=False,mode=ProactiveMode.LIVE,allowed_contacts=ALLOW,
-                        active_start='00:00',active_end='23:59')
+                        active_start='00:00',active_end='23:59',alarm_sink_configured=True)
     scheduler=ProactiveScheduler(state_db_path=tmp_path/'state.db',profile_home=tmp_path,profile_name='poke',config=cfg,
                                  ownership_registry_path=tmp_path/'ownership.db')
     slot=scheduler.arm_slot(ROUTE,kind='checkin',fire_at=NOW-1,now=NOW-2)
@@ -52,6 +52,8 @@ async def test_exactly_once_concurrent_delivery(tmp_path: Path):
     assert tuple(row)==('sent',1,'guid')
     projected=ContactMemoryStore(tmp_path/'contact-memory','kosta-owner').get_proactive_send(slot)
     assert projected is not None and projected.sent_at==NOW
+    circuit=scheduler.ownership_registry.global_send_status(now=NOW)
+    assert circuit['circuit_state']=='open' and circuit['circuit_reason']=='send_rate_above_40_percent'
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(('send_result','expected','calls'),[(SendResult(False,error='timeout'), 'delivery_unknown',1),(SendResult(False,error='connect',retryable=True),'retry_wait',1),(SendResult(False,error='partial',raw_response={'partial_delivery':True}),'partial_delivery',1)])
@@ -135,6 +137,24 @@ async def test_retry_replays_immutable_payload_without_recomposition(tmp_path: P
     second=Adapter(SendResult(True,message_id='sent'))
     assert await deliver_prepared_exactly_once(scheduler=scheduler,delivery=transport(second,scheduler),route=ROUTE,claim=retry,text='recomposed',correlation_id='two',now=NOW+301)=='sent'
     assert first.texts==['original'] and second.texts==['original']
+
+
+@pytest.mark.asyncio
+async def test_global_spacing_contention_rearms_without_attempt_or_payload_loss(tmp_path: Path):
+    scheduler,claim,slot=setup(tmp_path)
+    scheduler.ownership_registry.finish_global_send('prior',sent=True,now=NOW-1)
+    # Seed the singleton as a recent visible send without touching this slot.
+    with scheduler.ownership_registry._connect() as con:
+        con.execute("INSERT INTO proactive_global_send VALUES(1,NULL,NULL,?,?) ON CONFLICT(singleton) DO UPDATE SET slot_id=NULL,reserved_until=NULL,last_visible_at=excluded.last_visible_at,updated_at=excluded.updated_at",(NOW-1,NOW-1))
+    adapter=Adapter(SendResult(True,message_id='must-not-send'))
+    result=await deliver_prepared_exactly_once(
+        scheduler=scheduler,delivery=transport(adapter,scheduler),route=ROUTE,claim=claim,
+        text='immutable',correlation_id='spacing',now=NOW,
+    )
+    assert result=='retry_wait' and adapter.calls==0
+    with scheduler._connect() as con:
+        row=con.execute('SELECT state,attempt_count,prepared_payload FROM proactive_delivery WHERE slot_id=?',(slot,)).fetchone()
+    assert tuple(row)==('retry_wait',0,'immutable')
 
 
 def test_global_send_lease_and_operator_reset_are_durable(tmp_path: Path):

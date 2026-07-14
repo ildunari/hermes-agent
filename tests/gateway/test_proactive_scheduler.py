@@ -42,13 +42,22 @@ ROUTE = {
 
 
 def config(**overrides) -> ProactiveConfig:
-    values = {**ProactiveConfig().__dict__, "enabled": True, **overrides}
+    values = {
+        **ProactiveConfig().__dict__, "enabled": True,
+        "allowed_contacts": (
+            ("poke", "kosta-owner", "owner"),
+            ("guest", "stephen-lucier", "guest"),
+        ),
+        "alarm_sink_configured": True,
+        **overrides,
+    }
     cfg = ProactiveConfig(**values)
     cfg.validate()
     return cfg
 
 
-def contact_route(*, profile: str = "poke", contact_id: str = "contact-a") -> ContactRoute:
+def contact_route(*, profile: str = "poke", contact_id: str | None = None) -> ContactRoute:
+    contact_id = contact_id or ("stephen-lucier" if profile == "guest" else "kosta-owner")
     return ContactRoute(
         contact_id=contact_id, profile_name=profile, timezone="America/New_York",
         principal="guest" if profile == "guest" else "owner", chat_type="dm",
@@ -85,7 +94,7 @@ def make_interest(
 def register_messages(
     state: ProactiveStateStore,
     *,
-    contact_id: str = "contact-a",
+    contact_id: str = "kosta-owner",
     count: int = 5,
     start: float = NOW - 10_000,
     serious: bool = False,
@@ -143,6 +152,8 @@ def test_config_modes_default_disabled_and_live_requires_explicit_allowlist():
     assert ProactiveConfig.from_mapping({"enabled": True}).mode.value == "disabled"
     with pytest.raises(ValueError, match="allowlist"):
         ProactiveConfig.from_mapping({"enabled": True, "mode": "live"})
+    with pytest.raises(ValueError, match="allowlist"):
+        ProactiveConfig.from_mapping({"enabled": True, "mode": "observe", "allowed_contacts": []})
     with pytest.raises(ValueError, match="cannot be below 48"):
         config(min_gap_hours=12)
 
@@ -156,7 +167,7 @@ def test_contact_local_active_hours_and_jitter_survive_dst():
         active_start="09:00",
         active_end="21:30",
         jitter_minutes=45,
-        jitter_key="contact-a",
+        jitter_key="kosta-owner",
     )
     local = datetime.fromtimestamp(result, zone)
     assert local.date() == datetime(2026, 3, 8, tzinfo=zone).date()
@@ -168,7 +179,7 @@ def test_contact_local_active_hours_and_jitter_survive_dst():
         active_start="09:00",
         active_end="21:30",
         jitter_minutes=45,
-        jitter_key="contact-a",
+        jitter_key="kosta-owner",
     )
 
 
@@ -190,14 +201,14 @@ def test_eligibility_requires_five_unique_inbounds_in_fourteen_days(tmp_path: Pa
     state = ProactiveStateStore(tmp_path / "state.db")
     key = register_messages(state, count=4)
     memory = tmp_path / "contact-memory"
-    make_interest(ContactMemoryStore(memory, "contact-a"))
+    make_interest(ContactMemoryStore(memory, "kosta-owner"))
     scheduler = ProactiveScheduler(
         state_db=tmp_path / "state.db", contact_memory_root=memory,
         config=config(), profile="poke",
     )
     assert scheduler.tick(now=NOW)["armed"] == 0
     state.register_inbound(
-        profile="poke", contact_id="contact-a", route=ROUTE,
+        profile="poke", contact_id="kosta-owner", route=ROUTE,
         timezone_name="America/New_York", source_id="m-4", received_at=NOW - 5,
     )
     assert scheduler.tick(now=NOW)["armed"] == 1
@@ -215,7 +226,7 @@ def test_cancel_on_inbound_revokes_even_a_claim(tmp_path: Path):
     claim = state.claim_due(now=NOW, lease_seconds=900)
     assert claim is not None and claim.slot_id == slot_id
     result = state.register_inbound(
-        profile="poke", contact_id="contact-a", route=ROUTE,
+        profile="poke", contact_id="kosta-owner", route=ROUTE,
         timezone_name="America/New_York", source_id="new", received_at=NOW + 1,
     )
     assert result["cancelled"] == 1
@@ -248,7 +259,7 @@ def test_claims_are_overlap_safe_restart_safe_and_stale_slots_die(tmp_path: Path
     assert other.slot(stale_id)["status_reason"] == "stale"
 
 
-def test_dual_profile_conflict_refuses_across_explicit_state_dbs(tmp_path: Path):
+def test_dual_profile_exact_allowlist_prevents_cross_profile_contact_registration(tmp_path: Path):
     poke_home = tmp_path / "profiles" / "poke"
     guest_home = tmp_path / "profiles" / "guest"
     poke = ProactiveScheduler(
@@ -260,15 +271,17 @@ def test_dual_profile_conflict_refuses_across_explicit_state_dbs(tmp_path: Path)
         state_db_path=guest_home / "state.db", profile_home=guest_home,
         profile_name="guest", config=config(),
     )
-    with pytest.raises(RuntimeError, match="ownership conflict"):
+    guest.note_inbound(contact_route(profile="guest"), message_id="guest-1", received_at=NOW + 1)
+    with pytest.raises(ValueError, match="exact proactive allowlist"):
         guest.note_inbound(
-            contact_route(profile="guest"), message_id="guest-1", received_at=NOW + 1,
+            contact_route(profile="guest", contact_id="kosta-owner"),
+            message_id="forged", received_at=NOW + 2,
         )
     with pytest.raises(RuntimeError, match="owned by both"):
-        assert_no_profile_conflicts({"poke": ["contact-a"], "guest": ["contact-a"]})
+        assert_no_profile_conflicts({"poke": ["kosta-owner"], "guest": ["kosta-owner"]})
 
 
-def test_cross_profile_registry_serializes_overlapping_first_claim(tmp_path: Path):
+def test_parallel_exact_principals_register_without_cross_profile_collision(tmp_path: Path):
     homes = {name: tmp_path / "profiles" / name for name in ("poke", "guest")}
     schedulers = {
         name: ProactiveScheduler(
@@ -285,12 +298,8 @@ def test_cross_profile_registry_serializes_overlapping_first_claim(tmp_path: Pat
         return name
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(claim, name) for name in ("poke", "guest")]
-    successes = [future.result() for future in futures if future.exception() is None]
-    failures = [future.exception() for future in futures if future.exception() is not None]
-    assert len(successes) == 1
-    assert len(failures) == 1
-    assert "ownership conflict" in str(failures[0])
+        results = list(pool.map(claim, ("poke", "guest")))
+    assert sorted(results) == ["guest", "poke"]
 
 
 def test_dm_and_bluebubbles_only(tmp_path: Path):
@@ -310,7 +319,7 @@ def test_dm_and_bluebubbles_only(tmp_path: Path):
 def test_one_strike_rejects_delayed_pre_send_inbound_and_newer_inbound_clears(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state, start=NOW - 50 * 3600)
-    store = ContactMemoryStore(tmp_path / "contact-memory", "contact-a")
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
     make_interest(store)
     scheduler = ProactiveScheduler(
         state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
@@ -319,28 +328,28 @@ def test_one_strike_rejects_delayed_pre_send_inbound_and_newer_inbound_clears(tm
     send_at = NOW - 49 * 3600
     sent(store, "unanswered", when=send_at)
     scheduler._import_ledger_actions(contact_route())
-    assert scheduler.eligibility_reason(state.contact_key("contact-a"), "interest_share", now=NOW) == "one_strike_unanswered"
+    assert scheduler.eligibility_reason(state.contact_key("kosta-owner"), "interest_share", now=NOW) == "one_strike_unanswered"
 
     # Arrives late at ingress, but was received before the proactive action.
     scheduler.note_inbound(
         contact_route(), message_id="delayed", received_at=send_at - 10,
     )
-    assert scheduler.eligibility_reason(state.contact_key("contact-a"), "interest_share", now=NOW) == "one_strike_unanswered"
+    assert scheduler.eligibility_reason(state.contact_key("kosta-owner"), "interest_share", now=NOW) == "one_strike_unanswered"
 
     scheduler.note_inbound(
         contact_route(), message_id="after", received_at=send_at + 10,
     )
-    assert scheduler.eligibility_reason(state.contact_key("contact-a"), "interest_share", now=NOW) is None
+    assert scheduler.eligibility_reason(state.contact_key("kosta-owner"), "interest_share", now=NOW) is None
 
     sent(store, "recent", when=NOW - 3600, outcome=ProactiveOutcome.ENGAGED)
     scheduler._import_ledger_actions(contact_route())
-    assert scheduler.eligibility_reason(state.contact_key("contact-a"), "interest_share", now=NOW) == "minimum_gap"
+    assert scheduler.eligibility_reason(state.contact_key("kosta-owner"), "interest_share", now=NOW) == "minimum_gap"
 
 
 def test_three_consecutive_ignored_or_dismissed_back_off_thirty_days(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state, start=NOW - 100)
-    store = ContactMemoryStore(tmp_path / "contact-memory", "contact-a")
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
     make_interest(store)
     for index, outcome in enumerate((
         ProactiveOutcome.IGNORED,
@@ -353,7 +362,7 @@ def test_three_consecutive_ignored_or_dismissed_back_off_thirty_days(tmp_path: P
         config=config(), profile="poke",
     )
     scheduler._import_ledger_actions(contact_route())
-    key = state.contact_key("contact-a")
+    key = state.contact_key("kosta-owner")
     assert scheduler.eligibility_reason(key, "interest_share", now=NOW) == "backoff_active"
     first_until = scheduler.get_contact(key)["disabled_until"]
     assert first_until is not None
@@ -370,7 +379,7 @@ def test_three_consecutive_ignored_or_dismissed_back_off_thirty_days(tmp_path: P
 def test_serious_register_arms_only_checkin_and_dry_run_never_sends(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state, start=NOW - 4 * 3600 - 10, serious=True)
-    store = ContactMemoryStore(tmp_path / "contact-memory", "contact-a")
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
     make_interest(store)
     scheduler = ProactiveScheduler(
         state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
@@ -389,7 +398,7 @@ def test_500_character_checkin_ticks_with_compact_audit_and_initiates(tmp_path: 
     register_messages(state, count=4, start=NOW - 5 * 3600)
     reason = "r" * 500
     state.register_inbound(
-        profile="poke", contact_id="contact-a", route=ROUTE,
+        profile="poke", contact_id="kosta-owner", route=ROUTE,
         timezone_name="America/New_York", source_id="max-reason",
         received_at=NOW - 4 * 3600, checkin_kind="open_loop", checkin_reason=reason,
     )
@@ -408,7 +417,7 @@ def test_500_character_checkin_ticks_with_compact_audit_and_initiates(tmp_path: 
     assert result["fired"] == 1
     assert initiated[0].payload["reason"] == reason
     record = ContactMemoryStore(
-        tmp_path / "contact-memory", "contact-a"
+        tmp_path / "contact-memory", "kosta-owner"
     ).get_proactive_send(str(slot["slot_id"]))
     assert record is not None
     audit = json.loads(record.candidate_json)
@@ -466,10 +475,10 @@ def test_checkin_projection_or_initiation_failure_is_immediately_retryable(
 def test_open_loop_inbound_arms_contact_local_checkin_not_interest(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state, start=NOW - 3 * 3600)
-    store = ContactMemoryStore(tmp_path / "contact-memory", "contact-a")
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
     make_interest(store)
     state.register_inbound(
-        profile="poke", contact_id="contact-a", route=ROUTE,
+        profile="poke", contact_id="kosta-owner", route=ROUTE,
         timezone_name="America/New_York", source_id="open-loop",
         received_at=NOW - 2 * 3600, checkin_kind="open_loop",
         checkin_reason="wish me luck at my interview",
@@ -488,7 +497,7 @@ def test_open_loop_inbound_arms_contact_local_checkin_not_interest(tmp_path: Pat
 def test_due_interest_share_is_logged_suppressed_not_sent(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     key = register_messages(state)
-    store = ContactMemoryStore(tmp_path / "contact-memory", "contact-a")
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
     make_interest(store)
     slot = state.arm_slot(
         contact_key=key, kind="interest_share", interest_id="cars",
@@ -509,7 +518,7 @@ def test_due_interest_share_is_logged_suppressed_not_sent(tmp_path: Path):
 
 
 def test_outcome_tracking_is_atomic_idempotent_and_updates_bandit(tmp_path: Path):
-    store = ContactMemoryStore(tmp_path / "contact-memory", "contact-a")
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
     make_interest(store)
     outbound = sent(store, "outcome", when=NOW - 60)
     assert classify_inbound_outcome(outbound, "sports cars are getting wild lately honestly") == "engaged"
@@ -532,7 +541,7 @@ def test_outcome_tracking_is_atomic_idempotent_and_updates_bandit(tmp_path: Path
 def test_inbound_hook_cancels_and_records_next_outcome_within_24h(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     key = register_messages(state)
-    store = ContactMemoryStore(tmp_path / "contact-memory", "contact-a")
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
     make_interest(store)
     sent(store, "prior", when=NOW - 100)
     slot_id = state.arm_slot(
@@ -542,7 +551,7 @@ def test_inbound_hook_cancels_and_records_next_outcome_within_24h(tmp_path: Path
     result = handle_inbound(
         state_db=tmp_path / "state.db",
         contact_memory_root=tmp_path / "contact-memory",
-        profile="poke", contact_id="contact-a", route=ROUTE,
+        profile="poke", contact_id="kosta-owner", route=ROUTE,
         timezone_name="America/New_York", source_id="reply",
         text="sports cars are honestly getting ridiculously fast now",
         received_at=NOW, config=config(),
@@ -560,7 +569,7 @@ def test_inbound_hook_cancels_and_records_next_outcome_within_24h(tmp_path: Path
     replay = handle_inbound(
         state_db=tmp_path / "state.db",
         contact_memory_root=tmp_path / "contact-memory",
-        profile="poke", contact_id="contact-a", route=ROUTE,
+        profile="poke", contact_id="kosta-owner", route=ROUTE,
         timezone_name="America/New_York", source_id="reply",
         text="sports cars are honestly getting ridiculously fast now",
         received_at=NOW, config=config(),
@@ -572,7 +581,7 @@ def test_inbound_hook_cancels_and_records_next_outcome_within_24h(tmp_path: Path
 def test_tick_marks_unanswered_send_ignored_after_24h_once(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state, start=NOW - 3 * 86_400)
-    store = ContactMemoryStore(tmp_path / "contact-memory", "contact-a")
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
     make_interest(store)
     sent(store, "old", when=NOW - 24 * 3600 - 1)
     scheduler = ProactiveScheduler(
@@ -588,7 +597,7 @@ def test_tick_marks_unanswered_send_ignored_after_24h_once(tmp_path: Path):
 def test_sibling_exploration_is_blocked_if_one_of_previous_three_explored(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state, start=NOW - 100)
-    store = ContactMemoryStore(tmp_path / "contact-memory", "contact-a")
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
     make_interest(store, "parent", topic="cars")
     make_interest(store, "sports", topic="sports cars", parent_id="parent")
     make_interest(store, "paint", topic="car paint", parent_id="parent")
@@ -612,7 +621,7 @@ def test_sibling_exploration_is_blocked_if_one_of_previous_three_explored(tmp_pa
 def test_disabled_is_a_hard_stop_for_tick_and_arm(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state)
-    make_interest(ContactMemoryStore(tmp_path / "contact-memory", "contact-a"))
+    make_interest(ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner"))
     scheduler = ProactiveScheduler(
         state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
         config=ProactiveConfig(enabled=False), profile="poke",
@@ -631,7 +640,7 @@ def test_interest_slot_is_pushed_into_contact_local_active_hours(tmp_path: Path)
     late = datetime.fromtimestamp(NOW, zone).replace(hour=23, minute=0, second=0).timestamp()
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state, start=late - 100)
-    make_interest(ContactMemoryStore(tmp_path / "contact-memory", "contact-a"))
+    make_interest(ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner"))
     scheduler = ProactiveScheduler(
         state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
         config=config(), profile="poke",
@@ -647,7 +656,7 @@ def test_interest_slot_is_pushed_into_contact_local_active_hours(tmp_path: Path)
 def test_overlapping_ticks_atomically_arm_one_slot(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state)
-    make_interest(ContactMemoryStore(tmp_path / "contact-memory", "contact-a"))
+    make_interest(ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner"))
     scheduler = ProactiveScheduler(
         state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
         config=config(), profile="poke",
@@ -664,7 +673,7 @@ def test_overlapping_ticks_atomically_arm_one_slot(tmp_path: Path):
 def test_multitick_dry_runs_enforce_one_strike_min_gap_and_weekly_cap(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state)
-    make_interest(ContactMemoryStore(tmp_path / "contact-memory", "contact-a"))
+    make_interest(ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner"))
     scheduler = ProactiveScheduler(
         state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
         config=config(weekly_interest_cap=2, weekly_total_cap=3), profile="poke",
@@ -725,7 +734,13 @@ async def test_async_inbound_persists_canonical_contact_id_and_tick_survives(tmp
         await handle_inbound_async(
             profile_home=tmp_path,
             profile_name="poke",
-            proactive_config={"agent": {"proactive": {"enabled": True}}},
+            proactive_config={"agent": {"proactive": {
+                "enabled": True, "mode": "observe",
+                "allowed_contacts": [
+                    {"profile": "poke", "contact_id": "kosta-owner", "principal": "owner"},
+                    {"profile": "guest", "contact_id": "stephen-lucier", "principal": "guest"},
+                ],
+            }}},
             route=route,
             message_id=f"async-{index}",
             text="ordinary message",
@@ -736,5 +751,5 @@ async def test_async_inbound_persists_canonical_contact_id_and_tick_survives(tmp
         profile_name="poke", config=config(),
     )
     contact = scheduler.get_contact(route.contact_hash)
-    assert contact["contact_id"] == "contact-a"
+    assert contact["contact_id"] == "kosta-owner"
     assert scheduler.tick(now=NOW)["armed"] == 0

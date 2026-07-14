@@ -45,6 +45,7 @@ def config():
     proactive = {
         "enabled": True, "mode": "live", "dry_run": False,
         "transport_owner_profile": "poke",
+        "alarm_sink": {"configured": True, "type": "eval"},
         "allowed_contacts": [
             {"profile": "poke", "contact_id": "kosta-owner", "principal": "owner"},
             {"profile": "guest", "contact_id": "stephen-lucier", "principal": "guest"},
@@ -66,7 +67,8 @@ async def transport_eval(root: Path, result) -> str:
     scheduler = ProactiveScheduler(
         state_db_path=root / "state.db", profile_home=root, profile_name="poke",
         config=ProactiveConfig(enabled=True, dry_run=False, mode=ProactiveMode.LIVE,
-                               allowed_contacts=ALLOW, active_start="00:00", active_end="23:59"),
+                               allowed_contacts=ALLOW, active_start="00:00", active_end="23:59",
+                               alarm_sink_configured=True),
         ownership_registry_path=root / "ownership.db",
     )
     slot = scheduler.arm_slot(ROUTE, kind="checkin", fire_at=now-1, now=now-2)
@@ -97,7 +99,7 @@ def main() -> int:
         for case in cases:
             case_id=case["id"]
             if case_id=="cross-speaker-fact":
-                source=AuthoritativeSource("kosta-owner",hashlib.sha256(b"fact").hexdigest())
+                source=AuthoritativeSource("kosta-owner",hashlib.sha256(b"fact").hexdigest(),"fact")
                 try:
                     validate_semantic_items([{"kind":"fact","source_key":"row","author":"kosta-owner","text":"fact","confidence":.9}],
                                             subject="stephen-lucier",sources={"row":source})

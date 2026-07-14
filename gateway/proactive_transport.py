@@ -19,6 +19,7 @@ class ProactiveTransportResult:
     partial: bool = False
     unknown: bool = False
     error_class: str = ""
+    retry_at: float | None = None
 
 
 class BlueBubblesProactiveDelivery:
@@ -37,8 +38,8 @@ class BlueBubblesProactiveDelivery:
         self.participant_identities = dict(participant_identities or {})
         self.scheduler = scheduler
 
-    async def deliver(self, *, route: ContactRoute, text: str, slot_id: str,
-                      correlation_id: str) -> ProactiveTransportResult:
+    async def prepare(self, *, route: ContactRoute, slot_id: str) -> tuple[str | None, ProactiveTransportResult | None]:
+        """Traverse ownership and authenticated existing-DM checks before an attempt."""
         if self.owner_profile != "poke":
             raise ValueError("Poke is the sole proactive transport owner")
         now = __import__("time").time()
@@ -75,7 +76,22 @@ class BlueBubblesProactiveDelivery:
             self.ownership_registry.open_circuit("route_fingerprint_mismatch", now=now)
             raise RuntimeError("authenticated proactive route fingerprint changed")
         if not self.ownership_registry.reserve_global_send(slot_id, now=now):
-            raise RuntimeError("global proactive send lease unavailable")
+            status = self.ownership_registry.global_send_status(now=now)
+            if status["circuit_state"] == "open":
+                raise RuntimeError("global proactive circuit is open")
+            return None, ProactiveTransportResult(
+                "spacing_wait", False, retryable=True,
+                error_class="global_spacing_contention", retry_at=float(status["available_at"]),
+            )
+        return str(guid), None
+
+    async def deliver(self, *, route: ContactRoute, text: str, slot_id: str,
+                      correlation_id: str, prepared_guid: str | None = None) -> ProactiveTransportResult:
+        if prepared_guid is None:
+            prepared_guid, refusal = await self.prepare(route=route, slot_id=slot_id)
+            if refusal is not None:
+                return refusal
+        guid = str(prepared_guid)
         # Pass the resolved GUID so send() cannot enter its address/new-chat path.
         try:
             result = await self.adapter.send(
@@ -122,12 +138,37 @@ async def deliver_prepared_exactly_once(
     refusal = await asyncio.to_thread(scheduler.final_delivery_check, route, claim, now=now)
     if refusal:
         return await asyncio.to_thread(scheduler.finish_delivery, claim, state="suppressed", reason=refusal, now=now)
+    if not await asyncio.to_thread(scheduler.begin_delivery_preflight, claim, now=now):
+        row = await asyncio.to_thread(scheduler.get_slot, claim.slot_id)
+        return str((row or {}).get("reason") or "attempt_not_available")
+    try:
+        prepared_guid, transport_refusal = await delivery.prepare(route=route, slot_id=claim.slot_id)
+    except Exception as exc:
+        return await asyncio.to_thread(
+            scheduler.finish_delivery, claim, state="failed",
+            reason=f"pre_send_invariant:{type(exc).__name__}", now=now,
+        )
+    if transport_refusal is not None:
+        if transport_refusal.state == "spacing_wait":
+            return await asyncio.to_thread(
+                scheduler.defer_prepared_delivery, claim,
+                not_before=float(transport_refusal.retry_at or (__import__("time").time() + 300)),
+                reason=transport_refusal.error_class, now=now,
+            )
+        return await asyncio.to_thread(
+            scheduler.finish_delivery, claim, state=transport_refusal.state,
+            reason=transport_refusal.error_class or transport_refusal.state,
+            message_id=transport_refusal.message_id, now=now,
+        )
     if not await asyncio.to_thread(scheduler.begin_delivery_attempt, claim, now=now):
+        delivery.ownership_registry.finish_global_send(
+            claim.slot_id, sent=False, now=__import__("time").time()
+        )
         row = scheduler.get_slot(claim.slot_id)
         return str((row or {}).get("reason") or "attempt_not_available")
     try:
         result = await delivery.deliver(route=route, text=text, slot_id=claim.slot_id,
-                                        correlation_id=correlation_id)
+                                        correlation_id=correlation_id, prepared_guid=prepared_guid)
     except Exception as exc:
         return await asyncio.to_thread(
             scheduler.finish_delivery, claim, state="failed",

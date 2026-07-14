@@ -301,6 +301,28 @@ class ProactiveOwnershipRegistry:
                 (sent, now, now, slot_id),
             )
 
+    def global_send_status(self, *, now: float) -> dict[str, Any]:
+        """Return text-free circuit/spacing state after a reservation refusal."""
+        with self._connect() as con:
+            circuit = con.execute(
+                "SELECT state,reason,generation FROM proactive_global_circuit WHERE singleton=1"
+            ).fetchone()
+            spacing = con.execute(
+                "SELECT reserved_until,last_visible_at FROM proactive_global_send WHERE singleton=1"
+            ).fetchone()
+        available_at = now
+        if spacing is not None:
+            if spacing["reserved_until"] is not None:
+                available_at = max(available_at, float(spacing["reserved_until"]))
+            if spacing["last_visible_at"] is not None:
+                available_at = max(available_at, float(spacing["last_visible_at"]) + 300.0)
+        return {
+            "circuit_state": str(circuit["state"]) if circuit else "closed",
+            "circuit_reason": str(circuit["reason"]) if circuit else "",
+            "circuit_generation": int(circuit["generation"]) if circuit else 0,
+            "available_at": available_at,
+        }
+
     def open_circuit(self, reason: str, *, now: float) -> None:
         with self._connect() as con:
             con.execute(
@@ -351,13 +373,14 @@ class ProactiveConfig:
     circuit_breaker_failures: int = 3
     circuit_breaker_cooldown_seconds: int = 21_600
     kill_generation: int = 0
+    alarm_sink_configured: bool = False
 
     def validate(self) -> None:
         if self.mode is ProactiveMode.LIVE and not self.enabled:
             raise ValueError("live mode requires enabled=true")
         if self.transport_owner_profile != "poke":
             raise ValueError("Poke must own proactive transport")
-        if self.enabled and self.mode is ProactiveMode.LIVE and frozenset(self.allowed_contacts) != _EXACT_ALLOWLIST:
+        if self.enabled and self.mode in {ProactiveMode.OBSERVE, ProactiveMode.LIVE} and frozenset(self.allowed_contacts) != _EXACT_ALLOWLIST:
             raise ValueError("proactive allowlist must contain exactly Kosta owner and Stephen")
         if self.min_gap_hours < 48:
             raise ValueError("min_gap_hours cannot be below 48")
@@ -383,6 +406,7 @@ class ProactiveConfig:
         for item in values if isinstance(values, Sequence) else ():
             if isinstance(item, Mapping):
                 allowlist.append((str(item.get("profile") or ""), str(item.get("contact_id") or ""), str(item.get("principal") or "")))
+        alarm_sink = raw.get("alarm_sink")
         config = cls(
             enabled=bool(raw.get("enabled", False)),
             dry_run=mode is not ProactiveMode.LIVE,
@@ -409,6 +433,10 @@ class ProactiveConfig:
             circuit_breaker_failures=max(2, int(raw.get("circuit_breaker_failures", 3))),
             circuit_breaker_cooldown_seconds=max(300, int(raw.get("circuit_breaker_cooldown_seconds", 21_600))),
             kill_generation=max(0, int(raw.get("kill_generation", 0))),
+            alarm_sink_configured=bool(
+                isinstance(alarm_sink, Mapping) and alarm_sink.get("configured") is True
+                and str(alarm_sink.get("type") or "").strip()
+            ),
         )
         config.validate()
         return config
@@ -604,15 +632,21 @@ class ProactiveStateStore:
             int(row["inbound_version"]),
         ) for row in rows]
 
-    def record_ingress_observed(self, message_id: str, *, observed_at: float) -> bool:
+    def record_ingress_observed(self, message_id: str, *, observed_at: float) -> int:
         source_id = str(message_id).strip()
         if not source_id:
             raise ValueError("message_id is required")
         with self._connect() as con:
-            return bool(con.execute(
+            con.execute(
                 "INSERT OR IGNORE INTO proactive_ingress_observed(message_id,observed_at) VALUES(?,?)",
                 (source_id, _finite(observed_at, "observed_at")),
-            ).rowcount)
+            )
+            row = con.execute(
+                "SELECT rowid FROM proactive_ingress_observed WHERE message_id=?", (source_id,)
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("ingress arrival sequence was not durably visible")
+            return int(row[0])
 
     def set_backoff(self, contact_key: str, until: float) -> None:
         with self._connect() as con:
@@ -834,7 +868,7 @@ class ProactiveScheduler:
             raise ValueError("contact route belongs to a different profile")
         if route.principal not in {"owner", "guest"}:
             raise ValueError("principal must be owner or guest")
-        if self.config.allowed_contacts and (
+        if self.config.enabled and (
             route.profile_name, route.contact_id, route.principal
         ) not in self.config.allowed_contacts:
             raise ValueError("contact is not in the exact proactive allowlist")
@@ -1287,6 +1321,10 @@ class ProactiveScheduler:
             return "mode_not_live"
         if (route.profile_name, route.contact_id, route.principal) not in self.config.allowed_contacts:
             return "allowlist_mismatch"
+        if not self.config.alarm_sink_configured:
+            return "alarm_sink_unconfigured"
+        if self.ownership_registry.global_send_status(now=timestamp)["circuit_state"] == "open":
+            return "global_circuit_open"
         with self._connect() as con:
             failures = con.execute(
                 "SELECT state,updated_at FROM proactive_delivery ORDER BY updated_at DESC LIMIT ?",
@@ -1327,13 +1365,13 @@ class ProactiveScheduler:
         con = self._begin()
         try:
             row = con.execute("SELECT * FROM proactive_delivery WHERE slot_id=?", (claim.slot_id,)).fetchone()
-            allowed = bool(row and row["state"] in {"prepared", "retry_wait"} and
+            allowed = bool(row and row["state"] == "sending" and
                            (row["not_before"] is None or float(row["not_before"]) <= timestamp) and
                            int(row["attempt_count"]) < self.config.max_retry_attempts)
             changed = 0
             if allowed:
                 changed = con.execute(
-                    "UPDATE proactive_delivery SET state='sending',attempt_count=attempt_count+1,updated_at=? WHERE slot_id=? AND state IN ('prepared','retry_wait')",
+                    "UPDATE proactive_delivery SET attempt_count=attempt_count+1,updated_at=? WHERE slot_id=? AND state='sending'",
                     (timestamp, claim.slot_id),
                 ).rowcount
             self._finish(con)
@@ -1341,6 +1379,15 @@ class ProactiveScheduler:
         except BaseException as exc:
             self._finish(con, exc)
             raise
+
+    def begin_delivery_preflight(self, claim: SlotClaim, *, now: float | None = None) -> bool:
+        """Atomically select one worker for auth/spacing checks without consuming an attempt."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        with self._connect() as con:
+            return bool(con.execute(
+                "UPDATE proactive_delivery SET state='sending',updated_at=? WHERE slot_id=? AND state IN ('prepared','retry_wait') AND (not_before IS NULL OR not_before<=?)",
+                (timestamp, claim.slot_id, timestamp),
+            ).rowcount)
 
     def finish_delivery(self, claim: SlotClaim, *, state: str, reason: str,
                         message_id: str | None = None, retryable: bool = False,
@@ -1391,6 +1438,34 @@ class ProactiveScheduler:
                 self._finish(con, exc)
             raise
 
+    def defer_prepared_delivery(self, claim: SlotClaim, *, not_before: float, reason: str,
+                                now: float | None = None) -> str:
+        """Retry global-spacing contention without consuming an attempt or payload."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        retry_at = max(timestamp + 1.0, _finite(not_before, "not_before"))
+        con = self._begin()
+        try:
+            row = con.execute(
+                "SELECT state,attempt_count,prepared_payload FROM proactive_delivery WHERE slot_id=?", (claim.slot_id,)
+            ).fetchone()
+            if row is None or row["state"] != "sending" or not row["prepared_payload"]:
+                raise ValueError("prepared immutable delivery is unavailable for deferral")
+            con.execute(
+                "UPDATE proactive_delivery SET state='retry_wait',not_before=?,last_error_class=?,updated_at=? WHERE slot_id=?",
+                (retry_at, reason[:120], timestamp, claim.slot_id),
+            )
+            changed = con.execute(
+                "UPDATE proactive_slot SET status='armed',fire_at=?,claim_token=NULL,claim_until=NULL,reason=?,updated_at=? WHERE slot_id=? AND status='claimed' AND claim_token=?",
+                (retry_at, reason[:120], timestamp, claim.slot_id, claim.claim_token),
+            ).rowcount
+            if not changed:
+                raise ValueError("claim is no longer current for spacing deferral")
+            self._finish(con)
+            return "retry_wait"
+        except BaseException as exc:
+            self._finish(con, exc)
+            raise
+
     def _project_confirmed_send(self, claim: SlotClaim, *, timestamp: float, reason: str) -> None:
         with self._connect() as con:
             row = con.execute(
@@ -1416,6 +1491,28 @@ class ProactiveScheduler:
         from gateway.proactive_fetch import suppression_metrics
         if suppression_metrics(store, since=timestamp - _WEEK).alarm:
             self.ownership_registry.open_circuit("send_rate_above_40_percent", now=timestamp)
+
+    def enforce_send_rate_circuit(self, *, now: float | None = None) -> dict[str, Any]:
+        """Atomically open the durable global circuit when trailing sends exceed 40%."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        total = sent = 0
+        with self._connect() as con:
+            contacts = [str(row[0]) for row in con.execute(
+                "SELECT contact_id FROM proactive_contact WHERE contact_id IS NOT NULL"
+            )]
+        from gateway.proactive_fetch import suppression_metrics
+        for contact_id in contacts:
+            metrics = suppression_metrics(
+                ContactMemoryStore(self.profile_home / "contact-memory", contact_id),
+                since=timestamp - _WEEK,
+            )
+            total += metrics.total
+            sent += metrics.sent
+        rate = sent / total if total else 0.0
+        if total and rate > 0.40:
+            self.ownership_registry.open_circuit("send_rate_above_40_percent", now=timestamp)
+        return {"total": total, "sent": sent, "send_rate": rate,
+                "circuit_opened": bool(total and rate > 0.40)}
 
     def record_health(self, key: str, value: Mapping[str, Any], *, now: float | None = None) -> None:
         timestamp = _finite(time.time() if now is None else now, "now")
@@ -1767,6 +1864,16 @@ class ProactiveScheduler:
         if not self.config.enabled:
             return result
         timestamp = _finite(time.time() if now is None else now, "now")
+        self.record_health(
+            "planning_attempt", {"state": "started", "tick_at": timestamp}, now=timestamp
+        )
+        rate_status = self.enforce_send_rate_circuit(now=timestamp)
+        self.record_health("send_rate", rate_status, now=timestamp)
+        if self.config.mode is ProactiveMode.LIVE and rate_status["circuit_opened"]:
+            self.record_health(
+                "planning_attempt", {"state": "blocked_by_send_rate", "tick_at": timestamp}, now=timestamp
+            )
+            return result
         self.cleanup_sprawl(now=timestamp)
         contacts = {item.contact_key: item for item in ProactiveStateStore(self.state_db_path).contacts()}
         routes: dict[str, ContactRoute] = {}
@@ -1931,6 +2038,11 @@ class ProactiveScheduler:
             except ValueError as exc:
                 if "not eligible" not in str(exc):
                     raise
+        self.record_health(
+            "planning_attempt",
+            {"state": "completed", "tick_at": timestamp, "armed": result["armed"]},
+            now=timestamp,
+        )
         return result
 
 

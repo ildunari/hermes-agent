@@ -2005,6 +2005,7 @@ async def _record_proactive_inbound(
     text: str,
     received_at: float,
     metadata: Any = None,
+    arrival_sequence: int | None = None,
 ) -> dict[str, Any] | None:
     """Cancel slots and close outcomes off-loop for authenticated DM ingress."""
     if not isinstance(config_raw, dict) or not isinstance(trusted_scope, TrustedContactScope):
@@ -2018,7 +2019,7 @@ async def _record_proactive_inbound(
     if platform != "bluebubbles":
         return None
     try:
-        from gateway.proactive_scheduler import ProactiveConfig, ProactiveStateStore, handle_inbound
+        from gateway.proactive_scheduler import ProactiveConfig, handle_inbound
 
         cfg = ProactiveConfig.from_mapping(config_raw)
         scope_meta = metadata.get("_hermes_contact_scope", {}) if isinstance(metadata, dict) else {}
@@ -2031,6 +2032,8 @@ async def _record_proactive_inbound(
             or cfg.timezone
         )
         root = Path(profile_home).resolve()
+        if not isinstance(arrival_sequence, int) or arrival_sequence <= 0:
+            raise RuntimeError("proactive ingress arrival barrier is absent")
         route = {
             "platform": platform,
             "chat_id": str(getattr(source, "chat_id", "") or ""),
@@ -2038,10 +2041,6 @@ async def _record_proactive_inbound(
             "user_id": str(getattr(source, "user_id", "") or ""),
             "session_id": str(session_id),
         }
-        await asyncio.to_thread(
-            ProactiveStateStore(root / "state.db").record_ingress_observed,
-            str(source_id), observed_at=float(received_at),
-        )
         return await asyncio.to_thread(
             handle_inbound,
             state_db=root / "state.db",
@@ -2056,9 +2055,44 @@ async def _record_proactive_inbound(
             config=cfg,
         )
     except Exception as exc:
-        # Advisory and non-blocking exactly like contact-memory extraction.
-        logger.warning("Proactive inbound tracking skipped: %s", exc)
+        from gateway.proactive_scheduler import ProactiveOwnershipRegistry
+        root = Path(profile_home).resolve()
+        ownership = root.parent.parent / "proactive-contact-ownership.db" if root.parent.name == "profiles" else root.parent / "proactive-contact-ownership.db"
+        await asyncio.to_thread(
+            ProactiveOwnershipRegistry(ownership).open_circuit,
+            "ingress_persistence_failure", now=float(received_at),
+        )
+        raise RuntimeError("proactive inbound persistence failed closed") from exc
+
+
+async def _record_proactive_arrival(
+    *, config_raw: Any, trusted_scope: Any, profile_home: Any, source: Any,
+    source_id: str, received_at: float,
+) -> int | None:
+    """Durably expose arrival order before waiting for a per-contact delivery lock."""
+    if not isinstance(config_raw, dict) or not isinstance(trusted_scope, TrustedContactScope):
         return None
+    raw = (config_raw.get("agent", {}) or {}).get("proactive", {})
+    if not isinstance(raw, dict) or not raw.get("enabled"):
+        return None
+    platform = getattr(getattr(source, "platform", None), "value", None)
+    if getattr(source, "chat_type", "") != "dm" or platform != "bluebubbles":
+        return None
+    root = Path(profile_home).resolve()
+    ownership = root.parent.parent / "proactive-contact-ownership.db" if root.parent.name == "profiles" else root.parent / "proactive-contact-ownership.db"
+    try:
+        from gateway.proactive_scheduler import ProactiveStateStore
+        return await asyncio.to_thread(
+            ProactiveStateStore(root / "state.db").record_ingress_observed,
+            str(source_id), observed_at=float(received_at),
+        )
+    except Exception as exc:
+        from gateway.proactive_scheduler import ProactiveOwnershipRegistry
+        await asyncio.to_thread(
+            ProactiveOwnershipRegistry(ownership).open_circuit,
+            "ingress_arrival_persistence_failure", now=float(received_at),
+        )
+        raise RuntimeError("proactive ingress arrival barrier failed closed") from exc
 
 
 def _run_proactive_tick_once(
@@ -7371,6 +7405,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     cfg = ProactiveConfig.from_mapping(config_raw)
                     profile_home = get_profile_dir(profile)
                     prepared = []
+                    from gateway.proactive_status import probe_model_readiness
+                    model_probe = await asyncio.to_thread(probe_model_readiness)
+                    if cfg.mode.value == "live" and (
+                        not model_probe["ready"] or not cfg.alarm_sink_configured
+                    ):
+                        scheduler = ProactiveScheduler(
+                            state_db_path=Path(profile_home) / "state.db",
+                            profile_home=profile_home, profile_name=profile, config=cfg,
+                        )
+                        reason = "model_probe_unavailable" if not model_probe["ready"] else "alarm_sink_unconfigured"
+                        scheduler.ownership_registry.open_circuit(reason, now=time.time())
+                        scheduler.record_health("watcher", {
+                            "completed": False, "correlation_id": correlation_id,
+                            "model_probe": model_probe, "alarm_sink_configured": cfg.alarm_sink_configured,
+                            "failure": reason,
+                        })
+                        continue
 
                     def _tick_profile() -> dict[str, int]:
                         db = SessionDB(Path(profile_home) / "state.db")
@@ -7464,6 +7515,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                              adapter is not None and adapter.is_connected
                          ),
                          "participant_registry_ready": participant_registry_ready,
+                         "model_probe": model_probe,
+                         "alarm_sink_configured": cfg.alarm_sink_configured,
                          "extraction": _contact_memory_extraction_health(
                              Path(profile_home) / "contact-memory"
                          ),
@@ -12249,11 +12302,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from gateway.contact_memory.store import opaque_contact_filename
             barrier_key = Path(opaque_contact_filename(trusted_contact_scope.contact_id)).stem
             barrier = barriers.setdefault(barrier_key, asyncio.Lock())
+            _proactive_home = self._resolve_profile_home_for_source(source)
+            _arrival_sequence = await _record_proactive_arrival(
+                config_raw=_proactive_cfg,
+                trusted_scope=trusted_contact_scope,
+                profile_home=_proactive_home,
+                source=source,
+                source_id=_proactive_source_id,
+                received_at=_proactive_ts,
+            )
             async with barrier:
                 await _record_proactive_inbound(
                     config_raw=_proactive_cfg,
                     trusted_scope=trusted_contact_scope,
-                    profile_home=self._resolve_profile_home_for_source(source),
+                    profile_home=_proactive_home,
                     profile=str(getattr(source, "profile", None) or os.getenv("HERMES_PROFILE") or "default"),
                     source=source,
                     session_id=session_entry.session_id,
@@ -12261,6 +12323,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     text=str(event.text or ""),
                     received_at=_proactive_ts,
                     metadata=getattr(event, "metadata", None),
+                    arrival_sequence=_arrival_sequence,
                 )
 
         pinned_session_id = str(

@@ -53,8 +53,10 @@ def test_group_or_ambiguous_resolution_refused(tmp_path: Path):
 
 def test_cross_speaker_and_sensitive_semantics(tmp_path: Path):
     from gateway.contact_memory.imessage_bootstrap import AuthoritativeSource
-    sources={'g1': AuthoritativeSource('kosta-owner', __import__('hashlib').sha256(b'Kosta likes cars').hexdigest())}
-    item={'kind':'fact','guid':'g1','author':'kosta-owner','text':'likes cars','predicate':'likes','confidence':.9}
+    digest=__import__('hashlib').sha256(b'Kosta likes cars').hexdigest()
+    sources={'g1': AuthoritativeSource('kosta-owner', digest, 'Kosta likes cars')}
+    item={'kind':'fact','guid':'g1','source_content_hash':digest,'author':'kosta-owner','text':'likes cars',
+          'predicate':'likes','confidence':.9,'evidence_quote':'Kosta likes cars','evidence_start':0,'evidence_end':16}
     with pytest.raises(ValueError,match='cross-speaker'):
         validate_semantic_items([item],subject='stephen-lucier',sources=sources)
     sensitive={**item,'sensitive':True}
@@ -66,11 +68,12 @@ def test_cross_speaker_and_sensitive_semantics(tmp_path: Path):
 
 def test_semantics_require_authoritative_source_author_and_hash():
     from gateway.contact_memory.imessage_bootstrap import AuthoritativeSource
-    source = AuthoritativeSource('stephen-lucier', __import__('hashlib').sha256(b'evidence').hexdigest())
+    source = AuthoritativeSource('stephen-lucier', __import__('hashlib').sha256(b'evidence').hexdigest(), 'evidence')
     forged={'kind':'fact','guid':'g2','author':'kosta-owner','text':'forged','confidence':.9}
     with pytest.raises(ValueError,match='cross-speaker'):
         validate_semantic_items([forged],subject='kosta-owner',sources={'g2':source})
-    correct={**forged,'author':'stephen-lucier','source_content_hash':'bad'}
+    correct={**forged,'author':'stephen-lucier','source_content_hash':'bad',
+             'evidence_quote':'evidence','evidence_start':0,'evidence_end':8}
     with pytest.raises(ValueError,match='content hash'):
         validate_semantic_items([correct],subject='stephen-lucier',sources={'g2':source})
     with pytest.raises(ValueError,match='unknown source'):
@@ -107,7 +110,8 @@ def test_extraction_merge_coverage_and_review_execute_with_canonical_ids(tmp_pat
             rows=json.loads(prompt.split('\n',1)[1])
             return {'items': [
                 {'kind':'fact','source_key':row['source'],'source_content_hash':sources[row['source']].content_hash,
-                 'author':row['author'],'text':row['text'],'predicate':'context','confidence':.9}
+                 'author':row['author'],'text':row['text'],'predicate':'context','confidence':.9,
+                 'evidence_quote':row['text'],'evidence_start':0,'evidence_end':len(row['text'])}
                 for row in rows if row['text']!='[NON_TEXT]'
             ]}
         if prompt.startswith('Merge these'):
@@ -130,11 +134,24 @@ def test_extraction_merge_coverage_and_review_execute_with_canonical_ids(tmp_pat
 
 def test_semantic_validator_rejects_forged_derived_source_id():
     from gateway.contact_memory.imessage_bootstrap import AuthoritativeSource
-    source=AuthoritativeSource('kosta-owner',__import__('hashlib').sha256(b'evidence').hexdigest())
+    source=AuthoritativeSource('kosta-owner',__import__('hashlib').sha256(b'evidence').hexdigest(),'evidence')
     item={'kind':'fact','source_key':'g1','source_content_hash':source.content_hash,'source_id':'forged',
-          'author':'kosta-owner','text':'evidence','predicate':'context','confidence':.9}
+          'author':'kosta-owner','text':'evidence','predicate':'context','confidence':.9,
+          'evidence_quote':'evidence','evidence_start':0,'evidence_end':8}
     with pytest.raises(ValueError,match='source ID'):
         validate_semantic_items([item],subject='kosta-owner',sources={'g1':source})
+
+
+def test_same_speaker_source_cannot_launder_unsupported_abstraction():
+    import hashlib
+    from gateway.contact_memory.imessage_bootstrap import AuthoritativeSource
+    text='Stephen likes jazz'
+    source=AuthoritativeSource('stephen-lucier',hashlib.sha256(text.encode()).hexdigest(),text)
+    forged={'kind':'fact','source_key':'g2','source_content_hash':source.content_hash,
+            'author':'stephen-lucier','text':'Kosta private fact','predicate':'context','confidence':.9,
+            'evidence_quote':text,'evidence_start':0,'evidence_end':len(text)}
+    with pytest.raises(ValueError,match='needs operator review'):
+        validate_semantic_items([forged],subject='stephen-lucier',sources={'g2':source})
 
 
 def test_guest_visibility_requires_operator_file_bound_to_review_bytes(tmp_path: Path):

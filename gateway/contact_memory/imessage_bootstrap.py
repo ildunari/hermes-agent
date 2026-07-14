@@ -13,6 +13,7 @@ from pathlib import Path
 import plistlib
 import re
 import sqlite3
+import unicodedata
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 CANONICAL_AUTHORS = frozenset({"kosta-owner", "stephen-lucier"})
@@ -62,6 +63,20 @@ class BootstrapChunk:
 class AuthoritativeSource:
     canonical_author: str
     content_hash: str
+    canonical_text: str
+
+
+def _normalize_evidence(value: object) -> str:
+    """Normalize only representation differences, never paraphrase semantics."""
+    return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
+
+
+def _normalized_contains(haystack: object, needle: object) -> bool:
+    normalized_haystack = _normalize_evidence(haystack)
+    normalized_needle = _normalize_evidence(needle)
+    if not normalized_needle:
+        return False
+    return re.search(r"(?<!\w)" + re.escape(normalized_needle) + r"(?!\w)", normalized_haystack) is not None
 
 
 def _normalize_handle(value: str) -> str:
@@ -203,7 +218,7 @@ def authoritative_source_map(
         for row in chunk.rows:
             if row.rejection_reason is not None:
                 continue
-            source = AuthoritativeSource(row.author, content_hash(row))
+            source = AuthoritativeSource(row.author, content_hash(row), row.text or "")
             previous = result.setdefault(row.source_key, source)
             if previous != source:
                 raise ValueError(f"conflicting source identity: {row.source_key}")
@@ -262,7 +277,7 @@ def validate_semantic_items(
         raise ValueError("invalid semantic subject or output")
     allowed = {"kind", "guid", "source_key", "source_content_hash", "author", "predicate", "text",
                "topic", "signal_type", "valence", "confidence", "sensitive", "third_party",
-               "audience", "created_at", "source_id"}
+               "audience", "created_at", "source_id", "evidence_quote", "evidence_start", "evidence_end"}
     result: list[dict[str, Any]] = []
     for raw in items:
         if not isinstance(raw, Mapping) or not set(raw) <= allowed:
@@ -275,8 +290,20 @@ def validate_semantic_items(
         if item.get("author") != subject or source.canonical_author != subject:
             raise ValueError("cross-speaker semantic evidence rejected")
         supplied_hash = str(item.get("source_content_hash") or "").strip()
-        if supplied_hash and supplied_hash != source.content_hash:
+        if not supplied_hash or supplied_hash != source.content_hash:
             raise ValueError("semantic evidence content hash mismatch")
+        quote = item.get("evidence_quote")
+        start, end = item.get("evidence_start"), item.get("evidence_end")
+        if not isinstance(quote, str) or not quote or len(quote) > 500:
+            raise ValueError("semantic evidence requires a bounded verbatim quote")
+        if not isinstance(start, int) or isinstance(start, bool) or not isinstance(end, int) or isinstance(end, bool):
+            raise ValueError("semantic evidence requires integer quote bounds")
+        if start < 0 or end <= start or end > len(source.canonical_text):
+            raise ValueError("semantic evidence quote bounds are invalid")
+        if source.canonical_text[start:end] != quote:
+            raise ValueError("semantic evidence quote is not verbatim canonical source text")
+        if not _normalized_contains(source.canonical_text, quote):
+            raise ValueError("normalized semantic evidence is not contained in canonical source text")
         if item.get("kind") not in {"fact", "interest"}:
             raise ValueError("semantic item lacks kind/guid")
         item["guid"] = source_key
@@ -289,6 +316,9 @@ def validate_semantic_items(
             raise ValueError("fact text is required")
         if item["kind"] == "interest" and not str(item.get("topic") or "").strip():
             raise ValueError("interest topic is required")
+        claim = item.get("text") if item["kind"] == "fact" else item.get("topic")
+        if not _normalized_contains(quote, claim):
+            raise ValueError("semantic abstraction needs operator review: claim is not deterministically grounded")
         canonical_source_id = stable_semantic_source_id(str(item["guid"]), subject, item)
         supplied_source_id = str(item.get("source_id") or "").strip()
         if supplied_source_id and supplied_source_id != canonical_source_id:

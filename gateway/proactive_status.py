@@ -8,9 +8,31 @@ import sqlite3
 import time
 from typing import Any, Mapping
 
-from gateway.proactive_scheduler import ProactiveConfig
+from gateway.proactive_scheduler import ProactiveConfig, ProactiveMode
 
 _REQUIRED_MODEL = {"provider": "openai-codex", "model": "gpt-5.6-sol", "reasoning_effort": "medium"}
+
+
+def probe_model_readiness(*, now: float | None = None, resolver: Any = None) -> dict[str, Any]:
+    """Resolve real authenticated clients without sending prompts or private history."""
+    timestamp = float(time.time() if now is None else now)
+    if resolver is None:
+        from agent.auxiliary_client import resolve_provider_client
+        resolver = resolve_provider_client
+    tasks: dict[str, Any] = {}
+    for task in ("proactive_gate", "proactive_semantic", "proactive_compose"):
+        try:
+            client, model = resolver("openai-codex", model="gpt-5.6-sol", task=task)
+            ready = bool(
+                client is not None and model == "gpt-5.6-sol"
+                and callable(getattr(getattr(getattr(client, "chat", None), "completions", None), "create", None))
+            )
+            tasks[task] = {"ready": ready, "provider": "openai-codex", "model": model}
+        except Exception as exc:
+            tasks[task] = {"ready": False, "provider": "openai-codex", "model": None,
+                           "error_class": type(exc).__name__}
+    return {"checked_at": timestamp, "ready": all(item["ready"] for item in tasks.values()),
+            "tasks": tasks, "sent_request": False}
 
 
 def _lane_ok(config: Mapping[str, Any], task: str) -> bool:
@@ -24,12 +46,23 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
     timestamp = float(time.time() if now is None else now)
     root = Path(profile_home).expanduser().resolve()
     proactive_raw = (config.get("agent", {}) or {}).get("proactive", {})
-    cfg = ProactiveConfig.from_mapping(proactive_raw if isinstance(proactive_raw, Mapping) else {})
+    config_error = None
+    try:
+        cfg = ProactiveConfig.from_mapping(proactive_raw if isinstance(proactive_raw, Mapping) else {})
+    except (TypeError, ValueError) as exc:
+        config_error = type(exc).__name__
+        cfg = ProactiveConfig(
+            enabled=bool(isinstance(proactive_raw, Mapping) and proactive_raw.get("enabled")),
+            mode=ProactiveMode.DISABLED,
+        )
     compose = proactive_raw.get("compose_model", {}) if isinstance(proactive_raw, Mapping) else {}
     compose_ok = isinstance(compose, Mapping) and compose.get("provider") == "openai-codex" and compose.get("model") == "gpt-5.6-sol" and compose.get("reasoning_effort") == "low" and compose.get("fallback") is False
     result: dict[str, Any] = {
         "profile": profile, "enabled": cfg.enabled, "mode": cfg.mode.value,
         "model_lane_match": _lane_ok(config, "proactive_gate") and _lane_ok(config, "proactive_semantic") and compose_ok,
+        "model_probe": None, "model_probe_age_seconds": None,
+        "alarm_sink_configured": cfg.alarm_sink_configured,
+        "send_rate": 0.0, "send_rate_total": 0, "send_rate_sent": 0,
         "adapter_ready": adapter_ready, "cron_fresh": cron_fresh,
         "participant_registry_ready": None,
         "ownership_conflict": False, "global_circuit": "unknown",
@@ -40,8 +73,11 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
         "attempts": 0, "retries": 0, "last_success_at": None, "last_error_class": None,
         "oldest_claim_age_seconds": None, "extraction": None,
         "watcher_heartbeat_at": None, "watcher_age_seconds": None,
+        "planning_attempt_at": None, "planning_attempt_age_seconds": None,
         "dead": False, "reasons": [],
     }
+    if config_error:
+        result["reasons"].append("proactive_config_invalid")
     db = root / "state.db"
     if db.is_file():
         try:
@@ -91,6 +127,14 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
                         result["adapter_ready"] = health.get("adapter_ready")
                     result["participant_registry_ready"] = health.get("participant_registry_ready")
                     result["extraction"] = health.get("extraction")
+                    result["model_probe"] = health.get("model_probe")
+                    probe = result["model_probe"]
+                    if isinstance(probe, Mapping) and probe.get("checked_at") is not None:
+                        result["model_probe_age_seconds"] = max(0.0, timestamp - float(probe["checked_at"]))
+                planning = con.execute("SELECT value_json,updated_at FROM proactive_health WHERE key='planning_attempt' LIMIT 1").fetchone()
+                if planning:
+                    result["planning_attempt_at"] = float(planning["updated_at"])
+                    result["planning_attempt_age_seconds"] = max(0.0, timestamp - float(planning["updated_at"]))
             con.close()
         except sqlite3.Error:
             result["reasons"].append("state_db_unreadable")
@@ -124,6 +168,12 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
         try:
             memory = sqlite3.connect(f"file:{contact_db.as_posix()}?mode=ro", uri=True)
             result["interest_count"] += int(memory.execute("SELECT count(*) FROM interest").fetchone()[0])
+            send_counts = memory.execute(
+                "SELECT count(*),sum(CASE WHEN gate_decision='sent' THEN 1 ELSE 0 END) FROM proactive_send WHERE created_at>=?",
+                (timestamp - 7 * 86400,),
+            ).fetchone()
+            result["send_rate_total"] += int(send_counts[0] or 0)
+            result["send_rate_sent"] += int(send_counts[1] or 0)
             result["unfolded_interest_events"] += int(memory.execute(
                 "SELECT count(*) FROM interest_event WHERE folded_at IS NULL"
             ).fetchone()[0])
@@ -156,23 +206,37 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
         result["reasons"].append("watcher_stale")
     if cfg.enabled and not result["model_lane_match"]:
         result["reasons"].append("model_lane_mismatch")
+    probe = result["model_probe"]
+    if cfg.enabled and (
+        not isinstance(probe, Mapping) or probe.get("ready") is not True
+        or result["model_probe_age_seconds"] is None or result["model_probe_age_seconds"] > 65 * 60
+    ):
+        result["reasons"].append("model_probe_unavailable_or_stale")
     if cfg.enabled and result["adapter_ready"] is not True:
         result["reasons"].append("adapter_unavailable")
     if cfg.enabled and result["participant_registry_ready"] is not True:
         result["reasons"].append("participant_registry_unavailable")
     if cfg.enabled and result["cron_fresh"] is not True:
         result["reasons"].append("maintenance_cron_stale")
-    if cfg.enabled and result["eligible_interests"] and not result["slots"]:
+    if cfg.enabled and result["eligible_interests"] and (
+        result["planning_attempt_age_seconds"] is None
+        or result["planning_attempt_age_seconds"] > 65 * 60
+    ):
         result["reasons"].append("eligible_interests_unplanned")
     if cfg.enabled and missing_eligible_digest:
         result["reasons"].append("digest_missing")
     if cfg.enabled and result["oldest_digest_age_seconds"] is not None and result["oldest_digest_age_seconds"] > 8 * 86400:
         result["reasons"].append("digest_stale")
-    if cfg.mode.value == "live" and not cfg.allowed_contacts:
-        result["reasons"].append("allowlist_missing")
+    if cfg.enabled and not cfg.alarm_sink_configured:
+        result["reasons"].append("alarm_sink_unconfigured")
+    result["send_rate"] = (
+        result["send_rate_sent"] / result["send_rate_total"] if result["send_rate_total"] else 0.0
+    )
+    if result["send_rate_total"] and result["send_rate"] > 0.40:
+        result["reasons"].append("send_rate_above_40_percent")
     result["reasons"] = sorted(set(result["reasons"]))
     result["dead"] = bool(result["reasons"])
     return result
 
 
-__all__ = ["health_snapshot"]
+__all__ = ["health_snapshot", "probe_model_readiness"]
