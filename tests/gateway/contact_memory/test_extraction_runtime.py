@@ -21,7 +21,20 @@ from gateway.run import (
     _is_successful_completed_turn,
     _submit_contact_memory_extraction,
 )
-from gateway.contact_memory.schema import RetrievalPrincipal, SCHEMA_VERSION
+from gateway.contact_memory.schema import (
+    CommunicationActorRole,
+    CommunicationDirection,
+    CommunicationEvent,
+    CommunicationKind,
+    CommunicationProjection,
+    CommunicationRecommendationOutcome,
+    CommunicationRelation,
+    CommunicationRelationType,
+    ProjectionMethod,
+    RecommendationProjection,
+    RetrievalPrincipal,
+    SCHEMA_VERSION,
+)
 from gateway.contact_memory.store import ContactMemoryStore
 
 
@@ -165,7 +178,7 @@ async def test_gateway_submission_is_profile_scoped_and_scope_gated(
 
 
 @pytest.mark.asyncio
-async def test_extractor_updates_recommendation_ledger_idempotently_and_expires(tmp_path: Path):
+async def test_extractor_recommendation_without_canonical_event_writes_nothing(tmp_path: Path):
     store = ContactMemoryStore(tmp_path, "contact")
     proposal = validate_pending_operation(raw_fact(), "contact", "fact-source")
     fact = store.ingest_extracted_fact(proposal, idempotency_key="fact", auto_promote=True, now=100)["fact"]
@@ -182,12 +195,145 @@ async def test_extractor_updates_recommendation_ledger_idempotently_and_expires(
     async def backend(user, assistant, metadata):
         return [operation]
 
-    first = await propose_turn_memories(store, backend, "u", "a", {"source_id": "turn-rec"})
-    retry = await propose_turn_memories(store, backend, "u", "a", {"source_id": "turn-rec"})
-    assert first == retry
-    active = store.active_recommendations(now=150)
-    assert active[0]["change_requirements"] == ["Withdraw if sleep schedule changes"]
-    assert store.active_recommendations(now=201) == []
+    assert await propose_turn_memories(store, backend, "u", "a", {"source_id": "turn-rec"}) == []
+    assert store.active_recommendations(now=150) == []
+    with sqlite3.connect(store.path) as con:
+        assert con.execute("SELECT count(*) FROM recommendation").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM communication_projection_receipt").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_extractor_mixed_semantic_output_uses_one_atomic_receipt_or_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    store = ContactMemoryStore(tmp_path, "contact")
+    event_id = "a" * 64
+    store.ingest_communication_event(CommunicationEvent(
+        event_id=event_id, platform="synthetic", source_id="b" * 64,
+        occurred_at=2 * 86_400.0, direction=CommunicationDirection.INBOUND,
+        kind=CommunicationKind.RECOMMENDATION, actor_role=CommunicationActorRole.CONTACT,
+        text_hash="c" * 64, text_present=True, text_length=20,
+        provenance="synthetic-fixture",
+    ))
+    support_id = "d" * 64
+    store.ingest_communication_event(CommunicationEvent(
+        event_id=support_id, platform="synthetic", source_id="e" * 64,
+        occurred_at=86_400.0, direction=CommunicationDirection.INBOUND,
+        kind=CommunicationKind.TEXT, actor_role=CommunicationActorRole.CONTACT,
+        text_hash="f" * 64, text_present=True, text_length=20,
+        provenance="synthetic-fixture",
+    ))
+    output = {
+        "proposals": [
+            {
+                "kind": "recommendation", "semantic_key": "coffee:decaf",
+                "topic": "coffee", "recommendation": "Choose decaf after lunch.",
+                "basis_fact_ids": ["legacy-basis"], "confidence": .98,
+                "change_requirements": ["Withdraw if sleep schedule changes"],
+            },
+            {
+                "kind": "entity", "canonical_label": "Decaf coffee",
+                "entity_type": "thing", "confidence": .96,
+            },
+            {
+                "kind": "callback", "semantic_key": "decaf-running-joke",
+                "canonical_label": "decaf running joke", "confidence": .95,
+                "supporting_event_ids": [support_id, event_id],
+            },
+        ],
+        "interest_events": [{
+            "topic": "coffee", "signal_type": "enthusiasm", "valence": "positive",
+        }],
+    }
+
+    async def backend(user, assistant, metadata):
+        return output
+
+    with sqlite3.connect(store.path) as con:
+        con.execute("""CREATE TRIGGER fail_projected_entity BEFORE INSERT ON projected_entity
+                       BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END""")
+    assert await propose_turn_memories(
+        store, backend, "u", "a",
+        {"source_id": "turn-mixed", "communication_event_id": event_id},
+    ) == []
+    with sqlite3.connect(store.path) as con:
+        for table in (
+            "recommendation", "interest_event", "projected_entity", "semantic_callback",
+            "communication_projection_receipt",
+        ):
+            assert con.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
+        con.execute("DROP TRIGGER fail_projected_entity")
+
+    assert await propose_turn_memories(
+        store, backend, "u", "a",
+        {"source_id": "turn-mixed", "communication_event_id": event_id},
+    ) == []
+    with sqlite3.connect(store.path) as con:
+        assert con.execute("SELECT count(*) FROM recommendation").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM interest_event").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM projected_entity").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM semantic_callback").fetchone()[0] == 1
+        assert con.execute(
+            "SELECT projection_count,active FROM communication_projection_receipt"
+        ).fetchone() == (4, 1)
+
+
+@pytest.mark.asyncio
+async def test_extractor_follow_through_uses_canonical_projection_receipt(tmp_path: Path) -> None:
+    store = ContactMemoryStore(tmp_path, "contact")
+    recommendation_id = "1" * 64
+    recommendation_source = "2" * 64
+    store.ingest_communication_event(CommunicationEvent(
+        event_id=recommendation_id, platform="synthetic", source_id=recommendation_source,
+        occurred_at=100.0, direction=CommunicationDirection.OUTBOUND,
+        kind=CommunicationKind.RECOMMENDATION, actor_role=CommunicationActorRole.COUNTERPART,
+        text_hash="3" * 64, text_present=True, text_length=20,
+        provenance="synthetic-fixture",
+    ))
+    store.project_communication_event(
+        recommendation_id,
+        CommunicationProjection(recommendations=(RecommendationProjection(
+            semantic_key="coffee:decaf", outcome=CommunicationRecommendationOutcome.PROPOSED,
+            confidence=1.0, source_method=ProjectionMethod.DETERMINISTIC,
+            explicit_linkage=True, topic="coffee", recommendation="choose decaf",
+        ),)),
+        projector_version="seed-v1",
+    )
+    follow_id = "4" * 64
+    store.ingest_communication_event(
+        CommunicationEvent(
+            event_id=follow_id, platform="synthetic", source_id="5" * 64,
+            occurred_at=200.0, direction=CommunicationDirection.INBOUND,
+            kind=CommunicationKind.FOLLOW_THROUGH, actor_role=CommunicationActorRole.CONTACT,
+            text_hash="6" * 64, text_present=True, text_length=20,
+            provenance="synthetic-fixture",
+        ),
+        relations=(CommunicationRelation(
+            relation_id="7" * 64, event_id=follow_id,
+            relation_type=CommunicationRelationType.FOLLOWS_THROUGH,
+            target_source_id=recommendation_source,
+            target_actor_role=CommunicationActorRole.COUNTERPART,
+        ),),
+    )
+
+    async def backend(user, assistant, metadata):
+        return [{
+            "kind": "follow_through", "semantic_key": "coffee:decaf",
+            "outcome": "fulfilled", "confidence": .99, "explicit_linkage": True,
+        }]
+
+    assert await propose_turn_memories(
+        store, backend, "u", "a",
+        {"source_id": "turn-follow", "communication_event_id": follow_id},
+    ) == []
+    with sqlite3.connect(store.path) as con:
+        assert con.execute(
+            "SELECT status FROM recommendation"
+        ).fetchone() == ("fulfilled",)
+        assert con.execute(
+            "SELECT projection_count FROM communication_projection_receipt "
+            "WHERE communication_event_id=?", (follow_id,),
+        ).fetchone() == (1,)
 
 
 def test_callback_ledger_enforces_turn_or_time_cooldown_with_direct_ask_bypass(tmp_path: Path):

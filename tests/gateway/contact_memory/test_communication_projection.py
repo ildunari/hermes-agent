@@ -164,7 +164,10 @@ def test_batch_replay_is_chronological_and_identity_is_semantic_keyed(tmp_path: 
     assert len(ids) == len(set(ids)) == 2
 
 
-def test_retraction_reverses_folded_interest_exactly_and_preserves_decay_shape(tmp_path: Path) -> None:
+@pytest.mark.parametrize("fold_before_removal", [False, True])
+def test_retraction_reverses_interest_without_caller_reprojection(
+    tmp_path: Path, fold_before_removal: bool,
+) -> None:
     store = ContactMemoryStore(tmp_path, "contact")
     target = _event(
         "reaction-add", kind=CommunicationKind.REACTION_ADD,
@@ -185,9 +188,10 @@ def test_retraction_reverses_folded_interest_exactly_and_preserves_decay_shape(t
         ),)),
         projector_version="phase-d-v1",
     )
-    store.fold_unfolded_interest_events(now=300.0)
-    before = store.list_interests()
-    assert len(before) == 1 and before[0].raw_score > 0
+    if fold_before_removal:
+        store.fold_unfolded_interest_events(now=300.0)
+        before = store.list_interests()
+        assert len(before) == 1 and before[0].raw_score > 0
 
     removal = _event(
         "reaction-remove", at=400.0, kind=CommunicationKind.REACTION_REMOVE,
@@ -201,17 +205,91 @@ def test_retraction_reverses_folded_interest_exactly_and_preserves_decay_shape(t
     store.retract_communication_event(
         removal, target_event_id=target.event_id, relations=(removal_relation,),
     )
-    result = store.project_communication_event(
-        target.event_id, CommunicationProjection(), projector_version="phase-d-v2",
-    )
-
-    assert result.retracted
     assert store.list_interests() == []
     with sqlite3.connect(store.path) as con:
         assert con.execute(
             "SELECT active FROM interest_event WHERE origin_communication_event_id=?",
             (target.event_id,),
         ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT active FROM communication_projection_receipt WHERE communication_event_id=?",
+            (target.event_id,),
+        ).fetchone()[0] == 0
+
+
+def test_reaction_removal_before_add_prevents_all_later_semantic_state(tmp_path: Path) -> None:
+    store = ContactMemoryStore(tmp_path, "contact")
+    target = _event(
+        "pending-reaction-add", kind=CommunicationKind.REACTION_ADD,
+        reaction=CommunicationReactionSubtype.LOVE,
+    )
+    target_source = _id("pending-reacted-message")
+    removal = _event(
+        "pending-reaction-remove", at=90.0, kind=CommunicationKind.REACTION_REMOVE,
+        reaction=CommunicationReactionSubtype.LOVE,
+    )
+    def relation(name: str, event_id: str) -> CommunicationRelation:
+        return CommunicationRelation(
+            relation_id=_id(name), event_id=event_id,
+            relation_type=CommunicationRelationType.REACTION_TO,
+            target_source_id=target_source,
+            target_actor_role=CommunicationActorRole.COUNTERPART,
+        )
+
+    store.retract_communication_event(
+        removal, target_event_id=target.event_id,
+        relations=(relation("pending-removal-relation", removal.event_id),),
+    )
+    store.ingest_communication_event(
+        target, relations=(relation("pending-add-relation", target.event_id),),
+    )
+    result = store.project_communication_event(
+        target.event_id,
+        CommunicationProjection(interests=(_interest(
+            "live music", SignalType.ENGAGED_MENTION, confidence=1.0,
+            method=ProjectionMethod.DETERMINISTIC,
+        ),)),
+        projector_version="phase-d-v1",
+    )
+
+    assert result.retracted
+    assert store.list_interests() == []
+    with sqlite3.connect(store.path) as con:
+        assert con.execute("SELECT count(*) FROM interest_event").fetchone()[0] == 0
+        assert con.execute(
+            "SELECT projection_count,active FROM communication_projection_receipt"
+        ).fetchone() == (0, 1)
+
+
+def test_same_topic_projection_supersession_preserves_exact_legacy_baseline(tmp_path: Path) -> None:
+    store = ContactMemoryStore(tmp_path, "contact")
+    with sqlite3.connect(store.path) as con:
+        con.execute(
+            """INSERT INTO interest(
+              interest_id,topic,parent_id,raw_score,last_evidence_at,evidence_count,valence,
+              half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
+            ) VALUES('legacy-music','music',NULL,4.2,50,7,'positive',180,'active',3.5,2.25,10,50,NULL)"""
+        )
+    baseline = store.list_interests()
+    event = _event("legacy-same-topic", at=100.0)
+    store.ingest_communication_event(event)
+
+    store.project_communication_event(
+        event.event_id, CommunicationProjection(interests=(_interest("music"),)),
+        projector_version="phase-d-v1", now=110.0,
+    )
+    assert store.list_interests() == baseline
+    store.fold_unfolded_interest_events(now=120.0)
+    assert store.list_interests() != baseline
+
+    store.project_communication_event(
+        event.event_id, CommunicationProjection(interests=(_interest("music"),)),
+        projector_version="phase-d-v2", now=130.0,
+    )
+    assert store.list_interests() == baseline
+    with sqlite3.connect(store.path) as con:
+        row = con.execute("SELECT * FROM interest WHERE interest_id='legacy-music'").fetchone()
+        assert row is not None
 
 
 def test_actor_reply_reaction_and_confidence_rules_are_mechanical(tmp_path: Path) -> None:

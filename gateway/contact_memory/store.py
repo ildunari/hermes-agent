@@ -248,7 +248,7 @@ class ContactMemoryStore:
             ).fetchone() if con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
             ).fetchone() else None
-            supported = {"1", "2", "3", "4", "5", "6", str(SCHEMA_VERSION)}
+            supported = {"1", "2", "3", "4", "5", "6", "7", str(SCHEMA_VERSION)}
             if existing is not None and str(existing[0]) not in supported:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {existing[0]}; expected {SCHEMA_VERSION}"
@@ -274,7 +274,7 @@ class ContactMemoryStore:
             if from_version == str(SCHEMA_VERSION):
                 con.execute("COMMIT")
                 return
-            if from_version not in {"1", "2", "3", "4", "5", "6"}:
+            if from_version not in {"1", "2", "3", "4", "5", "6", "7"}:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {from_version}; expected {SCHEMA_VERSION}"
                 )
@@ -1582,6 +1582,9 @@ class ContactMemoryStore:
             "WHERE event_id=? AND lifecycle='active'",
             (removal.event.event_id, target.event.event_id),
         )
+        cls._deactivate_semantic_projections_in(
+            con, target.event.event_id, timestamp=removal.event.occurred_at,
+        )
         con.execute(
             "DELETE FROM communication_retraction_pending WHERE retraction_event_id=?",
             (removal.event.event_id,),
@@ -1642,6 +1645,9 @@ class ContactMemoryStore:
                         "retracted_by_event_id=? WHERE event_id=? AND lifecycle='active'",
                         (event.event_id, target_identity),
                     )
+                self._deactivate_semantic_projections_in(
+                    con, target_identity, timestamp=event.occurred_at,
+                )
                 con.execute(
                     "DELETE FROM communication_retraction_pending WHERE retraction_event_id=?",
                     (event.event_id,),
@@ -1900,34 +1906,90 @@ class ContactMemoryStore:
         return items
 
     @staticmethod
+    def _ensure_interest_projection_baselines_in(
+        con: sqlite3.Connection, topics: Iterable[str],
+    ) -> None:
+        for topic in set(topics):
+            if con.execute(
+                "SELECT 1 FROM interest_projection_baseline WHERE topic=?", (topic,),
+            ).fetchone() is not None:
+                continue
+            interest = con.execute(
+                "SELECT * FROM interest WHERE topic=? AND retired_at IS NULL", (topic,),
+            ).fetchone()
+            if interest is None:
+                con.execute(
+                    "INSERT INTO interest_projection_baseline(topic,baseline_exists) VALUES(?,0)",
+                    (topic,),
+                )
+            else:
+                con.execute(
+                    """INSERT INTO interest_projection_baseline(
+                      topic,baseline_exists,interest_id,raw_score,last_evidence_at,evidence_count,
+                      valence,ts_alpha,ts_beta,updated_at
+                    ) VALUES(?,1,?,?,?,?,?,?,?,?)""",
+                    (topic, interest["interest_id"], interest["raw_score"],
+                     interest["last_evidence_at"], interest["evidence_count"],
+                     interest["valence"], interest["ts_alpha"], interest["ts_beta"],
+                     interest["updated_at"]),
+                )
+
+    @staticmethod
     def _recompute_projected_interest_topics_in(
         con: sqlite3.Connection, topics: Iterable[str], *, timestamp: float,
     ) -> None:
         from .schema import INTEREST_SIGNAL_BANDIT, INTEREST_SIGNAL_WEIGHTS
 
         for topic in set(topics):
+            baseline = con.execute(
+                "SELECT * FROM interest_projection_baseline WHERE topic=?", (topic,),
+            ).fetchone()
             rows = con.execute(
                 "SELECT signal_type,created_at FROM interest_event "
-                "WHERE topic_text=? AND active=1 AND folded_at IS NOT NULL "
-                "ORDER BY created_at,event_id", (topic,),
+                "WHERE topic_text=? AND origin_communication_event_id IS NOT NULL "
+                "AND active=1 AND folded_at IS NOT NULL ORDER BY created_at,event_id",
+                (topic,),
             ).fetchall()
             interest = con.execute(
                 "SELECT * FROM interest WHERE topic=? AND retired_at IS NULL", (topic,),
             ).fetchone()
+            baseline_exists = baseline is not None and int(baseline["baseline_exists"])
             if not rows:
-                if interest is not None:
+                if baseline_exists:
+                    if interest is None:
+                        raise RuntimeError("projection baseline interest disappeared")
+                    con.execute(
+                        """UPDATE interest SET raw_score=?,last_evidence_at=?,evidence_count=?,
+                           valence=?,ts_alpha=?,ts_beta=?,updated_at=? WHERE interest_id=?""",
+                        (baseline["raw_score"], baseline["last_evidence_at"],
+                         baseline["evidence_count"], baseline["valence"], baseline["ts_alpha"],
+                         baseline["ts_beta"], baseline["updated_at"], interest["interest_id"]),
+                    )
+                elif interest is not None:
                     con.execute("DELETE FROM interest WHERE interest_id=?", (interest["interest_id"],))
                 continue
-            score = alpha = beta = 0.0
-            negative = False
+            score = float(baseline["raw_score"]) if baseline_exists else 0.0
+            alpha = float(baseline["ts_alpha"]) - 1.0 if baseline_exists else 0.0
+            beta = float(baseline["ts_beta"]) - 1.0 if baseline_exists else 0.0
+            evidence_count = int(baseline["evidence_count"]) if baseline_exists else 0
+            negative = baseline_exists and baseline["valence"] == InterestValence.NEGATIVE.value
             for row in rows:
                 signal = SignalType(str(row["signal_type"]))
                 score += INTEREST_SIGNAL_WEIGHTS.get(signal, 0.0)
                 da, db = INTEREST_SIGNAL_BANDIT.get(signal, (0.0, 0.0))
                 alpha += da
                 beta += db
+                evidence_count += 1
                 negative = negative or signal is SignalType.EXPLICIT_NEGATIVE
-            latest = max(float(row["created_at"]) for row in rows)
+            latest = max(
+                [float(row["created_at"]) for row in rows]
+                + ([float(baseline["last_evidence_at"])] if baseline_exists else [])
+            )
+            valence = (
+                InterestValence.NEGATIVE.value if negative
+                else str(baseline["valence"]) if baseline_exists
+                else InterestValence.POSITIVE.value
+            )
             if interest is None:
                 con.execute(
                     """INSERT INTO interest(
@@ -1935,16 +1997,15 @@ class ContactMemoryStore:
                       valence,half_life_days,state,ts_alpha,ts_beta,created_at,updated_at,retired_at
                     ) VALUES(?,?,NULL,?,?,?,?,90,'candidate',?,?,?, ?,NULL)""",
                     (_projection_identity("aggregate-v1", "0" * 64, "interest", topic), topic,
-                     score, latest, len(rows), "negative" if negative else "positive",
-                     max(1.0, 1.0 + alpha), max(1.0, 1.0 + beta), timestamp, timestamp),
+                     score, latest, evidence_count, valence, max(1.0, 1.0 + alpha),
+                     max(1.0, 1.0 + beta), timestamp, timestamp),
                 )
             else:
                 con.execute(
                     "UPDATE interest SET raw_score=?,last_evidence_at=?,evidence_count=?,valence=?,"
                     "ts_alpha=?,ts_beta=?,updated_at=? WHERE interest_id=?",
-                    (score, latest, len(rows), "negative" if negative else "positive",
-                     max(1.0, 1.0 + alpha), max(1.0, 1.0 + beta), timestamp,
-                     interest["interest_id"]),
+                    (score, latest, evidence_count, valence, max(1.0, 1.0 + alpha),
+                     max(1.0, 1.0 + beta), timestamp, interest["interest_id"]),
                 )
 
     @staticmethod
@@ -1983,6 +2044,60 @@ class ContactMemoryStore:
                 "UPDATE recommendation SET status=?,updated_at=? WHERE recommendation_id=?",
                 (status, timestamp, recommendation_id),
             )
+
+    @classmethod
+    def _deactivate_semantic_projections_in(
+        cls, con: sqlite3.Connection, event_id: str, *, timestamp: float,
+    ) -> tuple[set[str], set[str]]:
+        affected_topics = {
+            str(row["topic_text"]) for row in con.execute(
+                "SELECT topic_text FROM interest_event "
+                "WHERE origin_communication_event_id=? AND active=1", (event_id,),
+            )
+        }
+        affected_recommendations = {
+            str(row["recommendation_id"]) for row in con.execute(
+                "SELECT recommendation_id FROM communication_recommendation_event "
+                "WHERE event_id=? AND projector_version IS NOT NULL AND active=1", (event_id,),
+            )
+        }
+        con.execute(
+            "UPDATE communication_projection_receipt SET active=0 "
+            "WHERE communication_event_id=? AND active=1", (event_id,),
+        )
+        con.execute(
+            "UPDATE interest_event SET active=0 "
+            "WHERE origin_communication_event_id=? AND active=1", (event_id,),
+        )
+        con.execute(
+            "UPDATE projected_entity SET active=0 "
+            "WHERE origin_communication_event_id=? AND active=1", (event_id,),
+        )
+        con.execute(
+            "UPDATE semantic_callback SET active=0 "
+            "WHERE origin_communication_event_id=? AND active=1", (event_id,),
+        )
+        con.execute(
+            "UPDATE communication_recommendation_event SET active=0 "
+            "WHERE event_id=? AND projector_version IS NOT NULL AND active=1", (event_id,),
+        )
+        con.execute(
+            "UPDATE recommendation SET status='withdrawn',updated_at=? WHERE recommendation_id IN ("
+            "SELECT recommendation_id FROM projected_recommendation "
+            "WHERE origin_communication_event_id=? AND active=1) "
+            "AND status IN ('proposed','active')", (timestamp, event_id),
+        )
+        con.execute(
+            "UPDATE projected_recommendation SET active=0 "
+            "WHERE origin_communication_event_id=? AND active=1", (event_id,),
+        )
+        cls._recompute_projected_interest_topics_in(
+            con, affected_topics, timestamp=timestamp,
+        )
+        cls._recompute_projected_recommendations_in(
+            con, affected_recommendations, timestamp=timestamp,
+        )
+        return affected_topics, affected_recommendations
 
     @classmethod
     def _project_communication_event_in(
@@ -2024,53 +2139,23 @@ class ContactMemoryStore:
                 retracted=bundle.event.lifecycle is CommunicationLifecycle.RETRACTED,
             )
 
-        affected_topics = {
+        prior_topics = {
             str(row["topic_text"]) for row in con.execute(
                 "SELECT topic_text FROM interest_event "
                 "WHERE origin_communication_event_id=? AND active=1",
                 (bundle.event.event_id,),
             )
         }
-        affected_recommendations = {
-            str(row["recommendation_id"]) for row in con.execute(
-                "SELECT recommendation_id FROM communication_recommendation_event "
-                "WHERE event_id=? AND projector_version IS NOT NULL AND active=1",
-                (bundle.event.event_id,),
-            )
+        projected_topics = {
+            str(item["topic"]) for item in items if item["kind"] == "interest"
         }
-        con.execute(
-            "UPDATE communication_projection_receipt SET active=0 "
-            "WHERE communication_event_id=? AND active=1", (bundle.event.event_id,),
+        cls._ensure_interest_projection_baselines_in(
+            con, prior_topics | projected_topics,
         )
-        con.execute(
-            "UPDATE interest_event SET active=0 WHERE origin_communication_event_id=? AND active=1",
-            (bundle.event.event_id,),
+        affected_topics, affected_recommendations = cls._deactivate_semantic_projections_in(
+            con, bundle.event.event_id, timestamp=timestamp,
         )
-        con.execute(
-            "UPDATE projected_entity SET active=0 WHERE origin_communication_event_id=? AND active=1",
-            (bundle.event.event_id,),
-        )
-        con.execute(
-            "UPDATE semantic_callback SET active=0 WHERE origin_communication_event_id=? AND active=1",
-            (bundle.event.event_id,),
-        )
-        con.execute(
-            "UPDATE communication_recommendation_event SET active=0 "
-            "WHERE event_id=? AND projector_version IS NOT NULL AND active=1",
-            (bundle.event.event_id,),
-        )
-        con.execute(
-            "UPDATE recommendation SET status='withdrawn',updated_at=? WHERE recommendation_id IN ("
-            "SELECT recommendation_id FROM projected_recommendation "
-            "WHERE origin_communication_event_id=? AND active=1) "
-            "AND status IN ('proposed','active')",
-            (timestamp, bundle.event.event_id),
-        )
-        con.execute(
-            "UPDATE projected_recommendation SET active=0 "
-            "WHERE origin_communication_event_id=? AND active=1",
-            (bundle.event.event_id,),
-        )
+        affected_topics.update(projected_topics)
 
         for item in items:
             kind = str(item["kind"])
@@ -2334,7 +2419,8 @@ class ContactMemoryStore:
         affected: dict[str, str] = {}
         folded = 0
         rows = con.execute(
-            "SELECT event_id,topic_text,signal_type,valence,created_at "
+            "SELECT event_id,topic_text,signal_type,valence,created_at,"
+            "origin_communication_event_id "
             "FROM interest_event WHERE folded_at IS NULL AND active=1 "
             "ORDER BY created_at,event_id"
         ).fetchall()
@@ -2399,6 +2485,46 @@ class ContactMemoryStore:
                     ),
                 )
                 affected[interest_id] = topic
+            baseline = con.execute(
+                "SELECT * FROM interest_projection_baseline WHERE topic=?", (topic,),
+            ).fetchone()
+            ordinary_events = [
+                event for event in events if event["origin_communication_event_id"] is None
+            ]
+            if baseline is not None and ordinary_events:
+                ordinary_score = ordinary_alpha = ordinary_beta = 0.0
+                ordinary_negative = False
+                for event in ordinary_events:
+                    signal = SignalType(str(event["signal_type"]))
+                    ordinary_score += INTEREST_SIGNAL_WEIGHTS.get(signal, 0.0)
+                    da, db = INTEREST_SIGNAL_BANDIT.get(signal, (0.0, 0.0))
+                    ordinary_alpha += da
+                    ordinary_beta += db
+                    ordinary_negative = ordinary_negative or signal is SignalType.EXPLICIT_NEGATIVE
+                ordinary_latest = max(float(event["created_at"]) for event in ordinary_events)
+                if int(baseline["baseline_exists"]):
+                    con.execute(
+                        """UPDATE interest_projection_baseline SET raw_score=?,last_evidence_at=?,
+                           evidence_count=?,valence=?,ts_alpha=?,ts_beta=?,updated_at=? WHERE topic=?""",
+                        (float(baseline["raw_score"]) + ordinary_score,
+                         max(float(baseline["last_evidence_at"]), ordinary_latest),
+                         int(baseline["evidence_count"]) + len(ordinary_events),
+                         InterestValence.NEGATIVE.value if ordinary_negative else baseline["valence"],
+                         max(0.0001, float(baseline["ts_alpha"]) + ordinary_alpha),
+                         max(0.0001, float(baseline["ts_beta"]) + ordinary_beta),
+                         timestamp, topic),
+                    )
+                else:
+                    con.execute(
+                        """UPDATE interest_projection_baseline SET baseline_exists=1,interest_id=?,
+                           raw_score=?,last_evidence_at=?,evidence_count=?,valence=?,ts_alpha=?,
+                           ts_beta=?,updated_at=? WHERE topic=?""",
+                        (interest_id, ordinary_score, ordinary_latest, len(ordinary_events),
+                         InterestValence.NEGATIVE.value if ordinary_negative
+                         else InterestValence.POSITIVE.value,
+                         max(1.0, 1.0 + ordinary_alpha), max(1.0, 1.0 + ordinary_beta),
+                         timestamp, topic),
+                    )
             for event in events:
                 folded += con.execute(
                     "UPDATE interest_event SET folded_at=? WHERE event_id=? "

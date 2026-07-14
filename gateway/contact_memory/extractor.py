@@ -20,8 +20,10 @@ import threading
 from typing import Any, Awaitable, Callable, Mapping, Protocol, cast
 
 from .schema import (
-    AssertionType, Audience, CommunicationProjection, FactProposal, FactStatus,
-    InterestProjection, InterestValence, MentionPolicy, ProjectionMethod, SignalType,
+    AssertionType, Audience, CallbackProjection, CommunicationProjection,
+    CommunicationRecommendationOutcome, EntityProjection, FactProposal, FactStatus,
+    InterestProjection, InterestValence, MentionPolicy, ProjectionMethod,
+    RecommendationProjection, SignalType,
 )
 from .store import ContactMemoryStore, normalize_interest_topic
 
@@ -321,11 +323,18 @@ async def propose_turn_memories(store: ContactMemoryStore, extractor: Extractor 
     else:
         raw_interest_events = raw_interest_events[:_MAX_INTEREST_EVENTS]
     proposal_ids: list[str] = []
+    recommendation_proposals: list[RecommendationProjection] = []
+    entity_proposals: list[EntityProjection] = []
+    callback_proposals: list[CallbackProjection] = []
+    communication_event_id = str(metadata.get("communication_event_id") or "").strip()
     for raw in raw_operations:
         if not isinstance(raw, Mapping):
             raise ValueError("extractor operation must be an object")
         if raw.get("kind") == "recommendation":
-            allowed = {"kind", "topic", "recommendation", "basis_fact_ids", "confidence", "change_requirements", "expires_at"}
+            allowed = {
+                "kind", "semantic_key", "topic", "recommendation", "basis_fact_ids",
+                "confidence", "change_requirements", "expires_at",
+            }
             if set(raw) - allowed:
                 raise ValueError("unknown recommendation fields")
             topic = _clean(raw.get("topic"), "topic", limit=128)
@@ -337,18 +346,64 @@ async def propose_turn_memories(store: ContactMemoryStore, extractor: Extractor 
                 raise ValueError("recommendation requires confidence and basis facts")
             if not isinstance(requirements, list) or not requirements:
                 raise ValueError("recommendation requires change requirements")
-            basis_ids = [_clean(item, "basis_fact_id", limit=64) for item in basis[:12]]
-            changes = [_clean(item, "change_requirement", limit=200) for item in requirements[:12]]
-            stable = json.dumps(raw, ensure_ascii=False, sort_keys=True)
-            rec_id = await asyncio.to_thread(
-                store.set_recommendation, topic, recommendation, basis_ids,
+            [_clean(item, "basis_fact_id", limit=64) for item in basis[:12]]
+            [_clean(item, "change_requirement", limit=200) for item in requirements[:12]]
+            semantic_key = str(raw.get("semantic_key") or "").strip().casefold()
+            if not semantic_key:
+                semantic_key = "recommendation:" + hashlib.sha256(
+                    f"{topic}\0{recommendation}".encode()
+                ).hexdigest()[:24]
+            recommendation_proposals.append(RecommendationProjection(
+                semantic_key=semantic_key,
+                outcome=CommunicationRecommendationOutcome.PROPOSED,
                 confidence=confidence,
-                status="active" if confidence >= _AUTO_CONFIDENCE else "proposed",
-                change_requirements=changes,
-                expires_at=float(raw["expires_at"]) if raw.get("expires_at") is not None else None,
-                idempotency_key=hashlib.sha256(f"{source_id}\0{stable}".encode()).hexdigest(),
-            )
-            proposal_ids.append(rec_id)
+                source_method=ProjectionMethod.MODEL,
+                explicit_linkage=False,
+                topic=topic,
+                recommendation=recommendation,
+            ))
+            continue
+        if raw.get("kind") == "entity":
+            if set(raw) != {"kind", "canonical_label", "entity_type", "confidence"}:
+                raise ValueError("unknown entity fields")
+            entity_proposals.append(EntityProjection(
+                canonical_label=_clean(raw.get("canonical_label"), "canonical_label", limit=120),
+                entity_type=_clean(raw.get("entity_type"), "entity_type", limit=32),
+                confidence=float(raw.get("confidence", 0.0)),
+                source_method=ProjectionMethod.MODEL,
+            ))
+            continue
+        if raw.get("kind") == "follow_through":
+            allowed = {"kind", "semantic_key", "outcome", "confidence", "explicit_linkage"}
+            if set(raw) - allowed:
+                raise ValueError("unknown follow-through fields")
+            recommendation_proposals.append(RecommendationProjection(
+                semantic_key=_clean(raw.get("semantic_key"), "semantic_key", limit=128),
+                outcome=CommunicationRecommendationOutcome(str(raw.get("outcome") or "")),
+                confidence=float(raw.get("confidence", 0.0)),
+                source_method=ProjectionMethod.MODEL,
+                explicit_linkage=raw.get("explicit_linkage") is True,
+            ))
+            continue
+        if raw.get("kind") == "callback":
+            allowed = {
+                "kind", "semantic_key", "canonical_label", "confidence",
+                "supporting_event_ids",
+            }
+            if set(raw) - allowed:
+                raise ValueError("unknown callback fields")
+            support = raw.get("supporting_event_ids")
+            if not isinstance(support, list):
+                raise ValueError("callback supporting_event_ids must be a list")
+            callback_proposals.append(CallbackProjection(
+                semantic_key=_clean(raw.get("semantic_key"), "semantic_key", limit=128),
+                canonical_label=_clean(raw.get("canonical_label"), "canonical_label", limit=120),
+                confidence=float(raw.get("confidence", 0.0)),
+                source_method=ProjectionMethod.MODEL,
+                supporting_event_ids=tuple(
+                    _clean(item, "supporting_event_id", limit=64) for item in support[:12]
+                ),
+            ))
             continue
         proposal = validate_pending_operation(raw, store.contact_id, source_id)
         result = await asyncio.to_thread(
@@ -360,7 +415,6 @@ async def propose_turn_memories(store: ContactMemoryStore, extractor: Extractor 
 
     # Interest extraction is an advisory proposal lane. It may only reach the
     # existing interest_event ledger through a canonical communication bundle.
-    communication_event_id = str(metadata.get("communication_event_id") or "").strip()
     topic_valences: dict[str, InterestValence] = {}
     interest_proposals: list[InterestProjection] = []
     for raw in raw_interest_events:
@@ -390,13 +444,22 @@ async def propose_turn_memories(store: ContactMemoryStore, extractor: Extractor 
                 confidence=1.0, source_method=ProjectionMethod.DETERMINISTIC,
             ))
 
-    if communication_event_id and interest_proposals:
+    semantic_projection = CommunicationProjection(
+        interests=tuple(interest_proposals),
+        entities=tuple(entity_proposals),
+        recommendations=tuple(recommendation_proposals),
+        callbacks=tuple(callback_proposals),
+    )
+    if communication_event_id and any((
+        semantic_projection.interests, semantic_projection.entities,
+        semantic_projection.recommendations, semantic_projection.callbacks,
+    )):
         try:
             await asyncio.to_thread(
                 store.project_communication_event,
                 communication_event_id,
-                CommunicationProjection(interests=tuple(interest_proposals)),
-                projector_version="qwen-interest-v1",
+                semantic_projection,
+                projector_version="qwen-semantic-v1",
             )
         except Exception:
             # Model proposals are fail-open and never bypass the projector.

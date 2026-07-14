@@ -13,7 +13,7 @@ import math
 import re
 from typing import Any
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _PROACTIVE_ITEM_WORD_RE = re.compile(r"[a-z0-9]+", re.I)
 
@@ -904,6 +904,24 @@ CREATE TABLE IF NOT EXISTS interest (
   retired_at REAL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS interest_topic_live ON interest(topic) WHERE retired_at IS NULL;
+CREATE TABLE IF NOT EXISTS interest_projection_baseline (
+  topic TEXT PRIMARY KEY,
+  baseline_exists INTEGER NOT NULL CHECK(baseline_exists IN (0,1)),
+  interest_id TEXT,
+  raw_score REAL,
+  last_evidence_at REAL,
+  evidence_count INTEGER,
+  valence TEXT CHECK(valence IS NULL OR valence IN ('positive','negative','neutral')),
+  ts_alpha REAL,
+  ts_beta REAL,
+  updated_at REAL,
+  CHECK((baseline_exists=0 AND interest_id IS NULL AND raw_score IS NULL
+         AND last_evidence_at IS NULL AND evidence_count IS NULL AND valence IS NULL
+         AND ts_alpha IS NULL AND ts_beta IS NULL AND updated_at IS NULL) OR
+        (baseline_exists=1 AND interest_id IS NOT NULL AND raw_score IS NOT NULL
+         AND last_evidence_at IS NOT NULL AND evidence_count IS NOT NULL AND valence IS NOT NULL
+         AND ts_alpha IS NOT NULL AND ts_beta IS NOT NULL AND updated_at IS NOT NULL))
+);
 CREATE TABLE IF NOT EXISTS proactive_send (
   send_id TEXT PRIMARY KEY,
   interest_id TEXT REFERENCES interest(interest_id),

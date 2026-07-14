@@ -136,7 +136,7 @@ Red-first verification reproduced 27 failures in the focused live-ingress file b
 
 ## Phase D — Semantic projections
 
-Status: Phase D implementation complete and locally verified; parent Gate D review is pending. Phase E has not started.
+Status: Independent Gate D findings repaired and locally verified; parent Gate D rerun is pending. Phase E has not started.
 
 Commit: Phase D boundary commit containing this progress record (the final SHA is reported by the implementation thread).
 
@@ -156,7 +156,13 @@ The final focused projection plus interest-ledger run completed with 41 passed a
 
 The requested broad `scripts/run_tests.sh tests/gateway -q` run is not globally green on this branch: it completed with 129 failures across 37 files. The failures remain outside the Phase D contact-memory and interest suites and cover the existing async session-store policy, API toolsets, command handlers/config expectations, Telegram metadata/documents, Slack, voice, and other unrelated gateway surfaces; every contact-memory file in the broad run passed.
 
+Independent Gate D rejected the boundary commit with three P0 defects. The repair removes the extractor recommendation bypass and sends recommendation, interest, entity, follow-through, and callback model proposals through one authenticated `CommunicationProjection` transaction and receipt. Exact regressions prove unauthenticated recommendation output writes nothing and injected mixed-output failure rolls back every semantic table before a successful one-receipt retry.
+
+Reaction removal now deactivates receipts and every semantic projection while applying the canonical retraction transaction, including pending removal-before-add handling. Regression coverage removes the caller-triggered empty reprojection and verifies removal before fold, after fold, and before add. A schema-8 projector-baseline ledger preserves migrated/reviewed/legacy aggregate score, count, valence, bandit, timestamp, state, and identity while projector-owned folded contributions are added, superseded, or retracted.
+
+Repair verification completed the focused extractor/projection/interest set with 65 passed and 0 failed, then the complete 14-file contact-memory plus interest-ledger set with 302 passed and 0 failed. Focused `py_compile`, Ruff, and `git diff --check` passed. No live data was touched, no gateway was restarted, no send mode changed, and Phase E/F did not begin.
+
 ### Current boundaries
 
 - Phase D defines and exercises semantic projection only. It does not scan historical messages, apply reviewed evidence to live Poke/Guest stores, run the Phase E backfill, or change observe-only delivery behavior.
-- Parent Gate D review remains pending. This phase did not access live stores/messages, restart a gateway, enable sends, push, or open a pull request.
+- Parent Gate D rerun remains pending. This phase did not access live stores/messages, restart a gateway, enable sends, push, or open a pull request.
