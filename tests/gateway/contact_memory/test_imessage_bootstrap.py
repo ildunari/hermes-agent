@@ -148,6 +148,10 @@ def test_guest_visibility_requires_operator_file_bound_to_review_bytes(tmp_path:
         'guest_visible_source_ids':['approved-source'],
     }))
     assert _operator_approval(approval,review,manifest)=={'approved-source'}
+    approval.chmod(0o620)
+    with pytest.raises(ValueError,match='owned by the operator'):
+        _operator_approval(approval,review,manifest)
+    approval.chmod(0o600)
     review.write_text('{"dossiers":{"changed":true}}')
     with pytest.raises(ValueError,match='reviewed dossiers'):
         _operator_approval(approval,review,manifest)

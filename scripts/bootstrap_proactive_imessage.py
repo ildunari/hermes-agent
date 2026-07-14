@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import stat
 import sys
 import tempfile
@@ -130,7 +131,11 @@ def run_semantic_workflow(chunks, sources, manifest, staging: Path, *, call_mode
 
 
 def _operator_approval(path: Path, review_path: Path, manifest: dict[str, Any]) -> set[str]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    approval_path = path.expanduser().resolve(strict=True)
+    approval_stat = approval_path.stat()
+    if approval_stat.st_uid != os.getuid() or approval_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ValueError("operator approval must be owned by the operator and not group/world writable")
+    value = json.loads(approval_path.read_text(encoding="utf-8"))
     review_hash = hashlib.sha256(review_path.read_bytes()).hexdigest()
     if value.get("operator_approved") is not True or value.get("rowset_sha256") != manifest["rowset_sha256"]:
         raise ValueError("operator approval is absent or bound to another rowset")
@@ -306,7 +311,35 @@ def main(argv: list[str] | None = None) -> int:
             source_hash=manifest["rowset_sha256"] + ":" + subject, manifest=manifest,
             dry_run=not args.apply,
         )
-    print(json.dumps({"manifest": str(manifest_path), "results": results}, indent=2, sort_keys=True))
+    output: dict[str, Any] = {"manifest": str(manifest_path), "results": results}
+    if not args.apply:
+        approval_path = (
+            Path(args.operator_approval).expanduser().resolve()
+            if args.operator_approval else staging / manifest["rowset_sha256"] / "operator-approval.json"
+        )
+        command = [
+            sys.executable, str(Path(__file__).resolve()),
+            "--source-person", args.source_person,
+            "--chat-db", str(db_path),
+            "--limit", str(args.limit),
+            "--chunk-size", str(args.chunk_size),
+            "--staging-dir", str(staging),
+            "--poke-root", str(supplied_roots["kosta-owner"]),
+            "--guest-root", str(supplied_roots["stephen-lucier"]),
+            "--poke-contact-id", args.poke_contact_id,
+            "--guest-contact-id", args.guest_contact_id,
+            "--task", args.task,
+        ]
+        for handle in args.handle:
+            command.extend(("--handle", handle))
+        command.extend((
+            "--review-manifest", str(Path(args.review_manifest).expanduser().resolve()),
+            "--operator-approval", str(approval_path),
+            "--apply",
+        ))
+        output["apply_command"] = shlex.join(command)
+        output["operator_approval_required"] = str(approval_path)
+    print(json.dumps(output, indent=2, sort_keys=True))
     return 0
 
 
