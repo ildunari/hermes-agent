@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -14,7 +15,8 @@ ALLOW=(('poke','kosta-owner','owner'),('guest','stephen-lucier','guest'))
 class Adapter:
     platform=SimpleNamespace(value='bluebubbles')
     def __init__(self,result): self.result=result; self.calls=0
-    async def _resolve_chat_guid(self,_): return 'iMessage;-;existing'
+    async def resolve_authenticated_existing_dm(self,chat_id,user_id):
+        return ('iMessage;-;existing','fingerprint') if chat_id and user_id else None
     async def send(self,*args,**kwargs): self.calls+=1; await asyncio.sleep(0); return self.result
 
 
@@ -22,16 +24,23 @@ def setup(tmp_path: Path):
     state=ProactiveStateStore(tmp_path/'state.db')
     route={'platform':'bluebubbles','chat_type':'dm','chat_id':'existing','user_id':'owner','session_id':'parent'}
     for i in range(5): state.register_inbound(profile='poke',contact_id='kosta-owner',route=route,timezone_name='UTC',source_id=f'm{i}',received_at=NOW-100+i)
-    cfg=ProactiveConfig(enabled=True,dry_run=False,mode=ProactiveMode.LIVE,allowed_contacts=ALLOW)
-    scheduler=ProactiveScheduler(state_db_path=tmp_path/'state.db',profile_home=tmp_path,profile_name='poke',config=cfg)
+    cfg=ProactiveConfig(enabled=True,dry_run=False,mode=ProactiveMode.LIVE,allowed_contacts=ALLOW,
+                        active_start='00:00',active_end='23:59')
+    scheduler=ProactiveScheduler(state_db_path=tmp_path/'state.db',profile_home=tmp_path,profile_name='poke',config=cfg,
+                                 ownership_registry_path=tmp_path/'ownership.db')
     slot=scheduler.arm_slot(ROUTE,kind='checkin',fire_at=NOW-1,now=NOW-2)
     claim=scheduler.claim_due(worker_id='x',now=NOW)[0]
     return scheduler,claim,slot
 
+def transport(adapter, scheduler):
+    scheduler.ownership_registry.acquire_transport('runner','adapter',now=NOW)
+    return BlueBubblesProactiveDelivery(adapter,ownership_registry=scheduler.ownership_registry,
+                                        runner_id='runner',adapter_id='adapter')
+
 @pytest.mark.asyncio
 async def test_exactly_once_concurrent_delivery(tmp_path: Path):
     scheduler,claim,slot=setup(tmp_path); adapter=Adapter(SendResult(True,message_id='guid'))
-    delivery=BlueBubblesProactiveDelivery(adapter)
+    delivery=transport(adapter,scheduler)
     results=await asyncio.gather(*[deliver_prepared_exactly_once(scheduler=scheduler,delivery=delivery,route=ROUTE,claim=claim,text='one',correlation_id=str(i),now=NOW) for i in range(2)])
     assert adapter.calls==1 and 'sent' in results
     with scheduler._connect() as con:
@@ -42,7 +51,7 @@ async def test_exactly_once_concurrent_delivery(tmp_path: Path):
 @pytest.mark.parametrize(('send_result','expected','calls'),[(SendResult(False,error='timeout'), 'delivery_unknown',1),(SendResult(False,error='connect',retryable=True),'retry_wait',1),(SendResult(False,error='partial',raw_response={'partial_delivery':True}),'partial_delivery',1)])
 async def test_delivery_uncertainty_and_retry_classification(tmp_path: Path,send_result,expected,calls):
     scheduler,claim,_=setup(tmp_path); adapter=Adapter(send_result)
-    result=await deliver_prepared_exactly_once(scheduler=scheduler,delivery=BlueBubblesProactiveDelivery(adapter),route=ROUTE,claim=claim,text='one',correlation_id='c',now=NOW)
+    result=await deliver_prepared_exactly_once(scheduler=scheduler,delivery=transport(adapter,scheduler),route=ROUTE,claim=claim,text='one',correlation_id='c',now=NOW)
     assert result==expected and adapter.calls==calls
 
 @pytest.mark.asyncio
@@ -50,8 +59,15 @@ async def test_nonallowlisted_refused_before_adapter(tmp_path: Path):
     scheduler,claim,_=setup(tmp_path); adapter=Adapter(SendResult(True,message_id='x'))
     bad=ContactRoute('mom','poke','UTC','owner','dm','existing')
     with pytest.raises(ValueError,match='non-allowlisted'):
-        await BlueBubblesProactiveDelivery(adapter).deliver(route=bad,text='x',slot_id=claim.slot_id,correlation_id='c')
+        await transport(adapter,scheduler).deliver(route=bad,text='x',slot_id=claim.slot_id,correlation_id='c')
     assert adapter.calls==0
+
+
+def test_final_check_refuses_outside_active_hours(tmp_path: Path):
+    scheduler,claim,_=setup(tmp_path)
+    scheduler.config=dataclasses.replace(scheduler.config,active_start='09:00',active_end='09:01')
+    scheduler.reserve_delivery(claim,'one',now=NOW)
+    assert scheduler.final_delivery_check(ROUTE,claim,now=NOW)=='outside_active_hours'
 
 
 def test_circuit_breaker_and_sprawl_cleanup(tmp_path: Path):

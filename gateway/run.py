@@ -40,6 +40,7 @@ import signal
 import tempfile
 import threading
 import time
+import uuid
 import sqlite3
 from collections import OrderedDict
 from contextvars import copy_context
@@ -7333,9 +7334,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     async def _proactive_scheduler_watcher(self) -> None:
         """Drive isolated profile policy off-loop and Poke-owned transport on-loop."""
+        from hermes_cli.profiles import get_active_profile_name
+        runner_profile = get_active_profile_name() or os.getenv("HERMES_PROFILE") or "default"
+        if runner_profile != "poke":
+            logger.info("Proactive watcher disabled for non-Poke runner profile=%s", runner_profile)
+            return
+        transport_runner_id = f"poke:{os.getpid()}:{uuid.uuid4().hex}"
         while self._running:
             from hermes_cli.profiles import get_active_profile_name, get_profile_dir
             active = get_active_profile_name() or os.getenv("HERMES_PROFILE") or "default"
+            next_wake_seconds = 1800.0
             for profile in dict.fromkeys((active, "poke", "guest")):
                 correlation_id = uuid.uuid4().hex
                 try:
@@ -7360,6 +7368,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 generate=self._proactive_compose_generate,
                                 gate_verdict=self._proactive_gate_verdict,
                                 prepared_sink=prepared,
+                                web_fallback=__import__("gateway.proactive_fetch", fromlist=["CallableWebFallback"]).CallableWebFallback(
+                                    lambda topic: __import__("tools.web_tools", fromlist=["web_search_tool"]).web_search_tool(topic, limit=5)
+                                ),
                             )
                             scheduler = ProactiveScheduler(
                                 state_db_path=Path(profile_home) / "state.db",
@@ -7375,23 +7386,40 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         adapter = self.adapters.get(Platform.BLUEBUBBLES)
                         if adapter is None:
                             raise RuntimeError("Poke BlueBubbles adapter unavailable")
+                        latest_config = _load_gateway_config_for_profile(profile)
                         scheduler = ProactiveScheduler(
                             state_db_path=Path(profile_home) / "state.db",
-                            profile_home=profile_home, profile_name=profile, config=cfg,
+                            profile_home=profile_home, profile_name=profile,
+                            config=ProactiveConfig.from_mapping(latest_config),
                         )
-                        delivery = BlueBubblesProactiveDelivery(adapter, owner_profile="poke")
+                        adapter_id = f"{type(adapter).__module__}.{type(adapter).__qualname__}:{id(adapter)}"
+                        scheduler.ownership_registry.acquire_transport(
+                            transport_runner_id, adapter_id, now=time.time()
+                        )
+                        delivery = BlueBubblesProactiveDelivery(
+                            adapter, owner_profile="poke", ownership_registry=scheduler.ownership_registry,
+                            runner_id=transport_runner_id, adapter_id=adapter_id,
+                        )
                         for route, claim, text in prepared[:1]:
-                            await deliver_prepared_exactly_once(
-                                scheduler=scheduler, delivery=delivery, route=route,
-                                claim=claim, text=text, correlation_id=correlation_id,
-                            )
+                            barriers = getattr(self, "_proactive_delivery_barriers", None)
+                            if barriers is None:
+                                barriers = self._proactive_delivery_barriers = {}
+                            barrier = barriers.setdefault(route.contact_hash, asyncio.Lock())
+                            async with barrier:
+                                await deliver_prepared_exactly_once(
+                                    scheduler=scheduler, delivery=delivery, route=route,
+                                    claim=claim, text=text, correlation_id=correlation_id,
+                                )
+                    retry_at = scheduler.earliest_retry_at()
+                    if retry_at is not None:
+                        next_wake_seconds = min(next_wake_seconds, max(1.0, retry_at - time.time()))
                     logger.info("Proactive tick profile=%s result=%s correlation_id=%s", profile, result, correlation_id)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     # Per-profile isolation: a broken Guest tick never hides Poke.
                     logger.warning("Proactive scheduler tick failed profile=%s correlation_id=%s", profile, correlation_id, exc_info=True)
-            for _ in range(1800):
+            for _ in range(max(1, int(next_wake_seconds))):
                 if not self._running:
                     return
                 await asyncio.sleep(1)
@@ -12159,20 +12187,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _proactive_source_id = hashlib.sha256(
                     f"{session_entry.session_id}\0{_proactive_ts:.6f}\0{event.text or ''}".encode()
                 ).hexdigest()
-            _proactive_task = asyncio.create_task(_record_proactive_inbound(
-                config_raw=_proactive_cfg,
-                trusted_scope=trusted_contact_scope,
-                profile_home=self._resolve_profile_home_for_source(source),
-                profile=str(getattr(source, "profile", None) or os.getenv("HERMES_PROFILE") or "default"),
-                source=source,
-                session_id=session_entry.session_id,
-                source_id=_proactive_source_id,
-                text=str(event.text or ""),
-                received_at=_proactive_ts,
-                metadata=getattr(event, "metadata", None),
-            ))
-            self._background_tasks.add(_proactive_task)
-            _proactive_task.add_done_callback(self._background_tasks.discard)
+            barriers = getattr(self, "_proactive_delivery_barriers", None)
+            if barriers is None:
+                barriers = self._proactive_delivery_barriers = {}
+            from gateway.contact_memory.store import opaque_contact_filename
+            barrier_key = Path(opaque_contact_filename(trusted_contact_scope.contact_id)).stem
+            barrier = barriers.setdefault(barrier_key, asyncio.Lock())
+            async with barrier:
+                await _record_proactive_inbound(
+                    config_raw=_proactive_cfg,
+                    trusted_scope=trusted_contact_scope,
+                    profile_home=self._resolve_profile_home_for_source(source),
+                    profile=str(getattr(source, "profile", None) or os.getenv("HERMES_PROFILE") or "default"),
+                    source=source,
+                    session_id=session_entry.session_id,
+                    source_id=_proactive_source_id,
+                    text=str(event.text or ""),
+                    received_at=_proactive_ts,
+                    metadata=getattr(event, "metadata", None),
+                )
 
         pinned_session_id = str(
             (getattr(event, "metadata", None) or {}).get("gateway_session_id") or ""

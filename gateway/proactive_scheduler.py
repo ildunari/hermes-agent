@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS proactive_delivery (
   not_before REAL,
   state TEXT NOT NULL CHECK(state IN ('prepared','sending','retry_wait','sent','suppressed','delivery_unknown','partial_delivery','failed')),
   payload_hash TEXT NOT NULL,
+  prepared_payload TEXT,
+  kill_generation INTEGER NOT NULL DEFAULT 0,
   transport_message_id TEXT,
   last_error_class TEXT,
   updated_at REAL NOT NULL
@@ -125,12 +127,38 @@ CREATE TABLE IF NOT EXISTS proactive_contact_owner (
   state_db TEXT NOT NULL,
   updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS proactive_transport_owner (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  runner_id TEXT NOT NULL,
+  adapter_id TEXT NOT NULL,
+  lease_until REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proactive_global_send (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  slot_id TEXT,
+  reserved_until REAL,
+  last_visible_at REAL,
+  updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proactive_global_circuit (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  state TEXT NOT NULL CHECK(state IN ('closed','open')),
+  reason TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  updated_at REAL NOT NULL
+);
 """
 
 
 def _initialize_schema(con: sqlite3.Connection) -> None:
     """Install the additive schema and repair pre-index duplicate live slots."""
     con.executescript(_SCHEMA)
+    columns = {str(row[1]) for row in con.execute("PRAGMA table_info(proactive_delivery)")}
+    if "prepared_payload" not in columns:
+        con.execute("ALTER TABLE proactive_delivery ADD COLUMN prepared_payload TEXT")
+    if "kill_generation" not in columns:
+        con.execute("ALTER TABLE proactive_delivery ADD COLUMN kill_generation INTEGER NOT NULL DEFAULT 0")
     con.execute("BEGIN IMMEDIATE")
     try:
         duplicates = con.execute(
@@ -191,6 +219,11 @@ class ProactiveOwnershipRegistry:
                 (contact_hash,),
             ).fetchone()
             if row is not None and row["profile_name"] != profile_name:
+                con.execute(
+                    "INSERT INTO proactive_global_circuit VALUES(1,'open','ownership_conflict',1,?) ON CONFLICT(singleton) DO UPDATE SET state='open',reason='ownership_conflict',generation=proactive_global_circuit.generation+1,updated_at=excluded.updated_at",
+                    (now,),
+                )
+                con.execute("COMMIT")
                 raise RuntimeError(
                     f"contact ownership conflict across profiles: {row['profile_name']} vs {profile_name}"
                 )
@@ -202,10 +235,75 @@ class ProactiveOwnershipRegistry:
             )
             con.execute("COMMIT")
         except BaseException:
-            con.execute("ROLLBACK")
+            if con.in_transaction:
+                con.execute("ROLLBACK")
             raise
         finally:
             con.close()
+
+    def acquire_transport(self, runner_id: str, adapter_id: str, *, now: float, lease_seconds: int = 120) -> None:
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM proactive_transport_owner WHERE singleton=1").fetchone()
+            if row is not None and float(row["lease_until"]) > now and (
+                row["runner_id"] != runner_id or row["adapter_id"] != adapter_id
+            ):
+                con.execute("ROLLBACK")
+                raise RuntimeError("proactive transport owner lease conflict")
+            con.execute(
+                "INSERT INTO proactive_transport_owner VALUES(1,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET runner_id=excluded.runner_id,adapter_id=excluded.adapter_id,lease_until=excluded.lease_until,updated_at=excluded.updated_at",
+                (runner_id, adapter_id, now + lease_seconds, now),
+            )
+            con.execute("COMMIT")
+
+    def validate_transport(self, runner_id: str, adapter_id: str, *, now: float) -> bool:
+        with self._connect() as con:
+            row = con.execute("SELECT * FROM proactive_transport_owner WHERE singleton=1").fetchone()
+        return bool(row and row["runner_id"] == runner_id and row["adapter_id"] == adapter_id and float(row["lease_until"]) >= now)
+
+    def reserve_global_send(self, slot_id: str, *, now: float) -> bool:
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            circuit = con.execute("SELECT state FROM proactive_global_circuit WHERE singleton=1").fetchone()
+            if circuit is not None and circuit["state"] == "open":
+                con.execute("ROLLBACK")
+                return False
+            row = con.execute("SELECT * FROM proactive_global_send WHERE singleton=1").fetchone()
+            if row is not None and (
+                (row["reserved_until"] is not None and float(row["reserved_until"]) > now and row["slot_id"] != slot_id)
+                or (row["last_visible_at"] is not None and now - float(row["last_visible_at"]) < 300)
+            ):
+                con.execute("ROLLBACK")
+                return False
+            con.execute(
+                "INSERT INTO proactive_global_send VALUES(1,?,?,NULL,?) ON CONFLICT(singleton) DO UPDATE SET slot_id=excluded.slot_id,reserved_until=excluded.reserved_until,updated_at=excluded.updated_at",
+                (slot_id, now + 120, now),
+            )
+            con.execute("COMMIT")
+            return True
+
+    def finish_global_send(self, slot_id: str, *, sent: bool, now: float) -> None:
+        with self._connect() as con:
+            con.execute(
+                "UPDATE proactive_global_send SET reserved_until=NULL,last_visible_at=CASE WHEN ? THEN ? ELSE last_visible_at END,updated_at=? WHERE singleton=1 AND slot_id=?",
+                (sent, now, now, slot_id),
+            )
+
+    def open_circuit(self, reason: str, *, now: float) -> None:
+        with self._connect() as con:
+            con.execute(
+                "INSERT INTO proactive_global_circuit VALUES(1,'open',?,1,?) ON CONFLICT(singleton) DO UPDATE SET state='open',reason=excluded.reason,generation=proactive_global_circuit.generation+1,updated_at=excluded.updated_at",
+                (reason[:120], now),
+            )
+
+    def operator_reset_circuit(self, *, confirmed: bool, now: float) -> None:
+        if not confirmed:
+            raise PermissionError("explicit operator confirmation required")
+        with self._connect() as con:
+            con.execute(
+                "INSERT INTO proactive_global_circuit VALUES(1,'closed','operator_reset',1,?) ON CONFLICT(singleton) DO UPDATE SET state='closed',reason='operator_reset',generation=proactive_global_circuit.generation+1,updated_at=excluded.updated_at",
+                (now,),
+            )
 
 
 class ProactiveMode(str, Enum):
@@ -240,6 +338,7 @@ class ProactiveConfig:
     retry_base_seconds: int = 300
     circuit_breaker_failures: int = 3
     circuit_breaker_cooldown_seconds: int = 21_600
+    kill_generation: int = 0
 
     def validate(self) -> None:
         if self.mode is ProactiveMode.LIVE and not self.enabled:
@@ -297,6 +396,7 @@ class ProactiveConfig:
             retry_base_seconds=max(60, int(raw.get("retry_base_seconds", 300))),
             circuit_breaker_failures=max(2, int(raw.get("circuit_breaker_failures", 3))),
             circuit_breaker_cooldown_seconds=max(300, int(raw.get("circuit_breaker_cooldown_seconds", 21_600))),
+            kill_generation=max(0, int(raw.get("kill_generation", 0))),
         )
         config.validate()
         return config
@@ -1150,10 +1250,11 @@ class ProactiveScheduler:
             ).fetchone()
             if current is None:
                 raise ValueError("claim is no longer current")
-            con.execute("INSERT INTO proactive_delivery(slot_id,state,payload_hash,updated_at) VALUES(?,'prepared',?,?)",
-                        (claim.slot_id, payload_hash, timestamp))
+            con.execute("INSERT INTO proactive_delivery(slot_id,state,payload_hash,prepared_payload,kill_generation,updated_at) VALUES(?,'prepared',?,?,?,?)",
+                        (claim.slot_id, payload_hash, str(text), self.config.kill_generation, timestamp))
             self._finish(con)
-            return {"state": "prepared", "payload_hash": payload_hash, "attempt_count": 0, "not_before": None}
+            return {"state": "prepared", "payload_hash": payload_hash, "prepared_payload": str(text),
+                    "kill_generation": self.config.kill_generation, "attempt_count": 0, "not_before": None}
         except BaseException as exc:
             if con.in_transaction:
                 self._finish(con, exc)
@@ -1178,7 +1279,9 @@ class ProactiveScheduler:
                 return "transport_circuit_open"
             row = con.execute(
                 """SELECT s.status,s.claim_token,s.inbound_version,c.inbound_version current_inbound,
-                          c.disabled_until FROM proactive_slot s JOIN proactive_contact c USING(contact_hash)
+                          c.disabled_until,c.timezone,d.kill_generation FROM proactive_slot s
+                   JOIN proactive_contact c USING(contact_hash)
+                   LEFT JOIN proactive_delivery d USING(slot_id)
                    WHERE s.slot_id=?""", (claim.slot_id,),
             ).fetchone()
         if row is None or row["status"] != "claimed" or row["claim_token"] != claim.claim_token:
@@ -1187,6 +1290,16 @@ class ProactiveScheduler:
             return "newer_inbound"
         if row["disabled_until"] is not None and float(row["disabled_until"]) > timestamp:
             return "backoff_active"
+        if int(row["kill_generation"] or 0) != self.config.kill_generation:
+            return "kill_generation_changed"
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        local = datetime.fromtimestamp(timestamp, ZoneInfo(str(row["timezone"])))
+        current = local.hour * 60 + local.minute
+        start_h, start_m = (int(value) for value in self.config.active_start.split(":", 1))
+        end_h, end_m = (int(value) for value in self.config.active_end.split(":", 1))
+        if not (start_h * 60 + start_m <= current <= end_h * 60 + end_m):
+            return "outside_active_hours"
         return self.eligibility_reason(claim.contact_hash, claim.kind, now=timestamp)
 
     def begin_delivery_attempt(self, claim: SlotClaim, *, now: float | None = None) -> bool:
@@ -1226,10 +1339,18 @@ class ProactiveScheduler:
             attempts = int(row["attempt_count"])
             if retryable and state == "failed" and attempts < self.config.max_retry_attempts:
                 delay = min(self.config.retry_base_seconds * (4 ** max(attempts - 1, 0)), 3600)
+                timezone_name = str(con.execute(
+                    "SELECT timezone FROM proactive_contact WHERE contact_hash=?", (claim.contact_hash,)
+                ).fetchone()[0])
+                retry_at = push_into_active_hours(
+                    timestamp + delay, timezone_name=timezone_name,
+                    active_start=self.config.active_start, active_end=self.config.active_end,
+                    jitter_minutes=0, jitter_key=claim.slot_id,
+                )
                 con.execute("UPDATE proactive_delivery SET state='retry_wait',not_before=?,last_error_class=?,updated_at=? WHERE slot_id=?",
-                            (timestamp + delay, reason[:120], timestamp, claim.slot_id))
+                            (retry_at, reason[:120], timestamp, claim.slot_id))
                 con.execute("UPDATE proactive_slot SET status='armed',fire_at=?,claim_token=NULL,claim_until=NULL,reason='transport_retry',updated_at=? WHERE slot_id=?",
-                            (timestamp + delay, timestamp, claim.slot_id))
+                            (retry_at, timestamp, claim.slot_id))
                 self._finish(con)
                 return "retry_wait"
             final = state if state in terminal else "delivery_unknown"
@@ -1242,11 +1363,39 @@ class ProactiveScheduler:
             con.execute("UPDATE proactive_slot SET status=?,reason=?,claim_token=NULL,claim_until=NULL,updated_at=? WHERE slot_id=?",
                         ("fired" if final == "sent" else "suppressed", reason, timestamp, claim.slot_id))
             self._finish(con)
+            if final == "sent":
+                self._project_confirmed_send(claim, timestamp=timestamp, reason=reason)
             return final
         except BaseException as exc:
             if con.in_transaction:
                 self._finish(con, exc)
             raise
+
+    def _project_confirmed_send(self, claim: SlotClaim, *, timestamp: float, reason: str) -> None:
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT c.contact_id,s.payload_json,d.payload_hash FROM proactive_slot s JOIN proactive_contact c USING(contact_hash) JOIN proactive_delivery d USING(slot_id) WHERE s.slot_id=?",
+                (claim.slot_id,),
+            ).fetchone()
+        if row is None or not row["contact_id"]:
+            raise RuntimeError("confirmed send lacks canonical contact")
+        payload = json.loads(row["payload_json"] or "{}")
+        candidate = {
+            "topic_hash": hashlib.sha256(str(payload.get("topic") or "").encode()).hexdigest(),
+            "payload_hash": str(row["payload_hash"]),
+        }
+        store = ContactMemoryStore(self.profile_home / "contact-memory", str(row["contact_id"]))
+        if store.get_proactive_send(claim.slot_id) is None:
+            store.record_proactive_send(ProactiveSend(
+                send_id=claim.slot_id, interest_id=claim.interest_id,
+                kind=ProactiveSendKind(claim.kind),
+                candidate_json=json.dumps(candidate, sort_keys=True, separators=(",", ":")),
+                gate_decision=GateDecision.SENT, gate_reason=reason,
+                sent_at=timestamp, outcome=None, outcome_at=None, created_at=timestamp,
+            ))
+        from gateway.proactive_fetch import suppression_metrics
+        if suppression_metrics(store, since=timestamp - _WEEK).alarm:
+            self.ownership_registry.open_circuit("send_rate_above_40_percent", now=timestamp)
 
     def record_health(self, key: str, value: Mapping[str, Any], *, now: float | None = None) -> None:
         timestamp = _finite(time.time() if now is None else now, "now")
@@ -1254,11 +1403,22 @@ class ProactiveScheduler:
             con.execute("INSERT INTO proactive_health(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
                         (str(key), json.dumps(dict(value), sort_keys=True), timestamp))
 
+    def earliest_retry_at(self) -> float | None:
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT min(not_before) FROM proactive_delivery WHERE state='retry_wait'"
+            ).fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
     def cleanup_sprawl(self, *, now: float | None = None) -> dict[str, int]:
         """Bound operational rows while preserving recent audits and contact evidence."""
         timestamp = _finite(time.time() if now is None else now, "now")
         con = self._begin()
         try:
+            redacted = con.execute(
+                "UPDATE proactive_delivery SET prepared_payload=NULL WHERE prepared_payload IS NOT NULL AND updated_at<? AND state IN ('sent','suppressed','delivery_unknown','partial_delivery','failed')",
+                (timestamp - 30 * 86400,),
+            ).rowcount
             counts = {
                 "inbound": con.execute("DELETE FROM proactive_inbound WHERE received_at < ?", (timestamp - 365 * 86400,)).rowcount,
                 "deliveries": con.execute(
@@ -1266,6 +1426,7 @@ class ProactiveScheduler:
                     (timestamp - 180 * 86400,),
                 ).rowcount,
             }
+            counts["payloads_redacted"] = redacted
             counts["slots"] = con.execute(
                 "DELETE FROM proactive_slot WHERE updated_at < ? AND status IN ('fired','cancelled','suppressed') "
                 "AND NOT EXISTS (SELECT 1 FROM proactive_delivery d WHERE d.slot_id=proactive_slot.slot_id)",
@@ -1587,6 +1748,18 @@ class ProactiveScheduler:
         for claim in claims:
             route = routes.get(claim.contact_hash)
             if route is None:
+                continue
+            with self._connect() as con:
+                retry = con.execute(
+                    "SELECT prepared_payload FROM proactive_delivery WHERE slot_id=? AND state='retry_wait'",
+                    (claim.slot_id,),
+                ).fetchone()
+            if retry is not None:
+                payload = str(retry["prepared_payload"] or "")
+                if not payload:
+                    self.finish_delivery(claim, state="failed", reason="retry_payload_missing", now=timestamp)
+                elif on_prepared is not None:
+                    on_prepared(route, claim, PreparedOutput(payload, reason="immutable_retry_replay"))
                 continue
             if claim.kind in {"interest_share", "exploration"} and on_interest_share is not None:
                 store = self._contact_store(route)
