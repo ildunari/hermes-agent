@@ -96,6 +96,24 @@ def test_prompt_only_stages_private_sender_attributed_packets(tmp_path: Path):
     assert bootstrap_main([*args,'--resume'])==0
 
 
+def test_semantic_reextract_refuses_populated_target_without_explicit_override(tmp_path: Path):
+    source=tmp_path/'chat.db'; staging=tmp_path/'private'; db(source)
+    poke=tmp_path/'poke'; guest=tmp_path/'guest'
+    target=poke/'contact-memory'/'contacts'
+    target.mkdir(parents=True)
+    from gateway.contact_memory.store import opaque_contact_filename
+    con=sqlite3.connect(target/opaque_contact_filename('kosta-owner'))
+    con.execute('CREATE TABLE fact(fact_id TEXT PRIMARY KEY)')
+    con.execute("INSERT INTO fact VALUES('existing-reviewed-fact')")
+    con.commit(); con.close()
+    args=['--source-person','Stephen Lucier','--chat-db',str(source),'--handle','+140****0100',
+          '--staging-dir',str(staging),'--poke-root',str(poke),'--guest-root',str(guest),'--run-semantic']
+    with pytest.raises(SystemExit) as exc:
+        bootstrap_main(args)
+    assert exc.value.code==2
+    assert not staging.exists()
+
+
 def test_extraction_merge_coverage_and_review_execute_with_canonical_ids(tmp_path: Path):
     source=tmp_path/'chat.db'; db(source)
     with open_messages_readonly(source) as con:

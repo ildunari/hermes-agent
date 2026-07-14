@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -24,12 +25,54 @@ from gateway.contact_memory.imessage_bootstrap import (  # noqa: E402
 )
 from gateway.contact_memory.import_contacts import _classify, import_typed_batch  # noqa: E402
 from gateway.contact_memory.schema import InterestEvent, InterestValence, SignalType  # noqa: E402
-from gateway.contact_memory.store import ContactMemoryStore  # noqa: E402
+from gateway.contact_memory.store import ContactMemoryStore, opaque_contact_filename  # noqa: E402
 
 _ALLOWED_TARGETS = {"poke": "kosta-owner", "guest": "stephen-lucier"}
 _SEMANTIC_MAX_ATTEMPTS = 3
 _SEMANTIC_MAX_CONCURRENCY = 4
 _SEMANTIC_AUTHORS = ("kosta-owner", "stephen-lucier")
+
+
+def _existing_target_data(profile_root: Path, contact_id: str) -> dict[str, int]:
+    """Return existing durable row counts without initializing or migrating a store."""
+    db_path = (
+        profile_root.expanduser().resolve()
+        / "contact-memory" / "contacts" / opaque_contact_filename(contact_id)
+    )
+    if not db_path.is_file():
+        return {}
+    uri = f"file:{db_path}?mode=ro&immutable=1"
+    with sqlite3.connect(uri, uri=True) as con:
+        tables = {
+            str(row[0])
+            for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        counts: dict[str, int] = {}
+        for table in ("fact", "interest", "interest_event", "import_run"):
+            if table in tables:
+                counts[table] = int(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        return counts
+
+
+def _refuse_reextract_of_populated_targets(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if not args.run_semantic or args.force_reextract_existing:
+        return
+    targets = (
+        ("poke", Path(args.poke_root), args.poke_contact_id),
+        ("guest", Path(args.guest_root), args.guest_contact_id),
+    )
+    populated = []
+    for profile, root, contact_id in targets:
+        counts = _existing_target_data(root, contact_id)
+        if any(counts.values()):
+            populated.append(f"{profile}/{contact_id} ({counts})")
+    if populated:
+        parser.error(
+            "refusing full-history semantic re-extraction for populated target namespace(s): "
+            + ", ".join(populated)
+            + "; reuse the existing reviewed contact-memory data, or pass "
+              "--force-reextract-existing only after an explicit operator decision"
+        )
 
 
 def _atomic_private_json(path: Path, value: object) -> None:
@@ -365,6 +408,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--review-manifest")
     parser.add_argument("--run-semantic", action="store_true")
+    parser.add_argument(
+        "--force-reextract-existing",
+        action="store_true",
+        help="explicitly allow semantic full-history extraction when target stores already contain data",
+    )
     parser.add_argument("--operator-approval")
     args = parser.parse_args(argv)
     if args.source_person != "Stephen Lucier":
@@ -377,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("canonical contact IDs are fixed for this rollout")
     if args.apply and (not args.review_manifest or not args.operator_approval):
         parser.error("--apply requires --review-manifest and --operator-approval")
+    _refuse_reextract_of_populated_targets(args, parser)
     if not args.apply:
         args.dry_run = True
 
