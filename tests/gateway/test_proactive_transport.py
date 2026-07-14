@@ -52,3 +52,19 @@ async def test_nonallowlisted_refused_before_adapter(tmp_path: Path):
     with pytest.raises(ValueError,match='non-allowlisted'):
         await BlueBubblesProactiveDelivery(adapter).deliver(route=bad,text='x',slot_id=claim.slot_id,correlation_id='c')
     assert adapter.calls==0
+
+
+def test_circuit_breaker_and_sprawl_cleanup(tmp_path: Path):
+    scheduler,claim,_=setup(tmp_path)
+    with scheduler._connect() as con:
+        for index in range(3):
+            slot=f'old-{index}'
+            con.execute("INSERT INTO proactive_slot(slot_id,contact_hash,kind,payload_json,status,fire_at,inbound_version,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (slot,claim.contact_hash,'checkin','{}','suppressed',NOW-1,claim.inbound_version,'failed',NOW-1,NOW-1))
+            con.execute("INSERT INTO proactive_delivery(slot_id,attempt_count,state,payload_hash,last_error_class,updated_at) VALUES(?,?,?,?,?,?)",
+                        (slot,1,'failed','hash','connect',NOW-1))
+        con.execute("INSERT INTO proactive_inbound(contact_hash,message_id,received_at) VALUES(?,?,?)",
+                    (claim.contact_hash,'ancient',NOW-366*86400))
+    assert scheduler.final_delivery_check(ROUTE,claim,now=NOW)=='transport_circuit_open'
+    cleaned=scheduler.cleanup_sprawl(now=NOW)
+    assert cleaned['inbound']==1

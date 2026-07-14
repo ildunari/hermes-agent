@@ -236,6 +236,10 @@ class ProactiveConfig:
     exploration_floor: float = 0.10
     claim_seconds: int = 300
     serious_suppression_hours: float = 72.0
+    max_retry_attempts: int = 3
+    retry_base_seconds: int = 300
+    circuit_breaker_failures: int = 3
+    circuit_breaker_cooldown_seconds: int = 21_600
 
     def validate(self) -> None:
         if self.mode is ProactiveMode.LIVE and not self.enabled:
@@ -288,6 +292,10 @@ class ProactiveConfig:
                 0.0,
                 float(raw.get("serious_suppression_hours", raw.get("serious_share_block_hours", 72))),
             ),
+            max_retry_attempts=max(1, int(raw.get("max_retry_attempts", 3))),
+            retry_base_seconds=max(60, int(raw.get("retry_base_seconds", 300))),
+            circuit_breaker_failures=max(2, int(raw.get("circuit_breaker_failures", 3))),
+            circuit_breaker_cooldown_seconds=max(300, int(raw.get("circuit_breaker_cooldown_seconds", 21_600))),
         )
         config.validate()
         return config
@@ -1158,6 +1166,15 @@ class ProactiveScheduler:
         if self.config.allowed_contacts and (route.profile_name, route.contact_id, route.principal) not in self.config.allowed_contacts:
             return "allowlist_mismatch"
         with self._connect() as con:
+            failures = con.execute(
+                "SELECT state,updated_at FROM proactive_delivery ORDER BY updated_at DESC LIMIT ?",
+                (self.config.circuit_breaker_failures,),
+            ).fetchall()
+            bad = {"failed", "delivery_unknown", "partial_delivery"}
+            if (len(failures) >= self.config.circuit_breaker_failures
+                    and all(str(item["state"]) in bad for item in failures)
+                    and timestamp - float(failures[0]["updated_at"]) < self.config.circuit_breaker_cooldown_seconds):
+                return "transport_circuit_open"
             row = con.execute(
                 """SELECT s.status,s.claim_token,s.inbound_version,c.inbound_version current_inbound,
                           c.disabled_until FROM proactive_slot s JOIN proactive_contact c USING(contact_hash)
@@ -1178,7 +1195,7 @@ class ProactiveScheduler:
             row = con.execute("SELECT * FROM proactive_delivery WHERE slot_id=?", (claim.slot_id,)).fetchone()
             allowed = bool(row and row["state"] in {"prepared", "retry_wait"} and
                            (row["not_before"] is None or float(row["not_before"]) <= timestamp) and
-                           int(row["attempt_count"]) < 3)
+                           int(row["attempt_count"]) < self.config.max_retry_attempts)
             changed = 0
             if allowed:
                 changed = con.execute(
@@ -1206,8 +1223,8 @@ class ProactiveScheduler:
                 self._finish(con)
                 return str(row["state"])
             attempts = int(row["attempt_count"])
-            if retryable and state == "failed" and attempts < 3:
-                delay = (300, 1200)[min(max(attempts - 1, 0), 1)]
+            if retryable and state == "failed" and attempts < self.config.max_retry_attempts:
+                delay = min(self.config.retry_base_seconds * (4 ** max(attempts - 1, 0)), 3600)
                 con.execute("UPDATE proactive_delivery SET state='retry_wait',not_before=?,last_error_class=?,updated_at=? WHERE slot_id=?",
                             (timestamp + delay, reason[:120], timestamp, claim.slot_id))
                 con.execute("UPDATE proactive_slot SET status='armed',fire_at=?,claim_token=NULL,claim_until=NULL,reason='transport_retry',updated_at=? WHERE slot_id=?",
@@ -1235,6 +1252,29 @@ class ProactiveScheduler:
         with self._connect() as con:
             con.execute("INSERT INTO proactive_health(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
                         (str(key), json.dumps(dict(value), sort_keys=True), timestamp))
+
+    def cleanup_sprawl(self, *, now: float | None = None) -> dict[str, int]:
+        """Bound operational rows while preserving recent audits and contact evidence."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        con = self._begin()
+        try:
+            counts = {
+                "inbound": con.execute("DELETE FROM proactive_inbound WHERE received_at < ?", (timestamp - 365 * 86400,)).rowcount,
+                "deliveries": con.execute(
+                    "DELETE FROM proactive_delivery WHERE updated_at < ? AND state IN ('sent','suppressed','failed')",
+                    (timestamp - 180 * 86400,),
+                ).rowcount,
+            }
+            counts["slots"] = con.execute(
+                "DELETE FROM proactive_slot WHERE updated_at < ? AND status IN ('fired','cancelled','suppressed') "
+                "AND NOT EXISTS (SELECT 1 FROM proactive_delivery d WHERE d.slot_id=proactive_slot.slot_id)",
+                (timestamp - 180 * 86400,),
+            ).rowcount
+            self._finish(con)
+            return {key: int(value) for key, value in counts.items()}
+        except BaseException as exc:
+            self._finish(con, exc)
+            raise
 
     def _total_sent(self, con: sqlite3.Connection, contact_hash: str) -> int:
         return int(con.execute(
@@ -1519,6 +1559,7 @@ class ProactiveScheduler:
         if not self.config.enabled:
             return result
         timestamp = _finite(time.time() if now is None else now, "now")
+        self.cleanup_sprawl(now=timestamp)
         contacts = {item.contact_key: item for item in ProactiveStateStore(self.state_db_path).contacts()}
         routes: dict[str, ContactRoute] = {}
         for key, contact in contacts.items():
