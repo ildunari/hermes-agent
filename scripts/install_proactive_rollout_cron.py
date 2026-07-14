@@ -11,6 +11,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from dotenv import dotenv_values
+import yaml
+
 from cron.jobs import create_job, list_jobs, remove_job, update_job, use_cron_store
 from scripts.install_contact_memory_maintenance_cron import install as install_maintenance, resolve_profile_home
 
@@ -62,6 +65,32 @@ def validate_alarm_target(target: str) -> dict[str, str]:
     return {"platform": platform.lower(), "address": address.strip(), "target": value}
 
 
+def _validate_bluebubbles_delivery_owner(home: Path, target: dict[str, str]) -> Path:
+    """Validate Guest's narrow, outbound-only use of Poke's alarm transport."""
+    owner_home = home if home.name == "poke" else home.parent / "poke"
+    values = dotenv_values(owner_home / ".env")
+    required = (
+        "BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD", "BLUEBUBBLES_HOME_CHANNEL",
+    )
+    missing = [key for key in required if not str(values.get(key) or "").strip()]
+    if missing:
+        raise ValueError(f"Poke BlueBubbles alarm owner is missing {', '.join(missing)}")
+    if str(values["BLUEBUBBLES_HOME_CHANNEL"]).strip() != target["address"]:
+        raise ValueError("BlueBubbles alarm target must exactly match Poke's configured home channel")
+    try:
+        config = yaml.safe_load((owner_home / "config.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError) as exc:
+        raise ValueError("Poke BlueBubbles alarm owner config is unavailable") from exc
+    blocks = [
+        ((config.get("gateway") or {}).get("platforms") or {}).get("bluebubbles"),
+        (config.get("platforms") or {}).get("bluebubbles"),
+        config.get("bluebubbles"),
+    ]
+    if not any(isinstance(block, dict) and block.get("enabled") is True for block in blocks):
+        raise ValueError("Poke must be explicitly enabled as the BlueBubbles transport owner")
+    return owner_home
+
+
 def _probe_script(nonce: str, generation: str) -> str:
     return (
         "#!/usr/bin/env python3\n"
@@ -86,10 +115,15 @@ def install(*, profile: str | None = None, root: str | None = None,
     if profile_name not in {"poke", "guest"}:
         raise ValueError("rollout cron is limited to poke and guest")
     target = validate_alarm_target(alarm_target or "")
+    delivery_profile = None
+    if target["platform"] == "bluebubbles":
+        _validate_bluebubbles_delivery_owner(home, target)
+        delivery_profile = "poke"
     plan: dict[str, Any] = {
         "profile_home": str(home), "profile": profile_name, "schedule": SCHEDULE,
         "dry_run": dry_run, "jobs": ["maintenance", "watchdog", "alarm_probe"],
         "alarm_target": target["target"], "task": "proactive_semantic",
+        "delivery_profile": delivery_profile,
     }
     if dry_run:
         return plan
@@ -110,6 +144,8 @@ def install(*, profile: str | None = None, root: str | None = None,
                 target=target["target"], nonce=prior_nonce,
                 generation=prior_generation, script=prior_script,
             )
+            if delivery_profile:
+                candidate["delivery_profile"] = delivery_profile
             if (
                 previous.get("version") == 2
                 and previous.get("binding") == candidate
@@ -123,6 +159,8 @@ def install(*, profile: str | None = None, root: str | None = None,
     binding = _probe_binding(
         target=target["target"], nonce=nonce, generation=generation, script=probe_script,
     )
+    if delivery_profile:
+        binding["delivery_profile"] = delivery_profile
     _atomic(home / "scripts" / ALARM_PROBE_SCRIPT, probe_script)
     _atomic(manifest_path, json.dumps({
         "version": 2, "type": "hermes_cron", "target": target["target"],
@@ -132,11 +170,12 @@ def install(*, profile: str | None = None, root: str | None = None,
 
     desired = {"name": WATCHDOG_NAME, "prompt": "", "schedule": SCHEDULE,
                "script": WATCHDOG_SCRIPT, "no_agent": True,
-               "deliver": target["target"], "enabled": True}
+               "deliver": target["target"], "enabled": True,
+               "delivery_profile": delivery_profile}
     probe_desired = {"name": ALARM_PROBE_NAME, "prompt": "",
                      "schedule": ALARM_PROBE_SCHEDULE, "script": ALARM_PROBE_SCRIPT,
                      "no_agent": True, "deliver": target["target"], "enabled": True,
-                     "probe_binding": binding}
+                     "probe_binding": binding, "delivery_profile": delivery_profile}
     with use_cron_store(home):
         matches = [j for j in list_jobs(include_disabled=True) if j.get("name") == WATCHDOG_NAME]
         if matches:
@@ -146,6 +185,8 @@ def install(*, profile: str | None = None, root: str | None = None,
         else:
             job = create_job(prompt=None, name=WATCHDOG_NAME, schedule=SCHEDULE,
                              script=WATCHDOG_SCRIPT, no_agent=True, deliver=target["target"])
+            if delivery_profile:
+                job = update_job(job["id"], {"delivery_profile": delivery_profile})
         probes = [j for j in list_jobs(include_disabled=True) if j.get("name") == ALARM_PROBE_NAME]
         if probes:
             if probes[0].get("probe_binding") != binding or prior_binding != binding:
@@ -159,6 +200,7 @@ def install(*, profile: str | None = None, root: str | None = None,
                                    no_agent=True, deliver=target["target"])
             probe_job = update_job(probe_job["id"], {
                 "probe_binding": binding, "last_probe_delivery_ack": None,
+                **({"delivery_profile": delivery_profile} if delivery_profile else {}),
             })
 
     plan.update({

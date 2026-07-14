@@ -11,6 +11,38 @@ from gateway.proactive_scheduler import ProactiveConfig
 from gateway.proactive_status import probe_alarm_sink_readiness
 from scripts.install_proactive_rollout_cron import ALARM_PROBE_NAME, WATCHDOG_NAME, install
 from scripts.install_contact_memory_maintenance_cron import JOB_NAME
+from scripts.install_proactive_profile_config import install as install_profile_config
+
+
+def _configure_poke_bluebubbles(parent: Path, target: str = "operator-guid") -> Path:
+    poke = parent / "poke"
+    poke.mkdir(parents=True, exist_ok=True)
+    (poke / ".env").write_text(
+        "BLUEBUBBLES_SERVER_URL=http://poke-bluebubbles.invalid\n"
+        "BLUEBUBBLES_PASSWORD=owner-route-secret\n"
+        f"BLUEBUBBLES_HOME_CHANNEL={target}\n",
+        encoding="utf-8",
+    )
+    (poke / "config.yaml").write_text(
+        "gateway:\n"
+        "  platforms:\n"
+        "    bluebubbles:\n"
+        "      enabled: true\n"
+        "      extra:\n"
+        "        webhook_register: true\n",
+        encoding="utf-8",
+    )
+    return poke
+
+
+def test_guest_profile_config_names_poke_delivery_owner_without_enabling_ingress(tmp_path: Path):
+    guest = tmp_path / "guest"
+    install_profile_config(profile="guest", root=str(guest), apply=True)
+    import yaml
+    config = yaml.safe_load((guest / "config.yaml").read_text(encoding="utf-8"))
+    assert config["gateway"]["platforms"]["bluebubbles"]["enabled"] is False
+    assert config["agent"]["proactive"]["transport_owner_profile"] == "poke"
+    assert config["agent"]["proactive"]["alarm_sink"]["delivery_profile"] == "poke"
 
 
 def test_rollout_cron_dry_run_and_idempotent_reconcile(tmp_path: Path):
@@ -130,6 +162,61 @@ def test_real_cron_delivery_path_persists_exact_probe_ack(monkeypatch, tmp_path:
     cfg = ProactiveConfig(alarm_sink_configured=True, alarm_sink_type="hermes_cron",
                           alarm_sink_target="telegram:operator")
     assert probe_alarm_sink_readiness(profile_home=root, config=cfg)["ready"]
+
+
+def test_guest_bluebubbles_probe_uses_only_poke_owner_and_records_ack(monkeypatch, tmp_path: Path):
+    from cron import scheduler
+    from tools import send_message_tool
+
+    _configure_poke_bluebubbles(tmp_path)
+    guest = tmp_path / "guest"
+    install(root=str(guest), alarm_target="bluebubbles:operator-guid")
+    delivered = []
+
+    async def fake_send(platform, pconfig, chat_id, message, **kwargs):
+        delivered.append((platform.value, dict(pconfig.extra), chat_id, message))
+        return {"success": True, "message_id": "owner-message"}
+
+    monkeypatch.setattr(send_message_tool, "_send_to_platform", fake_send)
+    monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: guest)
+    monkeypatch.setattr(scheduler, "save_job_output", lambda *a, **k: guest / "out")
+    with use_cron_store(guest):
+        job = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+        assert job["delivery_profile"] == "poke"
+        assert job["probe_binding"]["delivery_profile"] == "poke"
+        assert scheduler.run_one_job(job)
+        completed = next(j for j in list_jobs(include_disabled=True) if j["id"] == job["id"])
+
+    assert len(delivered) == 1
+    platform, extra, chat_id, message = delivered[0]
+    assert (platform, chat_id) == ("bluebubbles", "operator-guid")
+    assert extra["server_url"] == "http://poke-bluebubbles.invalid"
+    assert extra["password"] == "owner-route-secret"
+    assert extra["webhook_register"] is True  # standalone helper overrides at adapter construction
+    assert job["probe_binding"]["nonce"] in message
+    assert all(
+        completed["last_probe_delivery_ack"].get(key) == value
+        for key, value in job["probe_binding"].items()
+    )
+
+
+def test_bluebubbles_alarm_owner_rejects_non_owner_target_or_profile(tmp_path: Path):
+    _configure_poke_bluebubbles(tmp_path)
+    guest = tmp_path / "guest"
+    with pytest.raises(ValueError, match="exactly match"):
+        install(root=str(guest), alarm_target="bluebubbles:not-the-owner", dry_run=True)
+
+    from cron import scheduler
+    bad_job = {
+        "id": "tampered", "name": "tampered", "deliver": "bluebubbles:operator-guid",
+        "delivery_profile": "guest",
+    }
+    token = scheduler.set_hermes_home_override(guest)
+    try:
+        error = scheduler._deliver_result(bad_job, "alarm")
+    finally:
+        scheduler.reset_hermes_home_override(token)
+    assert error and "delivery_profile must be exactly 'poke'" in error
 
 
 def test_cron_does_not_ack_wrong_probe_output_or_transport_metadata(monkeypatch, tmp_path: Path):

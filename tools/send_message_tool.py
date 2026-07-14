@@ -1959,7 +1959,13 @@ async def _send_bluebubbles(extra, chat_id, message, media_files=None):
 
     try:
         from gateway.config import PlatformConfig
-        pconfig = PlatformConfig(extra=extra)
+        # This is the standalone outbound path (send_message and cron fallback),
+        # never an ingress owner. Do not inherit webhook_register=true from the
+        # profile or ambient environment: that would bind/register a receiver
+        # merely to send one message. Keep the live gateway config untouched.
+        send_only_extra = dict(extra or {})
+        send_only_extra["webhook_register"] = False
+        pconfig = PlatformConfig(extra=send_only_extra)
         adapter = BlueBubblesAdapter(pconfig)
         connected = await adapter.connect()
         if not connected:
