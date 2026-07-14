@@ -1066,7 +1066,7 @@ class TestBlueBubblesWebhookParsing:
         assert record["text"] == "hello"
 
     @pytest.mark.asyncio
-    async def test_webhook_deduplicates_message_guid(self, monkeypatch):
+    async def test_webhook_replays_reach_authoritative_store_dedupe(self, monkeypatch):
         import asyncio
         import json
 
@@ -1102,9 +1102,11 @@ class TestBlueBubblesWebhookParsing:
         if adapter._background_tasks:
             await asyncio.gather(*adapter._background_tasks)
 
-        assert len(seen) == 1
+        assert len(seen) == 2
+        assert all(event.message_id == "message-guid-1" for event in seen)
+
     @pytest.mark.asyncio
-    async def test_webhook_dedupe_cache_is_bounded(self, monkeypatch):
+    async def test_webhook_does_not_claim_process_cache_before_persistence(self, monkeypatch):
         import asyncio
         import json
 
@@ -1140,7 +1142,7 @@ class TestBlueBubblesWebhookParsing:
             await asyncio.gather(*adapter._background_tasks)
 
         assert len(seen) == 2
-        assert len(adapter._seen_message_guids) == 1
+        assert len(adapter._seen_message_guids) == 0
 
 
 class TestBlueBubblesGuidResolution:

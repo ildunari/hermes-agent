@@ -2004,6 +2004,37 @@ def _trusted_contact_scope_from_metadata(metadata: Any) -> Optional[TrustedConta
     )
 
 
+async def _persist_authenticated_communication_ingress(
+    *,
+    trusted_scope: Any,
+    profile_home: Any,
+    source: Any,
+    event: Any,
+) -> tuple[str, ...]:
+    """Persist frozen direct BlueBubbles evidence before mutable dispatch paths."""
+    if not isinstance(trusted_scope, TrustedContactScope):
+        return ()
+    if trusted_scope.principal not in {"owner", "guest"}:
+        return ()
+    if getattr(source, "chat_type", "") != "dm":
+        return ()
+    if getattr(getattr(source, "platform", None), "value", None) != "bluebubbles":
+        return ()
+    envelopes = getattr(event, "communication_ingress", ())
+    if not isinstance(envelopes, tuple) or not envelopes:
+        return ()
+    from gateway.contact_memory.live_ingress import persist_live_communication_ingress
+
+    result = await asyncio.to_thread(
+        persist_live_communication_ingress,
+        root=Path(profile_home).resolve() / "contact-memory",
+        contact_id=trusted_scope.contact_id,
+        principal=trusted_scope.principal,
+        envelopes=envelopes,
+    )
+    return result.event_ids
+
+
 async def _record_proactive_inbound(
     *,
     config_raw: Any,
@@ -8159,6 +8190,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             
             # Set up message + fatal error handlers
             adapter.set_message_handler(self._handle_message)
+            adapter.set_ingress_handler(self._handle_communication_ingress)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -9008,6 +9040,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         continue
 
                     adapter.set_message_handler(self._handle_message)
+                    adapter.set_ingress_handler(self._handle_communication_ingress)
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -9729,6 +9762,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter.set_message_handler(
                 self._make_profile_message_handler(profile_name)
             )
+            adapter.set_ingress_handler(self._handle_communication_ingress)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -10096,6 +10130,59 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("Hygiene compaction status ticker failed", exc_info=True)
         await self._edit_hygiene_compaction_status(status, content, finalize=True)
 
+    async def _handle_communication_ingress(self, event: MessageEvent) -> tuple[str, ...]:
+        """Authenticate and persist BlueBubbles direct ingress before webhook ACK."""
+        source = getattr(event, "source", None)
+        if (
+            source is None
+            or getattr(source, "platform", None) != Platform.BLUEBUBBLES
+            or getattr(source, "chat_type", "") != "dm"
+            or getattr(event, "internal", False)
+            or not getattr(event, "communication_ingress", ())
+        ):
+            return ()
+        metadata = getattr(event, "metadata", None)
+        if isinstance(metadata, dict) and any(metadata.get(key) for key in (
+            "forwarded", "is_forwarded", "forwarded_from", "gateway_session_id",
+        )):
+            return ()
+        platform_cfg = getattr(getattr(self, "config", None), "platforms", {}).get(
+            Platform.BLUEBUBBLES
+        )
+        extra = getattr(platform_cfg, "extra", {}) if platform_cfg else {}
+        registry_path = (
+            extra.get("guest_contacts_file")
+            or extra.get("contact_registry")
+            or os.getenv("HERMES_BLUEBUBBLES_GUEST_CONTACTS")
+        )
+        if not (registry_path or extra.get("guest_routing_enabled")):
+            return ()
+        from gateway.guest_access import (
+            GuestRoute,
+            classify_bluebubbles_route,
+            load_contact_registry,
+        )
+
+        registry = load_contact_registry(registry_path)
+        decision = classify_bluebubbles_route(source, event.raw_message, registry)
+        if decision.route not in {GuestRoute.OWNER, GuestRoute.GUEST} or not decision.contact_id:
+            return ()
+        principal = "owner" if decision.route is GuestRoute.OWNER else "guest"
+        profile = decision.profile or ("gpt" if principal == "owner" else "guest")
+        routed_source = dataclasses.replace(
+            source,
+            profile=profile,
+            user_id_alt=(f"owner:{profile}" if principal == "owner"
+                         else f"guest:{decision.contact_id}"),
+            chat_id_alt=f"hermes-profile:{profile}",
+        )
+        return await _persist_authenticated_communication_ingress(
+            trusted_scope=TrustedContactScope(principal, decision.contact_id),
+            profile_home=self._resolve_profile_home_for_source(routed_source),
+            source=routed_source,
+            event=event,
+        )
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -10332,6 +10419,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         trusted_contact_scope = _trusted_contact_scope_from_metadata(
             getattr(event, "metadata", None)
         )
+
+        # Canonical ingress is frozen by the adapter and authenticated by the
+        # owner/guest route above. Persist it before plugins, commands, model
+        # dispatch, or any later suppression/failure path can mutate the turn.
+        if trusted_contact_scope is not None and getattr(
+            event, "communication_ingress", ()
+        ):
+            try:
+                await _persist_authenticated_communication_ingress(
+                    trusted_scope=trusted_contact_scope,
+                    profile_home=self._resolve_profile_home_for_source(source),
+                    source=source,
+                    event=event,
+                )
+            except Exception:
+                logger.exception("Authenticated communication ingress persistence failed")
+                return None
+
+        # Tapbacks are durable evidence, never an instruction to run the agent.
+        _frozen_ingress = getattr(event, "communication_ingress", ())
+        if _frozen_ingress and all(
+            getattr(item, "event_kind", "") in {"reaction_add", "reaction_remove"}
+            for item in _frozen_ingress
+        ):
+            return None
 
         # scale-to-zero (Phase 0, 0.B/F13): stamp the gateway-scoped last-inbound
         # clock for real (user-originated) inbound only. Internal/system events

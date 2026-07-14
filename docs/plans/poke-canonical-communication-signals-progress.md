@@ -97,3 +97,31 @@ The parent focused adapter rerun completed with 62 passed and 0 failed; `py_comp
 ### Phase C handoff
 
 Add the immutable live ingress envelope at the platform boundary, freeze owner/guest scope after direct-thread routing, and persist authenticated BlueBubbles text/link/attachment/reaction/reply/batch evidence before dispatch through the same Phase A APIs. Preserve the Phase B identity, target-relation, actor-routing, privacy, and no-drop invariants; keep reactions non-replying and prove that suppressed, failed, and no-assistant-response turns still retain ingress. Do not reuse the private historical evidence artifact as a live ledger or begin semantic projection work from Phase D.
+
+## Phase C — Live ingress parity
+
+Status: Phase C implementation complete and locally verified; parent Gate C review is pending. Phase D has not started.
+
+Commit: Phase C boundary commit containing this progress record (the final SHA is reported by the implementation thread).
+
+### Delivered
+
+- Added a frozen, versioned transport envelope at the platform boundary. BlueBubbles now normalizes every supported payload wrapper and list member, source timestamps, strict boolean/integer aliases, visible URLs, safe attachment descriptors, reply targets, concrete tapback add/remove subtypes, and ordered rapid-message members without assigning a contact namespace.
+- Added pre-acknowledgement owner/guest routing and profile-local canonical persistence through the Phase A store APIs. Authenticated direct ingress commits before attachment download, plugin hooks, commands, model dispatch, or suppression; unknown senders, groups, forwarded/internal events, and mixed principals remain excluded.
+- Kept reactive behavior intact while making tapbacks evidence-only and making store source uniqueness authoritative across retries/restarts. Historical/live HMAC namespaces are shared, attachment download failure cannot erase descriptor evidence, exact replays deduplicate, and post-commit batching adds deterministic membership without collapsing source events.
+- Closed final audit gaps for concurrent first-use HMAC-key creation, strict rejection of unsupported associated-message types and conflicting reply aliases, direct-chat identifier fallback, and explicit owner/guest/group/unknown route isolation.
+
+### Gate C evidence
+
+The focused Phase C set `scripts/run_tests.sh tests/gateway/contact_memory/test_live_communication_ingress.py tests/gateway/test_bluebubbles.py tests/gateway/test_bluebubbles_guest_policy.py -q` completed with 136 passed and 0 failed. The surrounding canonical/contact-memory/BlueBubbles set completed with 378 passed and 0 failed across 15 files.
+
+The bounded synthetic ingress benchmark covered cold SQLite open/migration with four attachment descriptors plus eight concurrent attachment-bearing writes. It measured 27.544 ms cold, 141.751 ms total under contention, and 134.352 ms for the slowest worker; the enforced bounds are under 1 second cold and under 3 seconds for total and per-worker contention, with no download, network enrichment, or model work.
+
+`python3 -m py_compile` over all eight Phase C source/test files passed, focused Ruff checks passed, and `git diff --check` passed. Tests use synthetic temporary payloads, registries, keys, and stores only; no live Messages/contact store was accessed, no gateway was restarted, and no send mode was changed.
+
+The requested full `tests/gateway` run was executed but is not globally green on this branch: it reported 130 failures across 37 files plus teardown/config errors in one additional file. The failures are outside the Phase C BlueBubbles/contact-memory set (including existing async-session-store policy, API toolset, Telegram metadata, Slack, voice, and cwd/config expectations); no Phase C focused or surrounding test failed.
+
+### Current boundaries
+
+- Phase C persists authenticated transport evidence only. It does not infer interests, entities, recommendations, follow-through, or callbacks; those remain Phase D.
+- Poke and Guest remain observe-only. This phase did not access live stores/messages, restart a gateway, enable sends, push, or open a pull request.

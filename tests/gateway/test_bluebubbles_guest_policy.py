@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import sqlite3
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
+from gateway.platforms.base import CommunicationIngressEnvelope, MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
@@ -741,3 +742,206 @@ async def test_bluebubbles_shared_group_approval_fails_closed_without_admin_conf
     assert resolve.call_count == 0
     assert result is not None
     assert "admin-only" in result
+
+
+def _live_envelope(
+    *, source_id: str = "live-guid-1", text: str = "original text",
+    event_kind: str = "text", reaction_target: str | None = None,
+    reaction_kind: str | None = None, chat_type: str = "dm",
+    sender_identity: str = "guest@example.com",
+) -> CommunicationIngressEnvelope:
+    return CommunicationIngressEnvelope(
+        version=1,
+        source_message_id=source_id,
+        received_at=1720962001.0,
+        occurred_at=1720962000.0,
+        timestamp_source="dateCreated",
+        chat_type=chat_type,
+        direction="inbound",
+        sender_identity=sender_identity,
+        visible_text=text,
+        visible_urls=(),
+        attachments=(),
+        reply_target=None,
+        reaction_target=reaction_target,
+        reaction_kind=reaction_kind,
+        event_kind=event_kind,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pre_ack_live_ingress_isolates_owner_guest_group_and_unknown_routes(tmp_path):
+    from gateway.contact_memory.store import ContactMemoryStore
+
+    registry = tmp_path / "contacts.yaml"
+    registry.write_text(
+        """owner_identities: [kosta@example.com]
+owner_profile: gpt
+owner_contact_id: kosta-owner
+guest_profile: guest
+contacts:
+  stephen-lucier:
+    identities:
+      bluebubbles:
+        handles: [guest@example.com]
+    allowed_surfaces: [bluebubbles]
+""",
+        encoding="utf-8",
+    )
+    runner = _runner(extra={
+        "guest_routing_enabled": True,
+        "guest_contacts_file": str(registry),
+    })
+    runner._resolve_profile_home_for_source = lambda source: tmp_path / str(source.profile)
+
+    def event(sender: str, envelope: CommunicationIngressEnvelope, *, chat_type: str = "dm"):
+        return MessageEvent(
+            text=envelope.visible_text or "(reaction)",
+            source=_source(user_id=sender, chat_id=sender, chat_type=chat_type),
+            raw_message={"data": {"handle": {"address": sender}}},
+            message_id=envelope.source_message_id,
+            communication_ingress=(envelope,),
+        )
+
+    owner = _live_envelope(source_id="owner-live", sender_identity="kosta@example.com")
+    guest = _live_envelope(source_id="guest-live")
+    group = _live_envelope(source_id="group-live", chat_type="group")
+    unknown = _live_envelope(source_id="unknown-live", sender_identity="unknown@example.com")
+
+    assert len(await runner._handle_communication_ingress(event("kosta@example.com", owner))) == 1
+    assert len(await runner._handle_communication_ingress(event("guest@example.com", guest))) == 1
+    assert await runner._handle_communication_ingress(
+        event("guest@example.com", group, chat_type="group")
+    ) == ()
+    assert await runner._handle_communication_ingress(event("unknown@example.com", unknown)) == ()
+
+    owner_store = ContactMemoryStore(tmp_path / "gpt" / "contact-memory", "kosta-owner")
+    guest_store = ContactMemoryStore(
+        tmp_path / "guest" / "contact-memory", "stephen-lucier"
+    )
+    with sqlite3.connect(owner_store.path) as con:
+        assert con.execute("SELECT COUNT(*) FROM communication_event").fetchone()[0] == 1
+    with sqlite3.connect(guest_store.path) as con:
+        assert con.execute("SELECT COUNT(*) FROM communication_event").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_live_ingress_persists_before_plugin_rewrite_and_skip(tmp_path):
+    from gateway.contact_memory.live_ingress import load_or_create_communication_key
+    from gateway.contact_memory.imessage_communication_adapter import _opaque
+    from gateway.contact_memory.store import ContactMemoryStore
+
+    registry = tmp_path / "contacts.yaml"
+    registry.write_text(
+        """guest_profile: guest
+contacts:
+  stephen-lucier:
+    identities:
+      bluebubbles:
+        handles: [guest@example.com]
+    allowed_surfaces: [bluebubbles]
+""",
+        encoding="utf-8",
+    )
+    runner = _runner(extra={
+        "guest_routing_enabled": True,
+        "guest_contacts_file": str(registry),
+    })
+    profile_home = tmp_path / "guest-profile"
+    runner._resolve_profile_home_for_source = lambda source: profile_home
+    runner._handle_message_with_agent = AsyncMock(return_value=None)
+    envelope = _live_envelope()
+    event = MessageEvent(
+        text="original text",
+        source=_source(
+            user_id="guest@example.com", chat_id="guest@example.com", chat_type="dm"
+        ),
+        raw_message={"data": {"handle": {"address": "guest@example.com"}}},
+        message_id="live-guid-1",
+        communication_ingress=(envelope,),
+    )
+
+    hook_saw_store = False
+
+    def rewrite_then_skip(_hook_name, *, event, **_kwargs):
+        nonlocal hook_saw_store
+        store = ContactMemoryStore(profile_home / "contact-memory", "stephen-lucier")
+        hook_saw_store = store.get_communication_event_by_source(
+            "imessage",
+            _opaque(
+                load_or_create_communication_key(profile_home / "contact-memory"),
+                "imessage-source-v1",
+                "live-guid-1",
+            ),
+        ) is not None
+        event.text = "plugin forged text"
+        event.message_id = "plugin-forged-source"
+        return [{"action": "skip", "reason": "synthetic suppression"}]
+
+    with patch("hermes_cli.plugins.invoke_hook", side_effect=rewrite_then_skip):
+        assert await runner._handle_message(event) is None
+
+    assert hook_saw_store is True
+    runner._handle_message_with_agent.assert_not_awaited()
+    store = ContactMemoryStore(profile_home / "contact-memory", "stephen-lucier")
+    key = load_or_create_communication_key(profile_home / "contact-memory")
+    persisted = store.get_communication_event_by_source(
+        "imessage", _opaque(key, "imessage-source-v1", "live-guid-1")
+    )
+    assert persisted is not None
+    assert persisted.text_hash == _opaque(key, "imessage-text-v1", "original text")
+    assert store.get_communication_event_by_source(
+        "imessage", _opaque(key, "imessage-source-v1", "plugin-forged-source")
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_live_reaction_persists_without_agent_dispatch(tmp_path):
+    from gateway.contact_memory.store import ContactMemoryStore
+
+    registry = tmp_path / "contacts.yaml"
+    registry.write_text(
+        """guest_profile: guest
+contacts:
+  stephen-lucier:
+    identities:
+      bluebubbles:
+        handles: [guest@example.com]
+    allowed_surfaces: [bluebubbles]
+""",
+        encoding="utf-8",
+    )
+    runner = _runner(extra={
+        "guest_routing_enabled": True,
+        "guest_contacts_file": str(registry),
+    })
+    profile_home = tmp_path / "guest-profile"
+    runner._resolve_profile_home_for_source = lambda source: profile_home
+    runner._handle_message_with_agent = AsyncMock(return_value=None)
+    envelope = _live_envelope(
+        source_id="tapback-guid",
+        text="",
+        event_kind="reaction_add",
+        reaction_target="target-guid-1",
+        reaction_kind="like",
+    )
+    event = MessageEvent(
+        text="(reaction)",
+        source=_source(
+            user_id="guest@example.com", chat_id="guest@example.com", chat_type="dm"
+        ),
+        raw_message={"data": {"handle": {"address": "guest@example.com"}}},
+        message_id="tapback-guid",
+        communication_ingress=(envelope,),
+    )
+
+    with patch("hermes_cli.plugins.invoke_hook") as hook:
+        assert await runner._handle_message(event) is None
+
+    runner._handle_message_with_agent.assert_not_awaited()
+    hook.assert_not_called()
+    store = ContactMemoryStore(profile_home / "contact-memory", "stephen-lucier")
+    with sqlite3.connect(store.path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM communication_event WHERE kind='reaction_add'"
+        ).fetchone()[0] == 1

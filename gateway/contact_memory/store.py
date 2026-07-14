@@ -1418,6 +1418,33 @@ class ContactMemoryStore:
         with self._connect() as con:
             return self._communication_bundle_in(con, str(event_id))
 
+    def find_latest_reaction_add(
+        self,
+        *,
+        platform: str,
+        reaction_subtype: CommunicationReactionSubtype,
+        target_source_id: str,
+    ) -> str | None:
+        """Resolve the latest active add for one authenticated reaction target."""
+        if not isinstance(reaction_subtype, CommunicationReactionSubtype):
+            raise ValueError("reaction_subtype is invalid")
+        if reaction_subtype is CommunicationReactionSubtype.LEGACY_UNTYPED:
+            raise ValueError("legacy reactions cannot be live retraction targets")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(target_source_id)):
+            raise ValueError("target_source_id must be an opaque identity")
+        with self._connect() as con:
+            row = con.execute(
+                """SELECT e.event_id
+                   FROM communication_event e
+                   JOIN communication_relation r ON r.event_id=e.event_id
+                   WHERE e.platform=? AND e.kind='reaction_add'
+                     AND e.reaction_subtype=? AND e.lifecycle='active'
+                     AND r.relation_type='reaction_to' AND r.target_source_id=?
+                   ORDER BY e.occurred_at DESC,e.event_id DESC LIMIT 1""",
+                (str(platform), reaction_subtype.value, str(target_source_id)),
+            ).fetchone()
+        return str(row["event_id"]) if row is not None else None
+
     @staticmethod
     def _reaction_relation(bundle: CommunicationBundle) -> CommunicationRelation:
         matches = [

@@ -1757,6 +1757,79 @@ class ProcessingOutcome(Enum):
     CANCELLED = "cancelled"
 
 
+@dataclass(frozen=True)
+class CommunicationIngressAttachment:
+    """Sanitized immutable attachment facts captured before media download."""
+
+    source_attachment_id: str
+    media_kind: str
+    mime_type: Optional[str] = None
+    uti: Optional[str] = None
+    size_bytes: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_attachment_id, str) or not self.source_attachment_id:
+            raise ValueError("source_attachment_id is required")
+        if self.media_kind not in {"image", "video", "audio", "document", "other"}:
+            raise ValueError("media_kind is invalid")
+        if self.size_bytes is not None and (
+            isinstance(self.size_bytes, bool)
+            or not isinstance(self.size_bytes, int)
+            or not 0 <= self.size_bytes <= 10_000_000_000
+        ):
+            raise ValueError("size_bytes is outside the allowed range")
+
+
+@dataclass(frozen=True)
+class CommunicationIngressEnvelope:
+    """Versioned transport-only communication facts from one source record."""
+
+    version: int
+    source_message_id: str
+    received_at: float
+    occurred_at: float
+    timestamp_source: str
+    chat_type: str
+    direction: str
+    sender_identity: str
+    visible_text: str
+    visible_urls: Tuple[str, ...] = ()
+    attachments: Tuple[CommunicationIngressAttachment, ...] = ()
+    reply_target: Optional[str] = None
+    reaction_target: Optional[str] = None
+    reaction_kind: Optional[str] = None
+    event_kind: str = "text"
+
+    def __post_init__(self) -> None:
+        if self.version != 1:
+            raise ValueError("unsupported communication ingress envelope version")
+        for name in ("source_message_id", "timestamp_source", "sender_identity"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise ValueError(f"{name} is required")
+        if self.chat_type not in {"dm", "group"}:
+            raise ValueError("chat_type is invalid")
+        if self.direction not in {"inbound", "outbound"}:
+            raise ValueError("direction is invalid")
+        if not isinstance(self.visible_text, str):
+            raise ValueError("visible_text must be text")
+        if not isinstance(self.visible_urls, tuple) or not all(
+            isinstance(value, str) for value in self.visible_urls
+        ):
+            raise ValueError("visible_urls must be an immutable string tuple")
+        if not isinstance(self.attachments, tuple) or not all(
+            isinstance(value, CommunicationIngressAttachment) for value in self.attachments
+        ):
+            raise ValueError("attachments must be an immutable descriptor tuple")
+        if self.event_kind not in {
+            "text", "link_share", "attachment_share", "reply",
+            "reaction_add", "reaction_remove",
+        }:
+            raise ValueError("event_kind is invalid")
+        is_reaction = self.event_kind in {"reaction_add", "reaction_remove"}
+        if is_reaction != bool(self.reaction_target and self.reaction_kind):
+            raise ValueError("reaction events require target and kind")
+
+
 @dataclass
 class MessageEvent:
     """
@@ -1824,6 +1897,10 @@ class MessageEvent:
     # consume via ``event.metadata.get(...)`` and must not rely on any
     # particular key existing.
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Immutable transport evidence. BlueBubbles may merge several records into
+    # one reactive turn, but every original member remains present here.
+    communication_ingress: Tuple[CommunicationIngressEnvelope, ...] = ()
 
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
@@ -2196,6 +2273,7 @@ _RETRYABLE_ERROR_PATTERNS = (
 # reply), an ``EphemeralReply`` to opt the reply into auto-deletion, or
 # ``None`` when the response was already delivered (e.g. via streaming).
 MessageHandler = Callable[[MessageEvent], Awaitable[Optional[Union[str, "EphemeralReply"]]]]
+IngressHandler = Callable[[MessageEvent], Awaitable[Tuple[str, ...]]]
 
 
 def resolve_channel_prompt(
@@ -2375,6 +2453,7 @@ class BasePlatformAdapter(ABC):
         self.config = config
         self.platform = platform
         self._message_handler: Optional[MessageHandler] = None
+        self._ingress_handler: Optional[IngressHandler] = None
         # Optional hook (e.g. Telegram DM topic recovery) that rewrites
         # ``event.source.thread_id`` before session keying. Returns the
         # corrected thread_id or None to leave the source untouched.
@@ -2823,6 +2902,10 @@ class BasePlatformAdapter(ABC):
         an optional response string.
         """
         self._message_handler = handler
+
+    def set_ingress_handler(self, handler: IngressHandler) -> None:
+        """Set the bounded durable-ingress handler used before webhook ACK."""
+        self._ingress_handler = handler
 
     def set_topic_recovery_fn(
         self,
