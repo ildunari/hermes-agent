@@ -60,13 +60,17 @@ def test_installed_no_agent_script_executes_silently_through_scheduler(
     tmp_path, monkeypatch,
 ):
     profile = tmp_path / "scheduled-profile"
+    ambient_decoy = tmp_path / "ambient-profile"
     installer.install(root=str(profile))
-    monkeypatch.setenv("HERMES_HOME", str(profile))
+    # A profile-scoped scheduler may use a context/module override while the
+    # process-global environment still points at another live profile.  The
+    # child must inherit the same profile used to resolve its script.
+    monkeypatch.setenv("HERMES_HOME", str(ambient_decoy))
     monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: profile)
 
     success, output = scheduler._run_job_script(installer.JOB_SCRIPT)
-    assert success is True
-    assert output == ""
+    assert (success, output) == (True, "")
+    assert not ambient_decoy.exists()
 
 
 def test_runner_enumerates_profile_and_stays_silent_on_success(tmp_path, monkeypatch, capsys):

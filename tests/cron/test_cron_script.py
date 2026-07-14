@@ -171,6 +171,24 @@ class TestRunJobScript:
         assert success is True
         assert output == "ABSENT"
 
+    def test_script_subprocess_uses_scheduler_profile_home(self, cron_env, monkeypatch):
+        """Script lookup and child config resolution must use one profile."""
+        from cron import scheduler
+        from cron.scheduler import _run_job_script
+
+        ambient_decoy = cron_env.parent / "ambient-profile"
+        monkeypatch.setenv("HERMES_HOME", str(ambient_decoy))
+        monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: cron_env)
+        script = cron_env / "scripts" / "profile_probe.py"
+        script.write_text(
+            "import os\n"
+            "print(os.environ.get('HERMES_HOME', ''))\n"
+        )
+
+        success, output = _run_job_script("profile_probe.py")
+        assert success is True
+        assert output == str(cron_env.resolve())
+
     def test_script_empty_output(self, cron_env):
         from cron.scheduler import _run_job_script
 
