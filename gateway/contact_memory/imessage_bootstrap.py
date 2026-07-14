@@ -42,6 +42,10 @@ class ResolvedChat:
     handle_id: int
     handle: str
     message_count: int
+    # Every incoming row must carry one of these handle ids.  Keeping the
+    # approved database ids on the resolution result prevents callers from
+    # inferring identity merely from ``is_from_me == 0``.
+    approved_handle_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -100,27 +104,53 @@ def open_messages_readonly(path: str | Path) -> sqlite3.Connection:
     return con
 
 
-def resolve_one_to_one_chat(con: sqlite3.Connection, approved_handles: Sequence[str]) -> ResolvedChat:
+def resolve_one_to_one_chat(
+    con: sqlite3.Connection,
+    approved_handles: Sequence[str],
+    *,
+    chat_id: int | None = None,
+) -> ResolvedChat:
     approved = {_normalize_handle(item) for item in approved_handles if _normalize_handle(item)}
     if not approved:
         raise ValueError("at least one explicitly approved Stephen handle is required")
+    chat_columns = {str(row[1]) for row in con.execute("PRAGMA table_info(chat)")}
+    style = "c.style" if "style" in chat_columns else "NULL"
+    display_name = "c.display_name" if "display_name" in chat_columns else "NULL"
+    group_id = "c.group_id" if "group_id" in chat_columns else "NULL"
     rows = con.execute(
-        """SELECT c.ROWID chat_id,c.guid chat_guid,h.ROWID handle_id,h.id handle,
+        f"""SELECT c.ROWID chat_id,c.guid chat_guid,h.ROWID handle_id,h.id handle,
                   count(DISTINCT chj2.handle_id) participants,
-                  count(DISTINCT cmj.message_id) message_count
+                  count(DISTINCT cmj.message_id) message_count,
+                  {style} style,{display_name} display_name,{group_id} group_id
            FROM chat c JOIN chat_handle_join chj ON chj.chat_id=c.ROWID
            JOIN handle h ON h.ROWID=chj.handle_id
            JOIN chat_handle_join chj2 ON chj2.chat_id=c.ROWID
            LEFT JOIN chat_message_join cmj ON cmj.chat_id=c.ROWID
            GROUP BY c.ROWID,h.ROWID"""
     ).fetchall()
-    matches = [row for row in rows if int(row["participants"]) == 1 and _normalize_handle(row["handle"]) in approved]
+    def direct(row: sqlite3.Row) -> bool:
+        guid = str(row["chat_guid"] or "")
+        # '-' is Apple's direct-chat marker; '+' and non-empty group metadata
+        # are rejected even if a stale group currently has one participant.
+        if ";+;" in guid or row["display_name"] or row["group_id"]:
+            return False
+        if row["style"] is not None and int(row["style"]) not in {0, 43}:
+            return False
+        return int(row["participants"]) == 1
+
+    matches = [row for row in rows if direct(row) and _normalize_handle(row["handle"]) in approved]
+    if chat_id is not None:
+        matches = [row for row in matches if int(row["chat_id"]) == int(chat_id)]
     if len(matches) != 1:
-        candidates = sorted({(_normalize_handle(row["handle"]), int(row["message_count"])) for row in matches})
-        raise ValueError(f"strict 1:1 resolution requires exactly one chat; matched={candidates}")
+        candidates = sorted({(int(row["chat_id"]), _normalize_handle(row["handle"]), int(row["message_count"])) for row in matches})
+        raise ValueError(f"strict 1:1 resolution requires exactly one chat (use chat_id to disambiguate); matched={candidates}")
     row = matches[0]
+    approved_ids = tuple(sorted(
+        int(item["ROWID"]) for item in con.execute("SELECT ROWID,id FROM handle")
+        if _normalize_handle(item["id"]) in approved
+    ))
     return ResolvedChat(int(row["chat_id"]), str(row["chat_guid"] or ""), int(row["handle_id"]),
-                        _normalize_handle(row["handle"]), int(row["message_count"]))
+                        _normalize_handle(row["handle"]), int(row["message_count"]), approved_ids)
 
 
 def _decode_attributed_body(blob: object) -> str | None:
