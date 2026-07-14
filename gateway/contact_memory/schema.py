@@ -428,6 +428,15 @@ CREATE TABLE IF NOT EXISTS interest_event (
   folded_at REAL
 );
 CREATE INDEX IF NOT EXISTS interest_event_unfolded ON interest_event(folded_at, created_at);
+CREATE TABLE IF NOT EXISTS import_run (
+  run_id TEXT PRIMARY KEY,
+  source_hash TEXT NOT NULL,
+  manifest_json TEXT NOT NULL,
+  fact_count INTEGER NOT NULL,
+  interest_count INTEGER NOT NULL,
+  created_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS import_run_source ON import_run(source_hash);
 CREATE TABLE IF NOT EXISTS interest (
   interest_id TEXT PRIMARY KEY,
   topic TEXT NOT NULL,

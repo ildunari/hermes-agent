@@ -465,6 +465,62 @@ class ContactMemoryStore:
                 timestamp = math.nextafter(timestamp, math.inf)
         return {"inserted": inserted, "skipped": skipped}
 
+    def import_bootstrap_batch(
+        self,
+        proposals: Sequence[FactProposal],
+        events: Sequence[InterestEvent],
+        *,
+        run_id: str,
+        source_hash: str,
+        manifest: dict[str, Any],
+        now: float | None = None,
+    ) -> dict[str, int | bool]:
+        """Atomically import facts, interest evidence, and the reviewed run marker."""
+        run_id, source_hash = str(run_id).strip(), str(source_hash).strip()
+        if not run_id or not source_hash:
+            raise ValueError("run_id and source_hash are required")
+        if any(p.source_contact_id != self.contact_id for p in proposals):
+            raise ValueError("source_contact_id does not match physical contact namespace")
+        fact_sources = [p.source_id for p in proposals]
+        event_ids = [event.event_id for event in events]
+        if len(fact_sources) != len(set(fact_sources)) or len(event_ids) != len(set(event_ids)):
+            raise ValueError("duplicate IDs in bootstrap batch")
+        timestamp = _finite_timestamp(now)
+        inserted_facts = inserted_events = skipped_facts = skipped_events = 0
+        with self._immediate() as con:
+            prior = con.execute("SELECT source_hash FROM import_run WHERE run_id=?", (run_id,)).fetchone()
+            same_source = con.execute("SELECT run_id FROM import_run WHERE source_hash=?", (source_hash,)).fetchone()
+            if prior is not None or same_source is not None:
+                if prior is not None and str(prior["source_hash"]) != source_hash:
+                    raise ValueError("run_id already belongs to another source")
+                return {"already_applied": True, "inserted_facts": 0, "inserted_events": 0,
+                        "skipped_facts": len(proposals), "skipped_events": len(events)}
+            fact_timestamp = timestamp
+            for proposal in proposals:
+                if con.execute("SELECT 1 FROM fact WHERE source_contact_id=? AND source_id=?",
+                               (self.contact_id, proposal.source_id)).fetchone():
+                    skipped_facts += 1
+                else:
+                    self._insert_fact(con, proposal, timestamp=fact_timestamp)
+                    inserted_facts += 1
+                    fact_timestamp = math.nextafter(fact_timestamp, math.inf)
+            for event in events:
+                changed = con.execute(
+                    "INSERT OR IGNORE INTO interest_event(event_id,topic_text,signal_type,valence,source_id,created_at,folded_at) VALUES(?,?,?,?,?,?,?)",
+                    (event.event_id, event.topic_text, event.signal_type.value, event.valence.value,
+                     event.source_id, event.created_at, event.folded_at),
+                ).rowcount
+                inserted_events += int(changed)
+                skipped_events += int(not changed)
+            con.execute(
+                "INSERT INTO import_run(run_id,source_hash,manifest_json,fact_count,interest_count,created_at) VALUES(?,?,?,?,?,?)",
+                (run_id, source_hash, json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+                 len(proposals), len(events), timestamp),
+            )
+        return {"already_applied": False, "inserted_facts": inserted_facts,
+                "inserted_events": inserted_events, "skipped_facts": skipped_facts,
+                "skipped_events": skipped_events}
+
     def active_facts(self, principal: RetrievalPrincipal, *, now: float | None = None) -> list[FactRecord]:
         timestamp = _finite_timestamp(now)
         clause, params = visibility_sql(principal, timestamp)
