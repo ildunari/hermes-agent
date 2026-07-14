@@ -2,6 +2,7 @@
 """Install proactive maintenance, watchdog, and a proven operator alarm sink."""
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -61,6 +62,23 @@ def validate_alarm_target(target: str) -> dict[str, str]:
     return {"platform": platform.lower(), "address": address.strip(), "target": value}
 
 
+def _probe_script(nonce: str, generation: str) -> str:
+    return (
+        "#!/usr/bin/env python3\n"
+        f"print('HERMES_PROACTIVE_ALARM_PROBE_ACK_REQUEST {nonce} {generation}')\n"
+    )
+
+
+def _probe_binding(*, target: str, nonce: str, generation: str, script: str) -> dict[str, str]:
+    return {
+        "target": target,
+        "script": ALARM_PROBE_SCRIPT,
+        "script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest(),
+        "nonce": nonce,
+        "generation": generation,
+    }
+
+
 def install(*, profile: str | None = None, root: str | None = None,
             alarm_target: str | None = None, dry_run: bool = False) -> dict[str, Any]:
     home = resolve_profile_home(profile=profile, root=root)
@@ -79,20 +97,37 @@ def install(*, profile: str | None = None, root: str | None = None,
     maintenance = install_maintenance(root=str(home), task="proactive_semantic", dry_run=False)
     _atomic(home / "scripts" / WATCHDOG_SCRIPT, _runner(home, profile_name))
     manifest_path = home / "proactive-alarm-sink.json"
-    nonce = secrets.token_hex(16)
+    nonce = secrets.token_hex(32)
+    generation = secrets.token_hex(32)
+    prior_binding = None
     if manifest_path.is_file():
         try:
             previous = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if previous.get("target") == target["target"] and previous.get("nonce"):
-                nonce = str(previous["nonce"])
+            prior_nonce = str(previous.get("nonce") or "")
+            prior_generation = str(previous.get("generation") or "")
+            prior_script = _probe_script(prior_nonce, prior_generation)
+            candidate = _probe_binding(
+                target=target["target"], nonce=prior_nonce,
+                generation=prior_generation, script=prior_script,
+            )
+            if (
+                previous.get("version") == 2
+                and previous.get("binding") == candidate
+                and prior_nonce and prior_generation
+                and (home / "scripts" / ALARM_PROBE_SCRIPT).read_text(encoding="utf-8") == prior_script
+            ):
+                nonce, generation, prior_binding = prior_nonce, prior_generation, candidate
         except (OSError, ValueError):
             pass
-    _atomic(home / "scripts" / ALARM_PROBE_SCRIPT,
-            "#!/usr/bin/env python3\n"
-            f"print('HERMES_PROACTIVE_ALARM_PROBE_ACK_REQUEST {nonce}')\n")
+    probe_script = _probe_script(nonce, generation)
+    binding = _probe_binding(
+        target=target["target"], nonce=nonce, generation=generation, script=probe_script,
+    )
+    _atomic(home / "scripts" / ALARM_PROBE_SCRIPT, probe_script)
     _atomic(manifest_path, json.dumps({
-        "version": 1, "type": "hermes_cron", "target": target["target"],
-        "nonce": nonce, "probe_schedule": ALARM_PROBE_SCHEDULE,
+        "version": 2, "type": "hermes_cron", "target": target["target"],
+        "nonce": nonce, "generation": generation, "binding": binding,
+        "probe_schedule": ALARM_PROBE_SCHEDULE,
     }, sort_keys=True) + "\n", executable=False)
 
     desired = {"name": WATCHDOG_NAME, "prompt": "", "schedule": SCHEDULE,
@@ -100,7 +135,8 @@ def install(*, profile: str | None = None, root: str | None = None,
                "deliver": target["target"], "enabled": True}
     probe_desired = {"name": ALARM_PROBE_NAME, "prompt": "",
                      "schedule": ALARM_PROBE_SCHEDULE, "script": ALARM_PROBE_SCRIPT,
-                     "no_agent": True, "deliver": target["target"], "enabled": True}
+                     "no_agent": True, "deliver": target["target"], "enabled": True,
+                     "probe_binding": binding}
     with use_cron_store(home):
         matches = [j for j in list_jobs(include_disabled=True) if j.get("name") == WATCHDOG_NAME]
         if matches:
@@ -112,6 +148,8 @@ def install(*, profile: str | None = None, root: str | None = None,
                              script=WATCHDOG_SCRIPT, no_agent=True, deliver=target["target"])
         probes = [j for j in list_jobs(include_disabled=True) if j.get("name") == ALARM_PROBE_NAME]
         if probes:
+            if probes[0].get("probe_binding") != binding or prior_binding != binding:
+                probe_desired["last_probe_delivery_ack"] = None
             probe_job = update_job(probes[0]["id"], probe_desired)
             for duplicate in probes[1:]:
                 remove_job(duplicate["id"])
@@ -119,6 +157,9 @@ def install(*, profile: str | None = None, root: str | None = None,
             probe_job = create_job(prompt=None, name=ALARM_PROBE_NAME,
                                    schedule=ALARM_PROBE_SCHEDULE, script=ALARM_PROBE_SCRIPT,
                                    no_agent=True, deliver=target["target"])
+            probe_job = update_job(probe_job["id"], {
+                "probe_binding": binding, "last_probe_delivery_ack": None,
+            })
 
     plan.update({
         "dry_run": False, "maintenance_job_id": maintenance["job_id"],
@@ -131,7 +172,9 @@ def install(*, profile: str | None = None, root: str | None = None,
         # This becomes true only after cron transport reports an actual delivery
         # success. Live authorization independently requires this recent ACK.
         "alarm_probe_delivery_ack": bool(
-            probe_job.get("last_status") == "ok" and not probe_job.get("last_delivery_error")
+            probe_job.get("last_probe_delivery_ack")
+            and probe_job.get("last_probe_delivery_ack", {}).get("target") == target["target"]
+            and probe_job.get("last_probe_delivery_ack", {}).get("generation") == generation
         ),
     })
     return plan

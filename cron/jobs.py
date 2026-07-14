@@ -1466,7 +1466,8 @@ def remove_job(job_id: str) -> bool:
 
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None,
+                 delivery_ack_metadata: Optional[Dict[str, Any]] = None):
     """
     Mark a job as having been run.
     
@@ -1480,12 +1481,46 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
+                current_binding = job.get("probe_binding")
+                if (
+                    isinstance(delivery_ack_metadata, dict)
+                    and isinstance(current_binding, dict)
+                    and delivery_ack_metadata != current_binding
+                ):
+                    # This completion belongs to an older probe generation.
+                    # Do not let it overwrite run/ACK state for the newly
+                    # installed target or script. Claims still belong to the
+                    # physical run that just ended and must be released.
+                    job["fire_claim"] = None
+                    job["run_claim"] = None
+                    jobs[i] = job
+                    save_jobs(jobs)
+                    return
                 now = _hermes_now().isoformat()
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
                 job["last_error"] = error if not success else None
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
+                # A delivery proof is useful only when it describes the exact
+                # probe configuration that is still installed.  The scheduler
+                # passes the binding from the job snapshot it actually ran;
+                # compare it under the jobs lock so a target/script generation
+                # changed during delivery cannot inherit the old run's ACK.
+                if (
+                    success and delivery_error is None
+                    and isinstance(delivery_ack_metadata, dict)
+                    and isinstance(current_binding, dict)
+                    and delivery_ack_metadata == current_binding
+                ):
+                    job["last_probe_delivery_ack"] = {
+                        **delivery_ack_metadata,
+                        "run_at": now,
+                    }
+                # A stale in-flight probe must neither grant an ACK to a new
+                # binding nor erase an ACK that the new binding already earned.
+                # Reconciliation clears the proof when it installs that new
+                # binding; a mismatched completion is therefore a no-op here.
                 # Clear any external-fire claim so a re-armed recurring job can
                 # be claimed again on its next fire (Phase 4C CAS).
                 job["fire_claim"] = None

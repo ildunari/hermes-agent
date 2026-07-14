@@ -400,6 +400,49 @@ contacts:
 
 
 @pytest.mark.asyncio
+async def test_authenticated_arrival_is_fenced_before_session_handler_and_carried_once(
+    monkeypatch, tmp_path
+):
+    """Regression: get_or_create_session must never precede the arrival fence."""
+    registry = tmp_path / "contacts.yaml"
+    registry.write_text(
+        """guest_profile: guest
+contacts:
+  stephen-lucier:
+    identities:
+      bluebubbles:
+        handles: [guest@example.com]
+    allowed_surfaces: [bluebubbles]
+""",
+        encoding="utf-8",
+    )
+    runner = _runner(extra={"guest_routing_enabled": True, "guest_contacts_file": str(registry)})
+    runner._resolve_profile_home_for_source = lambda _source: tmp_path / "guest"
+    order = []
+
+    async def record(**kwargs):
+        order.append(("arrival", kwargs["source_id"]))
+        return 17
+
+    async def handle(*args, **kwargs):
+        order.append(("session-handler", kwargs["proactive_arrival"].sequence))
+        return None
+
+    monkeypatch.setattr("gateway.run._record_proactive_arrival", record)
+    monkeypatch.setattr("gateway.run._load_gateway_config_for_profile", lambda _profile: {
+        "agent": {"proactive": {"enabled": True}}
+    })
+    runner._handle_message_with_agent = AsyncMock(side_effect=handle)
+    event = _event("hello", _source(user_id="guest@example.com", chat_id="guest@example.com", chat_type="dm"))
+    with patch("hermes_cli.plugins.invoke_hook", return_value=[]):
+        await runner._handle_message(event)
+
+    assert order == [("arrival", "m1"), ("session-handler", 17)]
+    carried = runner._handle_message_with_agent.await_args.kwargs["proactive_arrival"]
+    assert carried.source_id == "m1" and carried.sequence == 17
+
+
+@pytest.mark.asyncio
 async def test_bluebubbles_approved_contact_group_gets_no_retrieval_scope(tmp_path):
     registry = tmp_path / "contacts.yaml"
     registry.write_text(

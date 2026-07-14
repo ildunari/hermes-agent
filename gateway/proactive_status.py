@@ -1,6 +1,7 @@
 """Text-free proactive health and dead-system diagnostics."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -88,6 +89,8 @@ def probe_alarm_sink_readiness(*, profile_home: str | Path, config: ProactiveCon
         )
         manifest = json.loads((root / "proactive-alarm-sink.json").read_text(encoding="utf-8"))
         nonce = str(manifest.get("nonce") or "")
+        generation = str(manifest.get("generation") or "")
+        binding = manifest.get("binding")
         script = (root / "scripts" / ALARM_PROBE_SCRIPT).read_text(encoding="utf-8")
         with use_cron_store(root):
             all_jobs = list_jobs(include_disabled=True)
@@ -100,12 +103,21 @@ def probe_alarm_sink_readiness(*, profile_home: str | Path, config: ProactiveCon
         job = jobs[0]
         watchdog = watchdogs[0]
         structural = bool(
-            manifest.get("type") == "hermes_cron"
+            manifest.get("version") == 2
+            and manifest.get("type") == "hermes_cron"
             and manifest.get("target") == config.alarm_sink_target
+            and isinstance(binding, dict)
+            and job.get("probe_binding") == binding
             and job.get("enabled", True) and job.get("no_agent") is True
             and job.get("script") == ALARM_PROBE_SCRIPT
             and job.get("deliver") == config.alarm_sink_target
-            and nonce and nonce in script
+            and nonce and generation
+            and binding.get("nonce") == nonce
+            and binding.get("generation") == generation
+            and binding.get("target") == config.alarm_sink_target
+            and binding.get("script") == ALARM_PROBE_SCRIPT
+            and binding.get("script_sha256") == hashlib.sha256(script.encode("utf-8")).hexdigest()
+            and f"{nonce} {generation}" in script
             and watchdog.get("enabled", True) and watchdog.get("no_agent") is True
             and watchdog.get("script") == WATCHDOG_SCRIPT
             and watchdog.get("deliver") == config.alarm_sink_target
@@ -113,7 +125,12 @@ def probe_alarm_sink_readiness(*, profile_home: str | Path, config: ProactiveCon
         last_run = job.get("last_run_at")
         run_at = datetime.fromisoformat(str(last_run)).timestamp() if last_run else None
         fresh = bool(run_at is not None and 0 <= timestamp - run_at <= config.alarm_probe_max_age_seconds)
-        ack = bool(job.get("last_status") == "ok" and not job.get("last_delivery_error"))
+        ack_metadata = job.get("last_probe_delivery_ack")
+        expected_ack = {**binding, "run_at": str(last_run)} if isinstance(binding, dict) else None
+        ack = bool(
+            job.get("last_status") == "ok" and not job.get("last_delivery_error")
+            and isinstance(ack_metadata, dict) and ack_metadata == expected_ack
+        )
         result.update({"structural": structural, "last_ack_at": run_at,
                        "ack_age_seconds": timestamp - run_at if run_at is not None else None,
                        "delivery_ack": ack and fresh, "ready": structural and ack and fresh})

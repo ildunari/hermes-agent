@@ -1973,6 +1973,17 @@ class TrustedContactScope:
     source_text: str = ""
 
 
+@dataclasses.dataclass(frozen=True)
+class ProactiveInboundArrival:
+    """Durable authenticated-ingress fence carried into session handling."""
+
+    config_raw: dict[str, Any]
+    profile_home: Path
+    source_id: str
+    received_at: float
+    sequence: int
+
+
 def _trusted_contact_scope_from_metadata(metadata: Any) -> Optional[TrustedContactScope]:
     if not isinstance(metadata, dict):
         return None
@@ -10420,6 +10431,49 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
 
+        # The sender and routed contact scope are now authenticated. Establish
+        # the durable arrival fence before command handling, session lookup, or
+        # any other await can let a proactive sender pass it. Carry this exact
+        # identity/sequence to the later full inbound commit; do not re-record.
+        proactive_arrival = None
+        if isinstance(trusted_contact_scope, TrustedContactScope):
+            _proactive_cfg = _load_gateway_config_for_profile(
+                getattr(source, "profile", None)
+            )
+            _event_ts = getattr(event, "timestamp", None)
+            try:
+                _proactive_ts = float(
+                    _event_ts.timestamp() if hasattr(_event_ts, "timestamp") else _event_ts
+                )
+            except (TypeError, ValueError):
+                _proactive_ts = time.time()
+            _proactive_source_id = str(getattr(event, "message_id", None) or "").strip()
+            if not _proactive_source_id:
+                _proactive_source_id = hashlib.sha256(
+                    (
+                        f"{getattr(getattr(source, 'platform', None), 'value', '')}\0"
+                        f"{getattr(source, 'chat_id', '')}\0{getattr(source, 'user_id', '')}\0"
+                        f"{_proactive_ts:.6f}\0{event.text or ''}"
+                    ).encode()
+                ).hexdigest()
+            _proactive_home = self._resolve_profile_home_for_source(source)
+            _arrival_sequence = await _record_proactive_arrival(
+                config_raw=_proactive_cfg,
+                trusted_scope=trusted_contact_scope,
+                profile_home=_proactive_home,
+                source=source,
+                source_id=_proactive_source_id,
+                received_at=_proactive_ts,
+            )
+            if isinstance(_arrival_sequence, int) and _arrival_sequence > 0:
+                proactive_arrival = ProactiveInboundArrival(
+                    config_raw=_proactive_cfg,
+                    profile_home=Path(_proactive_home),
+                    source_id=_proactive_source_id,
+                    received_at=_proactive_ts,
+                    sequence=_arrival_sequence,
+                )
+
         # Shared BlueBubbles groups never inherit an owner-bound approval by
         # backward-compatible open-slash semantics. Approval is admin-only even
         # when no slash policy was configured.
@@ -11748,6 +11802,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _quick_key,
                 _run_generation,
                 trusted_contact_scope=trusted_contact_scope,
+                proactive_arrival=proactive_arrival,
             )
             # Goal continuation: after the agent returns a final response
             # for this turn, check any standing /goal — the judge will
@@ -12249,6 +12304,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         run_generation: int,
         *,
         trusted_contact_scope: Optional[TrustedContactScope] = None,
+        proactive_arrival: Optional[ProactiveInboundArrival] = None,
     ):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -12281,54 +12337,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
 
-        # Phase-3 proactive ingress hook: authenticated DMs cancel armed/claimed
-        # slots immediately and close any <24h outcome. It is config-gated,
-        # advisory, and offloaded so the reactive LLM hot path gains no blocking
-        # database work. No live profile enables it as part of this code change.
-        if isinstance(trusted_contact_scope, TrustedContactScope):
-            _proactive_cfg = _load_gateway_config_for_profile(
-                getattr(source, "profile", None)
-            )
-            _event_ts = getattr(event, "timestamp", None)
-            try:
-                _proactive_ts = float(
-                    _event_ts.timestamp() if hasattr(_event_ts, "timestamp") else _event_ts
-                )
-            except (TypeError, ValueError):
-                _proactive_ts = time.time()
-            _proactive_source_id = str(getattr(event, "message_id", None) or "").strip()
-            if not _proactive_source_id:
-                _proactive_source_id = hashlib.sha256(
-                    f"{session_entry.session_id}\0{_proactive_ts:.6f}\0{event.text or ''}".encode()
-                ).hexdigest()
+        # Complete the authenticated inbound transaction with the exact durable
+        # fence captured before session resolution.  The arrival itself is not
+        # written here, which makes this path idempotent and race-order safe.
+        if (
+            isinstance(trusted_contact_scope, TrustedContactScope)
+            and isinstance(proactive_arrival, ProactiveInboundArrival)
+        ):
             barriers = getattr(self, "_proactive_delivery_barriers", None)
             if barriers is None:
                 barriers = self._proactive_delivery_barriers = {}
             from gateway.contact_memory.store import opaque_contact_filename
             barrier_key = Path(opaque_contact_filename(trusted_contact_scope.contact_id)).stem
             barrier = barriers.setdefault(barrier_key, asyncio.Lock())
-            _proactive_home = self._resolve_profile_home_for_source(source)
-            _arrival_sequence = await _record_proactive_arrival(
-                config_raw=_proactive_cfg,
-                trusted_scope=trusted_contact_scope,
-                profile_home=_proactive_home,
-                source=source,
-                source_id=_proactive_source_id,
-                received_at=_proactive_ts,
-            )
             async with barrier:
                 await _record_proactive_inbound(
-                    config_raw=_proactive_cfg,
+                    config_raw=proactive_arrival.config_raw,
                     trusted_scope=trusted_contact_scope,
-                    profile_home=_proactive_home,
+                    profile_home=proactive_arrival.profile_home,
                     profile=str(getattr(source, "profile", None) or os.getenv("HERMES_PROFILE") or "default"),
                     source=source,
                     session_id=session_entry.session_id,
-                    source_id=_proactive_source_id,
+                    source_id=proactive_arrival.source_id,
                     text=str(event.text or ""),
-                    received_at=_proactive_ts,
+                    received_at=proactive_arrival.received_at,
                     metadata=getattr(event, "metadata", None),
-                    arrival_sequence=_arrival_sequence,
+                    arrival_sequence=proactive_arrival.sequence,
                 )
 
         pinned_session_id = str(

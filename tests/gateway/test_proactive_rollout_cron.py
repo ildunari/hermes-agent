@@ -27,6 +27,11 @@ def test_rollout_cron_dry_run_and_idempotent_reconcile(tmp_path: Path):
     probe_job=next(j for j in jobs if j['name']==ALARM_PROBE_NAME)
     with use_cron_store(root):
         mark_job_run(probe_job['id'],True,None,delivery_error=None)
+    # Generic/manual run state is not delivery evidence.
+    assert not probe_alarm_sink_readiness(profile_home=root,config=cfg)['ready']
+    with use_cron_store(root):
+        mark_job_run(probe_job['id'],True,None,delivery_error=None,
+                     delivery_ack_metadata=probe_job['probe_binding'])
     assert probe_alarm_sink_readiness(profile_home=root,config=cfg)['ready']
 
 
@@ -35,3 +40,83 @@ def test_rollout_cron_rejects_arbitrary_or_non_operator_sink(tmp_path: Path):
         import pytest
         with pytest.raises(ValueError):
             install(root=str(tmp_path/'poke'),alarm_target=target,dry_run=True)
+
+
+def test_probe_ack_is_bound_to_target_nonce_script_and_generation(tmp_path: Path):
+    root = tmp_path / "poke"
+    install(root=str(root), alarm_target="telegram:first")
+    with use_cron_store(root):
+        old = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+        mark_job_run(old["id"], True, delivery_ack_metadata=old["probe_binding"])
+    first_cfg = ProactiveConfig(alarm_sink_configured=True, alarm_sink_type="hermes_cron",
+                                alarm_sink_target="telegram:first")
+    assert probe_alarm_sink_readiness(profile_home=root, config=first_cfg)["ready"]
+
+    install(root=str(root), alarm_target="telegram:second")
+    with use_cron_store(root):
+        changed = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+        # Reproduction: an old in-flight run finishing after the update cannot ACK.
+        mark_job_run(changed["id"], True, delivery_ack_metadata=old["probe_binding"])
+    assert changed["probe_binding"]["nonce"] != old["probe_binding"]["nonce"]
+    assert changed["probe_binding"]["generation"] != old["probe_binding"]["generation"]
+    second_cfg = ProactiveConfig(alarm_sink_configured=True, alarm_sink_type="hermes_cron",
+                                 alarm_sink_target="telegram:second")
+    assert not probe_alarm_sink_readiness(profile_home=root, config=second_cfg)["ready"]
+
+    prior = changed["probe_binding"]
+    (root / "scripts" / "proactive_alarm_sink_probe.py").write_text("print('tampered')\n")
+    install(root=str(root), alarm_target="telegram:second")
+    with use_cron_store(root):
+        repaired = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+    assert repaired["probe_binding"]["generation"] != prior["generation"]
+    assert not probe_alarm_sink_readiness(profile_home=root, config=second_cfg)["ready"]
+
+
+def test_real_cron_delivery_path_persists_exact_probe_ack(monkeypatch, tmp_path: Path):
+    from cron import scheduler
+
+    root = tmp_path / "poke"
+    install(root=str(root), alarm_target="telegram:operator")
+    delivered = []
+    with use_cron_store(root):
+        job = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+        # Exercise the real no-agent script runner; only the external transport
+        # is replaced. This proves the nonce/generation emitted by the installed
+        # script and the target metadata travel through the actual cron path.
+        monkeypatch.setattr(scheduler, "_get_hermes_home", lambda: root)
+        monkeypatch.setattr(scheduler, "save_job_output", lambda *a, **k: root / "out")
+        monkeypatch.setattr(
+            scheduler, "_deliver_result",
+            lambda delivered_job, content, **kwargs: delivered.append((delivered_job, content)),
+        )
+        assert scheduler.run_one_job(job)
+    assert delivered == [(job, (
+        "HERMES_PROACTIVE_ALARM_PROBE_ACK_REQUEST "
+        f"{job['probe_binding']['nonce']} {job['probe_binding']['generation']}"
+    ))]
+    cfg = ProactiveConfig(alarm_sink_configured=True, alarm_sink_type="hermes_cron",
+                          alarm_sink_target="telegram:operator")
+    assert probe_alarm_sink_readiness(profile_home=root, config=cfg)["ready"]
+
+
+def test_cron_does_not_ack_wrong_probe_output_or_transport_metadata(monkeypatch, tmp_path: Path):
+    from cron import scheduler
+
+    root = tmp_path / "poke"
+    install(root=str(root), alarm_target="telegram:operator")
+    with use_cron_store(root):
+        job = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+        monkeypatch.setattr(scheduler, "run_job", lambda *a, **k: (True, "out", "wrong", None))
+        monkeypatch.setattr(scheduler, "save_job_output", lambda *a, **k: root / "out")
+        monkeypatch.setattr(scheduler, "_deliver_result", lambda *a, **k: None)
+        assert scheduler.run_one_job(job)
+    cfg = ProactiveConfig(alarm_sink_configured=True, alarm_sink_type="hermes_cron",
+                          alarm_sink_target="telegram:operator")
+    assert not probe_alarm_sink_readiness(profile_home=root, config=cfg)["ready"]
+
+    # A stale completion cannot erase a proof earned by the current generation.
+    with use_cron_store(root):
+        mark_job_run(job["id"], True, delivery_ack_metadata=job["probe_binding"])
+        stale = dict(job["probe_binding"], generation="stale")
+        mark_job_run(job["id"], True, delivery_ack_metadata=stale)
+    assert probe_alarm_sink_readiness(profile_home=root, config=cfg)["ready"]

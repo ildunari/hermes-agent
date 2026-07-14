@@ -3683,7 +3683,33 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
         if not _consume_interrupted_flag(job["id"]):
-            mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+            # Persist proof only from this real execution + delivery path.  A
+            # stale in-flight run carries its snapshot binding and is rejected
+            # atomically by mark_job_run if install/config changed meanwhile.
+            probe_binding = job.get("probe_binding")
+            expected_probe_output = None
+            if isinstance(probe_binding, dict):
+                nonce = str(probe_binding.get("nonce") or "")
+                generation = str(probe_binding.get("generation") or "")
+                if nonce and generation:
+                    expected_probe_output = (
+                        f"HERMES_PROACTIVE_ALARM_PROBE_ACK_REQUEST {nonce} {generation}"
+                    )
+            ack_metadata = (
+                dict(probe_binding)
+                if should_deliver and success and delivery_error is None
+                and expected_probe_output is not None
+                # Bind the proof to what the real script emitted and to the
+                # exact transport target/script carried by this run snapshot.
+                and deliver_content.strip() == expected_probe_output
+                and job.get("deliver") == probe_binding.get("target")
+                and job.get("script") == probe_binding.get("script")
+                else None
+            )
+            mark_kwargs = {"delivery_error": delivery_error}
+            if ack_metadata is not None:
+                mark_kwargs["delivery_ack_metadata"] = ack_metadata
+            mark_job_run(job["id"], success, error, **mark_kwargs)
         return True
 
     except Exception as e:

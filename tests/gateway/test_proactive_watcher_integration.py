@@ -150,6 +150,36 @@ async def test_authenticated_arrival_then_inbound_commit_traverses_real_protocol
 
 
 @pytest.mark.asyncio
+async def test_arrival_fences_are_idempotent_and_order_independent_and_visible_to_watcher(tmp_path):
+    import asyncio
+    from gateway.proactive_scheduler import ProactiveConfig
+    from gateway.proactive_status import health_snapshot
+
+    home = tmp_path / 'profiles' / 'poke'
+    source = SimpleNamespace(chat_type='dm', platform=SimpleNamespace(value='bluebubbles'),
+                             chat_id='dm', user_id='owner')
+    scope = TrustedContactScope('owner', 'kosta-owner')
+
+    async def observe(message_id, delay):
+        await asyncio.sleep(delay)
+        return await _record_proactive_arrival(
+            config_raw=_proactive_config(), trusted_scope=scope, profile_home=home,
+            source=source, source_id=message_id, received_at=100 + delay,
+        )
+
+    later_call, earlier_call = await asyncio.gather(observe('second', 0), observe('first', .01))
+    duplicate = await observe('second', 0)
+    assert duplicate == later_call
+    assert {later_call, earlier_call} == {1, 2}
+
+    snapshot = health_snapshot(
+        profile_home=home, profile='poke', config=_proactive_config(), now=200,
+        adapter_ready=True, cron_fresh=True,
+    )
+    assert snapshot['observed_ingress'] == 2
+
+
+@pytest.mark.asyncio
 async def test_live_watcher_traverses_real_tick_final_checks_and_authenticated_adapter_without_send(monkeypatch,tmp_path):
     import time
     from gateway.proactive_scheduler import ContactRoute, ProactiveConfig, ProactiveScheduler
