@@ -356,6 +356,10 @@ _parallel_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _parallel_pool_max_workers: Optional[int] = None
 _running_job_ids: set = set()
 _running_lock = threading.Lock()
+# Probe identity captured at dispatch, keyed by the physical in-flight run.
+# The shutdown timeout path uses this same frozen snapshot when it completes
+# the run from a different thread.
+_running_probe_snapshots: dict = {}
 
 # Job IDs the gateway shutdown path force-killed the tool subprocess of
 # while still in ``_running_job_ids`` (see ``mark_running_jobs_interrupted``
@@ -412,11 +416,17 @@ def mark_running_jobs_interrupted(reason: str) -> list:
     """
     with _running_lock:
         job_ids = list(_running_job_ids)
+        probe_snapshots = {
+            job_id: _running_probe_snapshots.get(job_id) for job_id in job_ids
+        }
         _interrupted_job_ids.update(job_ids)
     marked = []
     for job_id in job_ids:
         try:
-            mark_job_run(job_id, False, reason)
+            mark_job_run(
+                job_id, False, reason,
+                probe_run_snapshot=probe_snapshots.get(job_id),
+            )
             marked.append(job_id)
         except Exception as e:
             logger.warning("Failed to mark job %s interrupted: %s", job_id, e)
@@ -3563,6 +3573,11 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
     Returns True if the job was processed (even if the job itself failed —
     failure is recorded via ``mark_job_run``), False only if processing raised.
     """
+    # Freeze all probe identity axes before the run claim and execution. This
+    # detached copy is the only binding completion code may use, even if the
+    # installed job is reconciled while this run is in flight.
+    binding = job.get("probe_binding")
+    probe_run_snapshot = dict(binding) if isinstance(binding, dict) else None
     try:
         # Pre-run dispatch claim (issue #38758): atomically commit a finite
         # one-shot's dispatch BEFORE its side effect runs, so a tick that dies
@@ -3686,7 +3701,7 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             # Persist proof only from this real execution + delivery path.  A
             # stale in-flight run carries its snapshot binding and is rejected
             # atomically by mark_job_run if install/config changed meanwhile.
-            probe_binding = job.get("probe_binding")
+            probe_binding = probe_run_snapshot
             expected_probe_output = None
             if isinstance(probe_binding, dict):
                 nonce = str(probe_binding.get("nonce") or "")
@@ -3709,13 +3724,20 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             mark_kwargs = {"delivery_error": delivery_error}
             if ack_metadata is not None:
                 mark_kwargs["delivery_ack_metadata"] = ack_metadata
-            mark_job_run(job["id"], success, error, **mark_kwargs)
+            mark_job_run(
+                job["id"], success, error,
+                probe_run_snapshot=probe_run_snapshot,
+                **mark_kwargs,
+            )
         return True
 
     except Exception as e:
         logger.error("Error processing job %s: %s", job['id'], e)
         if not _consume_interrupted_flag(job["id"]):
-            mark_job_run(job["id"], False, str(e))
+            mark_job_run(
+                job["id"], False, str(e),
+                probe_run_snapshot=probe_run_snapshot,
+            )
         return False
 
 
@@ -3857,6 +3879,10 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     logger.info("Job '%s' already running — skipping", job.get("name", job_id))
                     return None
                 _running_job_ids.add(job_id)
+                binding = job.get("probe_binding")
+                _running_probe_snapshots[job_id] = (
+                    dict(binding) if isinstance(binding, dict) else None
+                )
             _ctx = contextvars.copy_context()
 
             def _run_and_release(j=job, ctx=_ctx):
@@ -3865,6 +3891,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 finally:
                     with _running_lock:
                         _running_job_ids.discard(j["id"])
+                        _running_probe_snapshots.pop(j["id"], None)
 
             try:
                 return pool.submit(_run_and_release)
@@ -3874,6 +3901,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 if _interpreter_shutting_down(submit_err):
                     with _running_lock:
                         _running_job_ids.discard(job_id)
+                        _running_probe_snapshots.pop(job_id, None)
                     logger.warning(
                         "Job '%s' not dispatched — interpreter is shutting down",
                         job.get("name", job_id),

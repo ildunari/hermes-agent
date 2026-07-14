@@ -1,4 +1,8 @@
 from pathlib import Path
+import copy
+
+import pytest
+
 from cron.jobs import list_jobs, mark_job_run, use_cron_store
 from gateway.proactive_scheduler import ProactiveConfig
 from gateway.proactive_status import probe_alarm_sink_readiness
@@ -120,3 +124,81 @@ def test_cron_does_not_ack_wrong_probe_output_or_transport_metadata(monkeypatch,
         stale = dict(job["probe_binding"], generation="stale")
         mark_job_run(job["id"], True, delivery_ack_metadata=stale)
     assert probe_alarm_sink_readiness(profile_home=root, config=cfg)["ready"]
+
+
+@pytest.mark.parametrize(
+    ("success", "error", "delivery_error"),
+    [
+        (False, "probe failed", None),
+        (True, None, None),  # successful run, but wrong output produced no ACK
+        (False, "probe timed out", "transport timeout"),
+    ],
+    ids=["failure", "wrong-output", "timeout"],
+)
+def test_old_probe_non_ack_completion_after_new_ack_is_atomic_noop(
+    tmp_path: Path, success: bool, error: str | None, delivery_error: str | None,
+):
+    root = tmp_path / "poke"
+    install(root=str(root), alarm_target="telegram:first")
+    with use_cron_store(root):
+        old = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+
+    install(root=str(root), alarm_target="telegram:second")
+    with use_cron_store(root):
+        current = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+        mark_job_run(
+            current["id"], True,
+            delivery_ack_metadata=current["probe_binding"],
+            probe_run_snapshot=current["probe_binding"],
+        )
+        before = copy.deepcopy(next(
+            j for j in list_jobs(include_disabled=True) if j["id"] == current["id"]
+        ))
+        mark_job_run(
+            current["id"], success, error, delivery_error=delivery_error,
+            probe_run_snapshot=old["probe_binding"],
+        )
+        after = next(j for j in list_jobs(include_disabled=True) if j["id"] == current["id"])
+
+    # Rejection is total: even current-generation claims/counters/schedule are
+    # not released or recomputed by the stale physical run.
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    ("success", "error", "delivery_error"),
+    [
+        (False, "probe failed", None),
+        (True, None, None),
+        (False, "probe timed out", "transport timeout"),
+    ],
+    ids=["failure", "wrong-output", "timeout"],
+)
+def test_new_ack_after_old_probe_non_ack_completion_wins(
+    tmp_path: Path, success: bool, error: str | None, delivery_error: str | None,
+):
+    root = tmp_path / "poke"
+    install(root=str(root), alarm_target="telegram:first")
+    with use_cron_store(root):
+        old = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+
+    install(root=str(root), alarm_target="telegram:second")
+    with use_cron_store(root):
+        current = next(j for j in list_jobs(include_disabled=True) if j["name"] == ALARM_PROBE_NAME)
+        pristine = copy.deepcopy(current)
+        mark_job_run(
+            current["id"], success, error, delivery_error=delivery_error,
+            probe_run_snapshot=old["probe_binding"],
+        )
+        assert next(
+            j for j in list_jobs(include_disabled=True) if j["id"] == current["id"]
+        ) == pristine
+        mark_job_run(
+            current["id"], True,
+            delivery_ack_metadata=current["probe_binding"],
+            probe_run_snapshot=current["probe_binding"],
+        )
+        completed = next(j for j in list_jobs(include_disabled=True) if j["id"] == current["id"])
+
+    assert completed["last_status"] == "ok"
+    assert completed["last_probe_delivery_ack"]["generation"] == current["probe_binding"]["generation"]

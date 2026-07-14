@@ -1467,7 +1467,8 @@ def remove_job(job_id: str) -> bool:
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                  delivery_error: Optional[str] = None,
-                 delivery_ack_metadata: Optional[Dict[str, Any]] = None):
+                 delivery_ack_metadata: Optional[Dict[str, Any]] = None,
+                 probe_run_snapshot: Optional[Dict[str, Any]] = None):
     """
     Mark a job as having been run.
     
@@ -1482,19 +1483,23 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
                 current_binding = job.get("probe_binding")
+                # The run snapshot is captured before execution and accompanies
+                # every probe completion, including failures and exceptions.
+                # Older direct callers supplied only ACK metadata, so retain it
+                # as a compatibility snapshot for successful proof writes.
+                completion_binding = (
+                    probe_run_snapshot
+                    if probe_run_snapshot is not None
+                    else delivery_ack_metadata
+                )
                 if (
-                    isinstance(delivery_ack_metadata, dict)
-                    and isinstance(current_binding, dict)
-                    and delivery_ack_metadata != current_binding
+                    isinstance(completion_binding, dict)
+                    and completion_binding != current_binding
                 ):
-                    # This completion belongs to an older probe generation.
-                    # Do not let it overwrite run/ACK state for the newly
-                    # installed target or script. Claims still belong to the
-                    # physical run that just ended and must be released.
-                    job["fire_claim"] = None
-                    job["run_claim"] = None
-                    jobs[i] = job
-                    save_jobs(jobs)
+                    # This completion belongs to another probe generation.
+                    # Reject the entire update while still under the jobs lock:
+                    # status, timestamps, ACK, counters, schedule, and current
+                    # generation claims must all remain untouched.
                     return
                 now = _hermes_now().isoformat()
                 job["last_run_at"] = now

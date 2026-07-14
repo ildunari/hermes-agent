@@ -10,6 +10,8 @@ The first test characterizes the sequence as driven through `tick()` (proving
 the extraction didn't change `tick`'s behavior); the rest unit-test the
 extracted helper directly.
 """
+import pytest
+
 import cron.scheduler as s
 
 
@@ -31,7 +33,7 @@ def _patch_pipeline(monkeypatch, *, success=True, output="out", final="final res
         calls.append(("deliver", job["id"]))
         return None
 
-    def fake_mark(jid, ok, err=None, delivery_error=None):
+    def fake_mark(jid, ok, err=None, delivery_error=None, **kwargs):
         calls.append(("mark", jid, ok))
 
     monkeypatch.setattr(s, "run_job", fake_run_job)
@@ -110,13 +112,53 @@ def test_run_one_job_exception_marks_failure(monkeypatch):
     marks = []
     monkeypatch.setattr(
         s, "mark_job_run",
-        lambda jid, ok, err=None, delivery_error=None: marks.append((jid, ok)),
+        lambda jid, ok, err=None, delivery_error=None, **kwargs: marks.append((jid, ok)),
     )
 
     ok = s.run_one_job({"id": "j6", "name": "t"})
 
     assert ok is False
     assert marks == [("j6", False)]
+
+
+@pytest.mark.parametrize("outcome", ["failure", "wrong-output", "timeout"])
+def test_probe_snapshot_is_frozen_and_passed_on_every_completion(monkeypatch, outcome):
+    binding = {
+        "target": "telegram:first",
+        "nonce": "old-nonce",
+        "generation": "old-generation",
+        "script": "probe.py",
+        "script_sha256": "old-hash",
+    }
+    expected = dict(binding)
+    job = {
+        "id": "probe", "name": "probe", "deliver": "telegram:first",
+        "script": "probe.py", "probe_binding": binding,
+    }
+
+    def fake_run_job(run_job, *, defer_agent_teardown=None):
+        # Simulate reconciliation mutating the caller's job object while this
+        # physical run is in flight. Completion must retain the old identity.
+        run_job["probe_binding"].update(
+            target="telegram:second", nonce="new-nonce",
+            generation="new-generation", script_sha256="new-hash",
+        )
+        if outcome == "timeout":
+            raise TimeoutError("probe timed out")
+        if outcome == "failure":
+            return False, "", "", "probe failed"
+        return True, "wrong", "wrong output", None
+
+    marks = []
+    monkeypatch.setattr(s, "run_job", fake_run_job)
+    monkeypatch.setattr(s, "save_job_output", lambda *a, **k: "/tmp/out")
+    monkeypatch.setattr(s, "_deliver_result", lambda *a, **k: None)
+    monkeypatch.setattr(s, "mark_job_run", lambda *a, **k: marks.append((a, k)))
+
+    s.run_one_job(job)
+
+    assert len(marks) == 1
+    assert marks[0][1]["probe_run_snapshot"] == expected
 
 
 def test_run_one_job_installs_secret_scope_under_multiplex(monkeypatch, tmp_path):
