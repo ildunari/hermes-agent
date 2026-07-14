@@ -3,9 +3,14 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+import sys
 import tempfile
 import time
 from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from gateway.contact_memory.imessage_bootstrap import AuthoritativeSource, validate_semantic_items
 from gateway.contact_memory.import_contacts import _classify
