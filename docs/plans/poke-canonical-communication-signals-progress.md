@@ -2,22 +2,22 @@
 
 ## Phase A — Contract and schema
 
-Status: complete; Gate A clear. Phase B has not started.
+Status: repair implementation complete; final parent review pending. Phase B has not started.
 
 Commit: Phase A boundary commit containing this progress record (the final SHA is reported by the implementation thread).
 
 ### Delivered
 
 - Added the typed canonical communication contract for events, URLs, attachment descriptors, relations, entity mentions, recommendation outcomes, lifecycle/retraction state, and ingest results.
-- Added schema version 5 as an additive migration. Existing contact-memory tables and data remain intact; canonical communication evidence is physically isolated per contact database.
+- Added schema version 6 as an additive migration. Existing contact-memory tables and data remain intact; canonical communication evidence is physically isolated per contact database.
 - Added atomic/idempotent ingress, additive enrichment, source uniqueness, exact conflict detection, authenticated actor checks, out-of-order reaction-removal reconciliation, and secure-delete coverage to `ContactMemoryStore`.
 - Added focused tests for real-shaped v4 migration, every child type, replay/conflict/rollback, concurrent ingestion, enrichment replay, reaction add/remove ordering and target validation, raw-artifact rejection, per-contact isolation, and deletion.
 
 ### Gate A evidence
 
-Final verification passed: `scripts/run_tests.sh tests/gateway/contact_memory tests/gateway/test_interest_ledger.py -q` completed with 155 passed and 0 failed across 11 files; `python3 -m py_compile gateway/contact_memory/schema.py gateway/contact_memory/store.py tests/gateway/contact_memory/test_communication_store.py` passed; and `git diff --check` passed.
+Repair verification passed: `scripts/run_tests.sh tests/gateway/contact_memory tests/gateway/test_interest_ledger.py -q` completed with 172 passed and 0 failed across 11 files; `python3 -m py_compile gateway/contact_memory/schema.py gateway/contact_memory/store.py tests/gateway/contact_memory/test_communication_store.py` passed; `python3 -m ruff check gateway/contact_memory/schema.py gateway/contact_memory/store.py tests/gateway/contact_memory/test_communication_store.py` passed; and `git diff --check` passed.
 
-Independent adversarial review ran after implementation and after each P0/P1 fix cycle. Final review found no unresolved P0 or P1 findings and declared Gate A clear.
+The parent independently reviewed the pre-repair diff and identified three P1 findings, all covered by focused regressions and repaired below. The parent will run the final independent review; no additional review was launched from this repair turn.
 
 ### Review findings fixed
 
@@ -26,6 +26,10 @@ Independent adversarial review ran after implementation and after each P0/P1 fix
 - Closed durable raw-artifact paths across URL metadata, attachment MIME/UTI fields, entity labels, machine tokens, and pending target IDs. Durable semantic free text is slash-free by contract.
 - Enforced exact integer/boolean persistence and prevented lossy SQLite round trips.
 - Replaced the synthetic version-marker test with a real-shaped v4 database lacking the new communication tables.
+- Migrated existing v5 reaction rows atomically as `legacy_untyped` historical evidence instead of making databases with reaction history unopenable; reopening the migrated database is idempotent.
+- Reserved `legacy_untyped` for the internal historical-row restoration path. The public event contract and both reaction add/remove ingestion APIs reject it for new events and require a concrete subtype.
+- Strengthened canonical-label credential filtering for service-qualified token, secret-access-key, and database-credential prose while preserving legitimate artist, show, platform, and place-like semantic labels.
+- Preserved the accepted exact timestamp normalization and lossless SQLite round-trip boundary checks.
 
 ### Current risks and boundaries
 

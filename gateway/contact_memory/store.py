@@ -38,6 +38,7 @@ from .schema import (
     CommunicationKind,
     CommunicationLifecycle,
     CommunicationPrivacy,
+    CommunicationReactionSubtype,
     CommunicationRecommendationEvent,
     CommunicationRecommendationOutcome,
     CommunicationRelation,
@@ -210,12 +211,12 @@ class ContactMemoryStore:
             ).fetchone() if con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
             ).fetchone() else None
-            supported = {"1", "2", "3", "4", str(SCHEMA_VERSION)}
+            supported = {"1", "2", "3", "4", "5", str(SCHEMA_VERSION)}
             if existing is not None and str(existing[0]) not in supported:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {existing[0]}; expected {SCHEMA_VERSION}"
                 )
-            if existing is not None and str(existing[0]) in {"1", "2", "3", "4"}:
+            if existing is not None and str(existing[0]) != str(SCHEMA_VERSION):
                 self._upgrade_to_current(con)
                 return
             con.executescript(CONTACT_SCHEMA_SQL)
@@ -236,13 +237,14 @@ class ContactMemoryStore:
             if from_version == str(SCHEMA_VERSION):
                 con.execute("COMMIT")
                 return
-            if from_version not in {"1", "2", "3", "4"}:
+            if from_version not in {"1", "2", "3", "4", "5"}:
                 raise RuntimeError(
                     f"unsupported contact-memory schema {from_version}; expected {SCHEMA_VERSION}"
                 )
             if from_version == "1":
                 self._migrate_v1_to_v2(con)
             self._migrate_proactive_item_hash(con)
+            self._migrate_communication_reaction_subtype(con)
             self._execute_script(con, CONTACT_SCHEMA_SQL)
             con.execute(
                 "UPDATE schema_meta SET value=? WHERE key='schema_version'",
@@ -320,6 +322,27 @@ class ContactMemoryStore:
         con.execute(
             "CREATE INDEX IF NOT EXISTS proactive_send_item_hash "
             "ON proactive_send(item_hash) WHERE item_hash IS NOT NULL"
+        )
+
+    @staticmethod
+    def _migrate_communication_reaction_subtype(con: sqlite3.Connection) -> None:
+        """Mark v5 reactions as historical rather than inventing a concrete subtype."""
+        table = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='communication_event'"
+        ).fetchone()
+        if table is None:
+            return
+        columns = {str(row[1]) for row in con.execute("PRAGMA table_info(communication_event)")}
+        if "reaction_subtype" in columns:
+            return
+        con.execute(
+            "ALTER TABLE communication_event ADD COLUMN reaction_subtype TEXT "
+            "CHECK(reaction_subtype IN "
+            "('like','love','dislike','laugh','emphasis','question','legacy_untyped'))"
+        )
+        con.execute(
+            "UPDATE communication_event SET reaction_subtype='legacy_untyped' "
+            "WHERE kind IN ('reaction_add','reaction_remove')"
         )
 
     @contextmanager
@@ -1018,12 +1041,15 @@ class ContactMemoryStore:
 
     @staticmethod
     def _row_to_communication_event(row: sqlite3.Row) -> CommunicationEvent:
-        return CommunicationEvent(
+        reaction_subtype = (CommunicationReactionSubtype(str(row["reaction_subtype"]))
+                            if row["reaction_subtype"] is not None else None)
+        values: dict[str, Any] = dict(
             event_id=str(row["event_id"]), platform=str(row["platform"]),
             source_id=str(row["source_id"]), occurred_at=float(row["occurred_at"]),
             direction=CommunicationDirection(str(row["direction"])),
             kind=CommunicationKind(str(row["kind"])),
             actor_role=CommunicationActorRole(str(row["actor_role"])),
+            reaction_subtype=reaction_subtype,
             privacy=CommunicationPrivacy(str(row["privacy"])),
             lifecycle=CommunicationLifecycle(str(row["lifecycle"])),
             text_hash=str(row["text_hash"]) if row["text_hash"] is not None else None,
@@ -1033,6 +1059,9 @@ class ContactMemoryStore:
             retracted_by_event_id=(str(row["retracted_by_event_id"])
                                    if row["retracted_by_event_id"] is not None else None),
         )
+        if reaction_subtype is CommunicationReactionSubtype.LEGACY_UNTYPED:
+            return CommunicationEvent._from_migrated_legacy(**values)
+        return CommunicationEvent(**values)
 
     @staticmethod
     def _communication_bundle_in(
@@ -1160,11 +1189,14 @@ class ContactMemoryStore:
         event = bundle.event
         con.execute(
             """INSERT INTO communication_event(
-              event_id,platform,source_id,occurred_at,direction,kind,actor_role,privacy,
+              event_id,platform,source_id,occurred_at,direction,kind,reaction_subtype,
+              actor_role,privacy,
               lifecycle,text_hash,text_present,text_length,provenance,provenance_version,
-              retracted_by_event_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              retracted_by_event_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (event.event_id, event.platform, event.source_id, event.occurred_at,
-             event.direction.value, event.kind.value, event.actor_role.value,
+             event.direction.value, event.kind.value,
+             event.reaction_subtype.value if event.reaction_subtype is not None else None,
+             event.actor_role.value,
              event.privacy.value, event.lifecycle.value, event.text_hash,
              int(event.text_present), event.text_length, event.provenance,
              event.provenance_version, event.retracted_by_event_id),
@@ -1253,6 +1285,8 @@ class ContactMemoryStore:
         recommendation_events: Sequence[CommunicationRecommendationEvent] = (),
     ) -> CommunicationIngestResult:
         """Atomically append one authenticated event and its typed evidence."""
+        if event.reaction_subtype is CommunicationReactionSubtype.LEGACY_UNTYPED:
+            raise ValueError("legacy_untyped is reserved for migrated historical reactions")
         if event.kind is CommunicationKind.REACTION_REMOVE:
             raise ValueError("reaction removals require retract_communication_event")
         if event.lifecycle is not CommunicationLifecycle.ACTIVE or event.retracted_by_event_id is not None:
@@ -1400,6 +1434,8 @@ class ContactMemoryStore:
     ) -> None:
         if target.event.kind is not CommunicationKind.REACTION_ADD:
             raise ValueError("retraction target is not a reaction add")
+        if target.event.reaction_subtype is not removal.event.reaction_subtype:
+            raise ValueError("retraction reaction subtype does not match the target")
         if (
             target.event.platform != removal.event.platform
             or target.event.actor_role is not removal.event.actor_role
@@ -1443,6 +1479,8 @@ class ContactMemoryStore:
         relations: Sequence[CommunicationRelation],
     ) -> CommunicationIngestResult:
         """Append a reaction removal and retract its authenticated target atomically."""
+        if event.reaction_subtype is CommunicationReactionSubtype.LEGACY_UNTYPED:
+            raise ValueError("legacy_untyped is reserved for migrated historical reactions")
         if (
             event.kind is not CommunicationKind.REACTION_REMOVE
             or event.lifecycle is not CommunicationLifecycle.ACTIVE

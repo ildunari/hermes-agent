@@ -13,7 +13,7 @@ import math
 import re
 from typing import Any
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _PROACTIVE_ITEM_WORD_RE = re.compile(r"[a-z0-9]+", re.I)
 
@@ -133,6 +133,16 @@ class CommunicationKind(StrEnum):
     CALLBACK = "callback"
 
 
+class CommunicationReactionSubtype(StrEnum):
+    LIKE = "like"
+    LOVE = "love"
+    DISLIKE = "dislike"
+    LAUGH = "laugh"
+    EMPHASIS = "emphasis"
+    QUESTION = "question"
+    LEGACY_UNTYPED = "legacy_untyped"
+
+
 class CommunicationActorRole(StrEnum):
     CONTACT = "contact"
     COUNTERPART = "counterpart"
@@ -215,6 +225,33 @@ def _reject_raw_artifact_text(value: str, *, name: str) -> None:
         raise ValueError(f"{name} cannot contain a raw URL, secret, or local path")
 
 
+_ENTITY_CREDENTIAL_MARKER_RE = re.compile(
+    r"\b(?:password|passcode|api[ -]?(?:key|secret)|client secret|access token|"
+    r"auth token|bearer token|private key|secret access key|credential(?:s)?|seed phrase)\b",
+    re.IGNORECASE,
+)
+_ENTITY_CREDENTIAL_VALUE_RE = re.compile(
+    r"\b(?:my|your|our|the)\s+(?:password|passcode|pin)\s+is\s+\S+|"
+    r"\b(?:password|passcode|pin)\s*(?:is\s+|[:=]\s*)\S+|"
+    r"\b(?:password|passcode|pin)\s+\S*[0-9]\S*|"
+    r"\b(?:api[ -]?(?:key|secret)|client secret|access token|auth token|bearer token|"
+    r"private key)(?:(?:\s+is)?\s*[:=]\s*|\s+is\s+)\S+|"
+    r"\b(?:api[ -]?(?:key|secret)|client secret|access token|auth token|bearer token)"
+    r"\s+\S+|"
+    r"\b(?:github|gitlab|aws|amazon|database|db|postgres(?:ql)?|mysql|mongodb|redis|"
+    r"stripe|slack|discord|telegram)\s+(?:token|secret access key|access key|"
+    r"credential(?:s)?)\s+(?:is\s+)?(?::\s*|=\s*)?\S+|"
+    r"\bseed phrase(?:\s+\S+){3,}|\bsk-[A-Za-z0-9_-]{8,}\b",
+    re.IGNORECASE,
+)
+
+
+def _reject_credential_like_entity_label(value: str) -> None:
+    markers = _ENTITY_CREDENTIAL_MARKER_RE.findall(value)
+    if len(markers) >= 2 or _ENTITY_CREDENTIAL_VALUE_RE.search(value):
+        raise ValueError("canonical_label cannot contain credential-like message text")
+
+
 def _require_machine_token(value: str, *, name: str) -> None:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
         raise ValueError(f"{name} must be a normalized machine token")
@@ -229,6 +266,7 @@ class CommunicationEvent:
     direction: CommunicationDirection
     kind: CommunicationKind
     actor_role: CommunicationActorRole
+    reaction_subtype: CommunicationReactionSubtype | None = None
     privacy: CommunicationPrivacy = CommunicationPrivacy.PRIVATE
     lifecycle: CommunicationLifecycle = CommunicationLifecycle.ACTIVE
     text_hash: str | None = None
@@ -253,14 +291,25 @@ class CommunicationEvent:
             _require_opaque_id(self.retracted_by_event_id, name="retracted_by_event_id")
         if isinstance(self.occurred_at, bool) or not isinstance(self.occurred_at, (int, float)):
             raise ValueError("occurred_at must be numeric")
-        if not math.isfinite(float(self.occurred_at)):
+        normalized_occurred_at = float(self.occurred_at)
+        if not math.isfinite(normalized_occurred_at):
             raise ValueError("occurred_at must be finite")
+        if isinstance(self.occurred_at, int) and normalized_occurred_at != self.occurred_at:
+            raise ValueError("occurred_at integer must be exactly representable as a float")
+        object.__setattr__(self, "occurred_at", normalized_occurred_at)
         if not isinstance(self.direction, CommunicationDirection):
             raise ValueError("direction is invalid")
         if not isinstance(self.kind, CommunicationKind):
             raise ValueError("kind is invalid")
         if not isinstance(self.actor_role, CommunicationActorRole):
             raise ValueError("actor_role is invalid")
+        is_reaction = self.kind in {
+            CommunicationKind.REACTION_ADD, CommunicationKind.REACTION_REMOVE
+        }
+        if is_reaction != isinstance(self.reaction_subtype, CommunicationReactionSubtype):
+            raise ValueError("reaction_subtype is required only for reaction events")
+        if self.reaction_subtype is CommunicationReactionSubtype.LEGACY_UNTYPED:
+            raise ValueError("legacy_untyped is reserved for migrated historical reactions")
         if not isinstance(self.privacy, CommunicationPrivacy):
             raise ValueError("privacy is invalid")
         if not isinstance(self.lifecycle, CommunicationLifecycle):
@@ -285,6 +334,19 @@ class CommunicationEvent:
             raise ValueError("active events cannot name a retraction event")
         if self.lifecycle is CommunicationLifecycle.RETRACTED and self.retracted_by_event_id is None:
             raise ValueError("retracted events require retracted_by_event_id")
+
+    @classmethod
+    def _from_migrated_legacy(cls, **values: Any) -> CommunicationEvent:
+        """Restore a validated historical row whose v5 source had no reaction subtype."""
+        if values.get("reaction_subtype") is not CommunicationReactionSubtype.LEGACY_UNTYPED:
+            raise ValueError("historical restoration requires legacy_untyped")
+        validated = cls(
+            **{**values, "reaction_subtype": CommunicationReactionSubtype.LIKE}
+        )
+        object.__setattr__(
+            validated, "reaction_subtype", CommunicationReactionSubtype.LEGACY_UNTYPED
+        )
+        return validated
 
 
 @dataclass(frozen=True)
@@ -391,6 +453,7 @@ class EntityMention:
         _require_short_text(self.source_method, name="source_method", maximum=32)
         _require_machine_token(self.source_method, name="source_method")
         _reject_raw_artifact_text(self.canonical_label, name="canonical_label")
+        _reject_credential_like_entity_label(self.canonical_label)
         _reject_raw_artifact_text(self.source_method, name="source_method")
         if self.surface_hash is not None:
             _require_opaque_id(self.surface_hash, name="surface_hash")
@@ -806,6 +869,8 @@ CREATE TABLE IF NOT EXISTS communication_event (
   kind TEXT NOT NULL CHECK(kind IN (
     'text','link_share','attachment_share','reaction_add','reaction_remove','reply',
     'batch_member','recommendation','follow_through','callback')),
+  reaction_subtype TEXT CHECK(reaction_subtype IN (
+    'like','love','dislike','laugh','emphasis','question','legacy_untyped')),
   actor_role TEXT NOT NULL CHECK(actor_role IN ('contact','counterpart','assistant')),
   privacy TEXT NOT NULL CHECK(privacy IN ('private','sensitive','restricted')),
   lifecycle TEXT NOT NULL CHECK(lifecycle IN ('active','retracted')),
@@ -821,12 +886,26 @@ CREATE TABLE IF NOT EXISTS communication_event (
   CHECK((text_present=1 AND text_hash IS NOT NULL AND text_length > 0) OR
         (text_present=0 AND text_hash IS NULL AND text_length=0)),
   CHECK((lifecycle='active' AND retracted_by_event_id IS NULL) OR
-        (lifecycle='retracted' AND retracted_by_event_id IS NOT NULL))
+        (lifecycle='retracted' AND retracted_by_event_id IS NOT NULL)),
+  CHECK((kind IN ('reaction_add','reaction_remove') AND reaction_subtype IS NOT NULL) OR
+        (kind NOT IN ('reaction_add','reaction_remove') AND reaction_subtype IS NULL))
 );
 CREATE INDEX IF NOT EXISTS communication_event_occurred
   ON communication_event(occurred_at, event_id);
 CREATE INDEX IF NOT EXISTS communication_event_lifecycle
   ON communication_event(lifecycle, occurred_at);
+CREATE TRIGGER IF NOT EXISTS communication_event_reaction_subtype_insert
+BEFORE INSERT ON communication_event
+WHEN (NEW.kind IN ('reaction_add','reaction_remove')) != (NEW.reaction_subtype IS NOT NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'reaction subtype must match reaction kind');
+END;
+CREATE TRIGGER IF NOT EXISTS communication_event_reaction_subtype_update
+BEFORE UPDATE OF kind,reaction_subtype ON communication_event
+WHEN (NEW.kind IN ('reaction_add','reaction_remove')) != (NEW.reaction_subtype IS NOT NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'reaction subtype must match reaction kind');
+END;
 CREATE TABLE IF NOT EXISTS communication_url (
   url_id TEXT PRIMARY KEY,
   event_id TEXT NOT NULL REFERENCES communication_event(event_id) ON DELETE CASCADE,

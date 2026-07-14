@@ -18,6 +18,7 @@ from gateway.contact_memory.schema import (
     CommunicationKind,
     CommunicationLifecycle,
     CommunicationPrivacy,
+    CommunicationReactionSubtype,
     CommunicationRecommendationEvent,
     CommunicationRecommendationOutcome,
     CommunicationRelation,
@@ -116,6 +117,70 @@ def test_v4_migration_is_additive_and_idempotent(tmp_path: Path):
     })
 
 
+def test_v5_migration_preserves_untyped_reactions_as_legacy_history(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    with sqlite3.connect(store.path) as con:
+        con.executescript("""
+        DROP TABLE communication_recommendation_event;
+        DROP TABLE entity_mention;
+        DROP TABLE communication_retraction_pending;
+        DROP TABLE communication_relation;
+        DROP TABLE communication_attachment;
+        DROP TABLE communication_url;
+        DROP TABLE communication_event;
+        CREATE TABLE communication_event (
+          event_id TEXT PRIMARY KEY, platform TEXT NOT NULL, source_id TEXT NOT NULL,
+          occurred_at REAL NOT NULL, direction TEXT NOT NULL, kind TEXT NOT NULL,
+          actor_role TEXT NOT NULL, privacy TEXT NOT NULL, lifecycle TEXT NOT NULL,
+          text_hash TEXT, text_present INTEGER NOT NULL, text_length INTEGER NOT NULL,
+          provenance TEXT NOT NULL, provenance_version INTEGER NOT NULL,
+          retracted_by_event_id TEXT, UNIQUE(platform, source_id)
+        );
+        """)
+        legacy = _event("legacy-v5")
+        reaction_event_id = _id("event:legacy-v5-reaction")
+        reaction_source_id = _id("source:legacy-v5-reaction")
+        con.execute(
+            "INSERT INTO communication_event VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                legacy.event_id, legacy.platform, legacy.source_id, legacy.occurred_at,
+                legacy.direction.value, legacy.kind.value, legacy.actor_role.value,
+                legacy.privacy.value, legacy.lifecycle.value, legacy.text_hash,
+                int(legacy.text_present), legacy.text_length, legacy.provenance,
+                legacy.provenance_version, legacy.retracted_by_event_id,
+            ),
+        )
+        con.execute(
+            "INSERT INTO communication_event VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                reaction_event_id, "bluebubbles", reaction_source_id, 101.0,
+                CommunicationDirection.INBOUND.value, CommunicationKind.REACTION_ADD.value,
+                CommunicationActorRole.CONTACT.value, CommunicationPrivacy.PRIVATE.value,
+                CommunicationLifecycle.ACTIVE.value, None, 0, 0, "legacy-migration", 1, None,
+            ),
+        )
+        con.execute("UPDATE schema_meta SET value='5' WHERE key='schema_version'")
+
+    reopened = ContactMemoryStore(tmp_path, "contact")
+    ContactMemoryStore(tmp_path, "contact")
+    with sqlite3.connect(reopened.path) as con:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(communication_event)")}
+        version = con.execute(
+            "SELECT value FROM schema_meta WHERE key='schema_version'"
+        ).fetchone()[0]
+        stored_subtype = con.execute(
+            "SELECT reaction_subtype FROM communication_event WHERE event_id=?",
+            (reaction_event_id,),
+        ).fetchone()[0]
+    assert "reaction_subtype" in columns
+    assert version == str(SCHEMA_VERSION)
+    assert stored_subtype == CommunicationReactionSubtype.LEGACY_UNTYPED.value
+    assert reopened.get_communication_event(legacy.event_id) == legacy
+    migrated_reaction = reopened.get_communication_event(reaction_event_id)
+    assert migrated_reaction is not None
+    assert migrated_reaction.reaction_subtype is CommunicationReactionSubtype.LEGACY_UNTYPED
+
+
 def test_bundle_ingest_round_trips_every_child_and_exact_replay_is_idempotent(tmp_path: Path):
     store = ContactMemoryStore(tmp_path, "contact")
     event = _event()
@@ -198,6 +263,7 @@ def test_concurrent_replay_inserts_exactly_one_bundle(tmp_path: Path):
 def test_reaction_removal_retracts_target_atomically_and_replays(tmp_path: Path):
     store = ContactMemoryStore(tmp_path, "contact")
     target = _event("reaction-add", kind=CommunicationKind.REACTION_ADD,
+                    reaction_subtype=CommunicationReactionSubtype.LIKE,
                     text_hash=None, text_present=False, text_length=0)
     original_source = _id("reacted-to-message")
     target_relation = CommunicationRelation(
@@ -208,6 +274,7 @@ def test_reaction_removal_retracts_target_atomically_and_replays(tmp_path: Path)
     )
     store.ingest_communication_event(target, relations=(target_relation,))
     removal = _event("reaction-remove", kind=CommunicationKind.REACTION_REMOVE,
+                     reaction_subtype=CommunicationReactionSubtype.LIKE,
                      text_hash=None, text_present=False, text_length=0)
     relation = CommunicationRelation(
         relation_id=_id("remove-target"), event_id=removal.event_id,
@@ -230,6 +297,7 @@ def test_reaction_removal_retracts_target_atomically_and_replays(tmp_path: Path)
     assert original_replay.event.lifecycle is CommunicationLifecycle.RETRACTED
 
     other = _event("other-remove", kind=CommunicationKind.REACTION_REMOVE,
+                   reaction_subtype=CommunicationReactionSubtype.LIKE,
                    text_hash=None, text_present=False, text_length=0)
     with pytest.raises(ValueError, match="retracted"):
         store.retract_communication_event(other, target_event_id=target.event_id,
@@ -245,8 +313,10 @@ def test_reaction_removal_retracts_target_atomically_and_replays(tmp_path: Path)
 def test_out_of_order_retraction_is_pending_and_applies_when_target_arrives(tmp_path: Path):
     store = ContactMemoryStore(tmp_path, "contact")
     removal = _event("orphan-remove", kind=CommunicationKind.REACTION_REMOVE,
+                     reaction_subtype=CommunicationReactionSubtype.LOVE,
                      text_hash=None, text_present=False, text_length=0)
     target = _event("late-add", kind=CommunicationKind.REACTION_ADD,
+                    reaction_subtype=CommunicationReactionSubtype.LOVE,
                     text_hash=None, text_present=False, text_length=0)
     original_source = _id("late-original")
     removal_relation = CommunicationRelation(
@@ -274,11 +344,13 @@ def test_out_of_order_retraction_is_pending_and_applies_when_target_arrives(tmp_
 def test_reaction_removal_cannot_bypass_or_retract_multiple_targets(tmp_path: Path):
     store = ContactMemoryStore(tmp_path, "contact")
     removal = _event("guarded-remove", kind=CommunicationKind.REACTION_REMOVE,
+                     reaction_subtype=CommunicationReactionSubtype.LAUGH,
                      text_hash=None, text_present=False, text_length=0)
     with pytest.raises(ValueError, match="retract_communication_event"):
         store.ingest_communication_event(removal)
     relationless_add = _event(
         "relationless-add", kind=CommunicationKind.REACTION_ADD,
+        reaction_subtype=CommunicationReactionSubtype.LAUGH,
         text_hash=None, text_present=False, text_length=0,
     )
     with pytest.raises(ValueError, match="exactly one"):
@@ -292,6 +364,130 @@ def test_reaction_removal_cannot_bypass_or_retract_multiple_targets(tmp_path: Pa
         store.retract_communication_event(
             removal, target_event_id=_id("target"), relations=relations
         )
+
+
+def test_reaction_removal_requires_exact_subtype_match(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    target = _event(
+        "loved-add", kind=CommunicationKind.REACTION_ADD,
+        reaction_subtype=CommunicationReactionSubtype.LOVE,
+        text_hash=None, text_present=False, text_length=0,
+    )
+    target_source = _id("same-reacted-to-message")
+    target_relation = CommunicationRelation(
+        relation_id=_id("loved-add-relation"), event_id=target.event_id,
+        relation_type=CommunicationRelationType.REACTION_TO,
+        target_source_id=target_source,
+        target_actor_role=CommunicationActorRole.COUNTERPART,
+    )
+    store.ingest_communication_event(target, relations=(target_relation,))
+    removal = _event(
+        "liked-removal", kind=CommunicationKind.REACTION_REMOVE,
+        reaction_subtype=CommunicationReactionSubtype.LIKE,
+        text_hash=None, text_present=False, text_length=0,
+    )
+    removal_relation = CommunicationRelation(
+        relation_id=_id("liked-removal-relation"), event_id=removal.event_id,
+        relation_type=CommunicationRelationType.REACTION_TO,
+        target_source_id=target_source,
+        target_actor_role=CommunicationActorRole.COUNTERPART,
+    )
+
+    with pytest.raises(ValueError, match="subtype"):
+        store.retract_communication_event(
+            removal, target_event_id=target.event_id, relations=(removal_relation,)
+        )
+    assert store.get_communication_event(removal.event_id) is None
+    stored = store.get_communication_event(target.event_id)
+    assert stored is not None and stored.lifecycle is CommunicationLifecycle.ACTIVE
+
+
+def test_out_of_order_reaction_removal_rejects_mismatched_subtype_atomically(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    target = _event(
+        "late-loved-add", kind=CommunicationKind.REACTION_ADD,
+        reaction_subtype=CommunicationReactionSubtype.LOVE,
+        text_hash=None, text_present=False, text_length=0,
+    )
+    removal = _event(
+        "early-liked-remove", kind=CommunicationKind.REACTION_REMOVE,
+        reaction_subtype=CommunicationReactionSubtype.LIKE,
+        text_hash=None, text_present=False, text_length=0,
+    )
+    target_source = _id("late-same-reacted-to-message")
+    removal_relation = CommunicationRelation(
+        relation_id=_id("early-liked-remove-relation"), event_id=removal.event_id,
+        relation_type=CommunicationRelationType.REACTION_TO,
+        target_source_id=target_source,
+        target_actor_role=CommunicationActorRole.COUNTERPART,
+    )
+    store.retract_communication_event(
+        removal, target_event_id=target.event_id, relations=(removal_relation,)
+    )
+    target_relation = CommunicationRelation(
+        relation_id=_id("late-loved-add-relation"), event_id=target.event_id,
+        relation_type=CommunicationRelationType.REACTION_TO,
+        target_source_id=target_source,
+        target_actor_role=CommunicationActorRole.COUNTERPART,
+    )
+
+    with pytest.raises(ValueError, match="subtype"):
+        store.ingest_communication_event(target, relations=(target_relation,))
+    assert store.get_communication_event(target.event_id) is None
+    assert store.get_communication_event(removal.event_id) == removal
+
+
+def test_reaction_subtype_is_required_only_for_reaction_events():
+    with pytest.raises(ValueError, match="reaction_subtype"):
+        _event("untyped-reaction", kind=CommunicationKind.REACTION_ADD)
+    with pytest.raises(ValueError, match="reaction_subtype"):
+        _event("typed-text", reaction_subtype=CommunicationReactionSubtype.LIKE)
+
+
+@pytest.mark.parametrize("kind", (
+    CommunicationKind.REACTION_ADD,
+    CommunicationKind.REACTION_REMOVE,
+))
+def test_legacy_untyped_reaction_subtype_is_not_valid_for_new_events(
+    tmp_path: Path, kind: CommunicationKind
+):
+    with pytest.raises(ValueError, match="historical"):
+        _event(
+            f"new-legacy-{kind.value}", kind=kind,
+            reaction_subtype=CommunicationReactionSubtype.LEGACY_UNTYPED,
+            text_hash=None, text_present=False, text_length=0,
+        )
+
+    store = ContactMemoryStore(tmp_path, "contact")
+    event = _event(
+        f"mutated-legacy-{kind.value}", kind=kind,
+        reaction_subtype=CommunicationReactionSubtype.LIKE,
+        text_hash=None, text_present=False, text_length=0,
+    )
+    object.__setattr__(event, "reaction_subtype", CommunicationReactionSubtype.LEGACY_UNTYPED)
+    with pytest.raises(ValueError, match="historical"):
+        if kind is CommunicationKind.REACTION_ADD:
+            store.ingest_communication_event(event)
+        else:
+            store.retract_communication_event(
+                event, target_event_id=_id("legacy-target"), relations=()
+            )
+
+
+def test_occurred_at_normalizes_exactly_and_replays_at_float_boundary(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    for index, timestamp in enumerate((2**53, 2**53 + 2, -(2**53))):
+        event = _event(f"exact-timestamp-{index}", occurred_at=timestamp)
+        assert isinstance(event.occurred_at, float)
+        assert event.occurred_at == timestamp
+        store.ingest_communication_event(event)
+        assert store.get_communication_event(event.event_id) == event
+        assert store.ingest_communication_event(event).deduplicated
+
+
+def test_occurred_at_rejects_integer_that_float_cannot_represent_exactly():
+    with pytest.raises(ValueError, match="exactly"):
+        _event("lossy-timestamp", occurred_at=2**53 + 1)
 
 
 def test_contract_rejects_raw_artifact_shapes_and_noncanonical_ids():
@@ -352,11 +548,48 @@ def test_contract_rejects_raw_artifact_shapes_and_noncanonical_ids():
                 entity_identity=_id(f"slash-identity-{label}"), entity_type="thing",
                 canonical_label=label, confidence=1.0, source_method="reviewed",
             )
+    for label in (
+        "password hunter2 api secret",
+        "my password is hunter2",
+        "client secret abc123",
+        "bearer token eyJhbG...NiJ9",
+        "GitHub token is ghp_123456789",
+        "AWS secret access key is abc123",
+        "database credential hunter2",
+    ):
+        with pytest.raises(ValueError, match="credential-like"):
+            EntityMention(
+                mention_id=_id(f"secret-label-{label}"), event_id=event.event_id,
+                entity_identity=_id(f"secret-identity-{label}"), entity_type="thing",
+                canonical_label=label, confidence=1.0, source_method="reviewed",
+            )
+
+
+@pytest.mark.parametrize("label", (
+    "Secret Garden",
+    "Password",
+    "The Great British Bake Off",
+    "The Place Beyond the Pines",
+    "Florence + the Machine",
+    "API Gallery",
+    "GitHub",
+    "AWS",
+    "Database",
+))
+def test_entity_semantic_labels_allow_legitimate_names(label: str):
+    event = _event(f"legitimate-label-{label}")
+    mention = EntityMention(
+        mention_id=_id(f"legitimate-label-{label}"), event_id=event.event_id,
+        entity_identity=_id(f"legitimate-identity-{label}"), entity_type="thing",
+        canonical_label=label, confidence=1.0, source_method="reviewed",
+    )
+    assert mention.canonical_label == label
 
 
 def test_pending_retraction_target_identity_must_be_opaque(tmp_path: Path):
     store = ContactMemoryStore(tmp_path, "contact")
     removal = _event("raw-target-remove", kind=CommunicationKind.REACTION_REMOVE,
+                     reaction_subtype=CommunicationReactionSubtype.QUESTION,
                      text_hash=None, text_present=False, text_length=0)
     relation = CommunicationRelation(
         relation_id=_id("raw-target-relation"), event_id=removal.event_id,
