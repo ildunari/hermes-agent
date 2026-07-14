@@ -47,6 +47,7 @@ _ACCOUNTING_CATEGORIES = (
     "explicit_nonsemantic", "rejected",
 )
 _BATCH_WINDOW_SECONDS = 60.0
+_BARE_GUID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*-[A-Za-z0-9._-]+"
 
 
 def _opaque(secret: bytes, namespace: str, value: str) -> str:
@@ -60,14 +61,13 @@ def parse_associated_guid(value: object) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    if not raw.startswith(("p:", "bp:")):
-        return raw if not any(ord(character) < 32 for character in raw) else ""
     for pattern in (
-        r"^(?:p|bp):0[/:]([^/:]+)$",
-        r"^p:a/([^/:]+)$",
+        rf"^(?:p|bp):[0-9]+[/:]({_BARE_GUID_PATTERN})$",
+        rf"^p:a/({_BARE_GUID_PATTERN})$",
         # Legacy wrappers without a numeric component are accepted only for a
         # GUID-shaped value. Short labels such as ``p:wat`` are malformed.
-        r"^(?:p|bp):([A-Za-z0-9][A-Za-z0-9._-]*-[A-Za-z0-9._-]+)$",
+        rf"^(?:p|bp):({_BARE_GUID_PATTERN})$",
+        rf"^({_BARE_GUID_PATTERN})$",
     ):
         match = re.fullmatch(pattern, raw)
         if match:
@@ -181,7 +181,7 @@ def _attachment_rows(con: Any) -> dict[int, list[dict[str, Any]]]:
     uti = field("uti")
     size = field("total_bytes")
     rows: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    seen: set[tuple[int, int]] = set()
+    seen: set[tuple[int, str]] = set()
     for row in con.execute(
         f"""SELECT maj.message_id,a.ROWID attachment_rowid,{guid} guid,
                    {filename} filename,{transfer_name} transfer_name,{mime} mime_type,
@@ -190,11 +190,17 @@ def _attachment_rows(con: Any) -> dict[int, list[dict[str, Any]]]:
             JOIN attachment a ON a.ROWID=maj.attachment_id
             ORDER BY maj.message_id,a.ROWID"""
     ):
-        key = (int(row["message_id"]), int(row["attachment_rowid"]))
+        message_id = int(row["message_id"])
+        attachment_source = str(
+            row["guid"] or f"attachment-rowid:{int(row['attachment_rowid'])}"
+        )
+        key = (message_id, attachment_source)
         if key in seen:
             continue
         seen.add(key)
-        rows[key[0]].append(dict(row))
+        # ORDER BY rowid makes the lowest-rowid metadata the deterministic
+        # winner when multiple attachment rows share one canonical GUID.
+        rows[message_id].append(dict(row))
     return dict(rows)
 
 

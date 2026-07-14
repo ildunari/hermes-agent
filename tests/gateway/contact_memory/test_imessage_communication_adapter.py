@@ -294,9 +294,13 @@ def test_scan_is_deterministic_and_replay_uses_only_phase_a_ingest_apis(tmp_path
         ("bp:0/message-guid", "message-guid"),
         ("p:0:message-guid", "message-guid"),
         ("bp:0:message-guid", "message-guid"),
+        ("p:1/message-guid", "message-guid"),
+        ("bp:2:message-guid", "message-guid"),
+        ("p:37:message-guid", "message-guid"),
         ("p:message-guid", "message-guid"),
         ("bp:message-guid", "message-guid"),
         ("message-guid", "message-guid"),
+        ("A1B2C3D4-5678-90AB-CDEF-0123456789AB", "A1B2C3D4-5678-90AB-CDEF-0123456789AB"),
     ],
 )
 def test_modern_and_legacy_associated_guid_variants(raw: str, expected: str):
@@ -312,6 +316,12 @@ def test_modern_and_legacy_associated_guid_variants(raw: str, expected: str):
         ("p:a/message/guid", ""),
         ("p:wat", ""),
         ("bp:/message-guid", ""),
+        ("x:message-guid", ""),
+        ("rp:1/message-guid", ""),
+        ("p:-1/message-guid", ""),
+        ("bp:2/message/guid", ""),
+        ("message guid", ""),
+        ("message-guid/child", ""),
         ("", ""),
     ],
 )
@@ -436,6 +446,52 @@ def test_malformed_reaction_wrappers_are_explicitly_rejected(tmp_path: Path, raw
     assert [item["reason"] for item in rejected] == ["malformed_associated_target"]
 
 
+def test_unknown_wrapper_cannot_authenticate_reaction_target(tmp_path: Path):
+    source = tmp_path / "chat.db"
+    _create_messages_db(source)
+    con = sqlite3.connect(source)
+    con.execute("UPDATE message SET guid='x:target-guid' WHERE ROWID=3")
+    con.execute(
+        "UPDATE message SET associated_message_guid='x:target-guid' WHERE ROWID=4"
+    )
+    con.commit()
+    con.close()
+
+    scan = _scan(source)
+    rejected = [
+        item for item in scan.rejected_evidence
+        if item["source_key"] == "tap-owner-add"
+    ]
+    assert [item["reason"] for item in rejected] == ["malformed_associated_target"]
+    assert not any(
+        record.private_evidence["source_key"] == "tap-owner-add"
+        for record in scan.records
+    )
+
+
+@pytest.mark.parametrize("wrapper", ["p:1/", "bp:2:", "p:37:"])
+def test_nonzero_numeric_part_wrappers_authenticate_reaction_target(
+    tmp_path: Path, wrapper: str
+):
+    source = tmp_path / "chat.db"
+    _create_messages_db(source)
+    con = sqlite3.connect(source)
+    con.execute(
+        "UPDATE message SET associated_message_guid=? WHERE ROWID=4",
+        (wrapper + "msg-contact-attachment",),
+    )
+    con.commit()
+    con.close()
+
+    scan = _scan(source)
+    reaction = next(
+        record for record in scan.records
+        if record.private_evidence["source_key"] == "tap-owner-add"
+    )
+    assert reaction.category == "reactions"
+    assert reaction.bundle.relations[0].relation_type is CommunicationRelationType.REACTION_TO
+
+
 @pytest.mark.parametrize(
     ("reply_to", "thread", "target", "same_speaker"),
     [
@@ -517,11 +573,12 @@ def test_duplicate_and_hostile_attachment_joins_emit_safe_unique_children(tmp_pa
         [
             (2, None, None, "not a mime", "bad uti!", "huge", None),
             (3, None, None, None, None, -1, None),
+            (4, "attachment-guid", "/private/Attachments/conflict.mov", "video/quicktime", "public.movie", 8192, None),
         ],
     )
     con.executemany(
         "INSERT INTO message_attachment_join VALUES(?,?)",
-        [(3, 1), (3, 2), (3, 3), (3, 9999)],
+        [(3, 1), (3, 2), (3, 3), (3, 4), (3, 9999)],
     )
     con.commit()
     con.close()
@@ -530,10 +587,17 @@ def test_duplicate_and_hostile_attachment_joins_emit_safe_unique_children(tmp_pa
     record = next(item for item in scan.records if item.category == "attachments")
     assert len(record.bundle.attachments) == 3
     assert len({item.attachment_id for item in record.bundle.attachments}) == 3
+    assert len({item.attachment_identity for item in record.bundle.attachments}) == 3
     assert len(record.bundle.urls) == 1
     hostile = [item for item in record.bundle.attachments if item.mime_type is None]
     assert len(hostile) == 2
     assert all(item.size_bytes is None and item.media_kind == "other" for item in hostile)
+    canonical = next(
+        item for item in record.bundle.attachments if item.mime_type == "image/jpeg"
+    )
+    assert canonical.media_kind == "image"
+    assert canonical.uti == "public.jpeg"
+    assert canonical.size_bytes == 4096
 
 
 @pytest.mark.parametrize("conflict", ["payload", "actor"])

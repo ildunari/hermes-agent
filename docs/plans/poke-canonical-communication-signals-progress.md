@@ -45,7 +45,7 @@ Build the historical direct-thread adapter as a pure emitter into this contract.
 
 ## Phase B — Historical adapter
 
-Status: Gate B repair complete and locally verified; awaiting independent Gate B rerun. Phase C has not started.
+Status: Gate B repair complete and locally verified. Phase C has not started.
 
 Commit: Phase B boundary commit containing this progress record (the final SHA is reported by the implementation thread).
 
@@ -87,6 +87,12 @@ The independent Gate B review rejected commit `e741e337b` with three P0 and five
 The review CLI now stages both disposable stores and both artifacts before publication, removes every published output on an injected later failure, rejects default and active external `HERMES_HOME` roots through descendants and symlink equivalents, and emits generic failure text that does not expose approved handles or source identifiers. Focused regressions cover every reproduced finding, the complete supported reaction matrix, known and unknown unsupported associated types, malformed wrappers, reply agreement/conflict/target cases, hostile attachments, duplicate actor/payload identities, injected store/artifact failures, external-home guards, and stderr privacy.
 
 Repair verification passed: the focused adapter suite completed with 48 passed and 0 failed; the historical/store surrounding set completed with 121 passed and 0 failed; and the full contact-memory plus interest-ledger suite completed with 228 passed and 0 failed across 12 files. `py_compile`, focused Ruff checks, and `git diff --check` passed. No live Messages database or profile store was scanned or mutated, and no gateway was restarted.
+
+### Final narrow Gate B repair
+
+The phase-boundary repair strictly rejects unknown associated-GUID wrappers instead of accepting them as bare targets, accepts authenticated `p`/`bp` wrappers with nonzero numeric parts, and deduplicates attachment joins by canonical attachment GUID while deterministically retaining the lowest-rowid metadata. Regressions cover malformed and unknown wrappers, nonzero numeric wrappers, and conflicting duplicate attachment rows.
+
+The parent focused adapter rerun completed with 62 passed and 0 failed; `py_compile`, focused Ruff checks, and `git diff --check` passed. Final phase-boundary verification then completed the five-file historical/store surrounding set with 136 passed and 0 failed, and the full contact-memory plus interest-ledger suite with 242 passed and 0 failed across 12 files. No live data was touched, no gateway was restarted, and no Phase C work began.
 
 ### Phase C handoff
 
