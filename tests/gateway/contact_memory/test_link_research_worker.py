@@ -198,6 +198,46 @@ def test_repeated_share_research_projects_only_after_qualifying_recurrence(tmp_p
     ]
 
 
+def test_distinct_urls_resolving_to_same_topic_are_recurrent(tmp_path: Path) -> None:
+    root = tmp_path / "contact-memory"
+    results = []
+    for index, url in enumerate(("https://example.com/strength", "https://other.test/lifting"), 1):
+        persist_live_communication_ingress(
+            root=root, contact_id="stephen-lucier", principal="guest",
+            envelopes=(_envelope(f"distinct-topic-{index}", url),), secret=_SECRET,
+            enqueue_link_research=True,
+        )
+        results.append(process_one_link_job(
+            root=root, contact_id="stephen-lucier", provider=_FakeProvider(), now=float(index),
+        ))
+    assert results[-1]["projected_events"] == 2
+    assert len(_projected_topics(ContactMemoryStore(root, "stephen-lucier"))) == 2
+
+
+def test_distinct_urls_resolving_to_same_entity_are_recurrent(tmp_path: Path) -> None:
+    root = tmp_path / "contact-memory"
+    provider = _SequenceProvider([
+        ((), (("music_artist", "Lady Gaga"),)),
+        ((), (("music_artist", "Lady Gaga"),)),
+    ])
+    results = []
+    for index, url in enumerate(("https://example.com/gaga", "https://other.test/concert"), 1):
+        persist_live_communication_ingress(
+            root=root, contact_id="stephen-lucier", principal="guest",
+            envelopes=(_envelope(f"distinct-entity-{index}", url),), secret=_SECRET,
+            enqueue_link_research=True,
+        )
+        results.append(process_one_link_job(
+            root=root, contact_id="stephen-lucier", provider=provider, now=float(index),
+        ))
+    assert results[-1]["projected_events"] == 2
+    store = ContactMemoryStore(root, "stephen-lucier")
+    with sqlite3.connect(store.path) as con:
+        assert con.execute(
+            "SELECT count(*) FROM projected_entity WHERE active=1 AND canonical_label='Lady Gaga'"
+        ).fetchone()[0] == 2
+
+
 def test_transient_retry_and_preprocessing_retraction_remain_neutral(tmp_path: Path) -> None:
     root = tmp_path / "contact-memory"
     ingress = persist_live_communication_ingress(
@@ -391,31 +431,45 @@ def test_bluebubbles_normalization_persists_owner_reaction_without_dispatch(tmp_
     assert bundle.relations[0].target_actor_role.value == "contact"
 
 
-def test_stale_complete_deactivates_every_event_in_recurrent_batch(
+def test_stale_third_completion_preserves_prior_recurrent_projections(
     tmp_path: Path, monkeypatch,
 ) -> None:
     root = tmp_path / "contact-memory"
+    prior_event_ids = []
     for index in (1, 2):
-        persist_live_communication_ingress(
+        ingress = persist_live_communication_ingress(
             root=root, contact_id="stephen-lucier", principal="guest",
             envelopes=(_envelope(f"stale-{index}"),), secret=_SECRET,
             enqueue_link_research=True,
         )
-        if index == 1:
-            process_one_link_job(
-                root=root, contact_id="stephen-lucier", provider=_FakeProvider(), now=1.0,
-            )
+        prior_event_ids.extend(ingress.event_ids)
+        process_one_link_job(
+            root=root, contact_id="stephen-lucier", provider=_FakeProvider(), now=float(index),
+        )
+
+    third = persist_live_communication_ingress(
+        root=root, contact_id="stephen-lucier", principal="guest",
+        envelopes=(_envelope("stale-3"),), secret=_SECRET, enqueue_link_research=True,
+    )
 
     def lose_lease(*args, **kwargs):
         raise ValueError("claim token is stale or does not own the job")
 
     monkeypatch.setattr(PrivateLinkResearchQueue, "complete", lose_lease)
     assert process_one_link_job(
-        root=root, contact_id="stephen-lucier", provider=_FakeProvider(), now=2.0,
+        root=root, contact_id="stephen-lucier", provider=_FakeProvider(), now=3.0,
     )["status"] == "stale_claim"
     store = ContactMemoryStore(root, "stephen-lucier")
-    assert _projected_topics(store) == []
+    assert len(_projected_topics(store)) == 2
+    third_bundle = store.get_communication_bundle(third.event_ids[0])
+    assert third_bundle is not None
+    assert third_bundle.urls[0].enrichment_state is CommunicationEnrichmentState.PENDING
     with sqlite3.connect(store.path) as con:
         assert con.execute(
             "SELECT count(*) FROM communication_projection_receipt WHERE active=1"
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 2
+        assert {
+            str(row[0]) for row in con.execute(
+                "SELECT communication_event_id FROM communication_projection_receipt WHERE active=1"
+            )
+        } == set(prior_event_ids)

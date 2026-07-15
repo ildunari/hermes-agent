@@ -1641,6 +1641,19 @@ class ContactMemoryStore:
         except sqlite3.IntegrityError as exc:
             raise ValueError("communication child conflicts with stored evidence") from exc
 
+    def compensate_communication_url_review(self, event_id: str, url_id: str) -> bool:
+        """Restore a worker-owned REVIEWED transition after its claim goes stale.
+
+        This narrow compare-and-set is the inverse of the live worker's
+        PENDING -> REVIEWED mutation; it cannot alter another state or field.
+        """
+        with self._immediate() as con:
+            return con.execute(
+                "UPDATE communication_url SET enrichment_state='pending' "
+                "WHERE event_id=? AND url_id=? AND enrichment_state='reviewed'",
+                (str(event_id), str(url_id)),
+            ).rowcount == 1
+
     def get_communication_event(self, event_id: str) -> CommunicationEvent | None:
         with self._connect() as con:
             bundle = self._communication_bundle_in(con, str(event_id))

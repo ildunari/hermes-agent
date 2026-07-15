@@ -190,7 +190,10 @@ def process_one_link_job(
     if target is None:
         queue.retry(claim.job_id, claim.claim_token, failure_code="canonical_url_missing", now=timestamp)
         return {"processed": True, "status": "canonical_url_missing"}
-    prior = queue.completed_for_url(claim.exact_url)
+    # Recurrence is semantic, not URL-based: distinct links can resolve to the
+    # same closed ontology topic or public entity.  This API omits exact URLs
+    # and the queue itself is physically isolated per contact.
+    prior = queue.completed_results()
     payload_by_event: dict[str, dict[str, object]] = {}
     for row in prior:
         try:
@@ -254,28 +257,45 @@ def process_one_link_job(
         if projection.interests or projection.entities:
             projections.append((event_id, projection))
     projected_event_ids: tuple[str, ...] = ()
+    enrichment_applied = False
+    claim_event_id = claim.event_id
     projected = 0
+
+    def compensate_attempt() -> None:
+        """Undo only canonical mutations newly owned by this claim attempt."""
+        for event_id in projected_event_ids:
+            store.deactivate_projector_event(
+                event_id, projector_version=projector_version, now=timestamp,
+            )
+        if enrichment_applied:
+            store.compensate_communication_url_review(claim_event_id, target.url_id)
+
     try:
         store.enrich_communication_event(
             claim.event_id,
             urls=(replace(target, enrichment_state=CommunicationEnrichmentState.REVIEWED),),
         )
+        enrichment_applied = (
+            target.enrichment_state is CommunicationEnrichmentState.PENDING
+        )
         refreshed = queue.renew_claim(claim.job_id, claim.claim_token, now=timestamp)
         if refreshed is None:
+            compensate_attempt()
             return {"processed": True, "status": "stale_claim"}
         claim = refreshed
         if projections:
-            store.project_communication_events(
+            projection_results = store.project_communication_events(
                 projections, projector_version=projector_version, now=timestamp,
             )
-            projected_event_ids = tuple(event_id for event_id, _projection_item in projections)
-            projected = len(projected_event_ids)
+            # Stable recurrent versions can already have successful receipts.
+            # Compensate only receipts inserted by this attempt.
+            projected_event_ids = tuple(
+                item.event_id for item in projection_results if item.inserted
+            )
+            projected = len(projection_results)
         refreshed = queue.renew_claim(claim.job_id, claim.claim_token, now=timestamp)
         if refreshed is None:
-            for event_id in projected_event_ids:
-                store.deactivate_projector_event(
-                    event_id, projector_version=projector_version, now=timestamp,
-                )
+            compensate_attempt()
             return {"processed": True, "status": "stale_claim"}
         if not recurrent and refreshed.engagement_score <= 0:
             for event_id in projected_event_ids:
@@ -289,16 +309,10 @@ def process_one_link_job(
                 result_commitment=result_commitment, result_json=result_json, now=timestamp,
             )
         except ValueError:
-            for event_id in projected_event_ids:
-                store.deactivate_projector_event(
-                    event_id, projector_version=projector_version, now=timestamp,
-                )
+            compensate_attempt()
             return {"processed": True, "status": "stale_claim"}
     except BaseException:
-        for event_id in projected_event_ids:
-            store.deactivate_projector_event(
-                event_id, projector_version=projector_version, now=timestamp,
-            )
+        compensate_attempt()
         refreshed = queue.renew_claim(claim.job_id, claim.claim_token, now=timestamp)
         if refreshed is not None:
             queue.retry(

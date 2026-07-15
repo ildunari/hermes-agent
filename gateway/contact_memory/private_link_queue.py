@@ -346,12 +346,16 @@ class PrivateLinkResearchQueue:
                 ),
             ).rowcount
 
-    def completed_for_url(self, exact_url: str) -> list[sqlite3.Row]:
+    def completed_results(self) -> list[sqlite3.Row]:
+        """Return privacy-safe completed result identities for this contact.
+
+        Exact URLs remain confined to the queue and are deliberately omitted
+        from the returned rows.
+        """
         with self._connect() as con:
             return list(con.execute(
                 "SELECT event_id,result_json,result_commitment,engagement_score,repeated_shares,distinct_days "
-                "FROM link_job WHERE exact_url=? AND state='complete' ORDER BY occurred_at,event_id",
-                (str(exact_url),),
+                "FROM link_job WHERE state='complete' ORDER BY occurred_at,event_id",
             ))
 
     def completed_for_event(self, event_id: str) -> list[sqlite3.Row]:
