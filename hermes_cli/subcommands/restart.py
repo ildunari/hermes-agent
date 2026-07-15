@@ -27,6 +27,19 @@ def _completion_marker() -> Path:
     return directory / f"restart-{timestamp}-{os.getpid()}.json"
 
 
+def _notification_tty() -> str | None:
+    """Return the invoking terminal so the detached worker can report back."""
+
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            fd = stream.fileno()
+            if os.isatty(fd):
+                return os.ttyname(fd)
+        except (AttributeError, OSError, ValueError):
+            continue
+    return None
+
+
 def _wait_for_completion(marker: Path, *, scope: str, timeout: float) -> int:
     deadline = time.monotonic() + max(0.0, timeout)
     try:
@@ -73,10 +86,12 @@ def cmd_restart(args: argparse.Namespace) -> None:
         return
 
     marker = _completion_marker()
+    notify_tty = None if args.wait else _notification_tty()
     print(enqueue_detached_restart(
         scope,
         delay=args.delay,
         completion_marker=str(marker),
+        notify_tty=notify_tty,
         safe_wait_timeout=args.safe_wait_timeout,
     ))
     print(f"Completion status: {marker}")

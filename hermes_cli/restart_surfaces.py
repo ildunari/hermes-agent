@@ -880,7 +880,7 @@ def enqueue_detached_restart(
             start_new_session=True,
             close_fds=True,
         )
-    notify_note = " I'll send a follow-up here when it finishes." if (notify_origin or notify_tty or completion_marker) else ""
+    notify_note = " I'll send a follow-up here when it finishes." if (notify_origin or notify_tty) else ""
     drain_note = "active gateway tasks and live WebUI chat turns"
     return (
         f"Queued detached Hermes {normalized} restart. "

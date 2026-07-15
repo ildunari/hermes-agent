@@ -81,6 +81,7 @@ def test_restart_queues_detached_safe_scope_with_status_marker(monkeypatch, tmp_
 
     monkeypatch.setattr("hermes_cli.restart_surfaces.enqueue_detached_restart", fake_enqueue)
     monkeypatch.setattr("hermes_cli.subcommands.restart._completion_marker", lambda: marker)
+    monkeypatch.setattr("hermes_cli.subcommands.restart._notification_tty", lambda: None)
 
     cmd_restart(_args(delay=2.5, safe_wait_timeout=90.0))
 
@@ -92,9 +93,57 @@ def test_restart_queues_detached_safe_scope_with_status_marker(monkeypatch, tmp_
         {
             "delay": 2.5,
             "completion_marker": str(marker),
+            "notify_tty": None,
             "safe_wait_timeout": 90.0,
         },
     )]
+
+
+def test_restart_requests_terminal_completion_notification(monkeypatch, tmp_path, capsys):
+    calls = []
+    marker = tmp_path / "restart.json"
+
+    def fake_enqueue(scope, **kwargs):
+        calls.append((scope, kwargs))
+        return "queued"
+
+    monkeypatch.setattr("hermes_cli.restart_surfaces.enqueue_detached_restart", fake_enqueue)
+    monkeypatch.setattr("hermes_cli.subcommands.restart._completion_marker", lambda: marker)
+    monkeypatch.setattr(
+        "hermes_cli.subcommands.restart._notification_tty",
+        lambda: "/dev/ttys001",
+    )
+
+    cmd_restart(_args())
+
+    assert capsys.readouterr().out.startswith("queued\n")
+    assert calls[0][1]["notify_tty"] == "/dev/ttys001"
+
+
+def test_restart_wait_does_not_duplicate_terminal_notification(monkeypatch, tmp_path):
+    calls = []
+    marker = tmp_path / "restart.json"
+    marker.write_text(json.dumps({
+        "status": "complete",
+        "scope": "gateways",
+        "exit_code": 0,
+        "message": "restart finished",
+    }))
+
+    def fake_enqueue(scope, **kwargs):
+        calls.append((scope, kwargs))
+        return "queued"
+
+    monkeypatch.setattr("hermes_cli.restart_surfaces.enqueue_detached_restart", fake_enqueue)
+    monkeypatch.setattr("hermes_cli.subcommands.restart._completion_marker", lambda: marker)
+    monkeypatch.setattr(
+        "hermes_cli.subcommands.restart._notification_tty",
+        lambda: "/dev/ttys001",
+    )
+
+    cmd_restart(_args(wait=True))
+
+    assert calls[0][1]["notify_tty"] is None
 
 
 def test_restart_wait_propagates_worker_failure(monkeypatch, tmp_path):

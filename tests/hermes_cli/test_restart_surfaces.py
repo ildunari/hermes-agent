@@ -279,7 +279,7 @@ def test_enqueue_restart_can_request_webui_completion_marker(monkeypatch, tmp_pa
 
     output = enqueue_detached_restart("gateways", completion_marker=str(marker))
 
-    assert "follow-up here" in output
+    assert "follow-up here" not in output
     cmd = launched["cmd"]
     assert "--detached-worker" in cmd
     assert launched["kwargs"]["stdin"] is subprocess.DEVNULL
