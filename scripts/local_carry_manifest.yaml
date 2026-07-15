@@ -90,7 +90,7 @@ features:
     checks:
       - id: desktop-chat-width-store
         path: apps/desktop/src/store/chat-width.ts
-        needles: [hermes.desktop.chatWidth.v1, 48.75rem, 76rem, "100%"]
+        needles: [hermes.desktop.chatWidth.v1, 48.75rem, 68rem, "100%"]
         description: persisted Normal, Wide, and Full chat widths
       - id: desktop-chat-width-bootstrap
         path: apps/desktop/src/main.tsx
