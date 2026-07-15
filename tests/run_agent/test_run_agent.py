@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import re
+import threading
 import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -3408,6 +3409,85 @@ class TestConcurrentToolExecution:
         assert "result_slow" in messages[0]["content"]
         assert messages[1]["tool_call_id"] == "c2"
         assert "result_fast" in messages[1]["content"]
+
+    def test_mixed_batch_preserves_message_order_and_finalizes_once(self, agent, monkeypatch):
+        """One grouped executor owns the whole model batch, including serial barriers."""
+        tc1 = _mock_tool_call(name="web_search", arguments='{"q":"one"}', call_id="c1")
+        tc2 = _mock_tool_call(name="web_search", arguments='{"q":"two"}', call_id="c2")
+        tc3 = _mock_tool_call(name="todo", arguments='{"todos":[]}', call_id="c3")
+        tc4 = _mock_tool_call(name="web_search", arguments='{"q":"three"}', call_id="c4")
+        tc5 = _mock_tool_call(name="web_search", arguments='{"q":"four"}', call_id="c5")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2, tc3, tc4, tc5])
+        messages = []
+        hook_calls = []
+        execution_events = []
+
+        monkeypatch.setattr(
+            "hermes_cli.plugins.invoke_hook",
+            lambda hook_name, **kwargs: hook_calls.append((hook_name, kwargs)) or [],
+        )
+        monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
+        agent._apply_pending_steer_to_tool_results = MagicMock()
+
+        def fake_handle(name, args, task_id, **kwargs):
+            execution_events.append(args["q"])
+            return f"result-{args['q']}"
+
+        def fake_todo(**kwargs):
+            execution_events.append("todo")
+            return '{"todos": []}'
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=fake_handle),
+            patch("tools.todo_tool.todo_tool", side_effect=fake_todo),
+            patch("agent.tool_executor.enforce_turn_budget") as enforce_budget,
+        ):
+            agent._execute_tool_calls(mock_msg, messages, "task-1")
+
+        assert [message["tool_call_id"] for message in messages] == [
+            "c1", "c2", "c3", "c4", "c5"
+        ]
+        todo_position = execution_events.index("todo")
+        assert set(execution_events[:todo_position]) == {"one", "two"}
+        assert set(execution_events[todo_position + 1:]) == {"three", "four"}
+        enforce_budget.assert_called_once()
+        assert sum(
+            call.args[1] == 5
+            for call in agent._apply_pending_steer_to_tool_results.call_args_list
+        ) == 1
+        todo_post_hooks = [
+            kwargs for name, kwargs in hook_calls
+            if name == "post_tool_call" and kwargs["tool_name"] == "todo"
+        ]
+        assert len(todo_post_hooks) == 1
+
+    def test_group_timeout_does_not_start_later_serial_operation(self, agent, monkeypatch):
+        monkeypatch.setenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "0.05")
+        blocker = threading.Event()
+        calls = []
+        tc1 = _mock_tool_call(name="web_search", arguments='{"q":"fast"}', call_id="c1")
+        tc2 = _mock_tool_call(name="web_search", arguments='{"q":"slow"}', call_id="c2")
+        tc3 = _mock_tool_call(name="terminal", arguments='{"command":"touch must-not-run"}', call_id="c3")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2, tc3])
+        messages = []
+
+        def fake_handle(name, args, task_id, **kwargs):
+            calls.append(name)
+            if name == "web_search" and args.get("q") == "slow":
+                blocker.wait(5)
+            return f"result-{name}"
+
+        try:
+            with patch("run_agent.handle_function_call", side_effect=fake_handle):
+                agent._execute_tool_calls(mock_msg, messages, "task-1")
+        finally:
+            blocker.set()
+
+        assert "terminal" not in calls
+        assert [message["tool_call_id"] for message in messages] == ["c1", "c2", "c3"]
+        assert "timed out" in messages[1]["content"]
+        assert "not started" in messages[2]["content"]
+        assert messages[2]["effect_disposition"] == "none"
 
     def test_concurrent_handles_tool_error(self, agent):
         """If one tool raises, others should still complete."""

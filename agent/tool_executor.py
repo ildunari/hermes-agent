@@ -37,6 +37,7 @@ from agent.tool_dispatch_helpers import (
     _is_multimodal_tool_result,
     _multimodal_text_summary,
     _append_subdir_hint_to_multimodal,
+    _plan_tool_execution_groups_for_specs,
     make_tool_result_message,
 )
 from tools.terminal_tool import (
@@ -324,10 +325,11 @@ def _run_agent_tool_execution_middleware(
 
 
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
-    """Execute multiple tool calls concurrently using a thread pool.
+    """Execute one model batch as ordered serial/parallel-safe groups.
 
     Results are collected in the original tool-call order and appended to
-    messages so the API sees them in the expected sequence.
+    messages so the API sees them in the expected sequence. Preflight and final
+    budget/steer handling remain single outer-batch operations.
     """
     tool_calls = assistant_message.tool_calls
     num_tools = len(tool_calls)
@@ -521,7 +523,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     # ── Logging / callbacks ──────────────────────────────────────────
     tool_names_str = ", ".join(name for _, name, _, _, _, _ in parsed_calls)
     if not agent.quiet_mode and getattr(agent, "tool_progress_mode", "all") != "off":
-        print(f"  ⚡ Concurrent: {num_tools} tool calls — {tool_names_str}")
+        print(f"  ⚡ Grouped: {num_tools} tool calls — {tool_names_str}")
         for i, (tc, name, args, middleware_trace, block_result, blocked_by_guardrail) in enumerate(parsed_calls, 1):
             display_args = _redact_tool_args_for_display(name, args) or args
             args_str = json.dumps(display_args, ensure_ascii=False)
@@ -553,9 +555,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             except Exception as cb_err:
                 logging.debug(f"Tool start callback error: {cb_err}")
 
-    # ── Concurrent execution ─────────────────────────────────────────
+    # ── Ordered grouped execution ────────────────────────────────────
     # Each slot holds (function_name, function_args, function_result, duration, error_flag, blocked_flag, middleware_trace)
-    results = [None] * num_tools
+    results: list[Optional[tuple]] = [None] * num_tools
     for i, (tc, name, args, middleware_trace, block_result, blocked_by_guardrail) in enumerate(parsed_calls):
         if block_result is not None:
             results[i] = (name, args, block_result, 0.0, True, True, middleware_trace)
@@ -563,7 +565,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     # Touch activity before launching workers so the gateway knows
     # we're executing tools (not stuck).
     agent._current_tool = tool_names_str
-    agent._touch_activity(f"executing {num_tools} tools concurrently: {tool_names_str}")
+    agent._touch_activity(f"executing {num_tools} grouped tools: {tool_names_str}")
 
     def _run_tool(index, tool_call, function_name, function_args, middleware_trace):
         """Worker function executed in a thread."""
@@ -653,167 +655,154 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     spinner = None
     if agent._should_emit_quiet_tool_messages() and agent._should_start_quiet_spinner():
         face = random.choice(KawaiiSpinner.get_waiting_faces())
-        spinner = KawaiiSpinner(f"{face} ⚡ running {num_tools} tools concurrently", spinner_type='dots', print_fn=agent._print_fn)
+        spinner = KawaiiSpinner(f"{face} ⚡ running {num_tools} grouped tools", spinner_type='dots', print_fn=agent._print_fn)
         spinner.start()
 
-    try:
-        runnable_calls = [
-            (i, tc, name, args)
-            for i, (tc, name, args, middleware_trace, block_result, blocked_by_guardrail) in enumerate(parsed_calls)
-            if block_result is None
-        ]
+    timed_out_indices: set[int] = set()
+    not_started_indices: set[int] = set()
+    timeout_s = _resolve_concurrent_tool_timeout()
+    execution_plan = _plan_tool_execution_groups_for_specs(
+        [(name, args) for _, name, args, _, _, _ in parsed_calls]
+    )
+
+    def _run_parallel_group(runnable_indices: list[int]) -> None:
+        """Run one safe group with its own timeout/interrupt boundary."""
         futures = []
         future_to_index = {}
-        timed_out_indices: set[int] = set()
-        timeout_s = _resolve_concurrent_tool_timeout()
         deadline = time.monotonic() + timeout_s if timeout_s is not None else None
-        if runnable_calls:
-            max_workers = min(len(runnable_calls), _MAX_TOOL_WORKERS)
-            # Daemon workers: an interrupted/timed-out batch is abandoned with
-            # shutdown(wait=False), but stdlib ThreadPoolExecutor workers are
-            # non-daemon and registered in concurrent.futures' atexit hook,
-            # which joins them unconditionally — so one wedged tool thread
-            # would block interpreter exit forever (multi-minute CLI exits).
-            from tools.daemon_pool import DaemonThreadPoolExecutor
-            executor = DaemonThreadPoolExecutor(max_workers=max_workers)
-            abandon_executor = False
-            try:
-                for submit_index, (i, tc, name, args) in enumerate(runnable_calls):
-                    # Propagate the agent turn's ContextVars (e.g.
-                    # _approval_session_key) AND thread-local approval/sudo
-                    # callbacks into the worker thread; clears callbacks on exit.
-                    try:
-                        f = executor.submit(
-                            propagate_context_to_thread(_run_tool), i, tc, name, args, parsed_calls[i][3]
-                        )
-                    except RuntimeError as submit_error:
-                        if not _is_interpreter_shutdown_submit_error(submit_error):
-                            raise
-                        skipped_calls = runnable_calls[submit_index:]
-                        logger.warning(
-                            "interpreter shutdown while scheduling concurrent tools; "
-                            "skipping %d unsubmitted tool(s)",
-                            len(skipped_calls),
-                        )
-                        for skipped_i, _tc, skipped_name, skipped_args in skipped_calls:
-                            if results[skipped_i] is None:
-                                middleware_trace = parsed_calls[skipped_i][3]
-                                result = (
-                                    f"Error executing tool '{skipped_name}': "
-                                    "Python interpreter is shutting down; tool was not started"
-                                )
-                                results[skipped_i] = (
-                                    skipped_name,
-                                    skipped_args,
-                                    result,
-                                    0.0,
-                                    True,
-                                    False,
-                                    middleware_trace,
-                                )
-                        break
-                    futures.append(f)
-                    future_to_index[f] = i
-
-                # Wait for all to complete with periodic heartbeats so the
-                # gateway's inactivity monitor doesn't kill us during long
-                # concurrent tool batches. Also check for user interrupts
-                # so we don't block indefinitely when the user sends /stop
-                # or a new message during concurrent tool execution.
-                _conc_start = time.time()
-                _interrupt_logged = False
-                while True:
-                    wait_timeout = 5.0
-                    if deadline is not None:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            done, not_done = set(), {
-                                f for f in futures if not f.done()
-                            }
-                        else:
-                            wait_timeout = min(wait_timeout, remaining)
-                            done, not_done = concurrent.futures.wait(
-                                futures, timeout=wait_timeout,
+        max_workers = min(len(runnable_indices), _MAX_TOOL_WORKERS)
+        # Daemon workers keep a timed-out group from blocking interpreter exit.
+        from tools.daemon_pool import DaemonThreadPoolExecutor
+        executor = DaemonThreadPoolExecutor(max_workers=max_workers)
+        abandon_executor = False
+        try:
+            for submit_index, i in enumerate(runnable_indices):
+                tc, name, args, middleware_trace, _, _ = parsed_calls[i]
+                try:
+                    future = executor.submit(
+                        propagate_context_to_thread(_run_tool),
+                        i,
+                        tc,
+                        name,
+                        args,
+                        middleware_trace,
+                    )
+                except RuntimeError as submit_error:
+                    if not _is_interpreter_shutdown_submit_error(submit_error):
+                        raise
+                    skipped_indices = runnable_indices[submit_index:]
+                    logger.warning(
+                        "interpreter shutdown while scheduling concurrent tools; "
+                        "skipping %d unsubmitted tool(s)",
+                        len(skipped_indices),
+                    )
+                    for skipped_i in skipped_indices:
+                        _, skipped_name, skipped_args, skipped_trace, _, _ = parsed_calls[skipped_i]
+                        if results[skipped_i] is None:
+                            result = (
+                                f"Error executing tool '{skipped_name}': "
+                                "Python interpreter is shutting down; tool was not started"
                             )
+                            results[skipped_i] = (
+                                skipped_name, skipped_args, result, 0.0, True, False, skipped_trace,
+                            )
+                    break
+                futures.append(future)
+                future_to_index[future] = i
+
+            group_start = time.time()
+            interrupt_logged = False
+            while futures:
+                wait_timeout = 5.0
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _done, not_done = set(), {f for f in futures if not f.done()}
                     else:
-                        done, not_done = concurrent.futures.wait(
-                            futures, timeout=wait_timeout,
+                        _done, not_done = concurrent.futures.wait(
+                            futures, timeout=min(wait_timeout, remaining)
                         )
-                    if not not_done:
-                        break
-
-                    if deadline is not None and time.monotonic() >= deadline:
-                        abandon_executor = True
-                        timed_out_indices = {
-                            future_to_index[f]
-                            for f in not_done
-                            if f in future_to_index
-                        }
-                        _still_running = [
-                            parsed_calls[i][1]
-                            for i in timed_out_indices
-                        ]
-                        logger.warning(
-                            "concurrent tool batch timed out after %.1fs; "
-                            "%d tool(s) still running: %s",
-                            timeout_s,
-                            len(timed_out_indices),
-                            ", ".join(_still_running[:5]),
+                else:
+                    _done, not_done = concurrent.futures.wait(futures, timeout=wait_timeout)
+                if not not_done:
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    abandon_executor = True
+                    group_timeouts = {
+                        future_to_index[f] for f in not_done if f in future_to_index
+                    }
+                    timed_out_indices.update(group_timeouts)
+                    logger.warning(
+                        "concurrent tool group timed out after %.1fs; %d tool(s) still running: %s",
+                        timeout_s,
+                        len(group_timeouts),
+                        ", ".join(parsed_calls[i][1] for i in sorted(group_timeouts)[:5]),
+                    )
+                    for future in not_done:
+                        future.cancel()
+                    with agent._tool_worker_threads_lock:
+                        worker_tids = list(agent._tool_worker_threads)
+                    for tid in worker_tids:
+                        try:
+                            _ra()._set_interrupt(True, tid)
+                        except Exception:
+                            pass
+                    break
+                if agent._interrupt_requested:
+                    abandon_executor = True
+                    if not interrupt_logged:
+                        interrupt_logged = True
+                        agent._vprint(
+                            f"{agent.log_prefix}⚡ Interrupt: cancelling "
+                            f"{len(not_done)} pending concurrent tool(s)",
+                            force=True,
                         )
-                        for f in not_done:
-                            f.cancel()
-                        with agent._tool_worker_threads_lock:
-                            worker_tids = list(agent._tool_worker_threads)
-                        for tid in worker_tids:
-                            try:
-                                _ra()._set_interrupt(True, tid)
-                            except Exception:
-                                pass
-                        break
+                    for future in not_done:
+                        future.cancel()
+                    concurrent.futures.wait(not_done, timeout=3.0)
+                    break
+                elapsed = int(time.time() - group_start)
+                if elapsed > 0 and elapsed % 30 < 6:
+                    still_running = [
+                        parsed_calls[future_to_index[f]][1]
+                        for f in not_done if f in future_to_index
+                    ]
+                    agent._touch_activity(
+                        f"concurrent tools running ({elapsed}s, "
+                        f"{len(not_done)} remaining: {', '.join(still_running[:3])})"
+                    )
+        finally:
+            executor.shutdown(wait=not abandon_executor, cancel_futures=abandon_executor)
 
-                    # Check for interrupt — the per-thread interrupt signal
-                    # already causes individual tools (terminal, execute_code)
-                    # to abort, but tools without interrupt checks (web_search,
-                    # read_file) will run to completion. Cancel any futures
-                    # that haven't started yet so we don't block on them.
-                    if agent._interrupt_requested:
-                        abandon_executor = True
-                        if not _interrupt_logged:
-                            _interrupt_logged = True
-                            agent._vprint(
-                                f"{agent.log_prefix}⚡ Interrupt: cancelling "
-                                f"{len(not_done)} pending concurrent tool(s)",
-                                force=True,
-                            )
-                        for f in not_done:
-                            f.cancel()
-                        # Give already-running tools a moment to notice the
-                        # per-thread interrupt signal and exit gracefully.
-                        concurrent.futures.wait(not_done, timeout=3.0)
-                        break
-
-                    _conc_elapsed = int(time.time() - _conc_start)
-                    # Heartbeat every ~30s (6 × 5s poll intervals)
-                    if _conc_elapsed > 0 and _conc_elapsed % 30 < 6:
-                        _still_running = [
-                            parsed_calls[future_to_index[f]][1]
-                            for f in not_done
-                            if f in future_to_index
-                        ]
-                        agent._touch_activity(
-                            f"concurrent tools running ({_conc_elapsed}s, "
-                            f"{len(not_done)} remaining: {', '.join(_still_running[:3])})"
-                        )
-            finally:
-                # On abandon (interrupt or deadline) we intentionally do NOT
-                # join hung workers: wait=False returns immediately and
-                # cancel_futures drops queued-but-unstarted work. A wedged tool
-                # thread is left running detached — the deliberate tradeoff vs.
-                # deadlocking the whole batch. Normal completion joins (wait=True).
-                executor.shutdown(
-                    wait=not abandon_executor,
-                    cancel_futures=abandon_executor,
+    try:
+        for group_position, group in enumerate(execution_plan):
+            if agent._interrupt_requested:
+                break
+            runnable_indices = [
+                i for i in group if parsed_calls[i][4] is None
+            ]
+            if len(runnable_indices) > 1:
+                _run_parallel_group(runnable_indices)
+            elif runnable_indices:
+                i = runnable_indices[0]
+                tc, name, args, middleware_trace, _, _ = parsed_calls[i]
+                _run_tool(i, tc, name, args, middleware_trace)
+            # A timed-out group may still have detached workers. Do not start
+            # later operations while those effects are unknown/in flight.
+            if timed_out_indices or agent._interrupt_requested:
+                not_started_indices.update(
+                    index
+                    for remaining_group in execution_plan[group_position + 1:]
+                    for index in remaining_group
+                    if parsed_calls[index][4] is None
                 )
+                break
+            if (
+                agent.tool_delay > 0
+                and group_position < len(execution_plan) - 1
+                and not agent._interrupt_requested
+            ):
+                time.sleep(agent.tool_delay)
     finally:
         if spinner:
             # Build a summary message for the spinner stop
@@ -847,6 +836,25 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 middleware_trace=list(middleware_trace),
             )
             tool_duration = float(timeout_s or 0.0)
+        elif i in not_started_indices and r is None:
+            reason = "an earlier tool group timed out" if timed_out_indices else "user interrupt"
+            function_result = (
+                f"[Tool execution skipped — {name} was not started due to {reason}]"
+            )
+            effect_disposition = "none"
+            _emit_terminal_post_tool_call(
+                agent,
+                function_name=name,
+                function_args=args,
+                result=function_result,
+                effective_task_id=effective_task_id,
+                tool_call_id=getattr(tc, "id", "") or "",
+                status="cancelled",
+                error_type="prior_group_timeout" if timed_out_indices else "keyboard_interrupt",
+                error_message=function_result,
+                middleware_trace=list(middleware_trace),
+            )
+            tool_duration = 0.0
         elif r is None:
             # Tool was cancelled (interrupt) or thread didn't return
             if agent._interrupt_requested:

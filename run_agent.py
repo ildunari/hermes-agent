@@ -209,7 +209,8 @@ from agent.trajectory import (
     save_trajectory as _save_trajectory_to_file,
 )
 from agent.tool_dispatch_helpers import (
-    _should_parallelize_tool_batch,
+    _should_parallelize_tool_batch,  # noqa: F401  # compatibility re-export
+    _plan_tool_execution_groups,
     _is_destructive_command,  # noqa: F401  # re-exported for tests that access `run_agent._is_destructive_command`
     _extract_parallel_scope_path,  # noqa: F401  # re-exported for tests that `from run_agent import _extract_parallel_scope_path`
     _paths_overlap,  # noqa: F401  # re-exported for tests that `from run_agent import _paths_overlap`
@@ -6066,16 +6067,17 @@ class AIAgent:
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls from the assistant message and append results to messages.
 
-        Dispatches to concurrent execution only for batches that look
-        independent: read-only tools may always share the parallel path, while
-        file reads/writes may do so only when their target paths do not overlap.
+        Mixed batches use one grouped executor when any contiguous safe group
+        can run concurrently. Serial barriers remain ordered inside that same
+        outer batch lifecycle, so budget/steer finalization happens once.
         """
         tool_calls = assistant_message.tool_calls
 
         # Allow _vprint during tool execution even with stream consumers
         self._executing_tools = True
         try:
-            if not _should_parallelize_tool_batch(tool_calls):
+            execution_plan = _plan_tool_execution_groups(tool_calls)
+            if not any(len(group) > 1 for group in execution_plan):
                 return self._execute_tool_calls_sequential(
                     assistant_message, messages, effective_task_id, api_call_count
                 )

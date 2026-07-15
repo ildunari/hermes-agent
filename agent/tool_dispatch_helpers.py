@@ -4,9 +4,9 @@ Pure module-level utilities extracted from ``run_agent.py``:
 
 * ``_is_destructive_command`` — terminal-command heuristic used to gate
   parallel batch dispatch.
-* ``_should_parallelize_tool_batch`` / ``_extract_parallel_scope_path`` /
-  ``_paths_overlap`` — the rules engine deciding when a multi-tool batch
-  can run concurrently.
+* ``_plan_tool_execution_groups`` / ``_should_parallelize_tool_batch`` /
+  ``_extract_parallel_scope_path`` / ``_paths_overlap`` — the rules engine
+  building ordered maximal safe groups for a multi-tool batch.
 * ``_is_multimodal_tool_result`` / ``_multimodal_text_summary`` /
   ``_append_subdir_hint_to_multimodal`` — envelope helpers for the
   ``{"_multimodal": True, "content": [...], "text_summary": ...}`` dict
@@ -29,7 +29,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
@@ -38,8 +38,8 @@ from tools.threat_patterns import scan_for_threats
 
 logger = logging.getLogger(__name__)
 
-# Tools that must never run concurrently (interactive / user-facing).
-# When any of these appear in a batch, we fall back to sequential execution.
+# Tools that must never run concurrently (interactive / user-facing). They are
+# singleton barriers in an otherwise groupable mixed batch.
 _NEVER_PARALLEL_TOOLS = frozenset({"clarify"})
 
 # Read-only tools with no shared mutable session state.
@@ -103,16 +103,82 @@ def _is_mcp_tool_parallel_safe(tool_name: str) -> bool:
 
 
 def _should_parallelize_tool_batch(tool_calls) -> bool:
-    """Return True when a tool-call batch is safe to run concurrently."""
-    if len(tool_calls) <= 1:
-        return False
+    """Return True when the entire batch forms one parallel-safe group."""
+    plan = _plan_tool_execution_groups(tool_calls)
+    return len(plan) == 1 and len(plan[0]) > 1
 
-    tool_names = [tc.function.name for tc in tool_calls]
-    if any(name in _NEVER_PARALLEL_TOOLS for name in tool_names):
-        return False
 
+def _parallel_safety_for_tool(
+    tool_name: str,
+    function_args: dict,
+) -> tuple[bool, Optional[Path]]:
+    """Classify one effective invocation for ordered-group planning.
+
+    The optional path is a conflict scope. Path-scoped calls may share a group
+    only when their scopes do not overlap. ``process`` is deliberately
+    argument-sensitive: listing tracked processes is observational, while every
+    other action mutates lifecycle/observation state and must remain serial.
+    """
+    if tool_name in _NEVER_PARALLEL_TOOLS:
+        return False, None
+    if tool_name == "process":
+        return function_args.get("action") == "list", None
+    if tool_name in _PATH_SCOPED_TOOLS:
+        scoped_path = _extract_parallel_scope_path(tool_name, function_args)
+        return scoped_path is not None, scoped_path
+    if tool_name in _PARALLEL_SAFE_TOOLS:
+        return True, None
+    return _is_mcp_tool_parallel_safe(tool_name), None
+
+
+def _plan_tool_execution_groups_for_specs(
+    specs: Sequence[Tuple[str, dict]],
+) -> tuple[tuple[int, ...], ...]:
+    """Plan ordered maximal contiguous groups from effective tool specs.
+
+    Unsafe calls are singleton barriers. Safe calls accumulate greedily until
+    a path conflict; a conflict starts the next group rather than allowing work
+    to leapfrog an intervening operation.
+    """
+    groups: list[tuple[int, ...]] = []
+    current: list[int] = []
     reserved_paths: list[Path] = []
-    for tool_call in tool_calls:
+
+    def flush() -> None:
+        nonlocal current, reserved_paths
+        if current:
+            groups.append(tuple(current))
+        current = []
+        reserved_paths = []
+
+    for index, (tool_name, function_args) in enumerate(specs):
+        safe, scoped_path = _parallel_safety_for_tool(tool_name, function_args)
+        if not safe:
+            flush()
+            groups.append((index,))
+            continue
+        if scoped_path is not None and any(
+            _paths_overlap(scoped_path, existing) for existing in reserved_paths
+        ):
+            flush()
+        current.append(index)
+        if scoped_path is not None:
+            reserved_paths.append(scoped_path)
+
+    flush()
+    return tuple(groups)
+
+
+def _plan_tool_execution_groups(tool_calls) -> tuple[tuple[int, ...], ...]:
+    """Plan ordered maximal safe groups for raw model tool calls.
+
+    Malformed arguments are conservative singleton barriers. The executor
+    replans from middleware-adjusted effective calls after its single outer
+    preflight, so argument rewriting cannot create an unsafe concurrent group.
+    """
+    specs: list[tuple[str, dict]] = []
+    malformed_indices: set[int] = set()
+    for index, tool_call in enumerate(tool_calls):
         tool_name = tool_call.function.name
         try:
             function_args = json.loads(tool_call.function.arguments)
@@ -122,30 +188,25 @@ def _should_parallelize_tool_batch(tool_calls) -> bool:
                 tool_name,
                 tool_call.function.arguments[:200],
             )
-            return False
+            function_args = {}
+            malformed_indices.add(index)
         if not isinstance(function_args, dict):
             logging.debug(
                 "Non-dict args for %s (%s) — defaulting to sequential",
                 tool_name,
                 type(function_args).__name__,
             )
-            return False
+            function_args = {}
+            malformed_indices.add(index)
+        specs.append((tool_name, function_args))
 
-        if tool_name in _PATH_SCOPED_TOOLS:
-            scoped_path = _extract_parallel_scope_path(tool_name, function_args)
-            if scoped_path is None:
-                return False
-            if any(_paths_overlap(scoped_path, existing) for existing in reserved_paths):
-                return False
-            reserved_paths.append(scoped_path)
-            continue
-
-        if tool_name not in _PARALLEL_SAFE_TOOLS:
-            # Check if it's an MCP tool from a server that opted into parallel calls.
-            if not _is_mcp_tool_parallel_safe(tool_name):
-                return False
-
-    return True
+    # Give malformed calls a guaranteed-serial sentinel name while preserving
+    # their original indices and group ordering.
+    effective_specs = [
+        ("__malformed_tool_call__", args) if index in malformed_indices else (name, args)
+        for index, (name, args) in enumerate(specs)
+    ]
+    return _plan_tool_execution_groups_for_specs(effective_specs)
 
 
 def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Optional[Path]:
@@ -543,6 +604,8 @@ __all__ = [
     "_REDIRECT_OVERWRITE",
     "_is_destructive_command",
     "_should_parallelize_tool_batch",
+    "_plan_tool_execution_groups",
+    "_plan_tool_execution_groups_for_specs",
     "_extract_parallel_scope_path",
     "_paths_overlap",
     "_is_multimodal_tool_result",
