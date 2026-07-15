@@ -19,3 +19,23 @@ def _default_cron_test_model(monkeypatch):
     """Pin a default HERMES_MODEL so cron run_job tests have a resolvable model."""
     monkeypatch.setenv("HERMES_MODEL", "test-cron-default-model")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cron_storage(tmp_path, monkeypatch):
+    """Keep every cron test away from the active profile's scheduler files.
+
+    ``cron.jobs`` is commonly imported during test collection, before the root
+    hermetic-environment fixture redirects ``HERMES_HOME``. Patch its cached
+    module paths for each test so a local test run cannot create live jobs.
+    """
+    import cron.jobs as jobs_mod
+
+    hermes_home = tmp_path / "cron_test_home"
+    cron_dir = hermes_home / "cron"
+    monkeypatch.setattr(jobs_mod, "HERMES_DIR", hermes_home)
+    monkeypatch.setattr(jobs_mod, "CRON_DIR", cron_dir)
+    monkeypatch.setattr(jobs_mod, "JOBS_FILE", cron_dir / "jobs.json")
+    monkeypatch.setattr(jobs_mod, "OUTPUT_DIR", cron_dir / "output")
+    monkeypatch.setattr(jobs_mod, "TICKER_HEARTBEAT_FILE", cron_dir / "ticker_heartbeat")
+    monkeypatch.setattr(jobs_mod, "TICKER_SUCCESS_FILE", cron_dir / "ticker_last_success")
