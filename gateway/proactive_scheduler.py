@@ -14,6 +14,7 @@ import logging
 import math
 from pathlib import Path
 import random
+import re
 import sqlite3
 import time
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -30,7 +31,11 @@ from gateway.contact_memory.schema import (
     ProactiveSendKind,
 )
 from gateway.contact_memory.store import ContactMemoryStore, opaque_contact_filename
-from gateway.proactive_checkin import plan_checkin, push_into_active_hours
+from gateway.proactive_checkin import (
+    CheckinInitiationResult,
+    plan_checkin,
+    push_into_active_hours,
+)
 
 _WEEK = 7 * 86_400.0
 _DAY = 86_400.0
@@ -1844,6 +1849,8 @@ class ProactiveScheduler:
         lowered = clean.casefold()
         if re_search_dismissive(lowered):
             return ProactiveOutcome.DISMISSED
+        if re.fullmatch(r"ok(?:ay)?[^\w]*", lowered):
+            return ProactiveOutcome.ACKNOWLEDGED
         words = [word for word in lowered.replace("-", " ").split() if word]
         topic_words = {word for word in str(topic or "").casefold().split() if len(word) > 2}
         overlap = bool(topic_words & set(words))
@@ -2014,7 +2021,8 @@ class ProactiveScheduler:
             self.set_action_outcome(action_id, outcome, now=outcome_at)
 
     def _project_action_to_ledger(
-        self, route: ContactRoute, claim: SlotClaim, *, now: float
+        self, route: ContactRoute, claim: SlotClaim, *, now: float,
+        gate_reason: str = "phase3_dry_run",
     ) -> ProactiveSend:
         """Idempotent contact-ledger projection of the canonical state action."""
         store = self._contact_store(route)
@@ -2040,7 +2048,7 @@ class ProactiveScheduler:
                 candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             ),
             gate_decision=GateDecision.SUPPRESSED,
-            gate_reason="phase3_dry_run",
+            gate_reason=gate_reason,
             sent_at=None,
             outcome=None,
             outcome_at=None,
@@ -2166,11 +2174,29 @@ class ProactiveScheduler:
                 # Projection and child-turn initiation must both succeed before
                 # the durable action/slot is marked fired.  A failure is re-armed
                 # immediately rather than becoming an unretryable dry-run action.
-                if self.config.mode is not ProactiveMode.LIVE:
-                    self._project_action_to_ledger(route, claim, now=timestamp)
                 composed_text = ""
                 if on_dry_run is not None:
-                    composed_text = str(on_dry_run(route, claim) or "").strip()
+                    initiation = on_dry_run(route, claim)
+                    if isinstance(initiation, CheckinInitiationResult):
+                        if not initiation.allowed:
+                            self._project_action_to_ledger(
+                                route,
+                                claim,
+                                now=timestamp,
+                                gate_reason=initiation.reason,
+                            )
+                            self.complete_claim(
+                                claim,
+                                sent=False,
+                                reason=initiation.reason,
+                                now=timestamp,
+                            )
+                            continue
+                        composed_text = initiation.text.strip()
+                    else:
+                        composed_text = str(initiation or "").strip()
+                if self.config.mode is not ProactiveMode.LIVE:
+                    self._project_action_to_ledger(route, claim, now=timestamp)
             except Exception:
                 logger.warning("Proactive check-in initiation failed", exc_info=True)
                 self.retry_claim(claim, reason="initiation_retry", now=timestamp)
@@ -2278,8 +2304,7 @@ def classify_inbound_outcome(send: ProactiveSend, text: str) -> str:
 
 
 def re_search_dismissive(text: str) -> bool:
-    import re
-    return bool(re.search(r"^(?:k|ok|okay|meh|nah|nope|stop|don't care|dont care)[.! ]*$", text))
+    return bool(re.search(r"^(?:k|meh|nah|nope|stop|don't care|dont care)[.! ]*$", text))
 
 
 async def handle_inbound_async(
@@ -2294,7 +2319,6 @@ async def handle_inbound_async(
     serious: bool = False,
 ) -> dict[str, Any]:
     """Non-blocking gateway hook over the canonical synchronous protocol."""
-    del serious
     return await asyncio.to_thread(
         handle_inbound,
         state_db=Path(profile_home) / "state.db",
@@ -2307,6 +2331,7 @@ async def handle_inbound_async(
         text=text,
         received_at=received_at,
         config=ProactiveConfig.from_mapping(proactive_config),
+        serious_register=serious,
     )
 
 
@@ -2322,6 +2347,7 @@ def handle_inbound(
     text: str,
     received_at: float,
     config: ProactiveConfig,
+    serious_register: bool = False,
 ) -> dict[str, Any]:
     """Synchronous worker used by the gateway's ``asyncio.to_thread`` hook.
 
@@ -2332,11 +2358,13 @@ def handle_inbound(
     memory_root = Path(contact_memory_root).expanduser().resolve()
     if memory_root != (profile_home / "contact-memory").resolve():
         raise ValueError("contact-memory root does not match explicit profile state.db")
-    try:
-        from gateway.conversation_texture_v2 import _tier_of
-        serious = bool(_tier_of(text or ""))
-    except Exception:
-        serious = False
+    serious = bool(serious_register)
+    if not serious:
+        try:
+            from gateway.conversation_texture_v2 import _tier_of
+            serious = bool(_tier_of(text or ""))
+        except Exception:
+            serious = False
     from gateway.proactive_checkin import detect_checkin_kind
     checkin_kind = detect_checkin_kind(text, serious_tier=1 if serious else 0)
     contact_route = ContactRoute(

@@ -231,6 +231,11 @@ async def test_live_watcher_traverses_real_tick_final_checks_and_authenticated_a
         'checked_at':time.time(),
     })
     monkeypatch.setattr(GatewayRunner,"_proactive_compose_generate",staticmethod(lambda request:"safe prepared text"))
+    monkeypatch.setattr(
+        GatewayRunner,
+        "_proactive_gate_verdict",
+        staticmethod(lambda _request: {"allow": True, "reason": "welcome"}),
+    )
     runner=GatewayRunner.__new__(GatewayRunner); runner._running=True
     runner.adapters={Platform.BLUEBUBBLES:adapter}
     runner.config=SimpleNamespace(platforms={Platform.BLUEBUBBLES:SimpleNamespace(extra={'guest_contacts_file':str(registry_path)})})

@@ -393,6 +393,44 @@ def test_serious_register_arms_only_checkin_and_dry_run_never_sends(tmp_path: Pa
     assert store.recent_proactive_sends() == []
 
 
+def test_inherited_serious_register_on_neutral_final_message_blocks_interest_for_72h(
+    tmp_path: Path,
+):
+    from gateway.conversation_texture_v2 import _seriousness
+
+    state = ProactiveStateStore(tmp_path / "state.db")
+    register_messages(state, count=4, start=NOW - 100)
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+
+    handle_inbound(
+        state_db=tmp_path / "state.db",
+        contact_memory_root=tmp_path / "contact-memory",
+        profile="poke",
+        contact_id="kosta-owner",
+        route=ROUTE,
+        timezone_name="America/New_York",
+        source_id="neutral-tail",
+        text="okay",
+        received_at=NOW,
+        config=config(),
+        serious_register=bool(_seriousness("okay", ["my dad died"])),
+    )
+
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db",
+        contact_memory_root=tmp_path / "contact-memory",
+        config=config(),
+        profile="poke",
+    )
+    key = state.contact_key("kosta-owner")
+    assert scheduler.eligibility_reason(
+        key,
+        "interest_share",
+        now=NOW + 72 * 3600 - 1,
+    ) == "serious_mode"
+
+
 def test_500_character_checkin_ticks_with_compact_audit_and_initiates(tmp_path: Path):
     state = ProactiveStateStore(tmp_path / "state.db")
     register_messages(state, count=4, start=NOW - 5 * 3600)
@@ -536,6 +574,24 @@ def test_outcome_tracking_is_atomic_idempotent_and_updates_bandit(tmp_path: Path
     assert after_first.ts_alpha == 3
     assert after_first.raw_score == pytest.approx(5.2)
     assert store.unfolded_interest_events() == []
+
+
+@pytest.mark.parametrize("reply", ("ok", "  okay!!!  ", "OK...", "okay?"))
+def test_bare_okay_reply_is_neutral_acknowledgement(tmp_path: Path, reply: str):
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+    outbound = sent(store, "outcome", when=NOW - 60)
+
+    assert classify_inbound_outcome(outbound, reply) == "acknowledged"
+
+
+@pytest.mark.parametrize("reply", ("nah", "nope!", "stop.", "don't care"))
+def test_explicit_dismissive_reply_remains_dismissed(tmp_path: Path, reply: str):
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+    outbound = sent(store, "outcome", when=NOW - 60)
+
+    assert classify_inbound_outcome(outbound, reply) == "dismissed"
 
 
 def test_inbound_hook_cancels_and_records_next_outcome_within_24h(tmp_path: Path):

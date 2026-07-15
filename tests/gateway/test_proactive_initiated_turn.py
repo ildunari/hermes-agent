@@ -203,6 +203,7 @@ def test_real_tick_wires_due_checkin_to_dry_run_child_without_peer_hijack(tmp_pa
         ]}}},
         session_db=db,
         generate=lambda request: seen.append(request) or "how'd the interview go",
+        gate_verdict=lambda _request: {"allow": True, "reason": "welcome"},
         now=1_800_000_002.0,
     )
     assert result["fired"] == 1
@@ -221,3 +222,91 @@ def test_real_tick_wires_due_checkin_to_dry_run_child_without_peer_hijack(tmp_pa
         chat_id="iMessage;-;+155****0123", chat_type="dm",
     )
     assert routed["id"] == "parent"
+
+
+@pytest.mark.parametrize(
+    ("gate_verdict", "expected_reason"),
+    (
+        (None, "final_gate_unavailable"),
+        (lambda _request: {"allow": False, "reason": "not now"}, "model_gate:not now"),
+    ),
+)
+def test_real_tick_suppresses_checkin_when_strict_gate_rejects_or_is_unavailable(
+    tmp_path: Path,
+    gate_verdict,
+    expected_reason: str,
+):
+    db = SessionDB(tmp_path / "state.db")
+    parent(db)
+    cfg = ProactiveConfig(
+        enabled=True,
+        allowed_contacts=(
+            ("poke", "kosta-owner", "owner"),
+            ("guest", "stephen-lucier", "guest"),
+        ),
+    )
+    scheduler = ProactiveScheduler(
+        state_db_path=tmp_path / "state.db",
+        profile_home=tmp_path,
+        profile_name="poke",
+        config=cfg,
+    )
+    route = ContactRoute(
+        contact_id="kosta-owner",
+        profile_name="poke",
+        timezone="America/New_York",
+        chat_type="dm",
+        chat_id="iMessage;-;+155****0123",
+        user_id="contact-a",
+        session_id="parent",
+    )
+    for index in range(5):
+        scheduler.note_inbound(
+            route,
+            message_id=f"m-{index}",
+            received_at=1_800_000_000.0 - 100 + index,
+        )
+    slot_id = scheduler.arm_slot(
+        route,
+        kind="checkin",
+        fire_at=1_800_000_001.0,
+        payload={"kind": "open_loop", "reason": "the interview", "session_id": "parent"},
+        now=1_800_000_000.0,
+    )
+    generated: list[ProactiveTurnRequest] = []
+
+    result = _run_proactive_tick_once(
+        profile_home=tmp_path,
+        profile="poke",
+        config_raw={
+            "agent": {
+                "proactive": {
+                    "enabled": True,
+                    "mode": "observe",
+                    "allowed_contacts": [
+                        {"profile": "poke", "contact_id": "kosta-owner", "principal": "owner"},
+                        {
+                            "profile": "guest",
+                            "contact_id": "stephen-lucier",
+                            "principal": "guest",
+                        },
+                    ],
+                },
+            },
+        },
+        session_db=db,
+        generate=lambda request: generated.append(request) or "how'd the interview go",
+        gate_verdict=gate_verdict,
+        now=1_800_000_002.0,
+    )
+
+    assert result["fired"] == 0
+    assert result["initiated"] == 0
+    assert generated == []
+    assert scheduler.get_slot(slot_id)["status"] == "suppressed"
+    with scheduler._connect() as con:
+        action = con.execute(
+            "SELECT reason FROM proactive_action WHERE action_id=?",
+            (slot_id,),
+        ).fetchone()
+    assert action["reason"] == expected_reason

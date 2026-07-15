@@ -59,6 +59,13 @@ class CheckinPlan:
     timezone: str
 
 
+@dataclass(frozen=True)
+class CheckinInitiationResult:
+    allowed: bool
+    reason: str
+    text: str = ""
+
+
 def push_to_active_hours(
     timestamp: float,
     *,
