@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -26,9 +27,13 @@ from urllib.parse import quote
 @dataclass(frozen=True)
 class PersistedCall:
     session_id: str
-    tool_call_id: str
+    tool_call_id: str | None
     tool_name: str
     timestamp: float
+    row_identity: str = ""
+
+
+DEFERRED_BRIDGE_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
 
 
 def _open_read_only(path: Path) -> sqlite3.Connection:
@@ -66,7 +71,7 @@ def _require_schema(connection: sqlite3.Connection) -> None:
             )
 
 
-def _tool_calls_from_json(raw: Any) -> Iterable[tuple[str, str]]:
+def _tool_calls_from_json(raw: Any) -> Iterable[tuple[str | None, str]]:
     if not raw:
         return ()
     try:
@@ -76,26 +81,28 @@ def _tool_calls_from_json(raw: Any) -> Iterable[tuple[str, str]]:
     if not isinstance(values, list):
         return ()
 
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str | None, str]] = []
     for value in values:
         if not isinstance(value, dict):
             continue
         function = value.get("function")
         name = function.get("name") if isinstance(function, dict) else value.get("name")
         call_id = value.get("id") or value.get("tool_call_id")
-        if call_id and name:
-            calls.append((str(call_id), str(name)))
+        if name:
+            calls.append((str(call_id) if call_id else None, str(name)))
     return calls
 
 
 def load_sessions_and_calls(
     db_path: Path, session_ids: Iterable[str] = ()
 ) -> tuple[dict[str, dict[str, Any]], list[PersistedCall], int]:
-    """Read sessions and unique tool calls, deduplicated by tool_call_id.
+    """Read sessions and unique tool calls without conflating sessions.
 
     Assistant tool_calls are preferred because they represent invocation time.
     Tool-result rows fill gaps for older/incomplete transcripts. Repeated rows
-    with the same tool_call_id are counted once across the selected data.
+    with the same ``(session_id, tool_call_id)`` are counted once. ID-less
+    legacy calls cannot be correlated safely, so each is retained using its
+    stable message-row identity (and array index for assistant rows).
     """
     selected = tuple(dict.fromkeys(session_ids))
     with closing(_open_read_only(db_path)) as connection:
@@ -128,36 +135,52 @@ def load_sessions_and_calls(
         message_rows = connection.execute(
             "SELECT id, session_id, role, tool_call_id, tool_calls, tool_name, timestamp "
             f"FROM messages WHERE session_id IN ({placeholders}) "
-            "AND (tool_calls IS NOT NULL OR tool_call_id IS NOT NULL) "
+            "AND (tool_calls IS NOT NULL OR tool_call_id IS NOT NULL OR tool_name IS NOT NULL) "
             "ORDER BY timestamp, id",
             tuple(sessions),
         ).fetchall()
 
-    by_id: dict[str, PersistedCall] = {}
+    by_identity: dict[tuple[str, str, str], PersistedCall] = {}
     persisted_rows = 0
     # First pass: invocations. This preserves first-use timing even if results arrive later.
     for row in message_rows:
-        for call_id, name in _tool_calls_from_json(row["tool_calls"]):
+        for index, (call_id, name) in enumerate(_tool_calls_from_json(row["tool_calls"])):
             persisted_rows += 1
-            by_id.setdefault(
-                call_id,
+            identity = (
+                (row["session_id"], "id", call_id)
+                if call_id is not None
+                else (row["session_id"], "assistant-row", f"{row['id']}:{index}")
+            )
+            by_identity.setdefault(
+                identity,
                 PersistedCall(
-                    row["session_id"], call_id, name, float(row["timestamp"])
+                    row["session_id"], call_id, name, float(row["timestamp"]),
+                    f"message:{row['id']}:{index}",
                 ),
             )
     # Second pass: tool results absent from assistant JSON (legacy/interrupted records).
     for row in message_rows:
         call_id = row["tool_call_id"]
         name = row["tool_name"]
-        if call_id and name:
+        if name:
             persisted_rows += 1
-            by_id.setdefault(
-                str(call_id),
+            normalized_id = str(call_id) if call_id else None
+            identity = (
+                (row["session_id"], "id", normalized_id)
+                if normalized_id is not None
+                else (row["session_id"], "tool-row", str(row["id"]))
+            )
+            by_identity.setdefault(
+                identity,
                 PersistedCall(
-                    row["session_id"], str(call_id), str(name), float(row["timestamp"])
+                    row["session_id"], normalized_id, str(name),
+                    float(row["timestamp"]), f"message:{row['id']}",
                 ),
             )
-    calls = sorted(by_id.values(), key=lambda call: (call.timestamp, call.tool_call_id))
+    calls = sorted(
+        by_identity.values(),
+        key=lambda call: (call.timestamp, call.session_id, call.row_identity),
+    )
     return sessions, calls, persisted_rows
 
 
@@ -291,47 +314,156 @@ def compare_candidates(
     report: dict[str, Any],
     candidates: dict[str, set[str]],
     unknown: dict[str, list[str]],
+    candidate_toolsets: dict[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Compare persisted workload with explicit uncertainty semantics.
+
+    Direct allowlists are exact for ordinary persisted tool names. Toolset
+    candidates are necessarily estimates: this static resolver does not run
+    availability filtering or progressive-disclosure assembly. Deferred bridge
+    rows also hide the underlying tool name because this privacy-preserving
+    audit deliberately does not read tool arguments. In either case exact
+    impact fields are null and conservative bounds are emitted instead.
+    """
+    candidate_toolsets = candidate_toolsets or {}
     actual_counts = {item["name"]: item["call_count"] for item in report["tools"]}
     actual_names = set(actual_counts)
     total_calls = report["summary"]["unique_tool_call_count"]
+    total_sessions = report["summary"]["session_count"]
     sessions_with_tools = [
         item for item in report["sessions"] if item["tool_call_count"]
     ]
+    tool_session_denominator = len(sessions_with_tools)
+    deferred_names = actual_names & DEFERRED_BRIDGE_NAMES
     results = []
     for name in sorted(candidates):
         allowed = candidates[name]
         missing_names = sorted(actual_names - allowed)
         missing_calls = sum(actual_counts[tool] for tool in missing_names)
-        affected = sum(
-            bool(set(item["tool_names"]) - allowed) for item in sessions_with_tools
+        affected_sessions = {
+            item["session_id"]
+            for item in sessions_with_tools
+            if set(item["tool_names"]) - allowed
+        }
+        affected = len(affected_sessions)
+
+        reasons = []
+        unknown_toolsets = unknown.get(name, [])
+        if unknown_toolsets:
+            reasons.append("unknown_toolsets_may_add_tools")
+        if name in candidate_toolsets:
+            reasons.append("runtime_tool_surface_not_simulated")
+        if deferred_names:
+            reasons.append("deferred_bridge_workload_not_expanded")
+        complete = not reasons
+
+        may_add_tools = bool(unknown_toolsets)
+        runtime_dynamic = name in candidate_toolsets
+        definitely_missing_names = (
+            []
+            if may_add_tools
+            else sorted((actual_names - allowed) - DEFERRED_BRIDGE_NAMES)
         )
+        lower_missing_calls = sum(actual_counts[tool] for tool in definitely_missing_names)
+        lower_affected_sessions = (
+            0
+            if may_add_tools
+            else sum(
+                bool((set(item["tool_names"]) - allowed) - DEFERRED_BRIDGE_NAMES)
+                for item in sessions_with_tools
+            )
+        )
+        if runtime_dynamic:
+            observed_upper_missing_tools = len(actual_names)
+            observed_upper_missing_calls = total_calls
+            observed_upper_affected = tool_session_denominator
+        else:
+            observed_upper_missing_tools = len(missing_names)
+            observed_upper_missing_calls = missing_calls
+            deferred_sessions = {
+                item["session_id"]
+                for item in sessions_with_tools
+                if set(item["tool_names"]) & deferred_names
+            }
+            observed_upper_affected = len(affected_sessions | deferred_sessions)
+
+        # A deferred row may stand for underlying workload absent from this
+        # name-only audit, so authoritative count upper bounds are unbounded.
+        count_upper = None if deferred_names else observed_upper_missing_calls
+        tool_count_upper = None if deferred_names else observed_upper_missing_tools
+
+        def rate(numerator: int, denominator: int) -> float:
+            return _round(numerator / denominator) if denominator else 0.0
+
+        exact = {
+            "missing_tools": missing_names,
+            "missing_tool_count": len(missing_names),
+            "missing_tool_rate": rate(len(missing_names), len(actual_names)),
+            "missing_call_count": missing_calls,
+            "missing_call_rate": rate(missing_calls, total_calls),
+            "affected_session_count": affected,
+            "affected_tool_session_rate": rate(affected, tool_session_denominator),
+            "affected_all_session_rate": rate(affected, total_sessions),
+        }
+        if not complete:
+            exact = {key: None for key in exact}
+
         results.append({
             "name": name,
             "allowed_tools": sorted(allowed),
-            "unknown_toolsets": unknown.get(name, []),
-            "missing_tools": missing_names,
-            "missing_tool_count": len(missing_names),
-            "missing_tool_rate": _round(len(missing_names) / len(actual_names))
-            if actual_names
-            else 0.0,
-            "missing_call_count": missing_calls,
-            "missing_call_rate": _round(missing_calls / total_calls)
-            if total_calls
-            else 0.0,
-            "affected_session_count": affected,
-            "affected_session_rate": _round(affected / len(sessions_with_tools))
-            if sessions_with_tools
-            else 0.0,
+            "unknown_toolsets": unknown_toolsets,
+            "impact_complete": complete,
+            "impact_incompleteness_reasons": reasons,
+            "impact_scope": "persisted tool names; deferred bridge payloads are not read",
+            "observed_deferred_bridge_tools": sorted(deferred_names),
+            "affected_tool_session_denominator": tool_session_denominator,
+            "affected_all_session_denominator": total_sessions,
+            **exact,
+            "definitely_missing_tools": definitely_missing_names,
+            "impact_bounds": {
+                "missing_tool_count": {
+                    "lower": len(definitely_missing_names),
+                    "upper": tool_count_upper,
+                },
+                "missing_call_count": {
+                    "lower": lower_missing_calls,
+                    "upper": count_upper,
+                },
+                "missing_call_rate": {
+                    "lower": 0.0 if deferred_names else rate(lower_missing_calls, total_calls),
+                    "upper": 1.0 if deferred_names else rate(observed_upper_missing_calls, total_calls),
+                },
+                "affected_session_count": {
+                    "lower": lower_affected_sessions,
+                    "upper": observed_upper_affected,
+                },
+                "affected_tool_session_rate": {
+                    "lower": rate(lower_affected_sessions, tool_session_denominator),
+                    "upper": rate(observed_upper_affected, tool_session_denominator),
+                },
+                "affected_all_session_rate": {
+                    "lower": rate(lower_affected_sessions, total_sessions),
+                    "upper": rate(observed_upper_affected, total_sessions),
+                },
+            },
         })
     return results
 
 
-def measure_availability() -> dict[str, Any]:
-    """Invoke each unique registered check_fn once and report timing.
+def _callable_name(value: Any) -> str:
+    """Return a deterministic callable label without address-bearing repr()."""
+    module = getattr(value, "__module__", None) or type(value).__module__
+    qualname = getattr(value, "__qualname__", None) or type(value).__qualname__
+    return f"{module}.{qualname}"
+
+
+def measure_availability(include_diagnostics: bool = False) -> dict[str, Any]:
+    """Invoke each unique registered check_fn once.
 
     This deliberately bypasses the registry TTL cache so the result measures the
     actual existing check. It does not save config or execute tool handlers.
+    Timings are excluded by default for deterministic JSON and are placed under
+    diagnostics only when explicitly requested.
     """
     registry, discovery_ms = _load_registry()
     grouped: dict[Any, dict[str, set[str]]] = {}
@@ -348,7 +480,7 @@ def measure_availability() -> dict[str, Any]:
     checks = []
     for check_fn, details in sorted(
         grouped.items(),
-        key=lambda item: getattr(item[0], "__qualname__", repr(item[0])),
+        key=lambda item: (_callable_name(item[0]), sorted(item[1]["tools"])),
     ):
         started = time.perf_counter()
         error_type = None
@@ -358,21 +490,27 @@ def measure_availability() -> dict[str, Any]:
             available = False
             error_type = type(exc).__name__
         elapsed_ms = (time.perf_counter() - started) * 1000.0
-        checks.append({
-            "check": getattr(check_fn, "__qualname__", repr(check_fn)),
+        check = {
+            "check": _callable_name(check_fn),
             "tools": sorted(details["tools"]),
             "toolsets": sorted(details["toolsets"]),
             "available": available,
-            "elapsed_ms": round(elapsed_ms, 3),
             "error_type": error_type,
-        })
-    return {
+        }
+        if include_diagnostics:
+            check["elapsed_ms"] = round(elapsed_ms, 3)
+        checks.append(check)
+    result = {
         "explicitly_invoked": True,
-        "registry_discovery_ms": round(discovery_ms, 3),
         "check_count": len(checks),
-        "total_check_ms": round(sum(item["elapsed_ms"] for item in checks), 3),
         "checks": checks,
     }
+    if include_diagnostics:
+        result["diagnostics"] = {
+            "registry_discovery_ms": round(discovery_ms, 3),
+            "total_check_ms": round(sum(item["elapsed_ms"] for item in checks), 3),
+        }
+    return result
 
 
 def render_human(report: dict[str, Any], session_limit: int = 20) -> str:
@@ -411,23 +549,71 @@ def render_human(report: dict[str, Any], session_limit: int = 20) -> str:
             f"{'-' * 18} {'-' * 13} {'-' * 8} {'-' * 18}",
         ])
         for candidate in report["candidates"]:
+            if candidate["impact_complete"]:
+                missing = str(candidate["missing_call_count"])
+                rate_text = f"{candidate['missing_call_rate']:.1%}"
+                affected = str(candidate["affected_session_count"])
+            else:
+                bounds = candidate["impact_bounds"]
+                upper = bounds["missing_call_count"]["upper"]
+                missing = f">={bounds['missing_call_count']['lower']}"
+                if upper is not None:
+                    missing += f"..<={upper}"
+                rate_text = "incomplete"
+                affected = "bounded"
             lines.append(
-                f"{candidate['name']:<18} {candidate['missing_call_count']:>13} "
-                f"{candidate['missing_call_rate']:>7.1%} "
-                f"{candidate['affected_session_count']:>18}"
+                f"{candidate['name']:<18} {missing:>13} "
+                f"{rate_text:>8} {affected:>18}"
             )
 
     availability = report.get("availability")
     if availability and availability.get("explicitly_invoked"):
-        lines.extend([
-            "",
-            (
-                f"Availability checks: {availability['check_count']} unique checks, "
-                f"{availability['total_check_ms']:.3f} ms total "
-                f"(+ {availability['registry_discovery_ms']:.3f} ms registry discovery)"
-            ),
-        ])
+        line = f"Availability checks: {availability['check_count']} unique checks"
+        diagnostics = availability.get("diagnostics")
+        if diagnostics:
+            line += (
+                f", {diagnostics['total_check_ms']:.3f} ms total "
+                f"(+ {diagnostics['registry_discovery_ms']:.3f} ms registry discovery)"
+            )
+        lines.extend(["", line])
     return "\n".join(lines)
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    """Compare existing paths by identity, following symlink/hardlink aliases."""
+    try:
+        return os.path.samefile(left.expanduser(), right.expanduser())
+    except FileNotFoundError:
+        return left.expanduser().resolve(strict=False) == right.expanduser().resolve(strict=False)
+
+
+def _reject_db_output_alias(db_path: Path, output_path: Path | None) -> None:
+    if output_path is not None and _same_file(db_path, output_path):
+        raise ValueError("--json-output must not be the selected state DB or an alias of it")
+
+
+def _write_json_safely(output_path: Path, db_path: Path, payload: str) -> None:
+    """Write only after comparing the opened output inode with the DB inode.
+
+    The second identity check closes the ordinary check/write race: the output
+    is opened without truncation, compared by device/inode, and only then
+    truncated. Thus a symlink or hardlink swapped in after argument validation
+    still cannot overwrite the selected DB.
+    """
+    output = output_path.expanduser()
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT, 0o666)
+    try:
+        db_stat = db_path.expanduser().stat()
+        output_stat = os.fstat(descriptor)
+        if (db_stat.st_dev, db_stat.st_ino) == (output_stat.st_dev, output_stat.st_ino):
+            raise ValueError("--json-output must not be the selected state DB or an alias of it")
+        os.ftruncate(descriptor, 0)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            stream.write(payload)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -458,7 +644,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check-availability",
         action="store_true",
-        help="Explicitly invoke each unique registered tool availability check and time it",
+        help="Explicitly invoke each unique registered tool availability check",
+    )
+    parser.add_argument(
+        "--include-diagnostics",
+        action="store_true",
+        help="Include nondeterministic discovery and availability timings in JSON",
     )
     parser.add_argument(
         "--json-output",
@@ -478,6 +669,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        _reject_db_output_alias(args.db, args.json_output)
         tools = parse_named_csv(args.candidate_tools, "--candidate-tools")
         toolsets = parse_named_csv(args.candidate_toolsets, "--candidate-toolsets")
         sessions, calls, persisted_rows = load_sessions_and_calls(
@@ -485,11 +677,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         report = build_workload_report(sessions, calls, persisted_rows)
         candidates, unknown, discovery_ms = resolve_candidates(tools, toolsets)
-        report["candidates"] = compare_candidates(report, candidates, unknown)
-        if discovery_ms is not None:
-            report["candidate_registry_discovery_ms"] = round(discovery_ms, 3)
+        report["candidates"] = compare_candidates(report, candidates, unknown, toolsets)
+        if args.include_diagnostics and discovery_ms is not None:
+            report.setdefault("diagnostics", {})[
+                "candidate_registry_discovery_ms"
+            ] = round(discovery_ms, 3)
         report["availability"] = (
-            measure_availability()
+            measure_availability(args.include_diagnostics)
             if args.check_availability
             else {"explicitly_invoked": False}
         )
@@ -506,7 +700,11 @@ def main(argv: list[str] | None = None) -> int:
         print(human, file=sys.stderr)
         sys.stdout.write(payload)
     else:
-        args.json_output.expanduser().write_text(payload, encoding="utf-8")
+        try:
+            _write_json_safely(args.json_output, args.db, payload)
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         print(human)
         print(f"JSON: {args.json_output.expanduser()}")
     return 0
