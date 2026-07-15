@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ComposerAttachment } from './composer'
 import {
@@ -17,6 +17,27 @@ import {
 
 const SESSION_KEY = 'session-abc'
 const QUEUE_STORAGE_KEY = 'hermes.desktop.composerQueue.v1'
+
+const storageData = new Map<string, string>()
+const localStorageStub: Storage = {
+  clear: () => storageData.clear(),
+  getItem: key => storageData.get(key) ?? null,
+  key: index => [...storageData.keys()][index] ?? null,
+  get length() {
+    return storageData.size
+  },
+  removeItem: key => storageData.delete(key),
+  setItem: (key, value) => storageData.set(key, value)
+}
+
+beforeEach(() => {
+  vi.stubGlobal("localStorage", localStorageStub)
+  localStorageStub.clear()
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 function attachment(id: string, kind: ComposerAttachment['kind'] = 'file'): ComposerAttachment {
   return {
