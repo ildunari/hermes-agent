@@ -85,6 +85,37 @@ class SpyTransport:
         return {"ok": True}
 
 
+def test_reused_candidate_skips_fetch_but_repeats_gate_and_freshness(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    item = interest(store)
+    fetcher = FixedFetcher(AssertionError("reused candidate must not fetch"))
+    verdicts = []
+    pipeline = ProactivePipeline(
+        fetcher=fetcher,
+        gate=ProactiveGate(lambda request: verdicts.append(request) or allow(request)),
+        compose=lambda _request: "fresh share",
+        mode="observe",
+    )
+    reused = candidate()
+    result = pipeline.run(
+        send_id="reuse", topic=item.topic, interest=item, store=store, route={},
+        candidate_override=reused.to_json(), now=NOW,
+    )
+    assert result.status == "dry_run"
+    assert len(verdicts) == 1
+
+    stale = candidate(
+        concrete_item="Ferrari F80 Specs Published Last Month",
+        freshness_ts=NOW - 10 * 86_400 - 1,
+    )
+    stale_result = pipeline.run(
+        send_id="reuse-stale", topic=item.topic, interest=item, store=store, route={},
+        candidate_override=stale.to_json(), now=NOW,
+    )
+    assert stale_result.reason == "stale"
+    assert len(verdicts) == 1
+
+
 def test_fetch_candidate_rejects_prompt_injection_before_compose(tmp_path: Path):
     store = ContactMemoryStore(tmp_path, "contact")
     item = interest(store)

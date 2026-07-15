@@ -2179,7 +2179,7 @@ def _run_proactive_tick_once(
     prepared_sink: Any = None,
     now: float | None = None,
 ) -> dict[str, int]:
-    """Run one scheduler tick through the structurally dry-run proactive pipeline."""
+    """Run one scheduler tick through the mode-gated proactive pipeline."""
     from gateway.proactive_scheduler import ProactiveConfig, ProactiveScheduler
     from gateway.contact_memory.schema import ProactiveSendKind, RetrievalPrincipal
     from gateway.proactive_fetch import (
@@ -2308,6 +2308,7 @@ def _run_proactive_tick_once(
                 else RetrievalPrincipal.OWNER
             ),
             kind=ProactiveSendKind(claim.kind),
+            candidate_override=claim.payload.get("reused_candidate_json"),
             now=now,
         )
 
@@ -8730,8 +8731,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         asyncio.create_task(self._platform_reconnect_watcher())
 
-        # Code-owned proactive policy ticker. Phase 3 is structurally dry-run and
-        # this watcher has no adapter/delivery-router reference.
+        # Code-owned proactive policy ticker. Observe mode cannot prepare a
+        # transport send; live mode still passes the exactly-once delivery gate.
         asyncio.create_task(self._proactive_scheduler_watcher())
 
         # Opt-in exact-URL research is isolated from message dispatch and never sends replies.

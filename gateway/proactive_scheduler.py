@@ -1,13 +1,13 @@
 """Persistent proactive scheduler for contact-isolated gateway profiles.
 
-The scheduler owns *when*.  Phase-4 interest claims pass through the isolated
-fetch/gate/compose callback, but both interest shares and check-ins remain
-structurally dry-run-only pending approval.  No scheduler path calls transport.
+The scheduler owns *when*. Interest shares and check-ins pass through isolated
+fetch/gate/compose callbacks. Live payloads are durably prepared here and sent
+only by the separately gated exactly-once transport edge.
 """
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import inspect
 import json
@@ -137,6 +137,9 @@ CREATE TABLE IF NOT EXISTS proactive_outcome_confirmation (
   input_chars INTEGER NOT NULL CHECK(input_chars BETWEEN 0 AND 4000),
   source_id TEXT NOT NULL,
   error_code TEXT,
+  projection_state TEXT NOT NULL DEFAULT 'not_required'
+    CHECK(projection_state IN ('not_required','pending','complete','failed')),
+  projection_error TEXT,
   CHECK((status='claimed' AND completed_at IS NULL AND confirmed_outcome IS NULL
          AND confirmed_valence IS NULL AND error_code IS NULL)
      OR (status='confirmed' AND completed_at IS NOT NULL AND confirmed_outcome IS NOT NULL
@@ -144,6 +147,17 @@ CREATE TABLE IF NOT EXISTS proactive_outcome_confirmation (
      OR (status='failed' AND completed_at IS NOT NULL AND confirmed_outcome IS NULL
          AND confirmed_valence IS NULL AND error_code IS NOT NULL))
 );
+CREATE TABLE IF NOT EXISTS proactive_cancelled_fetch (
+  source_slot_id TEXT PRIMARY KEY,
+  contact_hash TEXT NOT NULL REFERENCES proactive_contact(contact_hash) ON DELETE CASCADE,
+  topic_hash TEXT NOT NULL,
+  candidate_json TEXT NOT NULL,
+  cached_at REAL NOT NULL,
+  expires_at REAL NOT NULL,
+  consumed_at REAL
+);
+CREATE INDEX IF NOT EXISTS proactive_cancelled_fetch_reuse
+  ON proactive_cancelled_fetch(contact_hash,topic_hash,expires_at,consumed_at);
 CREATE TABLE IF NOT EXISTS proactive_delivery (
   slot_id TEXT PRIMARY KEY REFERENCES proactive_slot(slot_id),
   attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -226,6 +240,19 @@ def _initialize_schema(con: sqlite3.Connection) -> None:
     )
     if "outcome_source_id" not in action_columns:
         con.execute("ALTER TABLE proactive_action ADD COLUMN outcome_source_id TEXT")
+    confirmation_columns = {
+        str(row[1])
+        for row in con.execute("PRAGMA table_info(proactive_outcome_confirmation)")
+    }
+    if "projection_state" not in confirmation_columns:
+        con.execute(
+            "ALTER TABLE proactive_outcome_confirmation ADD COLUMN projection_state TEXT "
+            "NOT NULL DEFAULT 'not_required'"
+        )
+    if "projection_error" not in confirmation_columns:
+        con.execute(
+            "ALTER TABLE proactive_outcome_confirmation ADD COLUMN projection_error TEXT"
+        )
     con.execute("BEGIN IMMEDIATE")
     try:
         duplicates = con.execute(
@@ -1178,6 +1205,89 @@ class ProactiveScheduler:
             raise
         return identifier
 
+    def arm_operator_smoke(
+        self,
+        route: ContactRoute,
+        *,
+        route_fingerprint: str,
+        now: float | None = None,
+        slot_id: str | None = None,
+    ) -> str:
+        """Arm one audited immediate smoke for an already-bound exact DM route."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        if not self.config.enabled:
+            raise RuntimeError("proactive scheduling is disabled")
+        assert_unique_contact_ownership((route,))
+        if str(route.chat_type).lower() not in _DIRECT_TYPES:
+            raise ValueError("operator smoke is DM-only")
+        if (route.profile_name, route.contact_id, route.principal) not in self.config.allowed_contacts:
+            raise ValueError("operator smoke route is not in the exact allowlist")
+        fingerprint = str(route_fingerprint or "").strip()
+        if not fingerprint:
+            raise ValueError("operator smoke route fingerprint is required")
+        contact_hash = self.register_contact(route, now=timestamp)
+        interests = self._contact_store(route).eligible_interests(now=timestamp)
+        if not interests:
+            raise ValueError("operator smoke has no eligible interest")
+        interest = sorted(
+            interests,
+            key=lambda item: (item.effective_score(timestamp), item.interest_id),
+            reverse=True,
+        )[0]
+        con = self._begin()
+        try:
+            contact = con.execute(
+                "SELECT route_json,route_fingerprint,inbound_version FROM proactive_contact "
+                "WHERE contact_hash=? AND profile_name=? AND contact_id=?",
+                (contact_hash, route.profile_name, route.contact_id),
+            ).fetchone()
+            if contact is None or contact["route_fingerprint"] != fingerprint:
+                raise ValueError(
+                    "operator smoke route fingerprint does not match the bound existing DM"
+                )
+            stored_route = json.loads(contact["route_json"] or "{}")
+            supplied_route = route.as_dict()
+            if any(
+                str(stored_route.get(key) or "") != str(supplied_route.get(key) or "")
+                for key in ("chat_type", "chat_id", "user_id", "session_id")
+            ):
+                raise ValueError("operator smoke route does not match the stored existing DM")
+            if con.execute(
+                "SELECT 1 FROM proactive_slot WHERE contact_hash=? "
+                "AND status IN ('armed','claimed')",
+                (contact_hash,),
+            ).fetchone() is not None:
+                raise ValueError("operator smoke contact already has live work")
+            identifier = slot_id or f"operator-smoke-{uuid.uuid4().hex}"
+            payload = {
+                "topic": interest.topic,
+                "session_id": route.session_id,
+                "operator_smoke": True,
+                "active_hours_override": True,
+                "route_fingerprint": fingerprint,
+            }
+            con.execute(
+                """INSERT INTO proactive_slot(
+                   slot_id,contact_hash,kind,interest_id,payload_json,status,fire_at,
+                   inbound_version,ingress_sequence,reason,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,'armed',?,?,?,'operator_smoke',?,?)""",
+                (
+                    identifier, contact_hash, ProactiveSendKind.INTEREST_SHARE.value,
+                    interest.interest_id,
+                    json.dumps(payload, sort_keys=True, ensure_ascii=False), timestamp,
+                    int(contact["inbound_version"]),
+                    int(con.execute(
+                        "SELECT COALESCE(max(rowid),0) FROM proactive_ingress_observed"
+                    ).fetchone()[0]),
+                    timestamp, timestamp,
+                ),
+            )
+            self._finish(con)
+            return identifier
+        except BaseException as exc:
+            self._finish(con, exc)
+            raise
+
     def schedule_checkin(
         self,
         route: ContactRoute,
@@ -1342,11 +1452,8 @@ class ProactiveScheduler:
             if eligibility:
                 sent = False
                 reason = eligibility
-            status = (
-                "sent" if sent and self.config.mode is ProactiveMode.LIVE
-                else "dry_run" if sent else "suppressed"
-            )
-            slot_status = "fired" if status in {"sent", "dry_run"} else "suppressed"
+            status = "dry_run" if sent else "suppressed"
+            slot_status = "fired" if status == "dry_run" else "suppressed"
             action_id = claim.slot_id
             con.execute(
                 """INSERT OR IGNORE INTO proactive_action(
@@ -1445,8 +1552,10 @@ class ProactiveScheduler:
                     and timestamp - float(failures[0]["updated_at"]) < self.config.circuit_breaker_cooldown_seconds):
                 return "transport_circuit_open"
             row = con.execute(
-                """SELECT s.status,s.claim_token,s.inbound_version,c.inbound_version current_inbound,
-                          s.ingress_sequence,c.disabled_until,c.timezone,d.kill_generation,
+                """SELECT s.status,s.claim_token,s.inbound_version,s.payload_json,
+                          c.inbound_version current_inbound,
+                          s.ingress_sequence,c.disabled_until,c.timezone,c.route_fingerprint,
+                          d.kill_generation,
                           (SELECT COALESCE(max(rowid),0) FROM proactive_ingress_observed) current_ingress
                    FROM proactive_slot s
                    JOIN proactive_contact c USING(contact_hash)
@@ -1463,13 +1572,23 @@ class ProactiveScheduler:
             return "backoff_active"
         if int(row["kill_generation"] or 0) != self.config.kill_generation:
             return "kill_generation_changed"
+        payload = json.loads(row["payload_json"] or "{}")
+        operator_smoke = payload.get("operator_smoke") is True
+        if operator_smoke and (
+            payload.get("active_hours_override") is not True
+            or str(payload.get("route_fingerprint") or "") != str(row["route_fingerprint"] or "")
+        ):
+            return "operator_smoke_tag_invalid"
         from datetime import datetime
         from zoneinfo import ZoneInfo
         local = datetime.fromtimestamp(timestamp, ZoneInfo(str(row["timezone"])))
         current = local.hour * 60 + local.minute
         start_h, start_m = (int(value) for value in self.config.active_start.split(":", 1))
         end_h, end_m = (int(value) for value in self.config.active_end.split(":", 1))
-        if not (start_h * 60 + start_m <= current <= end_h * 60 + end_m):
+        if (
+            not operator_smoke
+            and not (start_h * 60 + start_m <= current <= end_h * 60 + end_m)
+        ):
             return "outside_active_hours"
         return self.eligibility_reason(claim.contact_hash, claim.kind, now=timestamp)
 
@@ -1590,7 +1709,11 @@ class ProactiveScheduler:
         terminal = {"sent", "suppressed", "delivery_unknown", "partial_delivery", "failed"}
         con = self._begin()
         try:
-            row = con.execute("SELECT * FROM proactive_delivery WHERE slot_id=?", (claim.slot_id,)).fetchone()
+            row = con.execute(
+                """SELECT d.*,s.payload_json FROM proactive_delivery d
+                   JOIN proactive_slot s USING(slot_id) WHERE d.slot_id=?""",
+                (claim.slot_id,),
+            ).fetchone()
             if row is None:
                 raise ValueError("delivery was not reserved")
             if row["state"] in terminal:
@@ -1617,9 +1740,15 @@ class ProactiveScheduler:
             con.execute("UPDATE proactive_delivery SET state=?,transport_message_id=?,last_error_class=?,projection_state=?,projection_error=NULL,updated_at=? WHERE slot_id=?",
                         (final, message_id, reason[:120], "pending" if final == "sent" else "not_required", timestamp, claim.slot_id))
             action_status = "sent" if final == "sent" else "suppressed"
+            slot_payload = json.loads(row["payload_json"] or "{}")
+            action_reason = (
+                f"operator_smoke:{reason}"
+                if slot_payload.get("operator_smoke") is True
+                else reason
+            )
             con.execute("INSERT OR IGNORE INTO proactive_action(action_id,slot_id,contact_hash,interest_id,kind,status,sent_at,inbound_version,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                         (claim.slot_id, claim.slot_id, claim.contact_hash, claim.interest_id, claim.kind,
-                         action_status, timestamp if final == "sent" else None, claim.inbound_version, reason, timestamp))
+                         action_status, timestamp if final == "sent" else None, claim.inbound_version, action_reason, timestamp))
             con.execute("UPDATE proactive_slot SET status=?,reason=?,claim_token=NULL,claim_until=NULL,updated_at=? WHERE slot_id=?",
                         ("fired" if final == "sent" else "suppressed", reason, timestamp, claim.slot_id))
             self._finish(con)
@@ -1797,6 +1926,72 @@ class ProactiveScheduler:
                 "SELECT min(not_before) FROM proactive_delivery WHERE state='retry_wait'"
             ).fetchone()
         return float(row[0]) if row and row[0] is not None else None
+
+    @staticmethod
+    def _topic_hash(topic: str) -> str:
+        normalized = " ".join(str(topic or "").casefold().split())
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def cache_cancelled_candidate(
+        self, claim: Any, candidate: Any, *, now: float | None = None,
+    ) -> bool:
+        """Retain one compact fetched candidate for exact-topic reuse for 24h."""
+        from gateway.proactive_fetch import ProactiveCandidate
+
+        timestamp = _finite(time.time() if now is None else now, "now")
+        parsed = ProactiveCandidate.parse(candidate)
+        topic = str(getattr(claim, "payload", {}).get("topic") or parsed.topic)
+        if not topic or str(getattr(claim, "contact_hash", "")) == "":
+            return False
+        with self._connect() as con:
+            con.execute(
+                """INSERT INTO proactive_cancelled_fetch(
+                   source_slot_id,contact_hash,topic_hash,candidate_json,cached_at,expires_at
+                   ) VALUES(?,?,?,?,?,?) ON CONFLICT(source_slot_id) DO NOTHING""",
+                (
+                    str(claim.slot_id), str(claim.contact_hash), self._topic_hash(topic),
+                    parsed.to_json(), timestamp, timestamp + _DAY,
+                ),
+            )
+            return bool(con.execute("SELECT changes()").fetchone()[0])
+
+    def reusable_cancelled_candidate(
+        self, route: ContactRoute, *, topic: str, now: float | None = None,
+    ) -> str | None:
+        """Atomically consume the newest unexpired exact-topic candidate."""
+        timestamp = _finite(time.time() if now is None else now, "now")
+        con = self._begin()
+        try:
+            row = con.execute(
+                """SELECT source_slot_id,candidate_json FROM proactive_cancelled_fetch
+                   WHERE contact_hash=? AND topic_hash=? AND consumed_at IS NULL
+                   AND expires_at>=? ORDER BY cached_at DESC,source_slot_id DESC LIMIT 1""",
+                (route.contact_hash, self._topic_hash(topic), timestamp),
+            ).fetchone()
+            if row is None:
+                con.execute(
+                    "DELETE FROM proactive_cancelled_fetch WHERE expires_at<?", (timestamp,)
+                )
+                self._finish(con)
+                return None
+            changed = con.execute(
+                "UPDATE proactive_cancelled_fetch SET consumed_at=? "
+                "WHERE source_slot_id=? AND consumed_at IS NULL",
+                (timestamp, row["source_slot_id"]),
+            ).rowcount
+            self._finish(con)
+            return str(row["candidate_json"]) if changed else None
+        except BaseException as exc:
+            self._finish(con, exc)
+            raise
+
+    def _claim_is_current(self, claim: SlotClaim) -> bool:
+        with self._connect() as con:
+            return con.execute(
+                "SELECT 1 FROM proactive_slot WHERE slot_id=? AND status='claimed' "
+                "AND claim_token=?",
+                (claim.slot_id, claim.claim_token),
+            ).fetchone() is not None
 
     def cleanup_sprawl(self, *, now: float | None = None) -> dict[str, int]:
         """Bound operational rows while preserving recent audits and contact evidence."""
@@ -2033,6 +2228,8 @@ class ProactiveScheduler:
             ).fetchone()
             if existing is not None:
                 self._finish(con)
+                if existing["status"] == "confirmed":
+                    self._ensure_outcome_projection(route, existing, now=timestamp)
                 return self._confirmation_result(existing, applied=False)
             if action["outcome_status"] == "confirmed":
                 self._finish(con)
@@ -2125,7 +2322,8 @@ class ProactiveScheduler:
             )
             con.execute(
                 """UPDATE proactive_outcome_confirmation SET status='confirmed',completed_at=?,
-                   confirmed_outcome=?,confirmed_valence=? WHERE action_id=? AND status='claimed'""",
+                   confirmed_outcome=?,confirmed_valence=?,projection_state='pending',
+                   projection_error=NULL WHERE action_id=? AND status='claimed'""",
                 (timestamp, confirmed, valence, action_id),
             )
             audit = con.execute(
@@ -2135,12 +2333,54 @@ class ProactiveScheduler:
         except BaseException as exc:
             self._finish(con, exc)
             raise
+        self._ensure_outcome_projection(route, audit, now=timestamp)
+        return self._confirmation_result(audit, applied=True)
+
+    def _project_confirmed_outcome(
+        self,
+        route: ContactRoute,
+        action_id: str,
+        outcome: str,
+        *,
+        source_id: str,
+        now: float,
+    ) -> None:
         store = self._contact_store(route)
         if store.get_proactive_send(action_id) is not None:
             store.record_proactive_outcome(
-                action_id, confirmed, source_id=source, now=timestamp,
+                action_id, outcome, source_id=source_id, now=now,
             )
-        return self._confirmation_result(audit, applied=True)
+
+    def _ensure_outcome_projection(
+        self, route: ContactRoute, audit: sqlite3.Row, *, now: float,
+    ) -> None:
+        if audit["projection_state"] == "complete":
+            return
+        action_id = str(audit["action_id"])
+        try:
+            self._project_confirmed_outcome(
+                route,
+                action_id,
+                str(audit["confirmed_outcome"]),
+                source_id=str(audit["source_id"]),
+                now=now,
+            )
+        except Exception as exc:
+            with self._connect() as con:
+                con.execute(
+                    """UPDATE proactive_outcome_confirmation
+                       SET projection_state='failed',projection_error=?
+                       WHERE action_id=? AND status='confirmed'""",
+                    (type(exc).__name__, action_id),
+                )
+            raise
+        with self._connect() as con:
+            con.execute(
+                """UPDATE proactive_outcome_confirmation
+                   SET projection_state='complete',projection_error=NULL
+                   WHERE action_id=? AND status='confirmed'""",
+                (action_id,),
+            )
 
     def _fail_outcome_confirmation(
         self, action_id: str, timestamp: float, error_code: str,
@@ -2388,6 +2628,14 @@ class ProactiveScheduler:
                 continue
             if claim.kind in {"interest_share", "exploration"} and on_interest_share is not None:
                 store = self._contact_store(route)
+                reused = self.reusable_cancelled_candidate(
+                    route, topic=str(claim.payload.get("topic") or ""), now=timestamp,
+                )
+                if reused:
+                    claim = replace(
+                        claim,
+                        payload={**claim.payload, "reused_candidate_json": reused},
+                    )
                 pipeline_result: Any = None
                 try:
                     pipeline_result = on_interest_share(route, claim, store)
@@ -2411,6 +2659,11 @@ class ProactiveScheduler:
                             gate_decision=GateDecision.SUPPRESSED, gate_reason=pipeline_reason,
                             sent_at=None, outcome=None, outcome_at=None, created_at=timestamp,
                         ))
+                if not self._claim_is_current(claim):
+                    candidate = getattr(pipeline_result, "candidate", None)
+                    if candidate is not None:
+                        self.cache_cancelled_candidate(claim, candidate, now=timestamp)
+                    continue
                 if pipeline_status == "prepared":
                     composed_text = str(getattr(pipeline_result, "composed_text", "") or "")
                     candidate = getattr(pipeline_result, "candidate", None)

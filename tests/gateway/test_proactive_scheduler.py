@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -21,9 +22,11 @@ from gateway.contact_memory.schema import (
 )
 from gateway.contact_memory.store import ContactMemoryStore
 from gateway.proactive_checkin import plan_checkin, push_into_active_hours
+from gateway.proactive_fetch import ProactiveCandidate
 from gateway.proactive_scheduler import (
     ContactRoute,
     ProactiveConfig,
+    ProactiveMode,
     ProactiveScheduler,
     ProactiveStateStore,
     assert_no_profile_conflicts,
@@ -834,6 +837,209 @@ async def test_confirmation_failure_is_closed_audited_and_not_retried(
     assert audit["input_chars"] == 4000
     assert audit["input_sha256"] == hashlib.sha256(inbound_text[:4000].encode()).hexdigest()
     assert inbound_text not in json.dumps(audit)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_outcome_replay_repairs_posterior_projection_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    register_messages(state)
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+    sent(store, "prior", when=NOW - 100)
+    reply = "sports cars are honestly getting ridiculously fast now"
+    handle_inbound(
+        state_db=tmp_path / "state.db",
+        contact_memory_root=tmp_path / "contact-memory",
+        profile="poke", contact_id="kosta-owner", route=ROUTE,
+        timezone_name="America/New_York", source_id="reply",
+        text=reply, received_at=NOW, config=config(),
+    )
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(), profile="poke",
+    )
+    real_project = scheduler._project_confirmed_outcome
+    calls = 0
+
+    def interrupted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("projection interrupted")
+        return real_project(*args, **kwargs)
+
+    monkeypatch.setattr(scheduler, "_project_confirmed_outcome", interrupted)
+    with pytest.raises(RuntimeError, match="projection interrupted"):
+        await scheduler.confirm_action_outcome(
+            contact_route(), "prior", inbound_text=reply,
+            model="pinned/outcome-v1",
+            extractor=lambda **_: {"outcome": "engaged", "valence": "positive"},
+            source_id="inbound:reply", now=NOW + 1,
+        )
+    assert store.get_interest("cars").ts_alpha == 2
+
+    replay = await scheduler.confirm_action_outcome(
+        contact_route(), "prior", inbound_text="ignored on replay",
+        model="ignored-on-replay", extractor=lambda **_: pytest.fail("must not extract twice"),
+        source_id="inbound:reply", now=NOW + 2,
+    )
+    assert replay == {
+        "outcome": "engaged", "outcome_status": "confirmed",
+        "valence": "positive", "applied": False,
+    }
+    assert calls == 2
+    assert store.get_interest("cars").ts_alpha == 3
+    with scheduler._connect() as con:
+        assert con.execute(
+            "SELECT projection_state FROM proactive_outcome_confirmation WHERE action_id='prior'"
+        ).fetchone()[0] == "complete"
+
+
+def test_cancelled_fetch_candidate_is_reused_once_within_24h_and_regated(tmp_path: Path):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    key = register_messages(state)
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(), profile="poke",
+    )
+    first_slot = scheduler.arm_slot(
+        contact_route(), kind="interest_share", interest_id="cars",
+        fire_at=NOW - 1, payload={"topic": "sports cars"}, now=NOW - 2,
+    )
+    candidate = ProactiveCandidate.parse({
+        "topic": "sports cars", "concrete_item": "Fresh track test published",
+        "why_now": "the test was published today", "source_url": "https://example.com/test",
+        "freshness_ts": NOW,
+    })
+
+    def cancelled_during_fetch(_route, _claim, _store):
+        scheduler.note_inbound(
+            contact_route(), message_id="during-fetch", received_at=NOW,
+        )
+        return SimpleNamespace(
+            status="prepared", reason="prepared_for_async_transport",
+            candidate=candidate, composed_text="would have sent",
+        )
+
+    assert scheduler.tick(now=NOW, on_interest_share=cancelled_during_fetch)["fired"] == 0
+    assert scheduler.get_slot(first_slot)["status"] == "cancelled"
+
+    second_slot = scheduler.arm_slot(
+        contact_route(), kind="interest_share", interest_id="cars",
+        fire_at=NOW + 1, payload={"topic": "sports cars"}, now=NOW + 0.5,
+    )
+    with scheduler._connect() as con:
+        con.execute(
+            "UPDATE proactive_slot SET fire_at=? WHERE slot_id=?",
+            (NOW + 1, second_slot),
+        )
+    seen = []
+
+    def reuse(_route, claim, _store):
+        seen.append(claim.payload.get("reused_candidate_json"))
+        return SimpleNamespace(status="suppressed", reason="model_gate:not_glad", candidate=candidate)
+
+    scheduler.tick(now=NOW + 2, on_interest_share=reuse)
+    assert seen == [candidate.to_json()]
+    assert scheduler.get_slot(second_slot)["status"] == "suppressed"
+    assert scheduler.reusable_cancelled_candidate(
+        contact_route(), topic="sports cars", now=NOW + 3,
+    ) is None
+
+
+def test_cancelled_fetch_reuse_expires_and_is_exact_topic_scoped(tmp_path: Path):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    register_messages(state)
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(), profile="poke",
+    )
+    claim = SimpleNamespace(
+        slot_id="cancelled", contact_hash=contact_route().contact_hash,
+        payload={"topic": "sports cars"},
+    )
+    candidate = ProactiveCandidate.parse({
+        "topic": "sports cars", "concrete_item": "Fresh track test published",
+        "why_now": "the test was published today", "source_url": "https://example.com/test",
+        "freshness_ts": NOW,
+    })
+    scheduler.cache_cancelled_candidate(claim, candidate, now=NOW)
+    assert scheduler.reusable_cancelled_candidate(
+        contact_route(), topic="electric cars", now=NOW + 1,
+    ) is None
+    assert scheduler.reusable_cancelled_candidate(
+        contact_route(), topic="sports cars", now=NOW + 86_400 + 1,
+    ) is None
+
+
+def test_operator_smoke_is_exact_route_tagged_observe_blocked_and_active_override(
+    tmp_path: Path,
+):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    register_messages(state)
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+    live = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(mode=ProactiveMode.LIVE, dry_run=False), profile="poke",
+    )
+    route = contact_route()
+    assert live.bind_route_fingerprint(route, "exact-existing-dm")
+    live.record_health("model_probe", {
+        "ready": True, "sent_request": True, "provider": "openai-codex",
+        "resolved_model": "gpt-5.6-sol", "response_model": "gpt-5.6-sol",
+        "private_history_used": False,
+    }, now=NOW)
+    live.record_health("alarm_sink_probe", {
+        "ready": True, "type": "", "target": "", "delivery_ack": True,
+    }, now=NOW)
+    slot = live.arm_operator_smoke(
+        route, route_fingerprint="exact-existing-dm", now=NOW,
+    )
+    claim = live.claim_due(worker_id="smoke", now=NOW)[0]
+    assert claim.slot_id == slot
+    assert claim.payload["operator_smoke"] is True
+    assert claim.payload["active_hours_override"] is True
+    # NOW is outside the configured New York active window; the explicit,
+    # durable smoke tag is the only allowed override.
+    assert live.final_delivery_check(route, claim, now=NOW) is None
+    live.reserve_delivery(claim, "operator smoke payload", now=NOW)
+    assert live.finish_delivery(
+        claim, state="sent", reason="sent", message_id="smoke-guid", now=NOW,
+    ) == "sent"
+    with live._connect() as con:
+        action = con.execute(
+            "SELECT status,reason FROM proactive_action WHERE action_id=?", (slot,)
+        ).fetchone()
+    assert tuple(action) == ("sent", "operator_smoke:sent")
+
+    observe_home = tmp_path / "observe"
+    observe = ProactiveScheduler(
+        state_db=observe_home / "state.db", contact_memory_root=observe_home / "contact-memory",
+        config=config(mode=ProactiveMode.OBSERVE, dry_run=True), profile="poke",
+    )
+    for index in range(5):
+        observe.note_inbound(route, message_id=f"o-{index}", received_at=NOW - 10 + index)
+    make_interest(ContactMemoryStore(observe_home / "contact-memory", "kosta-owner"))
+    assert observe.bind_route_fingerprint(route, "exact-existing-dm")
+    observed_slot = observe.arm_operator_smoke(
+        route, route_fingerprint="exact-existing-dm", now=NOW,
+    )
+    observed_claim = observe.claim_due(worker_id="observe-smoke", now=NOW)[0]
+    assert observed_claim.slot_id == observed_slot
+    assert observe.final_delivery_check(route, observed_claim, now=NOW) == "mode_not_live"
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        live.arm_operator_smoke(route, route_fingerprint="wrong", now=NOW + 1)
+    with pytest.raises(ValueError, match="DM-only"):
+        live.arm_operator_smoke(
+            ContactRoute(**{**route.__dict__, "chat_type": "group"}),
+            route_fingerprint="exact-existing-dm", now=NOW + 1,
+        )
 
 
 def test_tick_marks_unanswered_send_ignored_after_24h_once(tmp_path: Path):

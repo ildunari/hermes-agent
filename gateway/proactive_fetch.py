@@ -1,9 +1,9 @@
 """Isolated fetch, gate, compose, and delivery pipeline for proactive shares.
 
-Fetched material is untrusted input.  Raw research never leaves ``FetchCoordinator``;
+Fetched material is untrusted input. Raw research never leaves ``FetchCoordinator``;
 only a strict, compact :class:`ProactiveCandidate` can cross into the gate and
-assistant-first compose path.  Delivery is intentionally impossible in this
-release: ``DRY_RUN_ONLY`` is a structural fuse, not a profile setting.
+assistant-first compose path. The mode fuse keeps observe runs non-sending;
+live delivery is handed to the separately gated exactly-once transport edge.
 """
 from __future__ import annotations
 
@@ -775,7 +775,7 @@ def deliver_with_hard_gate(
 
 
 class ProactivePipeline:
-    """Run one claimed interest slot through isolated fetch -> gate -> compose -> dry-run."""
+    """Run one claimed interest slot through isolated fetch, gate, and compose."""
 
     def __init__(
         self,
@@ -811,6 +811,7 @@ class ProactivePipeline:
         route: Mapping[str, object],
         principal: RetrievalPrincipal = RetrievalPrincipal.OWNER,
         kind: ProactiveSendKind = ProactiveSendKind.INTEREST_SHARE,
+        candidate_override: object | None = None,
         now: float | None = None,
     ) -> PipelineResult:
         timestamp = float(time.time() if now is None else now)
@@ -831,7 +832,11 @@ class ProactivePipeline:
                 status, existing.gate_reason, prior_candidate, alarm=metrics.alarm
             )
         try:
-            candidate = self.fetcher.fetch(topic)
+            candidate = (
+                ProactiveCandidate.parse(candidate_override)
+                if candidate_override is not None
+                else self.fetcher.fetch(topic)
+            )
         except CandidateValidationError:
             _record_terminal(
                 store, send_id=send_id, interest_id=interest.interest_id if interest else None,
