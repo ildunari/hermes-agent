@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils'
 import { $chatWidth, setChatWidth } from '@/store/chat-width'
 import { $embedAllowed, $embedMode, clearEmbedAllowed, type EmbedMode, setEmbedMode } from '@/store/embed-consent'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
+import { $tableLayout, setTableLayout } from '@/store/table-layout'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
 import { $translucency, setTranslucency } from '@/store/translucency'
 import { $zoomPercent, setZoomPercent } from '@/store/zoom'
@@ -250,6 +251,7 @@ export function AppearanceSettings() {
   const embedAllowed = useStore($embedAllowed)
   const translucency = useStore($translucency)
   const chatWidth = useStore($chatWidth)
+  const tableLayout = useStore($tableLayout)
   const installs = useStore($marketplaceInstalls)
   const profiles = useStore($profiles)
   const activeProfileKey = normalizeProfileKey(useStore($activeGatewayProfile))
@@ -299,6 +301,11 @@ export function AppearanceSettings() {
     { id: 'normal', label: a.chatWidthNormal },
     { id: 'wide', label: a.chatWidthWide },
     { id: 'full', label: a.chatWidthFull }
+  ] as const
+
+  const tableLayoutOptions = [
+    { id: 'fit', label: a.tableLayoutFit },
+    { id: 'scroll', label: a.tableLayoutScroll }
   ] as const
 
   const matchedScalePreset = matchUiScalePreset(zoomPercent)
@@ -447,6 +454,22 @@ export function AppearanceSettings() {
             }
             description={a.chatWidthDesc}
             title={a.chatWidthTitle}
+          />
+
+          <ListRow
+            action={
+              <SegmentedControl
+                ariaLabel={a.tableLayoutTitle}
+                onChange={id => {
+                  triggerHaptic('selection')
+                  setTableLayout(id)
+                }}
+                options={tableLayoutOptions}
+                value={tableLayout}
+              />
+            }
+            description={a.tableLayoutDesc}
+            title={a.tableLayoutTitle}
           />
 
           <ListRow

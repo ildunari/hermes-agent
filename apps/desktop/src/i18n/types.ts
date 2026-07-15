@@ -314,6 +314,10 @@ export interface Translations {
       chatWidthNormal: string
       chatWidthWide: string
       chatWidthFull: string
+      tableLayoutTitle: string
+      tableLayoutDesc: string
+      tableLayoutFit: string
+      tableLayoutScroll: string
       translucencyTitle: string
       translucencyDesc: string
       embedsTitle: string

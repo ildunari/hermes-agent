@@ -2,6 +2,7 @@ import './styles.css'
 // Side-effects: apply persisted renderer-owned presentation preferences before
 // the first app render so chat geometry never flashes through its defaults.
 import './store/chat-width'
+import './store/table-layout'
 import './store/translucency'
 
 import { QueryClientProvider } from '@tanstack/react-query'
