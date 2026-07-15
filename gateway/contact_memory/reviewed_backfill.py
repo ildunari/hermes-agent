@@ -19,8 +19,14 @@ from .imessage_communication_adapter import (
     HistoricalCommunicationScan,
     build_aggregate_manifest,
 )
-from .imessage_link_review import evidence_id, sanitize_metadata_cache
-from .phase_e_enrichment import DERIVATION_VERSION, derive_scan_enrichment
+from .imessage_link_review import evidence_id
+from .phase_e_enrichment import (
+    DERIVATION_VERSION, EnrichmentCandidate, EnrichmentResult, derive_scan_enrichment,
+)
+from .phase_e_link_enrichment import (
+    LINK_DERIVATION_VERSION, derive_link_research_enrichment,
+)
+from .link_research import RESEARCH_VERSION
 from .phase_e_taxonomy import ONTOLOGY_VERSION, RULE_VERSION, TAXONOMY_COMMITMENT
 from .schema import (
     CommunicationBundle,
@@ -39,7 +45,8 @@ from .schema import (
 from .store import ContactMemoryStore, normalize_interest_topic, opaque_contact_filename
 
 _SUBJECTS = ("kosta-owner", "stephen-lucier")
-_PROJECTOR_VERSION = "phase-e-reviewed-v3"
+_PROJECTOR_VERSION = "phase-e-reviewed-v4"
+_LEGACY_PROJECTOR_VERSION = "phase-e-reviewed-v3"
 _RETIRED_REVIEW_IDS = frozenset({
     "8ce521b7cde167ffc581f6b1b639895de84f46b955e42affd51b72041b2aafb1",
     "b3330deb7bbbd107e7b3c26a8d78e0416b4ee3c4619d356f24f0e4a90f972647",
@@ -136,6 +143,43 @@ class ReviewedBackfill:
     manifest: dict[str, Any]
 
 
+def _merge_enrichment_results(
+    text: EnrichmentResult,
+    links: EnrichmentResult,
+) -> EnrichmentResult:
+    grouped: dict[tuple[str, str, str], list[EnrichmentCandidate]] = defaultdict(list)
+    for item in (*text.candidates, *links.candidates):
+        grouped[(item.subject, item.kind, item.semantic_key)].append(item)
+    candidates: list[EnrichmentCandidate] = []
+    for items in grouped.values():
+        first = items[0]
+        supports = tuple(sorted(
+            {support.support_id: support for item in items for support in item.supports}.values(),
+            key=lambda support: support.support_id,
+        ))
+        candidates.append(EnrichmentCandidate(
+            subject=first.subject, kind=first.kind, semantic_key=first.semantic_key,
+            label=first.label, entity_type=first.entity_type,
+            polarity=("positive" if any(item.polarity == "positive" for item in items)
+                      else "negative" if any(item.polarity == "negative" for item in items)
+                      else "neutral"),
+            eligibility="eligible", supports=supports,
+            distinct_days=len({support.occurred_day for support in supports}),
+            positive_supports=sum(support.polarity == "positive" for support in supports),
+        ))
+    exclusions = Counter(text.exclusions)
+    exclusions.update(links.exclusions)
+    return EnrichmentResult(
+        candidates=tuple(sorted(candidates, key=lambda item: (
+            item.subject, item.kind, item.semantic_key,
+        ))),
+        watchlist=(*text.watchlist, *links.watchlist),
+        exclusions=dict(sorted(exclusions.items())),
+        metrics={**text.metrics, **links.metrics},
+        versions={**text.versions, **links.versions},
+    )
+
+
 def _existing_state_payload(state: ExistingReviewedState) -> dict[str, object]:
     return {
         "topics": sorted(state.topics), "entities": sorted(state.entities),
@@ -217,22 +261,26 @@ def build_reviewed_backfill(
     existing: Mapping[str, ExistingReviewedState] | None = None,
     metadata_cache: object | None = None,
 ) -> ReviewedBackfill:
-    """Build signed v3 candidates from ephemeral deterministic enrichment."""
+    """Build signed v4 text + researched-link candidates."""
     if len(secret) < 16:
         raise ValueError("HMAC secret must be at least 16 bytes")
     states = {
         subject: (existing or {}).get(subject, ExistingReviewedState())
         for subject in _SUBJECTS
     }
-    # Metadata remains sanitized for compatibility, but v3 does not create a raw
-    # or model lane from it. Closed ontology derivation owns semantic admission.
-    sanitize_metadata_cache(metadata_cache or {})
     by_event = {record.bundle.event.event_id: record for record in scan.records}
-    enrichment = derive_scan_enrichment(
+    text_enrichment = derive_scan_enrichment(
         scan, secret=secret,
         existing_topics={subject: states[subject].topics for subject in _SUBJECTS},
         existing_entities={subject: states[subject].entities for subject in _SUBJECTS},
     )
+    link_enrichment = derive_link_research_enrichment(
+        scan, secret=secret, research_cache=metadata_cache or {},
+        existing_topics={subject: states[subject].topics for subject in _SUBJECTS},
+        existing_entities={subject: states[subject].entities for subject in _SUBJECTS},
+    )
+    enrichment = _merge_enrichment_results(text_enrichment, link_enrichment)
+    research_commitment = _sha256(_canonical_bytes(metadata_cache or {}))
     exclusions: Counter[str] = Counter(enrichment.exclusions)
 
     candidates: list[dict[str, Any]] = []
@@ -249,6 +297,17 @@ def build_reviewed_backfill(
                 exclusions["existing_canonical_event"] += 1
                 continue
             bundle = by_event[support.event_id].bundle
+            relation_types = {item.relation_type for item in bundle.relations}
+            if (
+                enriched.kind != "entity"
+                and not support.authenticated_target
+                and relation_types & {
+                    CommunicationRelationType.REPLY_TO,
+                    CommunicationRelationType.BATCH_MEMBER_OF,
+                }
+            ):
+                exclusions["link_interest_requires_root_or_authenticated_support"] += 1
+                continue
             if enriched.kind == "entity":
                 projected_entity_type = {
                     "music_artist": "person", "music_event": "event", "place": "place",
@@ -278,6 +337,10 @@ def build_reviewed_backfill(
                     ), confidence=1.0,
                     source_method=ProjectionMethod.DETERMINISTIC,
                 ),))
+            is_link_support = support.rule_code.startswith("researched_link:")
+            support_derivation_version = (
+                LINK_DERIVATION_VERSION if is_link_support else DERIVATION_VERSION
+            )
             derivation_payload = {
                 "support_id": support.support_id,
                 "recurrence_support_id": support.recurrence_support_id,
@@ -287,16 +350,18 @@ def build_reviewed_backfill(
                 "rule_code": support.rule_code,
                 "ontology_version": ONTOLOGY_VERSION,
                 "rule_version": RULE_VERSION,
-                "derivation_version": DERIVATION_VERSION,
+                "derivation_version": support_derivation_version,
                 "taxonomy_commitment": TAXONOMY_COMMITMENT,
                 "authenticated_target": support.authenticated_target,
+                "research_version": RESEARCH_VERSION if is_link_support else None,
+                "research_commitment": research_commitment if is_link_support else None,
             }
             occurrences.append({
                 "event_id": support.event_id, "source_id": support.source_id,
                 "bundle_commitment": _sha256(_canonical_bytes(_typed_payload(bundle))),
                 **derivation_payload,
                 "derivation_commitment": evidence_id(
-                    secret, "phase-e-derivation-v3",
+                    secret, "phase-e-derivation-v4",
                     _canonical_bytes(derivation_payload).decode("utf-8"),
                 ),
                 "projection": _projection_payload(projection),
@@ -316,7 +381,7 @@ def build_reviewed_backfill(
         }
         candidates.append({
             "candidate_id": evidence_id(
-                secret, "phase-e-candidate-v3",
+                secret, "phase-e-candidate-v4",
                 _canonical_bytes(candidate_body).decode("utf-8"),
             ), **candidate_body,
         })
@@ -348,9 +413,12 @@ def build_reviewed_backfill(
             "subject": subject, "projector_version": _PROJECTOR_VERSION,
             "ontology_version": ONTOLOGY_VERSION, "rule_version": RULE_VERSION,
             "derivation_version": DERIVATION_VERSION,
+            "link_derivation_version": LINK_DERIVATION_VERSION,
+            "link_research_version": RESEARCH_VERSION,
+            "link_research_commitment": research_commitment,
             "taxonomy_commitment": TAXONOMY_COMMITMENT,
             "source_snapshot_commitment": evidence_id(
-                secret, "phase-e-subject-source-v3",
+                secret, "phase-e-subject-source-v4",
                 _canonical_bytes(source_records).decode("utf-8"),
             ),
             "target_snapshot": target_snapshot,
@@ -368,7 +436,7 @@ def build_reviewed_backfill(
             },
         }
         subject_unsigned["subject_review_id"] = evidence_id(
-            secret, "phase-e-subject-review-v3",
+            secret, "phase-e-subject-review-v4",
             _canonical_bytes(subject_unsigned).decode("utf-8"),
         )
         subject_reviews.append(subject_unsigned)
@@ -381,6 +449,9 @@ def build_reviewed_backfill(
         "projector_version": _PROJECTOR_VERSION,
         "ontology_version": ONTOLOGY_VERSION, "rule_version": RULE_VERSION,
         "derivation_version": DERIVATION_VERSION,
+        "link_derivation_version": LINK_DERIVATION_VERSION,
+        "link_research_version": RESEARCH_VERSION,
+        "link_research_commitment": research_commitment,
         "taxonomy_commitment": TAXONOMY_COMMITMENT,
         "source_review_id": phase_b["review_id"],
         "evidence_commitment": phase_b["evidence_commitment"],
@@ -411,7 +482,7 @@ def build_reviewed_backfill(
         },
     }
     unsigned["global_review_id"] = evidence_id(
-        secret, "phase-e-global-review-v3", _canonical_bytes(unsigned).decode("utf-8"),
+        secret, "phase-e-global-review-v4", _canonical_bytes(unsigned).decode("utf-8"),
     )
     return ReviewedBackfill(manifest=unsigned)
 
@@ -424,9 +495,14 @@ def verify_review_manifest(manifest: Mapping[str, Any], *, secret: bytes) -> boo
         return False
     unsigned = dict(manifest)
     unsigned.pop("global_review_id", None)
-    expected = evidence_id(
-        secret, "phase-e-global-review-v3", _canonical_bytes(unsigned).decode("utf-8"),
-    )
+    projector = manifest.get("projector_version")
+    namespace = {
+        _PROJECTOR_VERSION: "phase-e-global-review-v4",
+        _LEGACY_PROJECTOR_VERSION: "phase-e-global-review-v3",
+    }.get(str(projector))
+    if namespace is None:
+        return False
+    expected = evidence_id(secret, namespace, _canonical_bytes(unsigned).decode("utf-8"))
     if not hmac.compare_digest(supplied, expected):
         return False
     reviews = manifest.get("subject_reviews")
@@ -447,10 +523,13 @@ def verify_subject_review(manifest: Mapping[str, Any], *, secret: bytes) -> bool
         return False
     unsigned = dict(manifest)
     unsigned.pop("subject_review_id", None)
-    expected = evidence_id(
-        secret, "phase-e-subject-review-v3",
-        _canonical_bytes(unsigned).decode("utf-8"),
-    )
+    namespace = {
+        _PROJECTOR_VERSION: "phase-e-subject-review-v4",
+        _LEGACY_PROJECTOR_VERSION: "phase-e-subject-review-v3",
+    }.get(str(manifest.get("projector_version")))
+    if namespace is None:
+        return False
+    expected = evidence_id(secret, namespace, _canonical_bytes(unsigned).decode("utf-8"))
     return hmac.compare_digest(supplied, expected)
 
 
@@ -487,7 +566,7 @@ def build_candidate_selection(
         raise ValueError("candidate selection contains an unknown or cross-subject ID")
     unsigned: dict[str, Any] = {
         "schema": 2,
-        "kind": "phase-e-v3-signed-candidate-subset",
+        "kind": "phase-e-v4-signed-candidate-subset",
         "subject": subject,
         "subject_review_id": snapshot["subject_review_id"],
         "projector_version": snapshot["projector_version"],
@@ -504,7 +583,7 @@ def build_candidate_selection(
         ],
     }
     unsigned["selection_id"] = evidence_id(
-        secret, "phase-e-selection-v3", _canonical_bytes(unsigned).decode("utf-8"),
+        secret, "phase-e-selection-v4", _canonical_bytes(unsigned).decode("utf-8"),
     )
     return unsigned
 
@@ -517,9 +596,13 @@ def verify_candidate_selection(
 ) -> bool:
     selection_id = selection.get("selection_id")
     subject = selection.get("subject")
+    selection_namespace = {
+        "phase-e-v4-signed-candidate-subset": "phase-e-selection-v4",
+        "phase-e-v3-signed-candidate-subset": "phase-e-selection-v3",
+    }.get(str(selection.get("kind")))
     if (
         selection.get("schema") != 2
-        or selection.get("kind") != "phase-e-v3-signed-candidate-subset"
+        or selection_namespace is None
         or not isinstance(selection_id, str)
         or not isinstance(subject, str)
     ):
@@ -527,7 +610,7 @@ def verify_candidate_selection(
     unsigned = dict(selection)
     unsigned.pop("selection_id", None)
     expected = evidence_id(
-        secret, "phase-e-selection-v3", _canonical_bytes(unsigned).decode("utf-8"),
+        secret, selection_namespace, _canonical_bytes(unsigned).decode("utf-8"),
     )
     if not hmac.compare_digest(selection_id, expected):
         return False
@@ -578,8 +661,11 @@ def apply_subject_backfill(
     approved_subject_review_id: str,
     approved_candidate_ids: Sequence[str],
     secret: bytes,
+    research_cache: object | None = None,
 ) -> dict[str, object]:
     """Apply exactly one approved subject through one SQLite transaction."""
+    if not verify_review_manifest(review.manifest, secret=secret):
+        raise ValueError("reviewed backfill package HMAC signature is invalid")
     if subject not in _SUBJECTS:
         raise ValueError("unsupported reviewed backfill subject")
     if store.contact_id != subject:
@@ -591,6 +677,7 @@ def apply_subject_backfill(
         raise ValueError("approved subject review ID must exactly match the signed snapshot")
     if not verify_subject_review(target_review, secret=secret):
         raise ValueError("subject review HMAC verification failed")
+    legacy_v3 = target_review.get("projector_version") == _LEGACY_PROJECTOR_VERSION
     requested = tuple(approved_candidate_ids)
     if not requested or len(set(requested)) != len(requested):
         raise ValueError("approved candidate IDs must be a non-empty duplicate-free allowlist")
@@ -605,7 +692,7 @@ def apply_subject_backfill(
         _typed_payload(record.bundle) for record in scan.records if record.author == subject
     ]
     current_source = evidence_id(
-        secret, "phase-e-subject-source-v3",
+        secret, "phase-e-subject-source-v3" if legacy_v3 else "phase-e-subject-source-v4",
         _canonical_bytes(source_records).decode("utf-8"),
     )
     if current_source != target_review.get("source_snapshot_commitment"):
@@ -614,7 +701,18 @@ def apply_subject_backfill(
         record.bundle.event.event_id: record.bundle
         for record in scan.records if record.author == subject
     }
-    current_enrichment = derive_scan_enrichment(scan, secret=secret)
+    research_commitment = _sha256(_canonical_bytes(research_cache or {}))
+    if legacy_v3:
+        current_enrichment = derive_scan_enrichment(scan, secret=secret)
+    else:
+        if research_commitment != target_review.get("link_research_commitment"):
+            raise ValueError("reviewed link research snapshot is stale")
+        current_enrichment = _merge_enrichment_results(
+            derive_scan_enrichment(scan, secret=secret),
+            derive_link_research_enrichment(
+                scan, secret=secret, research_cache=research_cache or {},
+            ),
+        )
     current_supports = {
         support.support_id: support
         for candidate in current_enrichment.candidates
@@ -628,7 +726,8 @@ def apply_subject_backfill(
         body = dict(candidate)
         supplied_candidate_id = body.pop("candidate_id", None)
         expected_candidate_id = evidence_id(
-            secret, "phase-e-candidate-v3", _canonical_bytes(body).decode("utf-8"),
+            secret, "phase-e-candidate-v3" if legacy_v3 else "phase-e-candidate-v4",
+            _canonical_bytes(body).decode("utf-8"),
         )
         if not isinstance(supplied_candidate_id, str) or not hmac.compare_digest(
             supplied_candidate_id, expected_candidate_id,
@@ -655,6 +754,7 @@ def apply_subject_backfill(
             support = current_supports.get(support_id) if isinstance(support_id, str) else None
             if support is None:
                 raise ValueError("signed support ID no longer matches deterministic derivation")
+            is_link_support = support.rule_code.startswith("researched_link:")
             expected_derivation = {
                 "support_id": support.support_id,
                 "recurrence_support_id": support.recurrence_support_id,
@@ -664,14 +764,21 @@ def apply_subject_backfill(
                 "rule_code": support.rule_code,
                 "ontology_version": ONTOLOGY_VERSION,
                 "rule_version": RULE_VERSION,
-                "derivation_version": DERIVATION_VERSION,
+                "derivation_version": (
+                    LINK_DERIVATION_VERSION if is_link_support else DERIVATION_VERSION
+                ),
                 "taxonomy_commitment": TAXONOMY_COMMITMENT,
                 "authenticated_target": support.authenticated_target,
             }
+            if not legacy_v3:
+                expected_derivation.update({
+                    "research_version": RESEARCH_VERSION if is_link_support else None,
+                    "research_commitment": research_commitment if is_link_support else None,
+                })
             if any(occurrence.get(key) != value for key, value in expected_derivation.items()):
                 raise ValueError("signed derivation projection is stale or tampered")
             expected_derivation_commitment = evidence_id(
-                secret, "phase-e-derivation-v3",
+                secret, "phase-e-derivation-v3" if legacy_v3 else "phase-e-derivation-v4",
                 _canonical_bytes(expected_derivation).decode("utf-8"),
             )
             if occurrence.get("derivation_commitment") != expected_derivation_commitment:
@@ -682,7 +789,7 @@ def apply_subject_backfill(
     bundles = [scan_by_event[event_id] for event_id in event_ids]
     supplied = tuple(sorted(projections.items()))
     approval_id = evidence_id(
-        secret, "phase-e-approval-v3",
+        secret, "phase-e-approval-v3" if legacy_v3 else "phase-e-approval-v4",
         _canonical_bytes({
             "subject": subject, "subject_review_id": approved_subject_review_id,
             "candidate_ids": sorted(requested),
@@ -721,6 +828,48 @@ def _sqlite_backup(source: Path, destination: Path) -> None:
     os.chmod(destination, stat.S_IRUSR | stat.S_IWUSR)
 
 
+def _copy_sqlite_family(source: Path, destination: Path) -> dict[str, str]:
+    """Byte-copy a SQLite database and live sidecars without opening the source."""
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(destination) + suffix).unlink(missing_ok=True)
+    hashes: dict[str, str] = {}
+    for suffix in ("", "-wal", "-shm"):
+        source_member = Path(str(source) + suffix)
+        if not source_member.exists():
+            continue
+        destination_member = Path(str(destination) + suffix)
+        payload = source_member.read_bytes()
+        hashes[suffix or "main"] = _sha256(payload)
+        destination_member.write_bytes(payload)
+        os.chmod(destination_member, stat.S_IRUSR | stat.S_IWUSR)
+    if "main" not in hashes:
+        raise FileNotFoundError(source)
+    return hashes
+
+
+def _sqlite_family_hashes(source: Path) -> dict[str, str]:
+    return {
+        suffix or "main": _sha256(member.read_bytes())
+        for suffix in ("", "-wal", "-shm")
+        if (member := Path(str(source) + suffix)).exists()
+    }
+
+
+def snapshot_sqlite_database(source: Path, destination: Path, staging: Path) -> dict[str, str]:
+    """Create a logical backup by opening only a stable byte-for-byte private snapshot."""
+    for _ in range(5):
+        copied = _copy_sqlite_family(source, staging)
+        if _sqlite_family_hashes(source) == copied:
+            break
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(staging) + suffix).unlink(missing_ok=True)
+    else:
+        raise RuntimeError("source store changed while creating private snapshot")
+    _sqlite_backup(staging, destination)
+    return copied
+
+
 def restore_rehearsal(
     scan: HistoricalCommunicationScan,
     review: ReviewedBackfill,
@@ -730,6 +879,7 @@ def restore_rehearsal(
     rehearsal_root: str | Path,
     secret: bytes,
     approved_candidate_ids: Sequence[str] | None = None,
+    research_cache: object | None = None,
 ) -> dict[str, Any]:
     """Exercise backup, apply, and byte-exact restore only in a temporary root."""
     root = Path(rehearsal_root).expanduser().resolve()
@@ -737,14 +887,19 @@ def restore_rehearsal(
         raise ValueError("restore rehearsal root must not already exist")
     root.mkdir(parents=True, mode=0o700)
     backup = root / "backup.sqlite3"
+    staged_source = root / "source-snapshot" / "source.sqlite3"
     working_root = root / "working"
     working = working_root / "contacts" / opaque_contact_filename(subject)
     source_path = (
         source_store.path if isinstance(source_store, ContactMemoryStore)
         else Path(source_store).expanduser().resolve()
     )
-    _sqlite_backup(source_path, backup)
-    _sqlite_backup(source_path, working)
+    # Never connect to the source. Copy its complete SQLite file family first,
+    # then perform recovery/backup/migration only against the private snapshot.
+    source_before = snapshot_sqlite_database(source_path, backup, staged_source)
+    working.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shutil.copyfile(backup, working)
+    os.chmod(working, stat.S_IRUSR | stat.S_IWUSR)
     backup_sha = _sha256(backup.read_bytes())
     rehearsal_store = ContactMemoryStore(working_root, subject)
     target_review = subject_review(review, subject)
@@ -755,6 +910,7 @@ def restore_rehearsal(
         scan, review, subject=subject, store=rehearsal_store,
         approved_subject_review_id=str(target_review["subject_review_id"]),
         approved_candidate_ids=candidate_ids, secret=secret,
+        research_cache=research_cache,
     )
     mutated_snapshot = root / "mutated-snapshot.sqlite3"
     _sqlite_backup(working, mutated_snapshot)
@@ -768,12 +924,20 @@ def restore_rehearsal(
         raise RuntimeError("restore rehearsal did not reproduce the backup bytes")
     if mutated_sha == backup_sha and applied["projected_events"]:
         raise RuntimeError("restore rehearsal did not observe the staged mutation")
+    source_after = _sqlite_family_hashes(source_path)
+    if source_after != source_before:
+        raise RuntimeError("restore rehearsal mutated the source store family")
     return {
         "subject": subject,
         "backup_sha256": backup_sha,
         "mutated_sha256": mutated_sha,
         "restored_sha256": restored_sha,
         "restore_exact": True,
+        "source_before_sha256": source_before["main"],
+        "source_after_sha256": source_after["main"],
+        "source_family_copy_hashes": source_before,
+        "source_family_after_hashes": source_after,
+        "source_unchanged": True,
         "apply_projected_candidates": int(applied["projected_candidates"]),
     }
 
@@ -781,6 +945,6 @@ def restore_rehearsal(
 __all__ = [
     "ExistingReviewedState", "ReviewedBackfill", "apply_subject_backfill",
     "build_candidate_selection", "build_reviewed_backfill", "read_existing_reviewed_state",
-    "restore_rehearsal", "subject_review", "verify_candidate_selection",
+    "restore_rehearsal", "snapshot_sqlite_database", "subject_review", "verify_candidate_selection",
     "verify_review_manifest", "verify_subject_review",
 ]

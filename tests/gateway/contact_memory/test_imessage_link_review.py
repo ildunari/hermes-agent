@@ -107,6 +107,28 @@ def test_unattributed_incoming_service_rows_are_omitted(tmp_path: Path):
     assert not any("must-not-attribute" in signal.identity_url for signal in signals)
 
 
+def test_typed_visible_rich_link_is_extracted_but_hidden_preview_url_is_not(tmp_path: Path):
+    path = tmp_path / "chat.db"
+    _db(path)
+    visible = "https://example.com/public-story"
+    attributed = plistlib.dumps({
+        "NSString": visible,
+        "visible_url_attributes": [{
+            "type": "link", "location": 0, "length": len(visible), "url": visible,
+        }],
+        "preview": {"imageURL": "https://cdn.example/private-token"},
+    })
+    con = sqlite3.connect(path)
+    con.execute("UPDATE message SET text=NULL,attributedBody=? WHERE guid='g3'", (attributed,))
+    con.commit()
+    con.close()
+
+    _, signals = _signals(path)
+    urls = {item.identity_url for item in signals if item.message_guid == "g3"}
+    assert urls == {visible}
+    assert not any("cdn.example" in item.identity_url for item in signals)
+
+
 def test_conservative_url_identity_and_risky_fetch_rejection():
     raw = "HTTPS://Example.COM/a%2Fb?z=2&utm_source=x&a=%2F&b=1#frag"
     assert canonicalize_url(raw) == "https://example.com/a%2Fb?z=2&a=%2F&b=1"

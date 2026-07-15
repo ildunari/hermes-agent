@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from array import array
 from dataclasses import dataclass, replace
 import hashlib
@@ -249,7 +249,7 @@ class ContactMemoryStore:
         return con
 
     def _initialize(self) -> None:
-        with self._connect() as con:
+        with closing(self._connect()) as con:
             existing = con.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone() if con.execute(
@@ -1856,6 +1856,7 @@ class ContactMemoryStore:
         projection: CommunicationProjection,
         projector_version: str,
         allowed_share_topics: frozenset[tuple[str, str]] = frozenset(),
+        allowed_share_entities: frozenset[tuple[str, str, str]] = frozenset(),
     ) -> list[dict[str, object]]:
         if not isinstance(projection, CommunicationProjection):
             raise ValueError("projection must use the typed communication contract")
@@ -1939,6 +1940,15 @@ class ContactMemoryStore:
         for proposal in projection.entities:
             if not isinstance(proposal, EntityProjection):
                 raise ValueError("entity proposal is invalid")
+            if (
+                event.kind in {CommunicationKind.LINK_SHARE, CommunicationKind.ATTACHMENT_SHARE}
+                and (
+                    event.event_id,
+                    _normalized_entity_key(proposal.canonical_label),
+                    str(proposal.entity_type).casefold(),
+                ) not in allowed_share_entities
+            ):
+                raise ValueError("one-time shares cannot directly create entity evidence")
             confidence = cls._projection_confidence(
                 proposal.confidence, proposal.source_method, minimum=0.80,
             )
@@ -2293,9 +2303,11 @@ class ContactMemoryStore:
         replay_sequence: int,
         timestamp: float,
         allowed_share_topics: frozenset[tuple[str, str]] = frozenset(),
+        allowed_share_entities: frozenset[tuple[str, str, str]] = frozenset(),
     ) -> CommunicationProjectionResult:
         items = cls._validated_projection_items_in(
             con, bundle, projection, projector_version, allowed_share_topics,
+            allowed_share_entities,
         ) if bundle.event.lifecycle is CommunicationLifecycle.ACTIVE else []
         canonical_payload = [
             {key: value for key, value in item.items() if key != "identity"}
@@ -2453,6 +2465,7 @@ class ContactMemoryStore:
                     loaded.append((bundle, projection))
                 loaded.sort(key=lambda item: (item[0].event.occurred_at, item[0].event.event_id))
                 share_topics: dict[str, set[str]] = {}
+                share_entities: dict[tuple[str, str], set[str]] = {}
                 for bundle, projection in loaded:
                     if bundle.event.kind not in {
                         CommunicationKind.LINK_SHARE, CommunicationKind.ATTACHMENT_SHARE,
@@ -2463,15 +2476,65 @@ class ContactMemoryStore:
                             con, normalize_interest_topic(proposal.topic),
                         )
                         share_topics.setdefault(topic, set()).add(bundle.event.event_id)
-                allowed_share_topics = frozenset(
+                    for proposal in projection.entities:
+                        entity = (
+                            _normalized_entity_key(proposal.canonical_label),
+                            str(proposal.entity_type).casefold(),
+                        )
+                        share_entities.setdefault(entity, set()).add(bundle.event.event_id)
+                recurrent_share_topics = frozenset(
                     (event_id, topic) for topic, event_ids in share_topics.items()
                     if len(event_ids) >= 2 for event_id in event_ids
+                )
+                recurrent_share_entities = frozenset(
+                    (event_id, entity_key, entity_type)
+                    for (entity_key, entity_type), event_ids in share_entities.items()
+                    if len(event_ids) >= 2 for event_id in event_ids
+                )
+                engaged_share_topics: set[tuple[str, str]] = set()
+                engaged_share_entities: set[tuple[str, str, str]] = set()
+                for bundle, projection in loaded:
+                    if bundle.event.kind not in {
+                        CommunicationKind.LINK_SHARE, CommunicationKind.ATTACHMENT_SHARE,
+                    }:
+                        continue
+                    engaged = con.execute(
+                        """SELECT 1 FROM communication_event AS event
+                           JOIN communication_relation AS relation ON relation.event_id=event.event_id
+                           WHERE relation.relation_type='reaction_to'
+                             AND relation.target_source_id=?
+                             AND event.kind='reaction_add'
+                             AND event.actor_role='counterpart'
+                             AND event.reaction_subtype IN ('like','love')
+                             AND event.lifecycle='active' LIMIT 1""",
+                        (bundle.event.source_id,),
+                    ).fetchone()
+                    if engaged is None:
+                        continue
+                    engaged_share_topics.update(
+                        (bundle.event.event_id, self._resolve_interest_alias_in(
+                            con, normalize_interest_topic(proposal.topic),
+                        ))
+                        for proposal in projection.interests
+                    )
+                    engaged_share_entities.update(
+                        (
+                            bundle.event.event_id,
+                            _normalized_entity_key(proposal.canonical_label),
+                            str(proposal.entity_type).casefold(),
+                        )
+                        for proposal in projection.entities
+                    )
+                admitted_share_topics = recurrent_share_topics | frozenset(engaged_share_topics)
+                admitted_share_entities = (
+                    recurrent_share_entities | frozenset(engaged_share_entities)
                 )
                 return [
                     self._project_communication_event_in(
                         con, bundle, projection, projector_version=version,
                         replay_sequence=index, timestamp=timestamp,
-                        allowed_share_topics=allowed_share_topics,
+                        allowed_share_topics=admitted_share_topics,
+                        allowed_share_entities=admitted_share_entities,
                     )
                     for index, (bundle, projection) in enumerate(loaded)
                 ]
@@ -2490,6 +2553,79 @@ class ContactMemoryStore:
         return self.project_communication_events(
             [(event_id, projection)], projector_version=projector_version, now=now,
         )[0]
+
+    def positive_link_engagement_count(self, event_id: str) -> int:
+        """Count active authenticated positive reactions targeting one canonical event."""
+        with self._connect() as con:
+            target = con.execute(
+                "SELECT source_id FROM communication_event WHERE event_id=?", (str(event_id),),
+            ).fetchone()
+            if target is None:
+                return 0
+            return int(con.execute(
+                """SELECT COUNT(*) FROM communication_event AS event
+                   JOIN communication_relation AS relation ON relation.event_id=event.event_id
+                   WHERE relation.relation_type='reaction_to' AND relation.target_source_id=?
+                     AND event.kind='reaction_add' AND event.actor_role='counterpart'
+                     AND event.reaction_subtype IN ('like','love')
+                     AND event.lifecycle='active'""",
+                (str(target["source_id"]),),
+            ).fetchone()[0])
+
+    def deactivate_projector_event(
+        self, event_id: str, *, projector_version: str, now: float | None = None,
+    ) -> bool:
+        """Deactivate one projector's output without retracting unrelated evidence."""
+        version = self._projection_version(projector_version)
+        timestamp = _finite_timestamp(now)
+        with self._immediate() as con:
+            receipt = con.execute(
+                "SELECT active FROM communication_projection_receipt "
+                "WHERE communication_event_id=? AND projector_version=?",
+                (str(event_id), version),
+            ).fetchone()
+            if receipt is None or not int(receipt["active"]):
+                return False
+            affected_topics = {
+                str(row[0]) for row in con.execute(
+                    "SELECT topic_text FROM interest_event WHERE origin_communication_event_id=? "
+                    "AND projector_version=? AND active=1", (str(event_id), version),
+                )
+            }
+            con.execute(
+                "UPDATE communication_projection_receipt SET active=0 WHERE communication_event_id=? "
+                "AND projector_version=?", (str(event_id), version),
+            )
+            con.execute(
+                "UPDATE interest_event SET active=0 WHERE origin_communication_event_id=? "
+                "AND projector_version=? AND active=1", (str(event_id), version),
+            )
+            con.execute(
+                "UPDATE projected_entity SET active=0 WHERE origin_communication_event_id=? "
+                "AND projector_version=? AND active=1", (str(event_id), version),
+            )
+            self._recompute_projected_interest_topics_in(con, affected_topics, timestamp=timestamp)
+            return True
+
+    def deactivate_projector_event_family(
+        self, event_id: str, *, projector_prefix: str, now: float | None = None,
+    ) -> int:
+        """Deactivate every active projector generation owned by one fixed prefix."""
+        prefix = self._projection_version(projector_prefix)
+        with self._connect() as con:
+            versions = [
+                str(row[0]) for row in con.execute(
+                    "SELECT projector_version FROM communication_projection_receipt "
+                    "WHERE communication_event_id=? AND active=1 AND projector_version LIKE ?",
+                    (str(event_id), prefix + "%"),
+                )
+            ]
+        return sum(
+            self.deactivate_projector_event(
+                event_id, projector_version=version, now=now,
+            )
+            for version in versions
+        )
 
     def import_reviewed_communication_backfill(
         self,

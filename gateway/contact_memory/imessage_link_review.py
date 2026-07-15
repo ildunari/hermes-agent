@@ -218,12 +218,59 @@ def _attributed_visible_string(blob: object) -> str | None:
     return None
 
 
+def _attributed_visible_urls(blob: object) -> list[str]:
+    """Read only URL attributes explicitly attached to visible root ranges.
+
+    The accepted keyed shape is intentionally narrow: the root owns the visible
+    string plus a list of typed URL attributes whose ranges are wholly inside it.
+    Sibling preview/canonical/CDN fields are never traversed.
+    """
+    if not isinstance(blob, (bytes, bytearray, memoryview)):
+        return []
+    try:
+        value = plistlib.loads(bytes(blob))
+    except Exception:
+        return []
+    if not isinstance(value, Mapping):
+        return []
+    text = next((value.get(key) for key in ("NSString", "string", "NS.string")
+                 if isinstance(value.get(key), str)), None)
+    attributes = value.get("visible_url_attributes")
+    if not isinstance(text, str) or not isinstance(attributes, list):
+        return []
+    result: list[str] = []
+    for item in attributes:
+        if not isinstance(item, Mapping) or set(item) != {"type", "location", "length", "url"}:
+            continue
+        if item.get("type") != "link":
+            continue
+        location, length, raw = item.get("location"), item.get("length"), item.get("url")
+        if (
+            isinstance(location, bool) or not isinstance(location, int)
+            or isinstance(length, bool) or not isinstance(length, int)
+            or not isinstance(raw, str) or location < 0 or length <= 0
+            or location + length > len(text)
+        ):
+            continue
+        visible = text[location:location + length]
+        if raw not in visible and visible not in raw:
+            continue
+        url = canonicalize_url(raw)
+        if url and url not in result:
+            result.append(url)
+    return result
+
+
 def _row_urls(text: object, attributed_body: object) -> list[str]:
     # A populated message.text is authoritative.  The attributed archive must
     # not add hidden rich-preview URLs alongside it.
     if text is not None and str(text).strip():
         return extract_urls(str(text))
-    return extract_urls(_attributed_visible_string(attributed_body))
+    result = extract_urls(_attributed_visible_string(attributed_body))
+    for url in _attributed_visible_urls(attributed_body):
+        if url not in result:
+            result.append(url)
+    return result
 
 
 def classify_url(url: str) -> tuple[str | None, str | None]:
@@ -338,7 +385,7 @@ def is_safe_fetch_candidate(url: str) -> bool:
     except ValueError:
         return False
     host = (parsed.hostname or "").casefold()
-    if parsed.scheme not in {"http", "https"} or not host or host in {"localhost"} or host.endswith((".local", ".internal")):
+    if parsed.scheme != "https" or not host or host in {"localhost"} or host.endswith((".local", ".internal")):
         return False
     try:
         if not ipaddress.ip_address(host).is_global:
@@ -372,7 +419,10 @@ def _entropy(value: str) -> float:
     return -sum((count / length) * math.log2(count / length) for count in counts.values())
 
 
-def select_enrichment_queue(signals: Sequence[LinkSignal], secret: bytes, *, max_requests: int = 50) -> dict[str, Any]:
+def select_enrichment_queue(
+    signals: Sequence[LinkSignal], secret: bytes, *, max_requests: int = 50,
+    eventual_old_quota: int = 1,
+) -> dict[str, Any]:
     """Select and rank before any trusted network tool receives full URLs."""
     if not 0 <= max_requests <= 50:
         raise ValueError("max_requests must be between 0 and 50")
@@ -380,15 +430,31 @@ def select_enrichment_queue(signals: Sequence[LinkSignal], secret: bytes, *, max
     for signal in signals:
         if is_safe_fetch_candidate(signal.fetch_url):
             grouped[signal.identity_url].append(signal)
-    ranked = sorted(grouped.items(), key=lambda pair: (
+    newest = max((item.created_at for items in grouped.values() for item in items), default=0.0)
+
+    def recency(items: Sequence[LinkSignal]) -> int:
+        age_days = max(0.0, newest - max(item.created_at for item in items)) / 86_400.0
+        return 0 if age_days <= 30 else 1 if age_days <= 180 else 2 if age_days <= 730 else 3
+
+    ranked_all = sorted(grouped.items(), key=lambda pair: (
+        recency(pair[1]),
+        -sum(len(item.positive_reactors) * 4 + len(item.replied_by) for item in pair[1]),
+        -len(pair[1]),
+        -len({int(item.created_at // 86_400) for item in pair[1]}),
         -int(any(item.platform for item in pair[1])),
-        -int(any(item.shared_by == "stephen-lucier" for item in pair[1])),
-        -int(any(item.positive_reactors for item in pair[1])),
-        -len(pair[1]), -max(item.created_at for item in pair[1]), pair[0],
-    ))[:max_requests]
+        -max(item.created_at for item in pair[1]), pair[0],
+    ))
+    ranked = ranked_all[:max_requests]
+    quota = min(max(int(eventual_old_quota), 0), max_requests)
+    if quota and len(ranked_all) > max_requests:
+        old = sorted(ranked_all, key=lambda pair: (-recency(pair[1]), max(item.created_at for item in pair[1]), pair[0]))[:quota]
+        old_urls = {url for url, _items in old}
+        ranked = [item for item in ranked if item[0] not in old_urls][:(max_requests - quota)] + old
+        ranked.sort(key=lambda pair: (recency(pair[1]), -len(pair[1]), pair[0]))
     return {"schema": 1, "kind": "private-link-metadata-fetch-queue", "max_requests": max_requests,
             "requests": [{"evidence_id": evidence_id(secret, "url", url), "url": items[0].fetch_url,
                           "platform": items[0].platform or "public-page",
+                          "recency_bucket": recency(items),
                           "metadata_strategy": (
                               "oembed" if items[0].platform in {"youtube", "spotify"}
                               else "platform-public-metadata" if items[0].platform

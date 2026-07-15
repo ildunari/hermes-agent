@@ -1516,9 +1516,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         except ValueError as exc:
             logger.warning("[bluebubbles] rejected malformed ingress: %s", exc)
             return web.json_response({"error": "invalid message record"}, status=400)
-        if all(item.direction == "outbound" for item in ingress):
+        owner_reaction_only = all(
+            item.direction == "outbound"
+            and item.event_kind in {"reaction_add", "reaction_remove"}
+            for item in ingress
+        )
+        if all(item.direction == "outbound" for item in ingress) and not owner_reaction_only:
             return web.Response(text="ok")
-        if any(item.direction != "inbound" for item in ingress):
+        if any(item.direction != "inbound" for item in ingress) and not owner_reaction_only:
             return web.json_response({"error": "mixed message directions"}, status=400)
         if len({(item.sender_identity, item.chat_type) for item in ingress}) != 1:
             return web.json_response({"error": "mixed message principals"}, status=400)

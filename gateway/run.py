@@ -2010,6 +2010,7 @@ async def _persist_authenticated_communication_ingress(
     profile_home: Any,
     source: Any,
     event: Any,
+    enqueue_link_research: bool = False,
 ) -> tuple[str, ...]:
     """Persist frozen direct BlueBubbles evidence before mutable dispatch paths."""
     if not isinstance(trusted_scope, TrustedContactScope):
@@ -2031,6 +2032,7 @@ async def _persist_authenticated_communication_ingress(
         contact_id=trusted_scope.contact_id,
         principal=trusted_scope.principal,
         envelopes=envelopes,
+        enqueue_link_research=enqueue_link_research,
     )
     return result.event_ids
 
@@ -4028,6 +4030,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+        self._contact_link_research_stop = asyncio.Event()
+        self._contact_link_research_task: Optional[asyncio.Task[Any]] = None
 
         # scale-to-zero (Phase 0, F13): gateway-scoped "last inbound seen" clock.
         # There is no such clock today (only a per-agent _last_activity_ts), so the
@@ -7427,6 +7431,88 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         return json.loads(raw)
 
+    async def _contact_link_research_watcher(self) -> None:
+        """Drain owner-only exact-URL queues off the reply path when enabled."""
+        from hermes_cli.profiles import (
+            get_active_profile_name,
+            get_profile_dir,
+            list_profiles,
+        )
+        from gateway.contact_memory.link_research_worker import (
+            build_configured_link_research_provider,
+            process_one_link_job,
+        )
+        from gateway.contact_memory.live_ingress import load_or_create_communication_key
+        from gateway.contact_memory.private_link_queue import discover_contacts_with_queues
+
+        active = get_active_profile_name() or os.getenv("HERMES_PROFILE") or "default"
+        targets: list[tuple[str, Path, Any]] = []
+        intervals: list[float] = []
+        discovered_profiles = tuple(info.name for info in list_profiles())
+        for profile in dict.fromkeys((active, "poke", "guest", *discovered_profiles)):
+            config_raw = _load_gateway_config_for_profile(profile)
+            contact_cfg = (config_raw.get("agent", {}) or {}).get("contact_memory", {})
+            research_cfg = contact_cfg.get("link_research", {}) if isinstance(contact_cfg, dict) else {}
+            if not isinstance(research_cfg, dict) or not research_cfg.get("enabled", False):
+                continue
+            root = Path(get_profile_dir(profile)).resolve() / "contact-memory"
+            provider = build_configured_link_research_provider(
+                secret=load_or_create_communication_key(root),
+            )
+            targets.append((profile, root, provider))
+            intervals.append(
+                min(max(float(research_cfg.get("interval_seconds", 5.0)), 1.0), 300.0)
+            )
+        if not targets:
+            logger.info("Contact link research worker disabled")
+            return
+        interval = min(intervals)
+        stop_event = self._contact_link_research_stop
+        while self._running and not stop_event.is_set():
+            processed = 0
+            try:
+                for profile, root, provider in targets:
+                    if not self._running or stop_event.is_set():
+                        break
+                    profile_processed = 0
+                    for contact_id in discover_contacts_with_queues(root):
+                        if not self._running or stop_event.is_set():
+                            break
+                        result = await asyncio.to_thread(
+                            process_one_link_job,
+                            root=root, contact_id=contact_id, provider=provider,
+                        )
+                        profile_processed += int(bool(result.get("processed")))
+                    processed += profile_processed
+                    if profile_processed:
+                        logger.info(
+                            "Contact link research profile=%s processed=%d",
+                            profile, profile_processed,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Contact link research worker tick failed: %s", type(exc).__name__)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _stop_contact_link_research_watcher(self) -> None:
+        """Wake and join research, including non-cancellable to_thread work."""
+        stop_event = getattr(self, "_contact_link_research_stop", None)
+        if stop_event is not None:
+            stop_event.set()
+        task = getattr(self, "_contact_link_research_task", None)
+        if task is None or task is asyncio.current_task():
+            return
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("contact link research shutdown error: %s", exc)
+
     async def _proactive_scheduler_watcher(self) -> None:
         """Drive isolated profile policy off-loop and Poke-owned transport on-loop."""
         from hermes_cli.profiles import get_active_profile_name
@@ -8501,6 +8587,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # this watcher has no adapter/delivery-router reference.
         asyncio.create_task(self._proactive_scheduler_watcher())
 
+        # Opt-in exact-URL research is isolated from message dispatch and never sends replies.
+        self._contact_link_research_stop = asyncio.Event()
+        self._contact_link_research_task = asyncio.create_task(
+            self._contact_link_research_watcher()
+        )
+        self._background_tasks.add(self._contact_link_research_task)
+        self._contact_link_research_task.add_done_callback(self._background_tasks.discard)
+
         # Start background handoff watcher — picks up CLI sessions marked
         # handoff_state='pending' in state.db and re-binds them to the
         # destination platform's home channel, then forges a synthetic user
@@ -9271,6 +9365,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             self._running = False
             self._draining = True
+
+            # A to_thread research call cannot be safely cancelled: its worker
+            # would keep running and could commit after shutdown returned. Wake
+            # the watcher and await any in-flight canonical write to completion.
+            await self._stop_contact_link_research_watcher()
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.
@@ -10182,11 +10281,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                          else f"guest:{decision.contact_id}"),
             chat_id_alt=f"hermes-profile:{profile}",
         )
+        routed_config = _load_gateway_config_for_profile(profile)
+        contact_cfg = (routed_config.get("agent", {}) or {}).get("contact_memory", {})
+        research_cfg = contact_cfg.get("link_research", {}) if isinstance(contact_cfg, dict) else {}
         return await _persist_authenticated_communication_ingress(
             trusted_scope=TrustedContactScope(principal, decision.contact_id),
             profile_home=self._resolve_profile_home_for_source(routed_source),
             source=routed_source,
             event=event,
+            enqueue_link_research=(
+                isinstance(research_cfg, dict) and research_cfg.get("enabled") is True
+            ),
         )
 
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:

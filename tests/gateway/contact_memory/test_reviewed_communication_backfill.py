@@ -14,6 +14,7 @@ from gateway.contact_memory.imessage_communication_adapter import (
     scan_historical_communication,
 )
 from gateway.contact_memory.imessage_bootstrap import open_messages_readonly, resolve_one_to_one_chat
+from gateway.contact_memory.imessage_link_review import evidence_id
 from gateway.contact_memory.reviewed_backfill import (
     ExistingReviewedState,
     apply_subject_backfill,
@@ -21,6 +22,7 @@ from gateway.contact_memory.reviewed_backfill import (
     restore_rehearsal,
     subject_review,
     verify_review_manifest,
+    verify_candidate_selection,
     verify_subject_review,
 )
 from gateway.contact_memory.store import ContactMemoryStore
@@ -78,6 +80,111 @@ def _approval(review, subject: str, *, kinds: set[str] | None = None):
         if kinds is None or item["kind"] in kinds
     ]
     return snapshot, candidate_ids
+
+
+def _canonical(value) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _as_signed_v3(review, scan):
+    """Recreate the deployed v3 signature domains from a text-only v4 review."""
+    from gateway.contact_memory.reviewed_backfill import ReviewedBackfill, _typed_payload
+
+    manifest = deepcopy(review.manifest)
+    manifest["projector_version"] = "phase-e-reviewed-v3"
+    for key in ("link_derivation_version", "link_research_version", "link_research_commitment"):
+        manifest.pop(key, None)
+    candidate_map = {}
+    for candidate in manifest["candidates"]:
+        for occurrence in candidate["occurrences"]:
+            occurrence.pop("research_version", None)
+            occurrence.pop("research_commitment", None)
+            derivation = {
+                key: occurrence[key] for key in (
+                    "support_id", "recurrence_support_id", "actor_code", "polarity",
+                    "stance_code", "gate_codes", "rule_code", "ontology_version",
+                    "rule_version", "derivation_version", "taxonomy_commitment",
+                    "authenticated_target",
+                )
+            }
+            occurrence["derivation_commitment"] = evidence_id(
+                SECRET, "phase-e-derivation-v3", _canonical(derivation),
+            )
+        body = dict(candidate)
+        old_id = body.pop("candidate_id")
+        candidate["candidate_id"] = evidence_id(
+            SECRET, "phase-e-candidate-v3", _canonical(body),
+        )
+        candidate_map[old_id] = candidate["candidate_id"]
+    by_subject = {
+        subject: [item for item in manifest["candidates"] if item["subject"] == subject]
+        for subject in ("kosta-owner", "stephen-lucier")
+    }
+    source_records = {
+        subject: [_typed_payload(record.bundle) for record in scan.records if record.author == subject]
+        for subject in by_subject
+    }
+    for subject_manifest in manifest["subject_reviews"]:
+        subject = subject_manifest["subject"]
+        subject_manifest["projector_version"] = "phase-e-reviewed-v3"
+        for key in ("link_derivation_version", "link_research_version", "link_research_commitment"):
+            subject_manifest.pop(key, None)
+        subject_manifest["candidates"] = by_subject[subject]
+        subject_manifest["source_snapshot_commitment"] = evidence_id(
+            SECRET, "phase-e-subject-source-v3", _canonical(source_records[subject]),
+        )
+        subject_manifest.pop("subject_review_id", None)
+        subject_manifest["subject_review_id"] = evidence_id(
+            SECRET, "phase-e-subject-review-v3", _canonical(subject_manifest),
+        )
+    manifest.pop("global_review_id", None)
+    manifest["global_review_id"] = evidence_id(
+        SECRET, "phase-e-global-review-v3", _canonical(manifest),
+    )
+    return ReviewedBackfill(manifest), candidate_map
+
+
+def test_v3_signed_review_and_selection_remain_verifiable_and_applicable(tmp_path: Path) -> None:
+    source = tmp_path / "chat.db"
+    _messages(source)
+    scan = _scan(source)
+    v4 = build_reviewed_backfill(scan, secret=SECRET)
+    v3, candidate_map = _as_signed_v3(v4, scan)
+    assert candidate_map
+    assert verify_review_manifest(v3.manifest, secret=SECRET)
+    snapshot = subject_review(v3, "stephen-lucier")
+    candidate_ids = [item["candidate_id"] for item in snapshot["candidates"]]
+    selection = {
+        "schema": 2, "kind": "phase-e-v3-signed-candidate-subset",
+        "subject": "stephen-lucier", "subject_review_id": snapshot["subject_review_id"],
+        "projector_version": snapshot["projector_version"],
+        "ontology_version": snapshot["ontology_version"],
+        "rule_version": snapshot["rule_version"],
+        "derivation_version": snapshot["derivation_version"],
+        "taxonomy_commitment": snapshot["taxonomy_commitment"],
+        "candidates": [{
+            "candidate_id": item["candidate_id"],
+            "candidate_payload_commitment": hashlib.sha256(
+                _canonical(item).encode()
+            ).hexdigest(),
+        } for item in snapshot["candidates"]],
+    }
+    selection["selection_id"] = evidence_id(
+        SECRET, "phase-e-selection-v3", _canonical(selection),
+    )
+    assert verify_candidate_selection(selection, v3, secret=SECRET)
+    store = ContactMemoryStore(tmp_path / "legacy", "stephen-lucier")
+    result = apply_subject_backfill(
+        scan, v3, subject="stephen-lucier", store=store,
+        approved_subject_review_id=snapshot["subject_review_id"],
+        approved_candidate_ids=candidate_ids, secret=SECRET,
+    )
+    assert result["projected_candidates"] == len(candidate_ids)
+    with sqlite3.connect(store.path) as con:
+        assert con.execute(
+            "SELECT count(*) FROM communication_projection_receipt "
+            "WHERE projector_version='phase-e-reviewed-v3' AND active=1"
+        ).fetchone()[0] > 0
 
 
 def test_review_manifest_is_deterministic_subject_correct_signed_and_aggregate_only(tmp_path: Path) -> None:
@@ -359,6 +466,9 @@ def test_restore_rehearsal_restores_exact_database_bytes_in_temporary_roots(tmp_
     assert evidence["restored_sha256"] == evidence["backup_sha256"]
     assert evidence["mutated_sha256"] != evidence["backup_sha256"]
     assert evidence["apply_projected_candidates"] == 3
+    assert evidence["source_before_sha256"] == before
+    assert evidence["source_after_sha256"] == before
+    assert evidence["source_unchanged"] is True
     assert hashlib.sha256(store.path.read_bytes()).hexdigest() == before
 
 

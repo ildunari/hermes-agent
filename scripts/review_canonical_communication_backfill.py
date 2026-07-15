@@ -25,6 +25,12 @@ from gateway.contact_memory.imessage_bootstrap import (  # noqa: E402
 from gateway.contact_memory.imessage_communication_adapter import (  # noqa: E402
     scan_historical_communication,
 )
+from gateway.contact_memory.link_research_worker import (  # noqa: E402
+    build_configured_link_research_provider,
+)
+from gateway.contact_memory.phase_e_link_enrichment import (  # noqa: E402
+    research_historical_links,
+)
 from gateway.contact_memory.reviewed_backfill import (  # noqa: E402
     ReviewedBackfill,
     apply_subject_backfill,
@@ -32,6 +38,7 @@ from gateway.contact_memory.reviewed_backfill import (  # noqa: E402
     build_reviewed_backfill,
     read_existing_reviewed_state,
     restore_rehearsal,
+    snapshot_sqlite_database,
     subject_review,
     verify_candidate_selection,
 )
@@ -167,6 +174,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--hmac-key", required=True)
     parser.add_argument("--artifact-root", required=True)
     parser.add_argument("--metadata-cache", help="optional bounded owner-only metadata JSON")
+    parser.add_argument("--run-link-research", action="store_true")
+    parser.add_argument(
+        "--private-link-cache-output",
+        help="required outside artifact root for exact owner-only URL evidence",
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--subject", choices=sorted(_SUBJECT_ROOT))
     parser.add_argument("--approved-subject-review-id")
@@ -177,6 +189,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--review-manifest", help="exact signed manifest produced by dry-run")
     parser.add_argument("--approved-selection", help="owner-only signed candidate subset artifact")
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.run_link_research and not args.private_link_cache_output:
+        parser.error("--run-link-research requires --private-link-cache-output")
     if args.apply and (
         not args.subject or not args.approved_subject_review_id
         or (not args.approved_candidate_id and not args.approved_selection)
@@ -223,6 +237,20 @@ def main(argv: Iterable[str] | None = None) -> int:
                 chat = replace(chat, approved_handle_ids=requested)
             scan = scan_historical_communication(con, chat, secret=secret)
             con.rollback()
+        link_aggregate = None
+        if args.run_link_research:
+            output_root = _artifact_root(Path(args.artifact_root))
+            private_output = Path(args.private_link_cache_output).expanduser().resolve()
+            if private_output == output_root or output_root in private_output.parents:
+                raise ValueError("private exact-URL cache must be outside the review artifact root")
+            historical = research_historical_links(
+                scan, secret=secret,
+                provider=build_configured_link_research_provider(secret=secret),
+                max_requests=50,
+            )
+            metadata = historical.review_cache
+            link_aggregate = historical.aggregate
+            _write_owner_only(private_output, _canonical_bytes(historical.private_cache))
         review = build_reviewed_backfill(
             scan, secret=secret, existing=existing, metadata_cache=metadata,
         )
@@ -255,12 +283,15 @@ def main(argv: Iterable[str] | None = None) -> int:
             output = _artifact_root(Path(args.artifact_root))
             output.mkdir(parents=True, mode=0o700)
             backup = output / "pre-apply-backup.sqlite3"
-            _sqlite_backup(store_path, backup)
+            snapshot_sqlite_database(
+                store_path, backup, output / "source-snapshot" / "pre-apply.sqlite3",
+            )
             store = ContactMemoryStore(root, args.subject)
             result = apply_subject_backfill(
                 scan, approved_review, subject=args.subject, store=store,
                 approved_subject_review_id=args.approved_subject_review_id,
                 approved_candidate_ids=approved_candidate_ids, secret=secret,
+                research_cache=metadata,
             )
             _write_owner_only(output / "apply-result.json", _canonical_bytes(result))
             print(json.dumps({
@@ -280,7 +311,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         _write_owner_only(summary, _canonical_bytes(_candidate_summary(review.manifest)))
         signed_selections = {
             "schema": 2,
-            "kind": "phase-e-v3-signed-candidate-subsets",
+            "kind": "phase-e-v4-signed-candidate-subsets",
             "selections": [
                 build_candidate_selection(
                     review, subject=subject,
@@ -300,9 +331,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             disposable_root = disposable / subject
             live_path = roots[subject] / "contacts" / opaque_contact_filename(subject)
             if live_path.is_file():
-                _sqlite_backup(
+                snapshot_sqlite_database(
                     live_path,
                     disposable_root / "contacts" / opaque_contact_filename(subject),
+                    output / "source-snapshots" / f"{subject}.sqlite3",
                 )
             store = ContactMemoryStore(disposable_root, subject)
             target_review = subject_review(review, subject)
@@ -311,7 +343,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 approved_subject_review_id=target_review["subject_review_id"],
                 approved_candidate_ids=[
                     item["candidate_id"] for item in target_review["candidates"]
-                ], secret=secret,
+                ], secret=secret, research_cache=metadata,
             )
         restore_results: dict[str, Any] = {}
         for subject in _SUBJECT_ROOT:
@@ -320,7 +352,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 restore_results[subject] = restore_rehearsal(
                     scan, review, subject=subject, source_store=source_path,
                     rehearsal_root=output / "restore-rehearsal" / subject,
-                    secret=secret,
+                    secret=secret, research_cache=metadata,
                 )
         rehearsal = {
             "schema": 1,
@@ -329,6 +361,13 @@ def main(argv: Iterable[str] | None = None) -> int:
             "restore": restore_results,
         }
         _write_owner_only(output / "rehearsal-evidence.json", _canonical_bytes(rehearsal))
+        if link_aggregate is not None:
+            _write_owner_only(
+                output / "link-research-aggregate.json", _canonical_bytes(link_aggregate),
+            )
+            _write_owner_only(
+                output / "link-research-review-cache.json", _canonical_bytes(metadata),
+            )
         _lock_down_tree(output)
     except (OSError, ValueError, PermissionError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
@@ -345,6 +384,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         "source_accounting": str(source_accounting),
         "candidate_summary": str(summary),
         "signed_candidate_subsets": str(selections_path),
+        "link_research_review_cache": (
+            str(output / "link-research-review-cache.json")
+            if link_aggregate is not None else None
+        ),
         "accounting": review.manifest["accounting"],
         "counts": review.manifest["counts"],
         "exclusions": review.manifest["exclusions"],
