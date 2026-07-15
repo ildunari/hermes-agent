@@ -379,6 +379,11 @@ export const zh: Translations = {
       uiScaleTitle: '界面缩放',
       uiScaleDesc: (percent: number) =>
         `缩放整个应用的文字和界面。也可使用 Cmd/Ctrl 加 +、- 或 0 调整。当前：${percent}%`,
+      chatWidthTitle: '聊天宽度',
+      chatWidthDesc: '控制对话和输入框在可用聊天区域内使用的宽度。',
+      chatWidthNormal: '标准',
+      chatWidthWide: '宽',
+      chatWidthFull: '全宽',
       translucencyTitle: '窗口透明',
       translucencyDesc: '让整个窗口透出桌面。仅支持 macOS 和 Windows。',
       backdropTitle: '聊天背景',

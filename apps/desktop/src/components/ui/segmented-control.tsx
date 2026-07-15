@@ -8,6 +8,7 @@ export interface SegmentedControlOption<T extends string> {
 }
 
 interface SegmentedControlProps<T extends string> {
+  ariaLabel?: string
   options: readonly SegmentedControlOption<T>[]
   value: T
   onChange: (id: T) => void
@@ -19,13 +20,21 @@ interface SegmentedControlProps<T extends string> {
  * (color mode, tool-call display, usage period, etc.). Flat by design —
  * no per-option borders, just a tinted track with a raised active pill.
  */
-export function SegmentedControl<T extends string>({ options, value, onChange, className }: SegmentedControlProps<T>) {
+export function SegmentedControl<T extends string>({
+  ariaLabel,
+  options,
+  value,
+  onChange,
+  className
+}: SegmentedControlProps<T>) {
   return (
     <div
+      aria-label={ariaLabel}
       className={cn(
         'inline-grid w-fit auto-cols-fr grid-flow-col gap-0.5 rounded-[5px] bg-(--ui-bg-tertiary) p-0.5',
         className
       )}
+      role={ariaLabel ? 'group' : undefined}
     >
       {options.map(({ id, label, icon: Icon }) => {
         const active = value === id
