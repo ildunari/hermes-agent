@@ -5452,10 +5452,7 @@ class AIAgent:
             or any(alias in model for alias in ("opus", "sonnet", "haiku", "mythos", "fable"))
         ):
             return True
-        if (
-            base_url_host_matches(self._base_url_lower, "100.93.10.54")
-            and model == "qwen36-ablit-atomic"
-        ):
+        if model == "qwen36-ablit-atomic":
             return True
         if "openrouter" not in self._base_url_lower:
             return False
@@ -5556,22 +5553,15 @@ class AIAgent:
         return {"effort": requested_effort}
 
     def _textual_tool_compat_enabled(self) -> bool:
-        """True for Qwopus-style endpoints that may emit tool calls as text.
+        """True for Qwopus models that may emit tool calls as text.
 
-        The GamingPC Qwopus proxy currently speaks OpenAI chat but does not
-        return native ``message.tool_calls``. It often emits a bare JSON object
-        like ``{"name":"terminal","arguments":{...}}`` instead. Keep this
-        compatibility shim tightly scoped so normal final answers are not
-        reinterpreted as tools on providers with proper tool-calling support.
+        Qwopus currently speaks OpenAI chat but may emit a bare JSON tool call
+        instead of native ``message.tool_calls``. Scope the compatibility shim
+        to the configured model identity so endpoint/machine addresses never
+        become product behavior.
         """
-        provider = (self.provider or "").strip().lower()
         model = (self.model or "").strip().lower()
-        base = (self.base_url or "").strip().lower()
-        return (
-            "qwopus" in model
-            or provider in {"custom:rtx", "rtx"}
-            or "100.93.10.54:8010" in base
-        )
+        return "qwopus" in model
 
     def _normalize_textual_tool_name(self, raw_name: Any) -> Optional[str]:
         if not isinstance(raw_name, str):

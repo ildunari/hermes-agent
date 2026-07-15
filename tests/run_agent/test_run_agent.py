@@ -2484,7 +2484,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_bare_json_tool_call(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"web_search"}
         msg = _mock_assistant_msg(
             content='{"name":"web_search","arguments":{"query":"Hermes /new"}}',
@@ -2503,7 +2503,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_prefaced_json_tool_call(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"skill_view"}
         msg = _mock_assistant_msg(
             content=(
@@ -2525,7 +2525,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_does_not_promote_json_with_trailing_prose(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"web_search"}
         msg = _mock_assistant_msg(
             content=(
@@ -2553,7 +2553,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_terminal_shell_fence(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"terminal"}
         msg = _mock_assistant_msg(
             content="```bash\necho QWOPUS_TOOL_OK\n```",
@@ -2571,7 +2571,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_bash_alias_json_tool_call(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"terminal"}
         msg = _mock_assistant_msg(
             content='{"name":"bash","arguments":{"command":"echo QWOPUS_TOOL_OK"}}',
@@ -2589,7 +2589,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_print_alias_json_tool_call(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"terminal"}
         msg = _mock_assistant_msg(
             content='{"name":"print","arguments":{"text":"QWOPUS_TOOL_OK"}}',
@@ -2607,7 +2607,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_terminal_run_alias_json_tool_call(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"terminal"}
         msg = _mock_assistant_msg(
             content=(
@@ -2634,7 +2634,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_single_item_json_array_tool_call(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"terminal"}
         msg = _mock_assistant_msg(
             content='```json\n[{"name":"bash","arguments":{"command":"printf DIRECT_TOOL_OK"}}]\n```',
@@ -2652,7 +2652,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_wrapped_xml_tool_call(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"session_search"}
         msg = _mock_assistant_msg(
             content=(
@@ -2676,7 +2676,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_tool_code_function_call(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"session_search"}
         msg = _mock_assistant_msg(
             content="<tool_code>session_search(query='gaming pc', limit=1)</tool_code>",
@@ -2695,7 +2695,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_tool_code_python_assignment_call(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"session_search"}
         msg = _mock_assistant_msg(
             content=(
@@ -2720,7 +2720,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_bracketed_function_call(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"session_search"}
         msg = _mock_assistant_msg(
             content='[session_search(query="gaming pc", limit=1)]',
@@ -2739,7 +2739,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_promotes_keyed_json_tool_call_with_preamble(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"session_search"}
         msg = _mock_assistant_msg(
             content=(
@@ -2794,7 +2794,7 @@ class TestBuildAssistantMessage:
     ):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"session_search", "skill_view", "terminal"}
         msg = _mock_assistant_msg(content=content, tool_calls=None)
 
@@ -2833,7 +2833,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_does_not_promote_ambiguous_or_documentation_shapes(self, agent, content):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"web_search", "terminal"}
         msg = _mock_assistant_msg(content=content, tool_calls=None)
 
@@ -2863,7 +2863,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_keeps_existing_structured_tool_calls_authoritative(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"web_search", "skill_view"}
         existing = _mock_tool_call(name="web_search", arguments='{"query":"native"}', call_id="c1")
         msg = _mock_assistant_msg(
@@ -2880,7 +2880,7 @@ class TestBuildAssistantMessage:
     def test_qwopus_rejects_overlong_textual_tool_payload(self, agent):
         agent.provider = "custom:RTX"
         agent.model = "qwopus-gpu"
-        agent.base_url = "http://100.93.10.54:8010/v1"
+        agent.base_url = "http://endpoint.invalid/v1"
         agent.valid_tool_names = {"web_search"}
         msg = _mock_assistant_msg(
             content=("x" * 12001) + '\n{"name":"web_search","arguments":{"query":"x"}}',
@@ -9084,6 +9084,22 @@ class TestSupportsReasoningExtraBody:
         agent._base_url_lower = agent.base_url.lower()
         agent.model = ""
         return agent
+
+    def test_atomic_qwen_reasoning_does_not_depend_on_endpoint_host(self):
+        agent = self._make_agent()
+        agent.provider = "custom:atomic"
+        agent.base_url = "http://endpoint.invalid/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "qwen36-ablit-atomic"
+        assert agent._supports_reasoning_extra_body() is True
+
+    def test_neighboring_atomic_model_is_not_reasoning_capable_by_host(self):
+        agent = self._make_agent()
+        agent.provider = "custom:atomic"
+        agent.base_url = "http://endpoint.invalid/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "plain-atomic-model"
+        assert agent._supports_reasoning_extra_body() is False
 
     def test_xiaomi_models_are_treated_as_reasoning_capable(self):
         agent = self._make_agent()

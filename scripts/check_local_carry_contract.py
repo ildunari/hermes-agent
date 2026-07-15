@@ -16,6 +16,12 @@ class Check:
     description: str
 
 
+FORBIDDEN_CHECKS = (
+    ("run_agent.py", "100.93.10.54", "machine address must not own provider behavior"),
+    ("plugins/model-providers/custom/__init__.py", "100.93.10.54", "custom provider behavior must follow model identity"),
+)
+
+
 CHECKS = (
     Check("hermes_cli/web_server.py", ("register_instance", "allowed_hosts", "_configured_dashboard_allowed_hosts"), "dashboard callback and host allowlist"),
     Check("web/src/lib/internal-agent-input.ts", (), "internal agent input helper"),
@@ -83,6 +89,13 @@ def main() -> int:
         for needle in check.needles:
             if needle.lower() not in text.lower():
                 failures.append(f"MISSING SYMBOL: {check.path}: {needle!r} ({check.description})")
+    for rel_path, forbidden, description in FORBIDDEN_CHECKS:
+        path = root / rel_path
+        if path.is_file() and forbidden in path.read_text(encoding="utf-8", errors="replace"):
+            failures.append(
+                f"FORBIDDEN SYMBOL: {rel_path}: {forbidden!r} ({description})"
+            )
+
     if failures:
         print("Local carry contract: FAIL", file=sys.stderr)
         for failure in failures:

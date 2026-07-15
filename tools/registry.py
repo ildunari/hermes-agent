@@ -455,7 +455,6 @@ class ToolRegistry:
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn
             self._generation += 1
-            invalidate_check_fn_cache()
 
     def deregister(self, name: str) -> None:
         """Remove a tool from the registry.
@@ -522,7 +521,6 @@ class ToolRegistry:
                     if target != entry.toolset
                 }
             self._generation += 1
-            invalidate_check_fn_cache()
         logger.debug("Deregistered tool: %s", name)
 
     # ------------------------------------------------------------------

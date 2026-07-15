@@ -33,7 +33,7 @@ class TestCustomProviderProfile:
             messages=_msgs(),
             tools=None,
             provider_profile=get_provider_profile("custom:RTX"),
-            base_url="http://100.93.10.54:8010/v1",
+            base_url="http://endpoint.invalid/v1",
         )
 
         assert kwargs["extra_body"]["think"] is False
@@ -47,10 +47,24 @@ class TestCustomProviderProfile:
             messages=_msgs(),
             tools=[{"type": "function", "function": {"name": "session_search", "parameters": {"type": "object"}}}],
             provider_profile=get_provider_profile("custom:RTX"),
-            base_url="http://100.93.10.54:8010/v1",
+            base_url="http://endpoint.invalid/v1",
         )
 
         assert "extra_body" not in kwargs
+
+    def test_atomic_qwen_keeps_configured_reasoning_for_plain_text(self, transport):
+        kwargs = transport.build_kwargs(
+            model="qwen36-ablit-atomic",
+            messages=_msgs(),
+            tools=None,
+            provider_profile=get_provider_profile("custom:Atomic"),
+            base_url="http://endpoint.invalid/v1",
+            reasoning_config={"enabled": True, "effort": "high"},
+        )
+        assert kwargs["reasoning_effort"] == "high"
+        assert "think" not in kwargs.get("extra_body", {})
+        assert "enable_thinking" not in kwargs.get("extra_body", {})
+        assert "chat_template_kwargs" not in kwargs.get("extra_body", {})
 
 
 class TestNvidiaProfileParity:

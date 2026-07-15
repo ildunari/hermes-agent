@@ -35,9 +35,8 @@ class CustomProfile(ProviderProfile):
             options["num_ctx"] = ollama_num_ctx
             extra_body["options"] = options
 
-        model = str(ctx.get("model") or "").lower()
-        base_url = str(ctx.get("base_url") or "").lower()
-        is_qwopus = "qwopus" in model or "100.93.10.54:8010" in base_url
+        model = str(ctx.get("model") or "").strip().lower()
+        is_qwopus = "qwopus" in model
         tools_present = bool(ctx.get("tools_present"))
 
         # Reasoning / thinking control for custom OpenAI-compatible endpoints
