@@ -16,6 +16,7 @@ The parent's context only sees the delegation call and the summary result,
 never the child's intermediate tool calls or reasoning.
 """
 
+import copy
 import enum
 import json
 import logging
@@ -583,7 +584,42 @@ def _preserve_parent_mcp_toolsets(
     return preserved
 
 
-DEFAULT_MAX_ITERATIONS = 50
+DEFAULT_ITERATION_BUDGETS = {
+    "quick": 15,
+    "standard": 50,
+    "deep": 150,
+}
+DEFAULT_BUDGET_CLASS = "standard"
+DEFAULT_MAX_ITERATIONS = 150
+
+
+def _positive_iteration_value(value: Any, fallback: int) -> int:
+    """Return a positive iteration count, rejecting bools and malformed config."""
+    if isinstance(value, bool):
+        return fallback
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _get_iteration_budgets(cfg: Optional[dict] = None) -> Dict[str, int]:
+    """Return configured class budgets after applying the absolute hard cap."""
+    cfg = _load_config() if cfg is None else cfg
+    hard_cap = _positive_iteration_value(
+        cfg.get("max_iterations"), DEFAULT_MAX_ITERATIONS
+    )
+    configured = cfg.get("iteration_budgets")
+    if not isinstance(configured, dict):
+        configured = {}
+    return {
+        name: min(
+            _positive_iteration_value(configured.get(name), default),
+            hard_cap,
+        )
+        for name, default in DEFAULT_ITERATION_BUDGETS.items()
+    }
 # Hard per-summary character ceiling layered on top of the dynamic
 # headroom budget (see _apply_summary_budget). Belt-and-suspenders for
 # models that ignore the "be concise" instruction. 0 disables the ceiling.
@@ -1178,10 +1214,10 @@ def _build_child_agent(
         session_ref=child_session_ref,
     )
 
-    # Each subagent gets its own iteration budget capped at max_iterations
-    # (configurable via delegation.max_iterations, default 50).  This means
+    # Each subagent gets its own class-selected iteration budget, with
+    # delegation.max_iterations as the absolute hard cap. This means
     # total iterations across parent + subagents can exceed the parent's
-    # max_iterations.  The user controls the per-subagent cap in config.yaml.
+    # max_iterations. The user controls both values in config.yaml.
 
     child_thinking_cb = None
     if child_progress_cb:
@@ -2376,6 +2412,7 @@ def delegate_task(
     context: Optional[str] = None,
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
+    budget_class: Optional[str] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
     model: Optional[str] = None,
@@ -2389,8 +2426,8 @@ def delegate_task(
     Spawn one or more child agents to handle delegated tasks.
 
     Supports two modes:
-      - Single: provide goal (+ optional context, toolsets, role)
-      - Batch:  provide tasks array [{goal, context, toolsets, role}, ...]
+      - Single: provide goal (+ optional context, toolsets, role, budget_class)
+      - Batch:  provide tasks array [{goal, context, toolsets, role, budget_class}, ...]
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
@@ -2440,19 +2477,22 @@ def delegate_task(
 
     # Load config
     cfg = _load_config()
-    default_max_iter = cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
-    # Model-supplied max_iterations is ignored — the config value is authoritative
-    # so users get predictable budgets. The kwarg is retained for internal callers
-    # and tests; a model-emitted value here would only shrink the budget and
-    # surprise the user mid-run. Log and drop it if one slips through from a
-    # cached tool schema or a stale provider.
-    if max_iterations is not None and max_iterations != default_max_iter:
+    hard_max_iter = _positive_iteration_value(
+        cfg.get("max_iterations"), DEFAULT_MAX_ITERATIONS
+    )
+    iteration_budgets = _get_iteration_budgets(cfg)
+    # Model-supplied max_iterations is ignored — config-owned budget classes and
+    # the hard cap are authoritative. The kwarg is retained for internal callers
+    # and tests; log and drop it if one slips through from a cached schema.
+    if max_iterations is not None and max_iterations != hard_max_iter:
         logger.debug(
             "delegate_task: ignoring caller-supplied max_iterations=%s; "
             "using delegation.max_iterations=%s from config",
-            max_iterations, default_max_iter,
+            max_iterations, hard_max_iter,
         )
-    effective_max_iter = default_max_iter
+    top_budget_class = budget_class or DEFAULT_BUDGET_CLASS
+    if top_budget_class not in iteration_budgets:
+        return tool_error("budget_class must be one of: quick, standard, deep.")
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -2478,6 +2518,7 @@ def delegate_task(
             "model": model, "provider": provider,
             "reasoning_effort": reasoning_effort,
             "enabled_toolsets": enabled_toolsets, "profile": profile,
+            "budget_class": top_budget_class,
         }]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2493,6 +2534,11 @@ def delegate_task(
             )
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
+        task_budget_class = task.get("budget_class") or top_budget_class
+        if task_budget_class not in iteration_budgets:
+            return tool_error(
+                f"Task {i} budget_class must be one of: quick, standard, deep."
+            )
         requested_profile = task.get("profile") or profile
         if requested_profile:
             return json.dumps({"error": {
@@ -2549,6 +2595,7 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            effective_budget_class = t.get("budget_class") or top_budget_class
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -2559,7 +2606,7 @@ def delegate_task(
                 toolsets=t.get("enabled_toolsets", enabled_toolsets),
                 model=creds["model"],
                 reasoning_effort=t.get("reasoning_effort", reasoning_effort),
-                max_iterations=effective_max_iter,
+                max_iterations=iteration_budgets[effective_budget_class],
                 task_count=n_tasks,
                 parent_agent=parent_agent,
                 override_provider=creds["provider"],
@@ -3256,6 +3303,13 @@ def _build_top_level_description() -> str:
         orchestrator_on = _get_orchestrator_enabled()
     except Exception:
         orchestrator_on = True
+    try:
+        iteration_budgets = _get_iteration_budgets()
+    except Exception:
+        iteration_budgets = dict(DEFAULT_ITERATION_BUDGETS)
+    budget_clause = ", ".join(
+        f"{name}={value}" for name, value in iteration_budgets.items()
+    )
 
     if max_depth >= 2 and orchestrator_on:
         nesting_clause = (
@@ -3289,6 +3343,9 @@ def _build_top_level_description() -> str:
         f"2. Batch (parallel): provide 'tasks' array with up to {max_children} "
         f"items concurrently for this user (configured via "
         f"delegation.max_concurrent_children in config.yaml). {nesting_clause}\n\n"
+        f"ITERATION BUDGETS: choose budget_class ({budget_clause}); standard is "
+        "the default. Values reflect delegation.iteration_budgets after the "
+        "delegation.max_iterations hard cap. Per-task values override the top-level value.\n\n"
         "DEFAULT EXECUTION IS SYNCHRONOUS. delegate_task waits for its "
         "subagent result before returning. In batch mode, children run in "
         "parallel and the parent receives one consolidated results array after "
@@ -3391,6 +3448,20 @@ def _build_role_param_description() -> str:
     )
 
 
+def _build_budget_param_description(*, per_task: bool = False) -> str:
+    """Describe the configured effective iteration budgets to the model."""
+    try:
+        budgets = _get_iteration_budgets()
+    except Exception:
+        budgets = dict(DEFAULT_ITERATION_BUDGETS)
+    values = ", ".join(f"{name}={value}" for name, value in budgets.items())
+    prefix = "Per-task override. " if per_task else "Optional; defaults to standard. "
+    return (
+        f"{prefix}Iteration budget class ({values}). Values are the actual "
+        "effective limits after delegation.max_iterations applies as a hard cap."
+    )
+
+
 def _build_dynamic_schema_overrides() -> dict:
     """Return per-call schema overrides reflecting current config.
 
@@ -3398,15 +3469,13 @@ def _build_dynamic_schema_overrides() -> dict:
     get_definitions() pass rewrites the description fields to the user's
     actual limits.
     """
-    overrides_params = {
-        **DELEGATE_TASK_SCHEMA["parameters"],
-    }
-    # Deep-copy properties so we don't mutate the static schema dict.
-    overrides_params["properties"] = {
-        k: dict(v) for k, v in DELEGATE_TASK_SCHEMA["parameters"]["properties"].items()
-    }
+    overrides_params = copy.deepcopy(DELEGATE_TASK_SCHEMA["parameters"])
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
     overrides_params["properties"]["role"]["description"] = _build_role_param_description()
+    overrides_params["properties"]["budget_class"]["description"] = _build_budget_param_description()
+    overrides_params["properties"]["tasks"]["items"]["properties"]["budget_class"]["description"] = (
+        _build_budget_param_description(per_task=True)
+    )
 
     return {
         "description": _build_top_level_description(),
@@ -3465,6 +3534,11 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "string",
                 "description": "Optional requested profile. Currently returns a structured refusal; omit to inherit the parent profile.",
             },
+            "budget_class": {
+                "type": "string",
+                "enum": ["quick", "standard", "deep"],
+                "description": "(rebuilt at get_definitions() time)",
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -3493,6 +3567,11 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "string",
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
+                        },
+                        "budget_class": {
+                            "type": "string",
+                            "enum": ["quick", "standard", "deep"],
+                            "description": "(rebuilt at get_definitions() time)",
                         },
                     },
                     "required": ["goal"],
@@ -3575,6 +3654,7 @@ registry.register(
         context=args.get("context"),
         tasks=_strip_model_hidden_task_fields(args.get("tasks")),
         max_iterations=args.get("max_iterations"),
+        budget_class=args.get("budget_class"),
         role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")),
         model=args.get("model"),

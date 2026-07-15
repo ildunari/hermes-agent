@@ -1783,6 +1783,15 @@ class TestDelegationCapUnificationMigration:
     def test_default_config_has_no_max_async_children(self):
         assert "max_async_children" not in DEFAULT_CONFIG["delegation"]
 
+    def test_default_delegation_iteration_budgets(self):
+        delegation = DEFAULT_CONFIG["delegation"]
+        assert delegation["iteration_budgets"] == {
+            "quick": 15,
+            "standard": 50,
+            "deep": 150,
+        }
+        assert delegation["max_iterations"] == 150
+
 
 class TestConfigNormalizationDoesNotOverwriteUserValues:
     """Regression tests for #27354."""

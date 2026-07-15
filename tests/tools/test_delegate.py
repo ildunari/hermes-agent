@@ -74,6 +74,11 @@ class TestDelegateRequirements(unittest.TestCase):
         for name in ("model", "provider", "reasoning_effort", "enabled_toolsets", "profile"):
             self.assertIn(name, props)
             self.assertIn(name, props["tasks"]["items"]["properties"])
+        self.assertEqual(props["budget_class"]["enum"], ["quick", "standard", "deep"])
+        self.assertEqual(
+            props["tasks"]["items"]["properties"]["budget_class"]["enum"],
+            ["quick", "standard", "deep"],
+        )
         # Credentials are never accepted through the model-facing surface.
         self.assertNotIn("api_key", props)
         self.assertNotIn("api_key", props["tasks"]["items"]["properties"])
@@ -107,6 +112,11 @@ class TestDelegateRequirements(unittest.TestCase):
         desc = overrides["description"]
         tasks_desc = overrides["parameters"]["properties"]["tasks"]["description"]
         role_desc = overrides["parameters"]["properties"]["role"]["description"]
+        budget_desc = overrides["parameters"]["properties"]["budget_class"]["description"]
+        per_task_budget_desc = (
+            overrides["parameters"]["properties"]["tasks"]["items"]["properties"]
+            ["budget_class"]["description"]
+        )
 
         # Top-level description names the user's concurrency limit explicitly.
         self.assertIn(f"up to {max_children}", desc)
@@ -116,6 +126,12 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn(f"up to {max_children}", tasks_desc)
         # role parameter description names the spawn-depth limit.
         self.assertIn(f"max_spawn_depth={max_depth}", role_desc)
+        from tools.delegate_tool import _get_iteration_budgets
+
+        for name, value in _get_iteration_budgets().items():
+            self.assertIn(f"{name}={value}", budget_desc)
+            self.assertIn(f"{name}={value}", per_task_budget_desc)
+            self.assertIn(f"{name}={value}", desc)
         # The misleading "default 3" / "default 2" wording is gone from
         # every dynamic surface (model-facing).
         for surface in (desc, tasks_desc, role_desc):
@@ -203,6 +219,52 @@ class TestStripBlockedTools(unittest.TestCase):
 
 
 class TestDelegateTask(unittest.TestCase):
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config")
+    def test_budget_class_defaults_overrides_and_hard_cap(
+        self, load_cfg, resolve_creds, build_child, run_child
+    ):
+        load_cfg.return_value = {
+            "max_iterations": 120,
+            "iteration_budgets": {"quick": 8, "standard": 40, "deep": 200},
+        }
+        resolve_creds.return_value = {
+            "model": None, "provider": None, "base_url": None, "api_key": None,
+            "api_mode": None,
+        }
+        build_child.side_effect = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
+        run_child.return_value = {"task_index": 0, "status": "completed", "summary": "ok"}
+
+        delegate_task(goal="implicit standard", parent_agent=_make_mock_parent())
+        self.assertEqual(build_child.call_args.kwargs["max_iterations"], 40)
+        build_child.reset_mock()
+
+        delegate_task(
+            tasks=[
+                {"goal": "inherits top"},
+                {"goal": "quick override", "budget_class": "quick"},
+                {"goal": "deep capped", "budget_class": "deep"},
+            ],
+            budget_class="standard",
+            parent_agent=_make_mock_parent(),
+        )
+
+        self.assertEqual(
+            [call.kwargs["max_iterations"] for call in build_child.call_args_list],
+            [40, 8, 120],
+        )
+
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_invalid_budget_class_is_rejected(self, resolve_creds):
+        result = json.loads(delegate_task(
+            goal="test", budget_class="turbo", parent_agent=_make_mock_parent()
+        ))
+        self.assertIn("error", result)
+        self.assertIn("budget_class", str(result["error"]))
+        resolve_creds.assert_not_called()
+
     @patch("tools.delegate_tool._run_single_child")
     @patch("tools.delegate_tool._build_child_agent")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
@@ -2388,6 +2450,32 @@ class TestDispatchDelegateTask(unittest.TestCase):
         self.assertEqual(captured["goal"], "test")
         self.assertNotIn("acp_command", captured["tasks"][0])
         self.assertNotIn("acp_args", captured["tasks"][0])
+
+    def test_budget_class_forwarded_by_both_dispatch_surfaces(self):
+        import run_agent
+        from tools.registry import registry
+
+        calls = []
+
+        def fake_delegate_task(**kwargs):
+            calls.append(kwargs)
+            return "{}"
+
+        parent = _make_mock_parent(depth=0)
+        args = {
+            "goal": "test",
+            "budget_class": "quick",
+            "tasks": [{"goal": "nested", "budget_class": "deep"}],
+        }
+        with patch("tools.delegate_tool.delegate_task", fake_delegate_task):
+            run_agent.AIAgent._dispatch_delegate_task(parent, args)
+            registry.get_entry("delegate_task").handler(args, parent_agent=parent)
+
+        self.assertEqual([call["budget_class"] for call in calls], ["quick", "quick"])
+        self.assertEqual(
+            [call["tasks"][0]["budget_class"] for call in calls],
+            ["deep", "deep"],
+        )
 
 class TestDelegateEventEnum(unittest.TestCase):
     """Tests for DelegateEvent enum and back-compat aliases."""

@@ -6112,6 +6112,7 @@ class AIAgent:
             context=function_args.get("context"),
             tasks=_strip_model_hidden_task_fields(function_args.get("tasks")),
             max_iterations=function_args.get("max_iterations"),
+            budget_class=function_args.get("budget_class"),
             role=function_args.get("role"),
             background=requested_background,
             model=function_args.get("model"),
