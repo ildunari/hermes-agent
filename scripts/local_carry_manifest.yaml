@@ -1,0 +1,138 @@
+version: 1
+
+checks:
+  - id: dashboard-host-allowlist
+    path: hermes_cli/web_server.py
+    needles: [register_instance, allowed_hosts, _configured_dashboard_allowed_hosts]
+    description: dashboard callback and host allowlist
+  - id: internal-agent-input
+    path: web/src/lib/internal-agent-input.ts
+    needles: []
+    description: internal agent input helper
+  - id: provider-usage-component
+    path: web/src/components/ProviderUsagePanel.tsx
+    needles: []
+    description: provider usage component
+  - id: provider-usage-mount
+    path: web/src/App.tsx
+    needles: [ProviderUsagePanel]
+    description: provider usage mount
+  - id: subscription-usage-client
+    path: web/src/lib/api.ts
+    needles: [subscription-usage]
+    description: subscription usage API client
+  - id: rich-card-bluebubbles
+    path: tools/send_message_tool.py
+    needles: [rich_card, bluebubbles]
+    description: rich-card and BlueBubbles delivery
+  - id: closed-session-mcp-refresh
+    path: tools/mcp_tool.py
+    needles: [session is None, skipping dynamic tool refresh; session is closed]
+    description: closed-session MCP refresh guard
+  - id: session-recents-index
+    path: hermes_state.py
+    needles: [_fts_trigram_disabled, disable_fts_trigram, last_active, idx_sessions_last_active]
+    description: trigram-disable lifecycle and indexed session recents
+  - id: detached-restart-cli
+    path: cli.py
+    needles: [restart-gateways, enqueue_detached_restart]
+    description: CLI detached restart dispatch
+  - id: gateway-compact-voice
+    path: gateway/run.py
+    needles: [_handle_detached_surface_restart_command, __compact__, compact_tool_counts, _update_compact_tool_progress, register_live_voice_streamer]
+    description: gateway restart, compact HUD, and Discord live voice integration
+  - id: discord-live-voice
+    path: plugins/platforms/discord/adapter.py
+    needles: [DiscordVoiceReplyStreamer, _handle_barge_in_event, start_busy_voice]
+    description: Discord live voice, barge-in, and busy-audio lifecycle
+  - id: spoken-text-formatting
+    path: hermes_cli/web_server.py
+    needles: [prepare_spoken_text, spoken_formatter]
+    description: feature-gated desktop spoken-text formatting
+  - id: desktop-read-aloud-autoplay
+    path: apps/desktop/electron/main.ts
+    needles: [autoplay-policy, no-user-gesture-required]
+    description: asynchronous Desktop read-aloud playback
+  - id: restart-readiness
+    path: hermes_cli/restart_surfaces.py
+    needles: [_resolve_loaded_service, restarted_services, _wait_for_scope_health]
+    description: launchd domain dedupe and readiness polling
+  - id: desktop-build-hooks
+    path: apps/desktop/package.json
+    needles: ['"afterPack"', '"entitlements"']
+    description: Desktop lifecycle hook declarations
+  - id: unattended-signing
+    path: apps/desktop/scripts/after-pack.mjs
+    needles: [3A22F53A48A189F4A8766CACE00192860CC37F8F, HERMES_OP_SHIM, HERMES_SIGNING_PASSWORD_SERVICE, serviceAccountToken, set-key-partition-list, 'apple-tool:,apple:,codesign:', refusing to produce an ad-hoc local build]
+    description: unattended Developer ID signing
+  - id: compaction-replay-budget
+    path: agent/context_compressor.py
+    needles: [_REPLAY_BUDGET_KEYS, _serialized_length_for_budget]
+    description: upstream replay-budget accounting for compaction tail
+  - id: portable-guest-denylist
+    path: gateway/guest_access.py
+    needles: [_HOST_HOME_PATH, _HOST_HOME_PATH_RE, Path.home()]
+    description: portable guest host-home denylist
+  - id: local-desktop-copy
+    path: apps/desktop/src/i18n/local-carry.ts
+    needles: [draftPendingNotice]
+    description: draft pending notice outside hot locale literals
+  - id: shared-rerere-cache
+    path: scripts/setup_local_merge_aids.sh
+    needles: [rerere.autoupdate, git-rr-cache]
+    description: shareable rerere setup helper
+
+features:
+  - id: desktop.chat-layout
+    title: Responsive chat width modes
+    tests:
+      - apps/desktop/src/store/chat-width.test.ts
+    checks:
+      - id: desktop-chat-width-store
+        path: apps/desktop/src/store/chat-width.ts
+        needles: [hermes.desktop.chatWidth.v1, 48.75rem, 76rem, "100%"]
+        description: persisted Normal, Wide, and Full chat widths
+      - id: desktop-chat-width-bootstrap
+        path: apps/desktop/src/main.tsx
+        needles: [./store/chat-width]
+        description: pre-render chat width application
+      - id: desktop-chat-width-settings
+        path: apps/desktop/src/app/settings/appearance-settings.tsx
+        needles: [setChatWidth, chatWidthOptions]
+        description: chat width settings control
+
+  - id: desktop.markdown-table-layout
+    title: Fit and horizontally scrollable Markdown tables
+    tests:
+      - apps/desktop/src/store/table-layout.test.ts
+    checks:
+      - id: desktop-table-layout-store
+        path: apps/desktop/src/store/table-layout.ts
+        needles: [hermes.desktop.tableLayout.v1, hermesTableLayout]
+        description: persisted Fit and Scroll table modes
+      - id: desktop-table-layout-styles
+        path: apps/desktop/src/styles.css
+        needles: [data-hermes-table-layout, 'width: max-content', 'min-width: 6rem', 'max-width: 24rem']
+        description: bounded cells and transcript-contained horizontal scrolling
+      - id: desktop-table-layout-settings
+        path: apps/desktop/src/app/settings/appearance-settings.tsx
+        needles: [setTableLayout, tableLayoutOptions]
+        description: Markdown table settings control
+
+  - id: desktop.local-enhancements-settings
+    title: Local enhancements settings section
+    tests:
+      - apps/desktop/src/app/settings/local-enhancements-section.test.tsx
+    checks:
+      - id: desktop-local-enhancements-component
+        path: apps/desktop/src/app/settings/local-enhancements-section.tsx
+        needles: [desktop.local-enhancements-settings, LocalEnhancementsSection]
+        description: reusable collapsible local-enhancements chrome
+      - id: desktop-local-enhancements-mount
+        path: apps/desktop/src/app/settings/appearance-settings.tsx
+        needles: [LocalEnhancementsSection]
+        description: Appearance local-enhancements section mount
+      - id: desktop-local-enhancements-copy
+        path: apps/desktop/src/i18n/local-carry.ts
+        needles: [localCarrySettings, Local Enhancements]
+        description: isolated localized local-carry copy
