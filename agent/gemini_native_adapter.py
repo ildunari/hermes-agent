@@ -233,9 +233,21 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
                 continue
             try:
                 header, encoded = url.split(",", 1)
-                mime = header.split(":", 1)[1].split(";", 1)[0]
-                raw = base64.b64decode(encoded)
-            except Exception:
+                media_spec = header.split(":", 1)[1]
+                mime, *params = media_spec.split(";")
+                if "base64" not in {param.strip().lower() for param in params}:
+                    continue
+                if ptype == "video_url" and mime not in {
+                    "video/mp4",
+                    "video/mpeg",
+                    "video/webm",
+                    "video/quicktime",
+                    "video/avi",
+                    "video/x-msvideo",
+                }:
+                    continue
+                raw = base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError, base64.binascii.Error):
                 continue
             parts.append(
                 {
