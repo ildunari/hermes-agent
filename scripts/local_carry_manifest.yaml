@@ -136,3 +136,13 @@ features:
         path: apps/desktop/src/i18n/local-carry.ts
         needles: [localCarrySettings, Local Enhancements]
         description: isolated localized local-carry copy
+
+  - id: desktop.loopback-url-fences
+    title: Preserve fenced loopback API endpoints
+    tests:
+      - apps/desktop/src/components/assistant-ui/markdown-text.test.ts
+    checks:
+      - id: desktop-loopback-url-fence-preprocess
+        path: apps/desktop/src/lib/markdown-preprocess.ts
+        needles: [LOOPBACK_URL_RE, normalizeVisibleProse]
+        description: prevents local preview cleanup from erasing explicit fenced localhost endpoints
