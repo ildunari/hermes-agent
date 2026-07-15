@@ -52,7 +52,7 @@ def arm_operator_smoke(
     contact = contacts.get(contact_id)
     if contact is None:
         raise ValueError("exact contact is not registered in proactive state")
-    route = scheduler._route_for_contact(contact)
+    route = scheduler.route_for_contact(contact)
     state = scheduler.get_contact(route.contact_hash)
     if state is None:
         raise ValueError("exact existing DM route is not registered")

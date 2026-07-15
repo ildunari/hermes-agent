@@ -2633,6 +2633,15 @@ class SessionStore:
             logger.debug("Could not load messages from DB: %s", e)
             return []
 
+    def load_recent_user_turns(self, session_id: str, *, limit: int = 3) -> List[str]:
+        """Load only the bounded user-message suffix needed for register carry."""
+        if not self._db:
+            return []
+        rows = self._db.list_recent_user_messages(
+            session_id, limit=max(1, min(int(limit), 3))
+        )
+        return [str(row.get("content") or "") for row in reversed(rows)]
+
     def rewind_session(self, session_id: str, n: int = 1) -> Optional[Dict[str, Any]]:
         """Back up ``n`` user turns via soft-delete, keeping rows for audit.
 

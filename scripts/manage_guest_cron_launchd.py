@@ -50,6 +50,8 @@ def isolated_environment(*, checkout: Path, profile_home: Path, path: str) -> di
         raise ValueError("PATH must not be empty")
     return {
         "HERMES_HOME": str(profile_home),
+        "HOME": str(profile_home),
+        "TMPDIR": str(profile_home / "state" / "tmp"),
         "PYTHONPATH": str(checkout),
         "PATH": path,
     }
@@ -114,12 +116,17 @@ def validate_plist(plist: dict[str, Any]) -> dict[str, Any]:
     if tuple(arguments[3::2]) != expected_options:
         raise ValueError("plist ProgramArguments has an invalid option layout")
     environment = plist.get("EnvironmentVariables")
-    if not isinstance(environment, dict) or set(environment) != {"HERMES_HOME", "PYTHONPATH", "PATH"}:
-        raise ValueError("plist environment must contain only HERMES_HOME, PYTHONPATH, and PATH")
+    expected_environment = {"HERMES_HOME", "HOME", "TMPDIR", "PYTHONPATH", "PATH"}
+    if not isinstance(environment, dict) or set(environment) != expected_environment:
+        raise ValueError("plist environment is not the exact Guest runner whitelist")
     if Path(str(environment["HERMES_HOME"])).name != "guest":
         raise ValueError("plist HERMES_HOME must name the guest profile")
     if str(arguments[8]) != str(environment["HERMES_HOME"]):
         raise ValueError("plist --profile-home and HERMES_HOME must match")
+    if environment["HOME"] != environment["HERMES_HOME"]:
+        raise ValueError("plist HOME must be the Guest profile home")
+    if _resolved(environment["TMPDIR"]).parent != _resolved(environment["HERMES_HOME"]) / "state":
+        raise ValueError("plist TMPDIR must be isolated under Guest state")
     if str(arguments[6]) != str(environment["PYTHONPATH"]):
         raise ValueError("plist --checkout and PYTHONPATH must match")
     if str(arguments[10]) != str(environment["PATH"]):
@@ -269,6 +276,7 @@ def run_once(
     )
     state_dir = home / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "tmp").mkdir(mode=0o700, exist_ok=True)
     lock_path = state_dir / "cron-guest.lock"
     with lock_path.open("a+b") as lock:
         try:

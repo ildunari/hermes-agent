@@ -46,7 +46,7 @@ from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
-from typing import Callable, Dict, Optional, Any, List, Union
+from typing import Callable, Dict, Optional, Any, List, Mapping, Union
 
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
 # /usage; we still import it at module top in the gateway because test
@@ -2109,7 +2109,7 @@ async def _record_proactive_inbound(
             "user_id": str(getattr(source, "user_id", "") or ""),
             "session_id": str(session_id),
         }
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             handle_inbound,
             state_db=root / "state.db",
             contact_memory_root=root / "contact-memory",
@@ -2123,6 +2123,20 @@ async def _record_proactive_inbound(
             config=cfg,
             serious_register=serious_register,
         )
+        if result.get("pending_action") and result.get("outcome_status") == "provisional":
+            await _queue_proactive_outcome_confirmation(
+                config_raw=config_raw,
+                trusted_scope=trusted_scope,
+                profile_home=root,
+                profile=str(profile or "default"),
+                route_raw=route,
+                timezone_name=timezone_name,
+                action_id=str(result["pending_action"]["action_id"]),
+                source_id=str(source_id),
+                text=str(text or ""),
+                received_at=float(received_at),
+            )
+        return result
     except Exception as exc:
         from gateway.proactive_scheduler import ProactiveOwnershipRegistry
         root = Path(profile_home).resolve()
@@ -2132,6 +2146,83 @@ async def _record_proactive_inbound(
             "ingress_persistence_failure", now=float(received_at),
         )
         raise RuntimeError("proactive inbound persistence failed closed") from exc
+
+
+async def _queue_proactive_outcome_confirmation(
+    *, config_raw: Mapping[str, Any], trusted_scope: TrustedContactScope,
+    profile_home: Path, profile: str, route_raw: Mapping[str, Any],
+    timezone_name: str, action_id: str, source_id: str, text: str,
+    received_at: float,
+) -> bool:
+    """Enqueue the pinned local confirmation lane without delaying a reply."""
+    try:
+        from gateway.contact_memory.extractor import OutcomeConfirmationJob
+        from gateway.contact_memory.runtime import get_extraction_runtime
+        from gateway.proactive_scheduler import ContactRoute, ProactiveConfig, ProactiveScheduler
+
+        contact_cfg = ((config_raw.get("agent") or {}).get("contact_memory") or {})
+        if not isinstance(contact_cfg, dict):
+            return False
+        runtime = get_extraction_runtime(profile_home / "contact-memory", contact_cfg)
+        if runtime is None:
+            return False
+        route = ContactRoute(
+            contact_id=trusted_scope.contact_id,
+            profile_name=profile,
+            timezone=timezone_name,
+            principal="guest" if profile == "guest" else "owner",
+            chat_type=str(route_raw.get("chat_type") or "dm"),
+            chat_id=str(route_raw.get("chat_id") or ""),
+            user_id=str(route_raw.get("user_id") or ""),
+            session_id=str(route_raw.get("session_id") or ""),
+        )
+
+        async def _confirm(backend: Any) -> Any:
+            scheduler = ProactiveScheduler(
+                state_db_path=profile_home / "state.db",
+                profile_home=profile_home,
+                profile_name=profile,
+                config=ProactiveConfig.from_mapping(config_raw),
+            )
+            model = str(getattr(backend, "model_id", ""))
+
+            async def _extractor(**request: Any) -> Any:
+                if request.get("model") != model:
+                    raise RuntimeError("outcome confirmation model pin mismatch")
+                return await backend.confirm_outcome(
+                    request.get("text", ""), request.get("provisional_outcome", "")
+                )
+
+            return await scheduler.confirm_action_outcome(
+                route, action_id, inbound_text=text, model=model,
+                extractor=_extractor, source_id=f"inbound:{source_id}",
+                now=received_at,
+            )
+
+        return runtime.submit_outcome_confirmation(OutcomeConfirmationJob(_confirm))
+    except Exception:
+        # The durable provisional row is intentionally retained and surfaced by
+        # text-free status; auxiliary queue setup must not drop the reactive turn.
+        logger.warning("Proactive outcome confirmation was not queued", exc_info=True)
+        return False
+
+
+async def _bounded_serious_register(
+    session_store: Any, session_id: str, current_text: str,
+) -> bool:
+    """Best-effort bounded history carry; never raises into reactive dispatch."""
+    try:
+        recent_user_turns = await asyncio.wait_for(
+            session_store.load_recent_user_turns(session_id, limit=3), timeout=2.0,
+        )
+        from gateway.conversation_texture_v2 import _seriousness
+        return bool(_seriousness(str(current_text or ""), recent_user_turns))
+    except Exception:
+        logger.warning(
+            "Bounded serious-register history unavailable; using current turn",
+            exc_info=True,
+        )
+        return False
 
 
 async def _record_proactive_arrival(
@@ -12762,15 +12853,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             barrier_key = Path(opaque_contact_filename(trusted_contact_scope.contact_id)).stem
             barrier = barriers.setdefault(barrier_key, asyncio.Lock())
             async with barrier:
-                proactive_history = await self.async_session_store.load_transcript(
+                serious_register = await _bounded_serious_register(
+                    self.async_session_store,
                     session_entry.session_id,
+                    str(event.text or ""),
                 )
-                from gateway.conversation_texture_v2 import _seriousness
-                recent_user_turns = [
-                    str(row.get("content") or "")
-                    for row in proactive_history
-                    if row.get("role") == "user"
-                ]
                 await _record_proactive_inbound(
                     config_raw=proactive_arrival.config_raw,
                     trusted_scope=trusted_contact_scope,
@@ -12783,9 +12870,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     received_at=proactive_arrival.received_at,
                     metadata=getattr(event, "metadata", None),
                     arrival_sequence=proactive_arrival.sequence,
-                    serious_register=bool(
-                        _seriousness(str(event.text or ""), recent_user_turns)
-                    ),
+                    serious_register=serious_register,
                 )
 
         pinned_session_id = str(

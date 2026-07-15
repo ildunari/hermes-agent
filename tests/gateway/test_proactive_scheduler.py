@@ -589,7 +589,9 @@ def test_bare_okay_reply_is_neutral_acknowledgement(tmp_path: Path, reply: str):
     assert classify_inbound_outcome(outbound, reply) == "acknowledged"
 
 
-@pytest.mark.parametrize("reply", ("nah", "nope!", "stop.", "don't care"))
+@pytest.mark.parametrize(
+    "reply", ("nah", "nope!", "stop.", "don't care", "nah stop", "no thanks stop")
+)
 def test_explicit_dismissive_reply_remains_dismissed(tmp_path: Path, reply: str):
     store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
     make_interest(store)
@@ -774,7 +776,7 @@ async def test_confirmation_claim_is_concurrent_and_replay_idempotent(tmp_path: 
     ("mode", "error_code"),
     (("malformed", "malformed_result"), ("unavailable", "callback_unavailable")),
 )
-async def test_confirmation_failure_is_closed_audited_and_not_retried(
+async def test_confirmation_failure_is_closed_audited_after_bounded_retry(
     tmp_path: Path, mode: str, error_code: str,
 ):
     state = ProactiveStateStore(tmp_path / "state.db")
@@ -820,7 +822,7 @@ async def test_confirmation_failure_is_closed_audited_and_not_retried(
         "confirmation_status": "failed", "error_code": error_code,
         "applied": False,
     }
-    assert calls == 1
+    assert calls == (2 if mode == "unavailable" else 1)
     assert store.get_proactive_send("prior").outcome is None
     interest = store.get_interest("cars")
     assert (interest.ts_alpha, interest.ts_beta) == (2, 1)
@@ -837,6 +839,12 @@ async def test_confirmation_failure_is_closed_audited_and_not_retried(
     assert audit["input_chars"] == 4000
     assert audit["input_sha256"] == hashlib.sha256(inbound_text[:4000].encode()).hexdigest()
     assert inbound_text not in json.dumps(audit)
+    from gateway.proactive_status import health_snapshot
+    status = health_snapshot(
+        profile_home=tmp_path, profile="poke", config={}, now=NOW + 2,
+    )
+    assert status["outcome_confirmation"]["failed"] == 1
+    assert status["outcome_confirmation"]["oldest_failed_age_seconds"] == 1
 
 
 @pytest.mark.asyncio
@@ -949,6 +957,7 @@ def test_cancelled_fetch_candidate_is_reused_once_within_24h_and_regated(tmp_pat
     assert scheduler.reusable_cancelled_candidate(
         contact_route(), topic="sports cars", now=NOW + 3,
     ) is None
+    assert scheduler.cleanup_sprawl(now=NOW + 3)["cancelled_fetches"] == 1
 
 
 def test_cancelled_fetch_reuse_expires_and_is_exact_topic_scoped(tmp_path: Path):

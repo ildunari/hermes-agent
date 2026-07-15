@@ -2020,6 +2020,10 @@ class ProactiveScheduler:
                     "DELETE FROM proactive_delivery WHERE updated_at < ? AND state IN ('sent','suppressed','failed')",
                     (timestamp - 180 * 86400,),
                 ).rowcount,
+                "cancelled_fetches": con.execute(
+                    "DELETE FROM proactive_cancelled_fetch WHERE expires_at < ? OR consumed_at IS NOT NULL",
+                    (timestamp,),
+                ).rowcount,
             }
             counts["payloads_redacted"] = redacted
             counts["slots"] = con.execute(
@@ -2281,14 +2285,27 @@ class ProactiveScheduler:
                 self._finish(con, exc)
             raise
 
+        extracted: Any = None
         try:
-            extracted = extractor(
-                model=pinned_model,
-                text=bounded_text,
-                provisional_outcome=provisional,
-            )
-            if inspect.isawaitable(extracted):
-                extracted = await extracted
+            # One immediate retry repairs transient worker restarts/timeouts while
+            # the bounded plaintext still exists only in this process. Malformed
+            # model output is deterministic and is not retried.
+            for attempt in range(2):
+                try:
+                    extracted = extractor(
+                        model=pinned_model,
+                        text=bounded_text,
+                        provisional_outcome=provisional,
+                    )
+                    if inspect.isawaitable(extracted):
+                        extracted = await extracted
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if attempt:
+                        raise
+                    await asyncio.sleep(0)
             if not isinstance(extracted, Mapping):
                 raise ValueError("extractor result must be an object")
             confirmed = ProactiveOutcome(str(extracted.get("outcome") or "")).value
@@ -2490,6 +2507,10 @@ class ProactiveScheduler:
             session_id=str(contact.route.get("session_id") or ""),
         )
 
+    def route_for_contact(self, contact: StateContact) -> ContactRoute:
+        """Return the validated canonical route for a persisted contact."""
+        return self._route_for_contact(contact)
+
     def _import_ledger_actions(self, route: ContactRoute) -> None:
         """Idempotently project pre-protocol sent ledger rows into state.db."""
         store = self._contact_store(route)
@@ -2531,7 +2552,7 @@ class ProactiveScheduler:
 
     def _project_action_to_ledger(
         self, route: ContactRoute, claim: SlotClaim, *, now: float,
-        gate_reason: str = "phase3_dry_run",
+        gate_reason: str = "observe_mode",
     ) -> ProactiveSend:
         """Idempotent contact-ledger projection of the canonical state action."""
         store = self._contact_store(route)
@@ -2733,7 +2754,7 @@ class ProactiveScheduler:
                     on_prepared(route, claim, prepared)
                 continue
             status = self.complete_claim(
-                claim, sent=True, reason="phase3_dry_run", now=timestamp
+                claim, sent=True, reason="observe_mode", now=timestamp
             )
             if status != "dry_run":
                 continue
@@ -2826,7 +2847,20 @@ def classify_inbound_outcome(send: ProactiveSend, text: str) -> str:
 
 
 def re_search_dismissive(text: str) -> bool:
-    return bool(re.search(r"^(?:k|meh|nah|nope|stop|don't care|dont care)[.! ]*$", text))
+    tokens = re.findall(r"[a-z]+(?:'[a-z]+)?", text.casefold())
+    if tokens in (["ok"], ["okay"]):
+        return False
+    dismissive = {"k", "meh", "nah", "nope", "stop"}
+    return bool(
+        tokens
+        and (
+            any(token in dismissive for token in tokens)
+            or any(
+                tokens[index:index + 2] in (["don't", "care"], ["dont", "care"])
+                for index in range(len(tokens) - 1)
+            )
+        )
+    )
 
 
 async def handle_inbound_async(

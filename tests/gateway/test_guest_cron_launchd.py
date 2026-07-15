@@ -49,6 +49,8 @@ def test_generate_has_isolated_profile_interval_and_explicit_arguments(runtime: 
     assert arguments[arguments.index("--profile-home") + 1] == str(runtime["profile_home"])
     assert plist["EnvironmentVariables"] == {
         "HERMES_HOME": str(runtime["profile_home"]),
+        "HOME": str(runtime["profile_home"]),
+        "TMPDIR": str(runtime["profile_home"] / "state" / "tmp"),
         "PYTHONPATH": str(runtime["checkout"]),
         "PATH": "/test/bin:/usr/bin",
     }
@@ -97,6 +99,8 @@ def test_run_once_uses_exact_command_environment_cwd_and_timeout(runtime: dict[s
                 "cwd": str(runtime["checkout"]),
                 "env": {
                     "HERMES_HOME": str(runtime["profile_home"]),
+                    "HOME": str(runtime["profile_home"]),
+                    "TMPDIR": str(runtime["profile_home"] / "state" / "tmp"),
                     "PYTHONPATH": str(runtime["checkout"]),
                     "PATH": "/safe/bin",
                 },
@@ -218,8 +222,16 @@ def test_status_is_deterministic_when_absent_malformed_unloaded_and_loaded(
 def test_validate_plist_rejects_cross_profile_environment(runtime: dict[str, Path]) -> None:
     plist = generated(runtime)
     plist["EnvironmentVariables"]["OTHER_PROFILE"] = "/profiles/poke"
-    with pytest.raises(ValueError, match="only HERMES_HOME"):
+    with pytest.raises(ValueError, match="exact Guest runner whitelist"):
         manager.validate_plist(plist)
+
+
+def test_validate_plist_rejects_home_or_tmpdir_escape(runtime: dict[str, Path]) -> None:
+    for key in ("HOME", "TMPDIR"):
+        plist = generated(runtime)
+        plist["EnvironmentVariables"][key] = "/profiles/poke"
+        with pytest.raises(ValueError, match=key):
+            manager.validate_plist(plist)
 
 
 def test_validate_plist_rejects_argument_environment_mismatch(runtime: dict[str, Path]) -> None:

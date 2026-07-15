@@ -170,6 +170,11 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
         "digest_count": 0, "oldest_digest_age_seconds": None,
         "contacts": 0, "recent_inbound": 0, "observed_ingress": 0,
         "slots": {}, "deliveries": {}, "actions": {}, "outcomes": {},
+        "outcome_confirmation": {
+            "provisional": 0, "claimed": 0, "failed": 0,
+            "oldest_provisional_age_seconds": None,
+            "oldest_failed_age_seconds": None,
+        },
         "attempts": 0, "retries": 0, "last_success_at": None, "last_error_class": None,
         "oldest_claim_age_seconds": None, "extraction": None,
         "watcher_heartbeat_at": None, "watcher_age_seconds": None,
@@ -228,6 +233,30 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
                 ).fetchone()
                 result["send_rate_total"] = int(canonical[0])
                 result["send_rate_sent"] = int(canonical[1])
+                confirmation = result["outcome_confirmation"]
+                provisional = con.execute(
+                    "SELECT count(*),min(outcome_at) FROM proactive_action "
+                    "WHERE outcome_status='provisional'"
+                ).fetchone()
+                confirmation["provisional"] = int(provisional[0])
+                if provisional[1] is not None:
+                    confirmation["oldest_provisional_age_seconds"] = max(
+                        0.0, timestamp - float(provisional[1])
+                    )
+            if "proactive_outcome_confirmation" in tables:
+                confirmation = result["outcome_confirmation"]
+                confirmation["claimed"] = int(con.execute(
+                    "SELECT count(*) FROM proactive_outcome_confirmation WHERE status='claimed'"
+                ).fetchone()[0])
+                failed = con.execute(
+                    "SELECT count(*),min(completed_at) FROM proactive_outcome_confirmation "
+                    "WHERE status='failed'"
+                ).fetchone()
+                confirmation["failed"] = int(failed[0])
+                if failed[1] is not None:
+                    confirmation["oldest_failed_age_seconds"] = max(
+                        0.0, timestamp - float(failed[1])
+                    )
             if "proactive_health" in tables:
                 heartbeat = con.execute("SELECT value_json,updated_at FROM proactive_health WHERE key='watcher' LIMIT 1").fetchone()
                 if heartbeat:
@@ -339,6 +368,14 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
         or result["planning_attempt_age_seconds"] > 65 * 60
     ):
         result["reasons"].append("eligible_interests_unplanned")
+    confirmation = result["outcome_confirmation"]
+    if cfg.enabled and confirmation["failed"]:
+        result["reasons"].append("outcome_confirmation_failed")
+    if cfg.enabled and (
+        confirmation["oldest_provisional_age_seconds"] is not None
+        and confirmation["oldest_provisional_age_seconds"] > 3600
+    ):
+        result["reasons"].append("outcome_confirmation_stalled")
     if cfg.enabled and missing_eligible_digest:
         result["reasons"].append("digest_missing")
     if cfg.enabled and result["oldest_digest_age_seconds"] is not None and result["oldest_digest_age_seconds"] > 8 * 86400:

@@ -219,3 +219,15 @@ The final signed review proposes 41 candidates over 761 projection events: Kosta
 Final review IDs are global `55752a9ce9217f09c966dd44c2e459c0c7ca45185c839138b4eae1215644353c`, Kosta `82a4d8b424baf72df39d824491c6f1efd21a7316f50ba062b3ba55ff35108df8`, and Stephen `219c2348756d5d6fe3e390faa22e10d4a735ab178612b811fc60492c17ec728c`. Artifacts are under `/Users/Kosta/.hermes/profiles/coding/artifacts/phase-e-canonical-review-v3-20260714-180416/`.
 
 Focused verification completed with 85 passed, the eight-file surrounding set with 193 passed, and the complete contact-memory plus interest-ledger set with 334 passed across 16 files. Both signed subject subsets and the global manifest revalidated; disposable apply succeeded; both restore rehearsals returned byte-identical backups after producing distinct mutated hashes. No maintenance, Phase F work, gateway restart, send enablement, push, or PR occurred.
+
+### Phase F disposition — rapid-fire projection cardinality
+
+Rapid-fire authenticated communication members remain distinct canonical events and all
+event IDs remain attached as extraction provenance. Semantic extraction intentionally
+projects one observation against the final transport anchor, rather than duplicating one
+turn-level model observation across every member. Per-event projection was not adopted:
+the current extractor sees the combined reactive turn, so multiplying that output would
+overweight interests and violate one-observation idempotency without evidence that each
+proposal belongs to an individual member. A future per-event change requires member-level
+extractor inputs and explicit weighting/retraction tests; provenance cardinality alone is
+not evidence that projection cardinality is safe.

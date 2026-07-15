@@ -37,6 +37,10 @@ class ExtractorBackend(Protocol):
         self, user_text: str, assistant_text: str, metadata: Mapping[str, Any]
     ) -> list[Mapping[str, Any]] | Mapping[str, Any]: ...
 
+    async def confirm_outcome(
+        self, text: str, provisional_outcome: str
+    ) -> Mapping[str, Any]: ...
+
 
 ExtractorOutput = list[Mapping[str, Any]] | Mapping[str, Any]
 Extractor = Callable[[str, str, Mapping[str, Any]], Awaitable[ExtractorOutput]]
@@ -164,6 +168,42 @@ class Qwen3ExtractorBackend:
     ) -> Mapping[str, Any]:
         return await asyncio.to_thread(
             self._extract_sync, user_text, assistant_text, metadata
+        )
+
+    def _confirm_outcome_sync(
+        self, text: str, provisional_outcome: str
+    ) -> Mapping[str, Any]:
+        bounded_text = str(text or "")[:4000]
+        with self._lock:
+            proc = self._start()
+            assert proc.stdin is not None
+            try:
+                proc.stdin.write(json.dumps({
+                    "task": "outcome_confirmation",
+                    "user_text": bounded_text,
+                    "provisional_outcome": str(provisional_outcome),
+                }, separators=(",", ":")) + "\n")
+                proc.stdin.flush()
+                line = self._readline(proc, self.timeout_seconds)
+                if not line:
+                    raise OSError("worker exited")
+                payload = json.loads(line)
+                result = payload.get("outcome_confirmation")
+                if not payload.get("ok") or not isinstance(result, dict):
+                    raise ExtractorWorkerError(str(payload.get("error") or "invalid outcome response"))
+                return result
+            except TimeoutError as exc:
+                self.close()
+                raise ExtractorWorkerError("extractor worker timed out") from exc
+            except (BrokenPipeError, json.JSONDecodeError, OSError) as exc:
+                self.close()
+                raise ExtractorWorkerError(f"extractor worker request failed: {exc}") from exc
+
+    async def confirm_outcome(
+        self, text: str, provisional_outcome: str
+    ) -> Mapping[str, Any]:
+        return await asyncio.to_thread(
+            self._confirm_outcome_sync, text, provisional_outcome
         )
 
     def close(self) -> None:
@@ -488,6 +528,13 @@ class ExtractionJob:
     metadata: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class OutcomeConfirmationJob:
+    """Text is held only in the bounded process-local queue, never persisted."""
+
+    run: Callable[[ExtractorBackend], Awaitable[Any]]
+
+
 class PostTurnExtractionRuntime:
     """Bounded fail-open queue; submitting a completed turn never awaits ML."""
 
@@ -495,7 +542,7 @@ class PostTurnExtractionRuntime:
         if max_queue < 1 or workers < 1 or max_retries < 0:
             raise ValueError("queue bounds, worker count, and retries must be valid")
         self.backend = backend
-        self.queue: asyncio.Queue[ExtractionJob | None] = asyncio.Queue(maxsize=max_queue)
+        self.queue: asyncio.Queue[ExtractionJob | OutcomeConfirmationJob | None] = asyncio.Queue(maxsize=max_queue)
         self.worker_count = workers
         self.max_retries = int(max_retries)
         self._tasks: list[asyncio.Task[None]] = []
@@ -519,6 +566,19 @@ class PostTurnExtractionRuntime:
             self.dropped += 1
             return False
 
+    def submit_outcome_confirmation(self, job: "OutcomeConfirmationJob") -> bool:
+        """Queue confirmation without adding model latency to the reactive turn."""
+        if self._closing:
+            self.dropped += 1
+            return False
+        self.start()
+        try:
+            self.queue.put_nowait(job)
+        except asyncio.QueueFull:
+            self.dropped += 1
+            return False
+        return True
+
     async def _worker(self) -> None:
         while True:
             job = await self.queue.get()
@@ -527,7 +587,10 @@ class PostTurnExtractionRuntime:
                     return
                 for attempt in range(self.max_retries + 1):
                     try:
-                        await propose_turn_memories(job.store, self.backend, job.user_text, job.assistant_text, job.metadata)
+                        if isinstance(job, OutcomeConfirmationJob):
+                            await job.run(self.backend)
+                        else:
+                            await propose_turn_memories(job.store, self.backend, job.user_text, job.assistant_text, job.metadata)
                         break
                     except Exception:
                         if attempt >= self.max_retries:

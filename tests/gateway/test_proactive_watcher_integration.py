@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.run import GatewayRunner, TrustedContactScope, _record_proactive_arrival, _record_proactive_inbound
+from gateway.run import (
+    GatewayRunner, TrustedContactScope, _bounded_serious_register,
+    _record_proactive_arrival, _record_proactive_inbound,
+)
 from gateway.config import Platform
 
 
@@ -104,6 +107,119 @@ def _proactive_config(mode="observe"):
             {"profile":"poke","contact_id":"kosta-owner","principal":"owner"},
             {"profile":"guest","contact_id":"stephen-lucier","principal":"guest"},
         ],"alarm_sink":{"configured":True,"type":"hermes_cron","target":"telegram:operator"}}}}
+
+
+@pytest.mark.asyncio
+async def test_serious_register_store_failure_is_shielded_and_current_turn_fallback_survives(tmp_path):
+    class BrokenStore:
+        async def load_recent_user_turns(self, session_id, *, limit):
+            assert session_id == "session" and limit == 3
+            raise OSError("store unavailable")
+
+    serious_register = await _bounded_serious_register(
+        BrokenStore(), "session", "my dog died"
+    )
+    assert serious_register is False
+    home = tmp_path / "profiles" / "poke"
+    raw = _proactive_config()
+    source = SimpleNamespace(
+        chat_type="dm", platform=SimpleNamespace(value="bluebubbles"),
+        chat_id="dm", user_id="owner",
+    )
+    scope = TrustedContactScope("owner", "kosta-owner")
+    sequence = await _record_proactive_arrival(
+        config_raw=raw, trusted_scope=scope, profile_home=home, source=source,
+        source_id="serious", received_at=100,
+    )
+    result = await _record_proactive_inbound(
+        config_raw=raw, trusted_scope=scope, profile_home=home, profile="poke",
+        source=source, session_id="session", source_id="serious", text="my dog died",
+        received_at=100, arrival_sequence=sequence, serious_register=serious_register,
+    )
+    assert result["inserted"] is True and result["serious"] is True
+
+
+@pytest.mark.asyncio
+async def test_production_inbound_queues_pinned_confirmation_and_projects_once(monkeypatch, tmp_path):
+    from gateway.contact_memory.schema import (
+        GateDecision, Interest, InterestState, InterestValence,
+        ProactiveSend, ProactiveSendKind,
+    )
+    from gateway.contact_memory.store import ContactMemoryStore
+    from gateway.proactive_scheduler import ContactRoute, ProactiveConfig, ProactiveScheduler
+
+    home = tmp_path / "profiles" / "poke"
+    raw = _proactive_config()
+    raw["agent"]["contact_memory"] = {"extraction": True}
+    source = SimpleNamespace(
+        chat_type="dm", platform=SimpleNamespace(value="bluebubbles"),
+        chat_id="dm", user_id="owner",
+    )
+    scope = TrustedContactScope("owner", "kosta-owner")
+    cfg = ProactiveConfig.from_mapping(raw)
+    scheduler = ProactiveScheduler(
+        state_db_path=home / "state.db", profile_home=home,
+        profile_name="poke", config=cfg,
+    )
+    route = ContactRoute("kosta-owner", "poke", "UTC", "owner", "dm", "dm", "owner", "session")
+    scheduler.note_inbound(route, message_id="before", received_at=10)
+    store = ContactMemoryStore(home / "contact-memory", "kosta-owner")
+    store.put_interest(Interest(
+        interest_id="cars", topic="sports cars", parent_id=None,
+        raw_score=3, last_evidence_at=1, evidence_count=4,
+        valence=InterestValence.POSITIVE, half_life_days=90,
+        state=InterestState.ACTIVE, ts_alpha=2, ts_beta=1,
+        created_at=1, updated_at=1, retired_at=None,
+    ))
+    store.record_proactive_send(ProactiveSend(
+        send_id="prior", interest_id="cars", kind=ProactiveSendKind.INTEREST_SHARE,
+        candidate_json='{"topic":"sports cars"}', gate_decision=GateDecision.SENT,
+        gate_reason="passed", sent_at=20, outcome=None, outcome_at=None, created_at=20,
+    ))
+    with scheduler._connect() as con:
+        con.execute(
+            "INSERT INTO proactive_action VALUES(?,?,?,?,?,'sent',?,NULL,NULL,NULL,NULL,?,?,?)",
+            ("prior", None, route.contact_hash, "cars", "interest_share", 20, 1, "sent", 20),
+        )
+
+    queued = []
+    class Runtime:
+        def submit_outcome_confirmation(self, job):
+            queued.append(job)
+            return True
+    monkeypatch.setattr("gateway.contact_memory.runtime.get_extraction_runtime", lambda *a, **k: Runtime())
+    sequence = await _record_proactive_arrival(
+        config_raw=raw, trusted_scope=scope, profile_home=home, source=source,
+        source_id="reply", received_at=30,
+    )
+    result = await _record_proactive_inbound(
+        config_raw=raw, trusted_scope=scope, profile_home=home, profile="poke",
+        source=source, session_id="session", source_id="reply", text="nah stop",
+        received_at=30, arrival_sequence=sequence,
+    )
+    assert result["outcome_status"] == "provisional" and len(queued) == 1
+    from gateway.proactive_status import health_snapshot
+    stalled = health_snapshot(
+        profile_home=home, profile="poke", config=raw, now=4000,
+        adapter_ready=True, cron_fresh=True,
+    )
+    assert stalled["outcome_confirmation"]["provisional"] == 1
+    assert stalled["outcome_confirmation"]["oldest_provisional_age_seconds"] == 3970
+    assert "outcome_confirmation_stalled" in stalled["reasons"]
+
+    class Backend:
+        model_id = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+        calls = 0
+        async def confirm_outcome(self, text, provisional):
+            self.calls += 1
+            assert text == "nah stop" and provisional == "dismissed"
+            return {"outcome": "dismissed", "valence": "negative"}
+    backend = Backend()
+    await queued[0].run(backend)
+    await queued[0].run(backend)
+    assert backend.calls == 1
+    assert store.get_proactive_send("prior").outcome.value == "dismissed"
+    assert store.get_interest("cars").ts_beta == 2
 
 
 @pytest.mark.asyncio
