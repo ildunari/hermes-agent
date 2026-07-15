@@ -552,6 +552,7 @@ class CommunicationProjectionResult:
     inserted: bool
     deduplicated: bool
     retracted: bool = False
+    attempt_owned: bool = False
 
 
 # Deterministic fold weights (plan §"Signal weights"). These are the single
@@ -1002,6 +1003,7 @@ CREATE TABLE IF NOT EXISTS communication_url (
   sharer_role TEXT NOT NULL CHECK(sharer_role IN ('contact','counterpart','assistant')),
   enrichment_state TEXT NOT NULL CHECK(enrichment_state IN ('pending','reviewed','rejected','unavailable')),
   platform TEXT,
+  review_attempt_owner TEXT,
   UNIQUE(event_id, url_identity)
 );
 CREATE TABLE IF NOT EXISTS communication_attachment (
@@ -1109,6 +1111,7 @@ CREATE TABLE IF NOT EXISTS communication_projection_receipt (
   replay_sequence INTEGER NOT NULL,
   projected_at REAL NOT NULL,
   active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+  attempt_owner TEXT,
   PRIMARY KEY(communication_event_id,projector_version)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_communication_projection

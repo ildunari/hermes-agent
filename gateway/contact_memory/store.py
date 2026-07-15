@@ -264,6 +264,7 @@ class ContactMemoryStore:
                 self._upgrade_to_current(con)
                 return
             con.executescript(CONTACT_SCHEMA_SQL)
+            self._migrate_link_review_attempt_owner(con)
             con.execute(
                 "INSERT INTO schema_meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -291,6 +292,7 @@ class ContactMemoryStore:
             self._migrate_communication_reaction_subtype(con)
             self._migrate_projection_columns(con)
             self._execute_script(con, CONTACT_SCHEMA_SQL)
+            self._migrate_link_review_attempt_owner(con)
             if from_version == "7":
                 self._backfill_v7_interest_projection_baselines(con)
             con.execute(
@@ -314,6 +316,28 @@ class ContactMemoryStore:
                 statement = ""
         if statement.strip():
             raise ValueError("incomplete SQL statement")
+
+    @staticmethod
+    def _migrate_link_review_attempt_owner(con: sqlite3.Connection) -> None:
+        """Add live-worker CAS owners to databases already at schema v8."""
+        tables = {
+            str(row[0]) for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        url_columns = {
+            str(row[1]) for row in con.execute("PRAGMA table_info(communication_url)")
+        } if "communication_url" in tables else set()
+        if url_columns and "review_attempt_owner" not in url_columns:
+            con.execute("ALTER TABLE communication_url ADD COLUMN review_attempt_owner TEXT")
+        receipt_columns = {
+            str(row[1])
+            for row in con.execute("PRAGMA table_info(communication_projection_receipt)")
+        } if "communication_projection_receipt" in tables else set()
+        if receipt_columns and "attempt_owner" not in receipt_columns:
+            con.execute(
+                "ALTER TABLE communication_projection_receipt ADD COLUMN attempt_owner TEXT"
+            )
 
     @staticmethod
     def _migrate_v1_to_v2(con: sqlite3.Connection) -> None:
@@ -1489,7 +1513,9 @@ class ContactMemoryStore:
         con: sqlite3.Connection, bundle: CommunicationBundle
     ) -> None:
         for item in bundle.urls:
-            con.execute("INSERT INTO communication_url VALUES(?,?,?,?,?,?,?)", (
+            con.execute("INSERT INTO communication_url("
+                        "url_id,event_id,url_identity,domain,sharer_role,enrichment_state,platform"
+                        ") VALUES(?,?,?,?,?,?,?)", (
                 item.url_id, item.event_id, item.url_identity, item.domain,
                 item.sharer_role.value, item.enrichment_state.value, item.platform,
             ))
@@ -1641,7 +1667,35 @@ class ContactMemoryStore:
         except sqlite3.IntegrityError as exc:
             raise ValueError("communication child conflicts with stored evidence") from exc
 
-    def compensate_communication_url_review(self, event_id: str, url_id: str) -> bool:
+    def claim_communication_url_review(
+        self, event_id: str, url_id: str, *, attempt_owner: str,
+    ) -> bool:
+        """Apply or adopt a live review transition for one queue claim attempt."""
+        owner = str(attempt_owner)
+        if not re.fullmatch(r"[0-9a-f]{64}", owner):
+            raise ValueError("attempt_owner must be an opaque identity")
+        with self._immediate() as con:
+            return con.execute(
+                "UPDATE communication_url SET enrichment_state='reviewed',review_attempt_owner=? "
+                "WHERE event_id=? AND url_id=? AND (enrichment_state='pending' OR "
+                "(enrichment_state='reviewed' AND review_attempt_owner IS NOT NULL))",
+                (owner, str(event_id), str(url_id)),
+            ).rowcount == 1
+
+    def commit_communication_url_review(
+        self, event_id: str, url_id: str, *, attempt_owner: str,
+    ) -> bool:
+        """Make an attempt-owned review immune to every stale claimant."""
+        with self._immediate() as con:
+            return con.execute(
+                "UPDATE communication_url SET review_attempt_owner=NULL WHERE event_id=? AND url_id=? "
+                "AND enrichment_state='reviewed' AND review_attempt_owner=?",
+                (str(event_id), str(url_id), str(attempt_owner)),
+            ).rowcount == 1
+
+    def compensate_communication_url_review(
+        self, event_id: str, url_id: str, *, attempt_owner: str,
+    ) -> bool:
         """Restore a worker-owned REVIEWED transition after its claim goes stale.
 
         This narrow compare-and-set is the inverse of the live worker's
@@ -1649,9 +1703,10 @@ class ContactMemoryStore:
         """
         with self._immediate() as con:
             return con.execute(
-                "UPDATE communication_url SET enrichment_state='pending' "
-                "WHERE event_id=? AND url_id=? AND enrichment_state='reviewed'",
-                (str(event_id), str(url_id)),
+                "UPDATE communication_url SET enrichment_state='pending',review_attempt_owner=NULL "
+                "WHERE event_id=? AND url_id=? AND enrichment_state='reviewed' "
+                "AND review_attempt_owner=?",
+                (str(event_id), str(url_id), str(attempt_owner)),
             ).rowcount == 1
 
     def get_communication_event(self, event_id: str) -> CommunicationEvent | None:
@@ -2315,6 +2370,7 @@ class ContactMemoryStore:
         projector_version: str,
         replay_sequence: int,
         timestamp: float,
+        attempt_owner: str | None = None,
         allowed_share_topics: frozenset[tuple[str, str]] = frozenset(),
         allowed_share_entities: frozenset[tuple[str, str, str]] = frozenset(),
     ) -> CommunicationProjectionResult:
@@ -2341,10 +2397,19 @@ class ContactMemoryStore:
                 raise ValueError("projector version replay conflicts with its stored proposal")
             if not int(prior_same["active"]):
                 raise ValueError("cannot reactivate a superseded projector version")
+            adopted = False
+            if attempt_owner is not None:
+                adopted = con.execute(
+                    "UPDATE communication_projection_receipt SET attempt_owner=? "
+                    "WHERE communication_event_id=? AND projector_version=? "
+                    "AND attempt_owner IS NOT NULL",
+                    (attempt_owner, bundle.event.event_id, projector_version),
+                ).rowcount == 1
             return CommunicationProjectionResult(
                 event_id=bundle.event.event_id, projector_version=projector_version,
                 identities=identities, inserted=False, deduplicated=True,
                 retracted=bundle.event.lifecycle is CommunicationLifecycle.RETRACTED,
+                attempt_owned=adopted,
             )
 
         prior_topics = {
@@ -2445,14 +2510,17 @@ class ContactMemoryStore:
             con, affected_recommendations, timestamp=timestamp,
         )
         con.execute(
-            "INSERT INTO communication_projection_receipt VALUES(?,?,?,?,?,?,1)",
+            "INSERT INTO communication_projection_receipt(communication_event_id,"
+            "projector_version,proposal_hash,projection_count,replay_sequence,projected_at,"
+            "active,attempt_owner) VALUES(?,?,?,?,?,?,1,?)",
             (bundle.event.event_id, projector_version, proposal_hash, len(items),
-             replay_sequence, timestamp),
+             replay_sequence, timestamp, attempt_owner),
         )
         return CommunicationProjectionResult(
             event_id=bundle.event.event_id, projector_version=projector_version,
             identities=identities, inserted=True, deduplicated=False,
             retracted=bundle.event.lifecycle is CommunicationLifecycle.RETRACTED,
+            attempt_owned=attempt_owner is not None,
         )
 
     def project_communication_events(
@@ -2460,6 +2528,7 @@ class ContactMemoryStore:
         projections: Sequence[tuple[str, CommunicationProjection]],
         *,
         projector_version: str,
+        attempt_owner: str | None = None,
         now: float | None = None,
     ) -> list[CommunicationProjectionResult]:
         """Project complete canonical bundles in deterministic replay order atomically."""
@@ -2546,6 +2615,7 @@ class ContactMemoryStore:
                     self._project_communication_event_in(
                         con, bundle, projection, projector_version=version,
                         replay_sequence=index, timestamp=timestamp,
+                        attempt_owner=attempt_owner,
                         allowed_share_topics=admitted_share_topics,
                         allowed_share_entities=admitted_share_entities,
                     )
@@ -2586,7 +2656,8 @@ class ContactMemoryStore:
             ).fetchone()[0])
 
     def deactivate_projector_event(
-        self, event_id: str, *, projector_version: str, now: float | None = None,
+        self, event_id: str, *, projector_version: str,
+        attempt_owner: str | None = None, now: float | None = None,
     ) -> bool:
         """Deactivate one projector's output without retracting unrelated evidence."""
         version = self._projection_version(projector_version)
@@ -2599,6 +2670,14 @@ class ContactMemoryStore:
             ).fetchone()
             if receipt is None or not int(receipt["active"]):
                 return False
+            if attempt_owner is not None:
+                owned = con.execute(
+                    "SELECT 1 FROM communication_projection_receipt WHERE "
+                    "communication_event_id=? AND projector_version=? AND attempt_owner=?",
+                    (str(event_id), version, str(attempt_owner)),
+                ).fetchone()
+                if owned is None:
+                    return False
             affected_topics = {
                 str(row[0]) for row in con.execute(
                     "SELECT topic_text FROM interest_event WHERE origin_communication_event_id=? "
@@ -2619,6 +2698,14 @@ class ContactMemoryStore:
             )
             self._recompute_projected_interest_topics_in(con, affected_topics, timestamp=timestamp)
             return True
+
+    def commit_projection_attempt(self, *, attempt_owner: str) -> int:
+        """Commit every active receipt still owned by this queue claim."""
+        with self._immediate() as con:
+            return con.execute(
+                "UPDATE communication_projection_receipt SET attempt_owner=NULL "
+                "WHERE attempt_owner=? AND active=1", (str(attempt_owner),),
+            ).rowcount
 
     def deactivate_projector_event_family(
         self, event_id: str, *, projector_prefix: str, now: float | None = None,

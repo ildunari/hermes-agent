@@ -473,3 +473,62 @@ def test_stale_third_completion_preserves_prior_recurrent_projections(
                 "SELECT communication_event_id FROM communication_projection_receipt WHERE active=1"
             )
         } == set(prior_event_ids)
+
+
+def test_successor_commit_survives_stale_attempt_compensation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """old projects -> successor completes -> old compensates must preserve successor."""
+    root = tmp_path / "contact-memory"
+    persist_live_communication_ingress(
+        root=root, contact_id="stephen-lucier", principal="guest",
+        envelopes=(_envelope("successor-race-1"),), secret=_SECRET,
+        enqueue_link_research=True,
+    )
+    assert process_one_link_job(
+        root=root, contact_id="stephen-lucier", provider=_FakeProvider(), now=1.0,
+    )["status"] == "ok"
+    second = persist_live_communication_ingress(
+        root=root, contact_id="stephen-lucier", principal="guest",
+        envelopes=(_envelope("successor-race-2"),), secret=_SECRET,
+        enqueue_link_research=True,
+    )
+
+    original_complete = PrivateLinkResearchQueue.complete
+    successor_results: list[dict[str, object]] = []
+    running_successor = False
+
+    def complete_after_successor(self, job_id, claim_token, **kwargs):
+        nonlocal running_successor
+        if running_successor:
+            return original_complete(self, job_id, claim_token, **kwargs)
+        with sqlite3.connect(self.path) as con:
+            con.execute(
+                "UPDATE link_job SET claim_until=0 WHERE job_id=? AND claim_token=?",
+                (job_id, claim_token),
+            )
+        running_successor = True
+        try:
+            successor_results.append(process_one_link_job(
+                root=root, contact_id="stephen-lucier", provider=_FakeProvider(), now=1000.0,
+            ))
+        finally:
+            running_successor = False
+        raise ValueError("claim token is stale or does not own the job")
+
+    monkeypatch.setattr(PrivateLinkResearchQueue, "complete", complete_after_successor)
+    assert process_one_link_job(
+        root=root, contact_id="stephen-lucier", provider=_FakeProvider(), now=2.0,
+    )["status"] == "stale_claim"
+    assert successor_results == [{"processed": True, "status": "ok", "projected_events": 2}]
+
+    store = ContactMemoryStore(root, "stephen-lucier")
+    bundle = store.get_communication_bundle(second.event_ids[0])
+    assert bundle is not None
+    assert bundle.urls[0].enrichment_state is CommunicationEnrichmentState.REVIEWED
+    assert len(_projected_topics(store)) == 2
+    with sqlite3.connect(store.path) as con:
+        assert con.execute(
+            "SELECT count(*) FROM communication_projection_receipt "
+            "WHERE active=1 AND attempt_owner IS NULL"
+        ).fetchone()[0] == 2
