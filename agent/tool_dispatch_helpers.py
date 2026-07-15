@@ -173,8 +173,8 @@ def _plan_tool_execution_groups(tool_calls) -> tuple[tuple[int, ...], ...]:
     """Plan ordered maximal safe groups for raw model tool calls.
 
     Malformed arguments are conservative singleton barriers. The executor
-    replans from middleware-adjusted effective calls after its single outer
-    preflight, so argument rewriting cannot create an unsafe concurrent group.
+    lazily replans each dispatch group from middleware-adjusted effective calls,
+    so argument rewriting cannot create an unsafe concurrent group.
     """
     specs: list[tuple[str, dict]] = []
     malformed_indices: set[int] = set()

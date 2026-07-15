@@ -15,6 +15,7 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 import time
 from collections import Counter, defaultdict
 from contextlib import closing
@@ -593,27 +594,31 @@ def _reject_db_output_alias(db_path: Path, output_path: Path | None) -> None:
 
 
 def _write_json_safely(output_path: Path, db_path: Path, payload: str) -> None:
-    """Write only after comparing the opened output inode with the DB inode.
-
-    The second identity check closes the ordinary check/write race: the output
-    is opened without truncation, compared by device/inode, and only then
-    truncated. Thus a symlink or hardlink swapped in after argument validation
-    still cannot overwrite the selected DB.
-    """
+    """Atomically replace output without ever opening a DB alias for writing."""
     output = output_path.expanduser()
-    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT, 0o666)
+    _reject_db_output_alias(db_path, output)
+    seed_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output.name}.", suffix=".tmp", dir=output.parent,
+    )
+    os.close(seed_descriptor)
+    temporary = Path(temporary_name)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_TRUNC)
     try:
-        db_stat = db_path.expanduser().stat()
-        output_stat = os.fstat(descriptor)
-        if (db_stat.st_dev, db_stat.st_ino) == (output_stat.st_dev, output_stat.st_ino):
-            raise ValueError("--json-output must not be the selected state DB or an alias of it")
-        os.ftruncate(descriptor, 0)
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             descriptor = -1
             stream.write(payload)
+        # Recheck immediately before replacement. If output was raced to a DB
+        # alias, fail closed; replacing it would not corrupt the DB, but should
+        # still honor the CLI's alias rejection contract.
+        _reject_db_output_alias(db_path, output)
+        os.replace(temporary, output)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def build_parser() -> argparse.ArgumentParser:

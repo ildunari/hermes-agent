@@ -37,6 +37,7 @@ from agent.tool_dispatch_helpers import (
     _is_multimodal_tool_result,
     _multimodal_text_summary,
     _append_subdir_hint_to_multimodal,
+    _parallel_safety_for_tool,
     _plan_tool_execution_groups_for_specs,
     make_tool_result_message,
 )
@@ -550,14 +551,14 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     started_indices: set[int] = set()
     observed_indices: set[int] = set()
 
-    def _preflight_group(group: list[int]) -> list[int]:
-        """Run side-effecting preflight only for the group being dispatched."""
-        runnable: list[int] = []
-        for i in group:
-            tc, name, args, _, block_result, _ = parsed_calls[i]
-            if block_result is not None:
-                continue
+    middleware_preflighted: set[int] = set()
 
+    def _apply_middleware(i: int) -> None:
+        """Resolve effective arguments once, immediately before group planning."""
+        if i in middleware_preflighted:
+            return
+        tc, name, args, middleware_trace, block_result, blocked_by_guardrail = parsed_calls[i]
+        if block_result is None:
             args, middleware_trace = _apply_tool_request_middleware_for_agent(
                 agent,
                 function_name=name,
@@ -565,6 +566,51 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 effective_task_id=effective_task_id,
                 tool_call_id=getattr(tc, "id", "") or "",
             )
+            parsed_calls[i] = (
+                tc, name, args, middleware_trace, block_result, blocked_by_guardrail,
+            )
+        middleware_preflighted.add(i)
+
+    def _effective_groups(group: tuple[int, ...]):
+        """Lazily split a raw group using middleware-adjusted arguments.
+
+        Laziness matters here: middleware is invoked only far enough ahead to
+        determine the next dispatch group.  A call that causes a boundary is
+        retained with its effective arguments, so it is neither invoked twice
+        nor subjected to policy checks before the preceding results have been
+        observed.
+        """
+        current: list[int] = []
+        for i in group:
+            _apply_middleware(i)
+            candidate = current + [i]
+            candidate_plan = _plan_tool_execution_groups_for_specs(
+                [(parsed_calls[j][1], parsed_calls[j][2]) for j in candidate]
+            )
+            if current and len(candidate_plan) > 1:
+                yield current
+                current = [i]
+            else:
+                current = candidate
+            # An unsafe effective call is a singleton barrier. Yield it now so
+            # middleware and policy for later calls remain dispatch-fresh.
+            if len(current) == 1:
+                call_name, call_args = parsed_calls[current[0]][1:3]
+                safe, _ = _parallel_safety_for_tool(call_name, call_args)
+                if not safe:
+                    yield current
+                    current = []
+        if current:
+            yield current
+
+    def _preflight_group(group: list[int]) -> list[int]:
+        """Run policy and guardrail preflight only for the group being dispatched."""
+        runnable: list[int] = []
+        for i in group:
+            tc, name, args, _, block_result, _ = parsed_calls[i]
+            if block_result is not None:
+                continue
+            middleware_trace = parsed_calls[i][3]
             block_message = None
             block_error_type = "plugin_block"
             if i in tool_scope_blocks:
@@ -801,34 +847,36 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             executor.shutdown(wait=not abandon_executor, cancel_futures=abandon_executor)
 
     try:
-        for group_position, group in enumerate(execution_plan):
+        dispatched_group_count = 0
+        stop_dispatch = False
+        for group in execution_plan:
             if agent._interrupt_requested:
                 break
-            runnable_indices = _preflight_group(group)
-            if len(runnable_indices) > 1:
-                _run_parallel_group(runnable_indices)
-            elif runnable_indices:
-                i = runnable_indices[0]
-                tc, name, args, middleware_trace, _, _ = parsed_calls[i]
-                _emit_started(i)
-                _run_tool(i, tc, name, args, middleware_trace)
-            _observe_finished(runnable_indices)
-            # A timed-out group may still have detached workers. Do not start
-            # later operations while those effects are unknown/in flight.
-            if timed_out_indices or agent._interrupt_requested:
-                not_started_indices.update(
-                    index
-                    for remaining_group in execution_plan[group_position + 1:]
-                    for index in remaining_group
-                    if parsed_calls[index][4] is None
-                )
+            for effective_group in _effective_groups(group):
+                if dispatched_group_count and agent.tool_delay > 0:
+                    time.sleep(agent.tool_delay)
+                runnable_indices = _preflight_group(effective_group)
+                if len(runnable_indices) > 1:
+                    _run_parallel_group(runnable_indices)
+                elif runnable_indices:
+                    i = runnable_indices[0]
+                    tc, name, args, middleware_trace, _, _ = parsed_calls[i]
+                    _emit_started(i)
+                    _run_tool(i, tc, name, args, middleware_trace)
+                _observe_finished(runnable_indices)
+                dispatched_group_count += 1
+                # A timed-out group may still have detached workers. Do not
+                # start later operations while those effects are unknown.
+                if timed_out_indices or agent._interrupt_requested:
+                    stop_dispatch = True
+                    break
+            if stop_dispatch:
                 break
-            if (
-                agent.tool_delay > 0
-                and group_position < len(execution_plan) - 1
-                and not agent._interrupt_requested
-            ):
-                time.sleep(agent.tool_delay)
+        if timed_out_indices or agent._interrupt_requested:
+            not_started_indices.update(
+                i for i, result in enumerate(results)
+                if result is None and i not in started_indices
+            )
     finally:
         if spinner:
             # Build a summary message for the spinner stop

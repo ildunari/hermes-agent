@@ -245,6 +245,23 @@ def test_cli_emits_json_without_message_content(tmp_path: Path, capsys) -> None:
     assert "TOP-SECRET-PROMPT" not in serialized
 
 
+def test_cli_overwrites_longer_json_output_without_trailing_bytes(
+    tmp_path: Path, capsys,
+) -> None:
+    db_path = _state_db(tmp_path)
+    output = tmp_path / "audit.json"
+    output.write_text('{"obsolete": "' + ("x" * 4096) + '"}', encoding="utf-8")
+
+    assert main(["--db", str(db_path), "--json-output", str(output)]) == 0
+
+    serialized = output.read_text(encoding="utf-8")
+    payload = json.loads(serialized)
+    assert payload["summary"]["unique_tool_call_count"] == 3
+    assert "obsolete" not in serialized
+    assert len(serialized) < 4096
+    capsys.readouterr()
+
+
 @pytest.mark.parametrize("alias_kind", ["same", "symlink", "hardlink"])
 def test_cli_rejects_db_output_aliases_without_modifying_db(
     tmp_path: Path, capsys, alias_kind: str

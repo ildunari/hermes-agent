@@ -3502,6 +3502,79 @@ class TestConcurrentToolExecution:
         assert observations == ["web_search", "web_search", "todo"]
         assert [message["tool_call_id"] for message in messages] == ["c1", "c2", "c3"]
 
+    @pytest.mark.parametrize(
+        ("tool_name", "first_args", "second_args", "effective_args"),
+        [
+            (
+                "write_file",
+                {"path": "one.txt", "content": "one"},
+                {"path": "two.txt", "content": "two"},
+                {"path": "shared.txt", "content": "rewritten"},
+            ),
+            (
+                "process",
+                {"action": "list", "marker": "one"},
+                {"action": "list", "marker": "two"},
+                {"action": "kill", "session_id": "rewritten"},
+            ),
+        ],
+    )
+    def test_middleware_unsafe_rewrites_are_replanned_once_and_serialized(
+        self, agent, monkeypatch, tool_name, first_args, second_args, effective_args,
+    ):
+        """Effective conflicts split dispatch without replaying middleware hooks."""
+        from agent.tool_guardrails import ToolGuardrailDecision
+
+        calls = [
+            _mock_tool_call(
+                name=tool_name, arguments=json.dumps(first_args), call_id="c1",
+            ),
+            _mock_tool_call(
+                name=tool_name, arguments=json.dumps(second_args), call_id="c2",
+            ),
+        ]
+        messages = []
+        observations = []
+        policy_snapshots = []
+        guardrail_snapshots = []
+        middleware_calls = []
+
+        def rewrite(agent, function_name, function_args, **kwargs):
+            middleware_calls.append(kwargs["tool_call_id"])
+            return dict(effective_args), [{"source": "test", "reason": "rewrite"}]
+
+        def policy(name, args, **kwargs):
+            policy_snapshots.append((kwargs["tool_call_id"], len(observations)))
+            return None
+
+        def before_call(name, args):
+            guardrail_snapshots.append(len(observations))
+            return ToolGuardrailDecision()
+
+        def observe(name, args, result, failed=False):
+            observations.append((name, dict(args)))
+            return result
+
+        monkeypatch.setattr(
+            "agent.tool_executor._apply_tool_request_middleware_for_agent", rewrite,
+        )
+        monkeypatch.setattr("hermes_cli.plugins.resolve_pre_tool_block", policy)
+        agent._tool_guardrails.before_call = MagicMock(side_effect=before_call)
+        agent._append_guardrail_observation = MagicMock(side_effect=observe)
+
+        with patch("run_agent.handle_function_call", return_value="ok") as invoke:
+            agent._execute_tool_calls_concurrent(
+                _mock_assistant_msg(content="", tool_calls=calls), messages, "task-1",
+            )
+
+        assert middleware_calls == ["c1", "c2"]
+        assert policy_snapshots == [("c1", 0), ("c2", 1)]
+        assert guardrail_snapshots == [0, 1]
+        assert len(observations) == 2
+        assert invoke.call_count == 2
+        assert all(call.args[1] == effective_args for call in invoke.call_args_list)
+        assert [message["tool_call_id"] for message in messages] == ["c1", "c2"]
+
     def test_group_timeout_does_not_start_later_serial_operation(self, agent, monkeypatch):
         monkeypatch.setenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "0.05")
         blocker = threading.Event()
