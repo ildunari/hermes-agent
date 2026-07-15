@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import ast
+import inspect
 from pathlib import Path
 import sqlite3
+import textwrap
 import time
 from typing import Any, cast
 
@@ -36,6 +39,27 @@ from gateway.contact_memory.schema import (
     SCHEMA_VERSION,
 )
 from gateway.contact_memory.store import ContactMemoryStore
+
+
+def test_gateway_forwards_canonical_event_ids_to_post_turn_extraction() -> None:
+    """Pin the outer-ingress IDs across the inner agent-handler boundary."""
+    from gateway.run import GatewayRunner
+
+    signature = inspect.signature(GatewayRunner._handle_message_with_agent)
+    assert signature.parameters["canonical_event_ids"].default == ()
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(GatewayRunner._handle_message)))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_handle_message_with_agent"
+    ]
+    assert len(calls) == 1
+    forwarded = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+    value = forwarded["canonical_event_ids"]
+    assert isinstance(value, ast.Name) and value.id == "canonical_event_ids"
 
 
 def raw_fact(**overrides):

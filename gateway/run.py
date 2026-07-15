@@ -11927,6 +11927,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _run_generation,
                 trusted_contact_scope=trusted_contact_scope,
                 proactive_arrival=proactive_arrival,
+                canonical_event_ids=canonical_event_ids,
             )
             # Goal continuation: after the agent returns a final response
             # for this turn, check any standing /goal — the judge will
@@ -12429,6 +12430,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         *,
         trusted_contact_scope: Optional[TrustedContactScope] = None,
         proactive_arrival: Optional[ProactiveInboundArrival] = None,
+        canonical_event_ids: tuple[str, ...] = (),
     ):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
