@@ -25,6 +25,7 @@ import type { DesktopTheme } from '@/themes/types'
 import { $marketplaceInstalls, isUserTheme, removeUserTheme } from '@/themes/user-themes'
 
 import { MODE_OPTIONS } from './constants'
+import { LocalEnhancementsSection } from './local-enhancements-section'
 import { PetSettings } from './pet-settings'
 import { ListRow, SectionHeading, SettingsContent } from './primitives'
 
@@ -442,38 +443,6 @@ export function AppearanceSettings() {
 
           <ListRow
             action={
-              <SegmentedControl
-                ariaLabel={a.chatWidthTitle}
-                onChange={id => {
-                  triggerHaptic('selection')
-                  setChatWidth(id)
-                }}
-                options={chatWidthOptions}
-                value={chatWidth}
-              />
-            }
-            description={a.chatWidthDesc}
-            title={a.chatWidthTitle}
-          />
-
-          <ListRow
-            action={
-              <SegmentedControl
-                ariaLabel={a.tableLayoutTitle}
-                onChange={id => {
-                  triggerHaptic('selection')
-                  setTableLayout(id)
-                }}
-                options={tableLayoutOptions}
-                value={tableLayout}
-              />
-            }
-            description={a.tableLayoutDesc}
-            title={a.tableLayoutTitle}
-          />
-
-          <ListRow
-            action={
               <div className="flex items-center gap-3">
                 <input
                   aria-label={a.translucencyTitle}
@@ -543,6 +512,40 @@ export function AppearanceSettings() {
           />
         </div>
       </div>
+
+      <LocalEnhancementsSection>
+        <ListRow
+          action={
+            <SegmentedControl
+              ariaLabel={a.chatWidthTitle}
+              onChange={id => {
+                triggerHaptic('selection')
+                setChatWidth(id)
+              }}
+              options={chatWidthOptions}
+              value={chatWidth}
+            />
+          }
+          description={a.chatWidthDesc}
+          title={a.chatWidthTitle}
+        />
+
+        <ListRow
+          action={
+            <SegmentedControl
+              ariaLabel={a.tableLayoutTitle}
+              onChange={id => {
+                triggerHaptic('selection')
+                setTableLayout(id)
+              }}
+              options={tableLayoutOptions}
+              value={tableLayout}
+            />
+          }
+          description={a.tableLayoutDesc}
+          title={a.tableLayoutTitle}
+        />
+      </LocalEnhancementsSection>
 
       <div className="mt-6">
         <PetSettings />
