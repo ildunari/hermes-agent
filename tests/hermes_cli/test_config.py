@@ -1793,6 +1793,53 @@ class TestDelegationCapUnificationMigration:
         assert delegation["max_iterations"] == 150
 
 
+class TestCompressionSummaryCleanupMigration:
+    """v33 → v34 removes v17 leftovers without overwriting canonical values."""
+
+    def _migrate(self, tmp_path, config):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+        return yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    def test_removes_orphaned_summary_keys_from_profile_already_past_v17(self, tmp_path):
+        raw = self._migrate(tmp_path, {
+            "_config_version": 33,
+            "compression": {
+                "threshold": 0.72,
+                "summary_model": "legacy-model",
+                "summary_provider": "legacy-provider",
+                "summary_base_url": "https://legacy.example/v1",
+            },
+            "auxiliary": {
+                "compression": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro",
+                    "base_url": "https://api.deepseek.com/v1",
+                }
+            },
+        })
+
+        assert raw["compression"] == {"threshold": 0.72}
+        assert raw["auxiliary"]["compression"] == {
+            "provider": "deepseek",
+            "model": "deepseek-v4-pro",
+            "base_url": "https://api.deepseek.com/v1",
+        }
+        assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+
+    def test_cleanup_is_idempotent(self, tmp_path):
+        first = self._migrate(tmp_path, {
+            "_config_version": 33,
+            "compression": {"summary_model": "orphan"},
+            "auxiliary": {"compression": {"model": "canonical"}},
+        })
+        second = self._migrate(tmp_path, first)
+
+        assert second == first
+
+
 class TestConfigNormalizationDoesNotOverwriteUserValues:
     """Regression tests for #27354."""
 

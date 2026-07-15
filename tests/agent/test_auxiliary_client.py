@@ -3396,6 +3396,106 @@ class TestAuxiliaryTaskExtraBody:
         assert not any("OPENAI_BASE_URL is set" in rec.message for rec in caplog.records), \
             "Should NOT warn when OPENAI_BASE_URL is not set"
 
+
+class TestAuxiliaryProviderAwareReasoning:
+    def test_deepseek_v4_task_config_uses_profile_reasoning_shape(self):
+        client = MagicMock()
+        client.base_url = "https://api.deepseek.com/v1"
+        client.chat.completions.create.return_value = _DummyResponse("ok")
+        task_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-pro",
+            "reasoning_effort": "high",
+            # Unsupported/dead by design: auxiliary routing never reads this.
+            "context_length": 1,
+        }
+        with (
+            patch("agent.auxiliary_client._get_auxiliary_task_config", return_value=task_config),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(client, "deepseek-v4-pro")),
+        ):
+            call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        kwargs = client.chat.completions.create.call_args.kwargs
+        assert kwargs["reasoning_effort"] == "high"
+        assert kwargs["extra_body"]["thinking"] == {"type": "enabled"}
+
+    def test_auto_route_infers_profile_from_selected_endpoint(self):
+        kwargs = _build_call_kwargs(
+            provider="auto",
+            model="deepseek-v4-pro",
+            messages=[{"role": "user", "content": "hello"}],
+            base_url="https://api.deepseek.com/v1",
+            reasoning_config={"enabled": True, "effort": "high"},
+        )
+
+        assert kwargs["reasoning_effort"] == "high"
+        assert kwargs["extra_body"]["thinking"] == {"type": "enabled"}
+
+    def test_xai_responses_keeps_reasoning_for_codex_adapter(self):
+        kwargs = _build_call_kwargs(
+            provider="xai",
+            model="grok-4.5",
+            messages=[{"role": "user", "content": "hello"}],
+            reasoning_config={"enabled": True, "effort": "medium"},
+        )
+        adapter, captured = TestCodexAdapterReasoningTranslation._build_adapter()
+
+        adapter.create(**kwargs)
+
+        assert captured["reasoning"] == {"effort": "medium", "summary": "auto"}
+        assert captured["include"] == ["reasoning.encrypted_content"]
+        assert "reasoning_effort" not in kwargs
+
+    def test_configured_fallback_drops_primary_task_extra_body_but_retargets_reasoning(self):
+        class _PaymentError(Exception):
+            status_code = 402
+
+        primary = MagicMock()
+        primary.base_url = "https://api.deepseek.com/v1"
+        primary.chat.completions.create.side_effect = _PaymentError("insufficient credits")
+
+        fallback = MagicMock()
+        fallback.base_url = "https://api.x.ai/v1"
+        fallback.chat.completions.create.return_value = _DummyResponse("fallback-ok")
+
+        task_config = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-pro",
+            "reasoning_effort": "medium",
+            "extra_body": {
+                "deepseek_only": True,
+                "thinking": {"type": "enabled"},
+            },
+        }
+        with (
+            patch("agent.auxiliary_client._get_auxiliary_task_config", return_value=task_config),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(primary, "deepseek-v4-pro")),
+            patch(
+                "agent.auxiliary_client._try_configured_fallback_chain",
+                return_value=(fallback, "grok-4.5", "fallback_chain[0](xai)"),
+            ),
+            patch("agent.auxiliary_client._try_main_agent_model_fallback", return_value=(None, None, "")),
+        ):
+            response = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "summarize"}],
+            )
+
+        assert response.choices[0].message.content == "fallback-ok"
+        primary_kwargs = primary.chat.completions.create.call_args.kwargs
+        assert primary_kwargs["extra_body"]["deepseek_only"] is True
+        assert primary_kwargs["reasoning_effort"] == "medium"
+
+        fallback_kwargs = fallback.chat.completions.create.call_args.kwargs
+        assert fallback_kwargs["extra_body"] == {
+            "reasoning": {"enabled": True, "effort": "medium"}
+        }
+        assert "reasoning_effort" not in fallback_kwargs
+
+
 # ---------------------------------------------------------------------------
 # Anthropic-compatible image block conversion
 # ---------------------------------------------------------------------------

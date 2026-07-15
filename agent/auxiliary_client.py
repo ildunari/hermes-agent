@@ -3479,6 +3479,7 @@ def _retry_same_provider_sync(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    reasoning_config: Optional[Dict[str, Any]] = None,
     request_overrides: Optional[Dict[str, Any]] = None,
 ) -> Any:
     if task == "vision":
@@ -3513,6 +3514,7 @@ def _retry_same_provider_sync(
         tools=tools,
         timeout=effective_timeout,
         extra_body=effective_extra_body,
+        reasoning_config=reasoning_config,
         request_overrides=request_overrides,
         base_url=retry_base or resolved_base_url,
     )
@@ -3538,6 +3540,7 @@ async def _retry_same_provider_async(
     tools: Optional[list],
     effective_timeout: float,
     effective_extra_body: dict,
+    reasoning_config: Optional[Dict[str, Any]] = None,
     request_overrides: Optional[Dict[str, Any]] = None,
 ) -> Any:
     if task == "vision":
@@ -3572,6 +3575,7 @@ async def _retry_same_provider_async(
         tools=tools,
         timeout=effective_timeout,
         extra_body=effective_extra_body,
+        reasoning_config=reasoning_config,
         request_overrides=request_overrides,
         base_url=retry_base or resolved_base_url,
     )
@@ -3691,7 +3695,8 @@ def _call_fallback_candidate_sync(
     max_tokens: Optional[int],
     tools: Optional[list],
     effective_timeout: float,
-    effective_extra_body: dict,
+    fallback_extra_body: dict,
+    reasoning_config: Optional[Dict[str, Any]] = None,
     request_overrides: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """Call one fallback candidate with stale-credential recovery.
@@ -3714,7 +3719,8 @@ def _call_fallback_candidate_sync(
         fb_label, fb_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout,
-        extra_body=effective_extra_body,
+        extra_body=fallback_extra_body,
+        reasoning_config=reasoning_config,
         request_overrides=request_overrides,
         base_url=fb_base)
     try:
@@ -3731,7 +3737,8 @@ def _call_fallback_candidate_sync(
                     fb_provider, retry_model or fb_model, messages,
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, timeout=effective_timeout,
-                    extra_body=effective_extra_body,
+                    extra_body=fallback_extra_body,
+                    reasoning_config=reasoning_config,
                     request_overrides=_retarget_request_overrides_for_model(request_overrides, retry_model or fb_model),
                     base_url=str(getattr(retry_client, "base_url", "") or fb_base))
                 try:
@@ -3764,7 +3771,8 @@ async def _call_fallback_candidate_async(
     max_tokens: Optional[int],
     tools: Optional[list],
     effective_timeout: float,
-    effective_extra_body: dict,
+    fallback_extra_body: dict,
+    reasoning_config: Optional[Dict[str, Any]] = None,
     request_overrides: Optional[Dict[str, Any]] = None,
 ) -> Optional[Any]:
     """Async mirror of :func:`_call_fallback_candidate_sync`."""
@@ -3773,7 +3781,8 @@ async def _call_fallback_candidate_async(
         fb_label, fb_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout,
-        extra_body=effective_extra_body,
+        extra_body=fallback_extra_body,
+        reasoning_config=reasoning_config,
         request_overrides=request_overrides,
         base_url=fb_base)
     try:
@@ -3791,7 +3800,8 @@ async def _call_fallback_candidate_async(
                     fb_provider, retry_model or fb_model, messages,
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, timeout=effective_timeout,
-                    extra_body=effective_extra_body,
+                    extra_body=fallback_extra_body,
+                    reasoning_config=reasoning_config,
                     request_overrides=_retarget_request_overrides_for_model(request_overrides, retry_model or fb_model),
                     base_url=str(getattr(retry_client, "base_url", "") or fb_base))
                 try:
@@ -6320,6 +6330,17 @@ def _get_task_extra_body(task: str) -> Dict[str, Any]:
     return {}
 
 
+def _get_task_reasoning_config(task: str) -> Optional[Dict[str, Any]]:
+    """Parse ``auxiliary.<task>.reasoning_effort`` using the shared schema."""
+    if not task:
+        return None
+    from hermes_constants import parse_reasoning_effort
+
+    return parse_reasoning_effort(
+        _get_auxiliary_task_config(task).get("reasoning_effort")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Anthropic-compatible endpoint detection + image block conversion
 # ---------------------------------------------------------------------------
@@ -6483,6 +6504,34 @@ def _normalize_vibeproxy_claude_extra_body(
     return cleaned
 
 
+def _provider_profile_for_aux_route(
+    provider: str | None,
+    base_url: str | None = None,
+):
+    """Resolve the existing provider profile for a concrete or labelled route."""
+    route = str(provider or "").strip()
+    if route.endswith(")") and "(" in route:
+        route = route.rsplit("(", 1)[1][:-1].strip()
+    route = _normalize_aux_provider(route)
+    try:
+        from providers import get_provider_profile, list_providers
+
+        profile = get_provider_profile(route)
+        if profile is not None:
+            return profile
+        # ``provider=auto`` keeps its sentinel after resolution. Infer the
+        # concrete profile from the selected endpoint's own declarative
+        # hostname instead of duplicating a provider capability/host table.
+        host = base_url_hostname(str(base_url or ""))
+        if host:
+            for candidate in list_providers():
+                if candidate.get_hostname().lower() == host.lower():
+                    return candidate
+    except Exception:
+        pass
+    return None
+
+
 def _build_call_kwargs(
     provider: str,
     model: str,
@@ -6494,6 +6543,7 @@ def _build_call_kwargs(
     extra_body: Optional[dict] = None,
     request_overrides: Optional[dict] = None,
     base_url: Optional[str] = None,
+    reasoning_config: Optional[dict] = None,
 ) -> dict:
     """Build kwargs for .chat.completions.create() with model/provider adjustments."""
     kwargs: Dict[str, Any] = {
@@ -6576,8 +6626,39 @@ def _build_call_kwargs(
             _deduped.append(_t)
         kwargs["tools"] = _deduped
 
-    # Provider-specific extra_body
-    merged_extra = dict(extra_body or {})
+    # Reuse the same provider profiles as the main Chat Completions transport;
+    # do not grow a second auxiliary provider-capability table.
+    profile = _provider_profile_for_aux_route(provider, base_url)
+    profile_extra: Dict[str, Any] = {}
+    if profile is not None:
+        try:
+            profile_extra, profile_top_level = profile.build_api_kwargs_extras(
+                reasoning_config=reasoning_config,
+                model=model,
+                base_url=base_url,
+                tools_present=bool(tools),
+            )
+            kwargs.update(profile_top_level or {})
+        except Exception:
+            logger.debug(
+                "Auxiliary provider profile request shaping failed for %s",
+                provider,
+                exc_info=True,
+            )
+
+    # Responses-backed profiles still use the existing Codex auxiliary
+    # adapter, which translates extra_body.reasoning to Responses reasoning.
+    if (
+        reasoning_config is not None
+        and profile is not None
+        and profile.api_mode == "codex_responses"
+    ):
+        profile_extra = dict(profile_extra or {})
+        profile_extra.setdefault("reasoning", dict(reasoning_config))
+
+    # Profile defaults first; explicit task/caller fields retain precedence.
+    merged_extra = dict(profile_extra or {})
+    merged_extra.update(extra_body or {})
     if provider == "nous":
         merged_extra.setdefault("tags", []).extend(_nous_portal_tags())
 
@@ -6748,8 +6829,11 @@ def call_llm(
         task, provider, model, base_url, api_key)
     if api_mode:
         resolved_api_mode = api_mode
-    effective_extra_body = _get_task_extra_body(task)
-    effective_extra_body.update(extra_body or {})
+    task_extra_body = _get_task_extra_body(task)
+    caller_extra_body = dict(extra_body or {})
+    effective_extra_body = dict(task_extra_body)
+    effective_extra_body.update(caller_extra_body)
+    reasoning_config = _get_task_reasoning_config(task)
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
@@ -6806,6 +6890,9 @@ def call_llm(
                 if fb_client is not None:
                     client, final_model = fb_client, fb_model
                     resolved_provider = fb_label or resolved_provider
+                    # Task extra_body belongs to the configured primary route;
+                    # do not leak provider-specific fields into its fallback.
+                    effective_extra_body = caller_extra_body
                 else:
                     raise RuntimeError(
                         f"Provider '{_explicit}' is set in config.yaml but no API key "
@@ -6852,6 +6939,7 @@ def call_llm(
         resolved_provider, final_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
+        reasoning_config=reasoning_config,
         request_overrides=request_overrides,
         base_url=_base_info or resolved_base_url)
 
@@ -7119,6 +7207,7 @@ def call_llm(
                     tools=tools,
                     effective_timeout=effective_timeout,
                     effective_extra_body=effective_extra_body,
+                    reasoning_config=reasoning_config,
                     request_overrides=request_overrides,
                 )
 
@@ -7162,6 +7251,7 @@ def call_llm(
                         tools=tools,
                         effective_timeout=effective_timeout,
                         effective_extra_body=effective_extra_body,
+                        reasoning_config=reasoning_config,
                         request_overrides=request_overrides,
                     )
                 except Exception as retry2_err:
@@ -7286,7 +7376,8 @@ def call_llm(
                     task=task, messages=messages,
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, effective_timeout=effective_timeout,
-                    effective_extra_body=effective_extra_body,
+                    fallback_extra_body=caller_extra_body,
+                    reasoning_config=reasoning_config,
                     request_overrides=_retarget_request_overrides_for_model(request_overrides, fb_model))
                 if fb_resp is not None:
                     return fb_resp
@@ -7301,7 +7392,8 @@ def call_llm(
                         task=task, messages=messages,
                         temperature=temperature, max_tokens=max_tokens,
                         tools=tools, effective_timeout=effective_timeout,
-                        effective_extra_body=effective_extra_body,
+                        fallback_extra_body=caller_extra_body,
+                        reasoning_config=reasoning_config,
                         request_overrides=_retarget_request_overrides_for_model(request_overrides, fb_model))
                     if fb_resp is not None:
                         return fb_resp
@@ -7405,8 +7497,11 @@ async def async_call_llm(
     """
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
-    effective_extra_body = _get_task_extra_body(task)
-    effective_extra_body.update(extra_body or {})
+    task_extra_body = _get_task_extra_body(task)
+    caller_extra_body = dict(extra_body or {})
+    effective_extra_body = dict(task_extra_body)
+    effective_extra_body.update(caller_extra_body)
+    reasoning_config = _get_task_reasoning_config(task)
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
@@ -7481,6 +7576,7 @@ async def async_call_llm(
                         fb_client, fb_model or "", is_vision=(task == "vision")
                     )
                     resolved_provider = fb_label or resolved_provider
+                    effective_extra_body = caller_extra_body
                 else:
                     raise RuntimeError(
                         f"Provider '{_explicit}' is set in config.yaml but no API key "
@@ -7506,6 +7602,7 @@ async def async_call_llm(
         resolved_provider, final_model, messages,
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
+        reasoning_config=reasoning_config,
         request_overrides=request_overrides,
         base_url=_client_base or resolved_base_url)
 
@@ -7703,6 +7800,7 @@ async def async_call_llm(
                     tools=tools,
                     effective_timeout=effective_timeout,
                     effective_extra_body=effective_extra_body,
+                    reasoning_config=reasoning_config,
                     request_overrides=request_overrides,
                 )
 
@@ -7741,6 +7839,7 @@ async def async_call_llm(
                         tools=tools,
                         effective_timeout=effective_timeout,
                         effective_extra_body=effective_extra_body,
+                        reasoning_config=reasoning_config,
                         request_overrides=request_overrides,
                     )
                 except Exception as retry2_err:
@@ -7835,7 +7934,8 @@ async def async_call_llm(
                     task=task, messages=messages,
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, effective_timeout=effective_timeout,
-                    effective_extra_body=effective_extra_body,
+                    fallback_extra_body=caller_extra_body,
+                    reasoning_config=reasoning_config,
                     request_overrides=_retarget_request_overrides_for_model(request_overrides, fb_model))
                 if fb_resp is not None:
                     return fb_resp
@@ -7852,7 +7952,8 @@ async def async_call_llm(
                         task=task, messages=messages,
                         temperature=temperature, max_tokens=max_tokens,
                         tools=tools, effective_timeout=effective_timeout,
-                        effective_extra_body=effective_extra_body,
+                        fallback_extra_body=caller_extra_body,
+                        reasoning_config=reasoning_config,
                         request_overrides=_retarget_request_overrides_for_model(request_overrides, fb_model))
                     if fb_resp is not None:
                         return fb_resp

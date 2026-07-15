@@ -1628,6 +1628,7 @@ DEFAULT_CONFIG = {
             "base_url": "",        # direct OpenAI-compatible endpoint (takes precedence over provider)
             "api_key": "",         # API key for base_url (falls back to OPENAI_API_KEY)
             "timeout": 120,        # seconds — LLM API call timeout; vision payloads need generous timeout
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},      # OpenAI-compatible provider-specific request fields
             "download_timeout": 30,  # seconds — image HTTP download timeout; increase for slow connections
         },
@@ -1637,6 +1638,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 360,        # seconds (6min) — per-attempt LLM summarization timeout; increase for slow local models
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         "compression": {
@@ -1645,6 +1647,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 120,        # seconds — compression summarises large contexts; increase for local models
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         # Note: session_search no longer uses an auxiliary LLM (PR #27590 —
@@ -1657,6 +1660,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 30,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         "approval": {
@@ -1665,6 +1669,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 30,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         "mcp": {
@@ -1673,6 +1678,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 30,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         "title_generation": {
@@ -1681,6 +1687,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 30,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
             "language": "",
         },
@@ -1690,6 +1697,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 30,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         # Triage specifier — flesh out a rough one-liner in the Kanban
@@ -1703,6 +1711,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 120,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         # Kanban decomposer — decomposes a triage task into a graph of
@@ -1716,6 +1725,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 180,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         # Profile describer — auto-generates a 1-2 sentence description
@@ -1728,6 +1738,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 60,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         # Curator — skill-usage review fork. Timeout is generous because the
@@ -1741,6 +1752,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 600,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         # Monitor — urgency/importance classifier used by the important-mail
@@ -1755,6 +1767,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 60,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         # Background review — the post-turn self-improvement fork that decides
@@ -1774,6 +1787,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 120,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         "moa_reference": {
@@ -1782,6 +1796,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 900,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
         "moa_aggregator": {
@@ -1790,6 +1805,7 @@ DEFAULT_CONFIG = {
             "base_url": "",
             "api_key": "",
             "timeout": 900,
+            "reasoning_effort": "",  # none | minimal | low | medium | high | xhigh | max | ultra
             "extra_body": {},
         },
     },
@@ -3369,7 +3385,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 33,
+    "_config_version": 34,
 }
 
 # =============================================================================
@@ -6114,6 +6130,31 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     "delegation.max_concurrent_children now caps background "
                     "delegations too."
                 )
+
+    # ── Version 33 → 34: clean up orphaned compression.summary_* keys ──
+    # v17 migrated these keys only for profiles whose version was still below
+    # 17. Profiles already past v17 could retain hand-written/default leftovers
+    # forever even though runtime reads exclusively from auxiliary.compression.
+    # Remove only the dead legacy leaves; canonical auxiliary values are never
+    # copied, replaced, or otherwise touched.
+    if current_ver < 34:
+        config = read_raw_config()
+        raw_compression = config.get("compression")
+        if isinstance(raw_compression, dict):
+            removed = False
+            for stale_key in (
+                "summary_model",
+                "summary_provider",
+                "summary_base_url",
+            ):
+                if stale_key in raw_compression:
+                    raw_compression.pop(stale_key, None)
+                    removed = True
+            if removed:
+                config["compression"] = raw_compression
+                _persist_migration(config)
+                if not quiet:
+                    print("  ✓ Removed orphaned compression.summary_* keys")
 
     # ── Post-migration: disable exfiltration-shaped MCP stdio entries ──
     # Users can hand-edit mcp_servers, and older installs may already contain a
