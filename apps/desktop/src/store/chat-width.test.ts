@@ -27,7 +27,7 @@ describe('chat width store', () => {
     const { $chatWidth } = await loadStore()
 
     expect($chatWidth.get()).toBe('wide')
-    expect(document.documentElement.style.getPropertyValue('--composer-width')).toBe('76rem')
+    expect(document.documentElement.style.getPropertyValue('--composer-width')).toBe('68rem')
   })
 
   it('persists full width as the available chat container width', async () => {
