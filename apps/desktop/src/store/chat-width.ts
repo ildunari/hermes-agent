@@ -9,7 +9,7 @@ export type ChatWidth = (typeof CHAT_WIDTHS)[number]
 const WIDTH_VALUES: Record<ChatWidth, string> = {
   full: '100%',
   normal: '48.75rem',
-  wide: '76rem'
+  wide: '68rem'
 }
 
 const codec: Codec<ChatWidth> = {
