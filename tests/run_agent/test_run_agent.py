@@ -3461,6 +3461,47 @@ class TestConcurrentToolExecution:
         ]
         assert len(todo_post_hooks) == 1
 
+    def test_later_group_preflight_sees_earlier_guardrail_observations(
+        self, agent, monkeypatch,
+    ):
+        """A serial barrier is preflighted after the prior safe group finishes."""
+        from agent.tool_guardrails import ToolGuardrailDecision
+
+        calls = [
+            _mock_tool_call(name="web_search", arguments='{"q":"one"}', call_id="c1"),
+            _mock_tool_call(name="web_search", arguments='{"q":"two"}', call_id="c2"),
+            _mock_tool_call(name="todo", arguments='{"todos":[]}', call_id="c3"),
+        ]
+        mock_msg = _mock_assistant_msg(content="", tool_calls=calls)
+        messages = []
+        observations = []
+        preflight_snapshots = []
+
+        def before_call(name, args):
+            preflight_snapshots.append((name, len(observations)))
+            return ToolGuardrailDecision()
+
+        def observe(name, args, result, failed=False):
+            observations.append(name)
+            return result
+
+        agent._tool_guardrails.before_call = MagicMock(side_effect=before_call)
+        agent._append_guardrail_observation = MagicMock(side_effect=observe)
+        monkeypatch.setattr(
+            "hermes_cli.plugins.resolve_pre_tool_block", lambda *args, **kwargs: None,
+        )
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search-result"),
+            patch("tools.todo_tool.todo_tool", return_value='{"todos": []}'),
+        ):
+            agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+
+        todo_preflight = next(snapshot for snapshot in preflight_snapshots if snapshot[0] == "todo")
+        assert todo_preflight == ("todo", 2)
+        assert observations == ["web_search", "web_search", "todo"]
+        assert [message["tool_call_id"] for message in messages] == ["c1", "c2", "c3"]
+
     def test_group_timeout_does_not_start_later_serial_operation(self, agent, monkeypatch):
         monkeypatch.setenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "0.05")
         blocker = threading.Event()
@@ -3488,6 +3529,56 @@ class TestConcurrentToolExecution:
         assert "timed out" in messages[1]["content"]
         assert "not started" in messages[2]["content"]
         assert messages[2]["effect_disposition"] == "none"
+
+    def test_timeout_skips_later_preflight_and_balances_progress_lifecycle(
+        self, agent, monkeypatch,
+    ):
+        monkeypatch.setenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "0.05")
+        blocker = threading.Event()
+        preflighted = []
+        middleware_preflighted = []
+        progress = []
+        calls = [
+            _mock_tool_call(name="web_search", arguments='{"q":"fast"}', call_id="c1"),
+            _mock_tool_call(name="web_search", arguments='{"q":"slow"}', call_id="c2"),
+            _mock_tool_call(
+                name="terminal", arguments='{"command":"touch must-not-run"}', call_id="c3",
+            ),
+        ]
+        mock_msg = _mock_assistant_msg(content="", tool_calls=calls)
+        messages = []
+        agent.tool_progress_callback = (
+            lambda event, name, preview, args, **kwargs: progress.append((event, name))
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.resolve_pre_tool_block",
+            lambda name, args, **kwargs: preflighted.append(name),
+        )
+        monkeypatch.setattr(
+            "agent.tool_executor._apply_tool_request_middleware_for_agent",
+            lambda agent, function_name, function_args, **kwargs: (
+                middleware_preflighted.append(function_name) or function_args,
+                [],
+            ),
+        )
+
+        def fake_handle(name, args, task_id, **kwargs):
+            if args.get("q") == "slow":
+                blocker.wait(5)
+            return f"result-{name}"
+
+        try:
+            with patch("run_agent.handle_function_call", side_effect=fake_handle):
+                agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+        finally:
+            blocker.set()
+
+        assert preflighted == ["web_search", "web_search"]
+        assert middleware_preflighted == ["web_search", "web_search"]
+        assert progress.count(("tool.started", "web_search")) == 2
+        assert progress.count(("tool.completed", "web_search")) == 2
+        assert all(name != "terminal" for _, name in progress)
+        assert "not started" in messages[2]["content"]
 
     def test_concurrent_handles_tool_error(self, agent):
         """If one tool raises, others should still complete."""
