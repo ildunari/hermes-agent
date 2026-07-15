@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -92,3 +94,18 @@ def test_command_refuses_wrong_contact_and_missing_confirmation(tmp_path: Path):
             contact_id="kosta-owner",
             confirmed=False,
         )
+
+
+def test_direct_script_entrypoint_loads_outside_repo_cwd(tmp_path: Path):
+    script = Path(__file__).resolve().parents[2] / "scripts" / "proactive_operator_smoke.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert completed.returncode == 0
+    assert "--confirm-arm" in completed.stdout
+    assert completed.stderr == ""
