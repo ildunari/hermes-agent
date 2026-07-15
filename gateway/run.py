@@ -2024,10 +2024,7 @@ async def _persist_authenticated_communication_ingress(
     envelopes = getattr(event, "communication_ingress", ())
     if not isinstance(envelopes, tuple) or not envelopes:
         return ()
-    from gateway.contact_memory.live_ingress import (
-        persist_live_communication_ingress,
-        recover_live_communication_event_ids,
-    )
+    from gateway.contact_memory.live_ingress import persist_live_communication_ingress
 
     root = Path(profile_home).resolve() / "contact-memory"
     try:
@@ -2040,20 +2037,26 @@ async def _persist_authenticated_communication_ingress(
             enqueue_link_research=enqueue_link_research,
         )
     except Exception:
+        # A link-research enqueue can fail after the immutable communication
+        # bundle commits. Re-run canonical persistence without that optional
+        # enrichment: exact replays deduplicate, partial batches complete, and
+        # conflicting transport replays still fail closed in the store.
         recovered = await asyncio.to_thread(
-            recover_live_communication_event_ids,
+            persist_live_communication_ingress,
             root=root,
             contact_id=trusted_scope.contact_id,
+            principal=trusted_scope.principal,
             envelopes=envelopes,
+            enqueue_link_research=False,
         )
-        if len(recovered) != len(envelopes):
+        if len(recovered.event_ids) != len(envelopes):
             raise
         logger.warning(
-            "Recovered %d durable communication events after enrichment failure",
-            len(recovered),
+            "Recovered %d durable communication events after optional enrichment failure",
+            len(recovered.event_ids),
             exc_info=True,
         )
-        return recovered
+        return recovered.event_ids
     return result.event_ids
 
 

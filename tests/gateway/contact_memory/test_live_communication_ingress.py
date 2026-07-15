@@ -281,8 +281,10 @@ async def test_gateway_recovers_fully_durable_ingress_instead_of_dropping_turn(
     real_persist = ingress_module.persist_live_communication_ingress
 
     def persist_then_fail(**kwargs):
-        real_persist(**kwargs)
-        raise ValueError("synthetic post-ingest enrichment failure")
+        result = real_persist(**kwargs)
+        if kwargs.get("enqueue_link_research"):
+            raise ValueError("synthetic post-ingest enrichment failure")
+        return result
 
     monkeypatch.setattr(ingress_module, "persist_live_communication_ingress", persist_then_fail)
     result = await _persist_authenticated_communication_ingress(
@@ -292,12 +294,46 @@ async def test_gateway_recovers_fully_durable_ingress_instead_of_dropping_turn(
             chat_type="dm", platform=SimpleNamespace(value="bluebubbles")
         ),
         event=SimpleNamespace(communication_ingress=(envelope,)),
+        enqueue_link_research=True,
     )
 
     assert len(result) == 1
     assert ContactMemoryStore(
         tmp_path / "contact-memory", "stephen-lucier"
     ).get_communication_event(result[0]) is not None
+
+
+@pytest.mark.asyncio
+async def test_gateway_recovery_rejects_conflicting_transport_replay(
+    tmp_path, monkeypatch
+):
+    from gateway.run import TrustedContactScope, _persist_authenticated_communication_ingress
+
+    adapter = _adapter(monkeypatch)
+    original = adapter._normalize_ingress_record(
+        _record("conflicting-replay", "ORIGINAL"), received_at=1.0
+    )
+    source = SimpleNamespace(
+        chat_type="dm", platform=SimpleNamespace(value="bluebubbles")
+    )
+    scope = TrustedContactScope("guest", "stephen-lucier")
+    assert await _persist_authenticated_communication_ingress(
+        trusted_scope=scope,
+        profile_home=tmp_path,
+        source=source,
+        event=SimpleNamespace(communication_ingress=(original,)),
+    )
+
+    conflicting = replace(original, visible_text="TAMPERED")
+    with pytest.raises(
+        ValueError, match="event_id already belongs to a different communication event"
+    ):
+        await _persist_authenticated_communication_ingress(
+            trusted_scope=scope,
+            profile_home=tmp_path,
+            source=source,
+            event=SimpleNamespace(communication_ingress=(conflicting,)),
+        )
 
 
 def test_batch_members_persist_in_order_without_collapsing(tmp_path, monkeypatch):

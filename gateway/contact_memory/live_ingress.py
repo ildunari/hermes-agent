@@ -143,30 +143,6 @@ def _batch_identity(secret: bytes, contact_id: str, envelopes: Sequence[Communic
     return _opaque(secret, "imessage-batch-v1", contact_id + "\0" + "\0".join(source_ids))
 
 
-def recover_live_communication_event_ids(
-    *,
-    root: str | Path,
-    contact_id: str,
-    envelopes: Sequence[CommunicationIngressEnvelope],
-    secret: bytes | None = None,
-) -> tuple[str, ...]:
-    """Recover a fully durable batch after a post-ingest enrichment failure."""
-    immutable = tuple(envelopes)
-    if not immutable or not contact_id:
-        return ()
-    key = bytes(secret) if secret is not None else load_or_create_communication_key(root)
-    store = ContactMemoryStore(root, contact_id)
-    recovered: list[str] = []
-    for envelope in immutable:
-        source_id = _source_identity(key, envelope.source_message_id)
-        expected_event_id = _event_identity(key, contact_id, envelope.source_message_id)
-        stored = store.get_communication_event_by_source("imessage", source_id)
-        if stored is None or stored.event_id != expected_event_id:
-            return ()
-        recovered.append(stored.event_id)
-    return tuple(recovered)
-
-
 def persist_live_communication_ingress(
     *,
     root: str | Path,
