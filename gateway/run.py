@@ -2270,7 +2270,13 @@ def _run_proactive_tick_once(
 
     def _prepared(route, claim, pipeline_result):
         if prepared_sink is not None:
-            prepared_sink.append((route, claim, pipeline_result.composed_text))
+            prepared_sink.append((
+                route, claim, pipeline_result.composed_text,
+                getattr(pipeline_result, "optional_image_url", None) or (
+                    getattr(getattr(pipeline_result, "candidate", None),
+                            "optional_image_url", None)
+                ),
+            ))
 
     result = scheduler.tick(
         now=now, on_dry_run=_initiate, on_interest_share=_interest_pipeline,
@@ -2321,8 +2327,12 @@ async def _submit_contact_memory_extraction(
         extraction_metadata = {
             "source_id": source_id, "principal": trusted_scope.principal,
         }
-        if len(communication_event_ids) == 1:
-            extraction_metadata["communication_event_id"] = communication_event_ids[0]
+        if communication_event_ids:
+            # A rapid-fire turn is one semantic observation. Project it once
+            # against the final member (the reactive turn's transport anchor)
+            # while retaining every canonical member for provenance/debugging.
+            extraction_metadata["communication_event_ids"] = communication_event_ids
+            extraction_metadata["communication_event_id"] = communication_event_ids[-1]
         return runtime.submit(ExtractionJob(
             store,
             clean_user,
@@ -7727,7 +7737,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             participant_identities=participant_identities,
                             scheduler=scheduler,
                         )
-                        for route, claim, text in prepared[:1]:
+                        for route, claim, text, image_url in prepared[:1]:
                             barriers = getattr(self, "_proactive_delivery_barriers", None)
                             if barriers is None:
                                 barriers = self._proactive_delivery_barriers = {}
@@ -7735,7 +7745,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             async with barrier:
                                 await deliver_prepared_exactly_once(
                                     scheduler=scheduler, delivery=delivery, route=route,
-                                    claim=claim, text=text, correlation_id=correlation_id,
+                                    claim=claim, text=text, image_url=image_url,
+                                    correlation_id=correlation_id,
                                 )
                     retry_at = scheduler.earliest_retry_at()
                     if retry_at is not None:
@@ -10638,11 +10649,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             event, "communication_ingress", ()
         ):
             try:
+                profile_home = self._resolve_profile_home_for_source(source)
+                routed_config = _load_gateway_config_for_profile(
+                    getattr(source, "profile", None)
+                )
+                contact_cfg = (
+                    (routed_config.get("agent", {}) or {})
+                    .get("contact_memory", {}) or {}
+                )
                 canonical_event_ids = await _persist_authenticated_communication_ingress(
                     trusted_scope=trusted_contact_scope,
-                    profile_home=self._resolve_profile_home_for_source(source),
+                    profile_home=profile_home,
                     source=source,
                     event=event,
+                    enqueue_link_research=bool(
+                        contact_cfg.get("link_research_enabled", False)
+                    ),
                 )
             except Exception:
                 logger.exception("Authenticated communication ingress persistence failed")

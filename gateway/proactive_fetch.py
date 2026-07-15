@@ -42,6 +42,7 @@ MAX_RESEARCH_BYTES = 2_000_000
 MAX_RESEARCH_STDERR_BYTES = 64_000
 _SUBPROCESS_READ_BYTES = 64 * 1024
 FRESHNESS_SECONDS = 10 * 86_400.0
+MIN_SEND_RATE_SAMPLES = 5
 
 _REQUIRED_FIELDS = frozenset({"topic", "concrete_item", "why_now", "source_url", "freshness_ts"})
 _ALLOWED_FIELDS = _REQUIRED_FIELDS | {"optional_image_url"}
@@ -542,7 +543,7 @@ def suppression_metrics(
     suppression_rate = suppressed / total if total else 0.0
     return SuppressionMetrics(
         total, sent, suppressed, send_rate, suppression_rate,
-        alarm=bool(total and send_rate > 0.40),
+        alarm=bool(total >= MIN_SEND_RATE_SAMPLES and send_rate > 0.40),
     )
 
 

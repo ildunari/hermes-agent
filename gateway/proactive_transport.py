@@ -86,7 +86,8 @@ class BlueBubblesProactiveDelivery:
         return str(guid), None
 
     async def deliver(self, *, route: ContactRoute, text: str, slot_id: str,
-                      correlation_id: str, prepared_guid: str | None = None) -> ProactiveTransportResult:
+                      correlation_id: str, image_url: str | None = None,
+                      prepared_guid: str | None = None) -> ProactiveTransportResult:
         if prepared_guid is None:
             prepared_guid, refusal = await self.prepare(route=route, slot_id=slot_id)
             if refusal is not None:
@@ -94,10 +95,16 @@ class BlueBubblesProactiveDelivery:
         guid = str(prepared_guid)
         # Pass the resolved GUID so send() cannot enter its address/new-chat path.
         try:
-            result = await self.adapter.send(
-                str(guid), str(text), metadata={"proactive": True, "slot_id": slot_id,
-                                                "correlation_id": correlation_id},
-            )
+            metadata = {
+                "proactive": True, "slot_id": slot_id,
+                "correlation_id": correlation_id,
+            }
+            if image_url:
+                result = await self.adapter.send_image(
+                    str(guid), str(image_url), caption=str(text), metadata=metadata,
+                )
+            else:
+                result = await self.adapter.send(str(guid), str(text), metadata=metadata)
         except BaseException as exc:
             self.ownership_registry.finish_global_send(slot_id, sent=False, now=__import__("time").time())
             # Interruption around await may have delivered remotely.
@@ -126,11 +133,15 @@ class BlueBubblesProactiveDelivery:
 async def deliver_prepared_exactly_once(
     *, scheduler: ProactiveScheduler, delivery: BlueBubblesProactiveDelivery,
     route: ContactRoute, claim: SlotClaim, text: str, correlation_id: str,
+    image_url: str | None = None,
     now: float | None = None,
 ) -> str:
     """Last-moment validation, one durable attempt, normalized final accounting."""
-    reservation = await asyncio.to_thread(scheduler.reserve_delivery, claim, text, now=now)
+    reservation = await asyncio.to_thread(
+        scheduler.reserve_delivery, claim, text, image_url=image_url, now=now,
+    )
     text = str(reservation.get("prepared_payload") or "")
+    image_url = str(reservation.get("prepared_image_url") or "") or None
     if not text:
         return await asyncio.to_thread(
             scheduler.finish_delivery, claim, state="failed", reason="prepared_payload_missing", now=now
@@ -183,8 +194,10 @@ async def deliver_prepared_exactly_once(
         )
     try:
         try:
-            result = await delivery.deliver(route=route, text=text, slot_id=claim.slot_id,
-                                            correlation_id=correlation_id, prepared_guid=prepared_guid)
+            result = await delivery.deliver(
+                route=route, text=text, image_url=image_url, slot_id=claim.slot_id,
+                correlation_id=correlation_id, prepared_guid=prepared_guid,
+            )
         finally:
             scheduler.finish_atomic_send_fence(fence)
     except Exception as exc:

@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS proactive_delivery (
   state TEXT NOT NULL CHECK(state IN ('prepared','sending','retry_wait','sent','suppressed','delivery_unknown','partial_delivery','failed')),
   payload_hash TEXT NOT NULL,
   prepared_payload TEXT,
+  prepared_image_url TEXT,
   kill_generation INTEGER NOT NULL DEFAULT 0,
   transport_message_id TEXT,
   last_error_class TEXT,
@@ -165,6 +166,8 @@ def _initialize_schema(con: sqlite3.Connection) -> None:
     columns = {str(row[1]) for row in con.execute("PRAGMA table_info(proactive_delivery)")}
     if "prepared_payload" not in columns:
         con.execute("ALTER TABLE proactive_delivery ADD COLUMN prepared_payload TEXT")
+    if "prepared_image_url" not in columns:
+        con.execute("ALTER TABLE proactive_delivery ADD COLUMN prepared_image_url TEXT")
     if "kill_generation" not in columns:
         con.execute("ALTER TABLE proactive_delivery ADD COLUMN kill_generation INTEGER NOT NULL DEFAULT 0")
     if "projection_state" not in columns:
@@ -516,6 +519,7 @@ class TopicSelection:
 @dataclass(frozen=True)
 class PreparedOutput:
     composed_text: str
+    optional_image_url: str | None = None
     reason: str = "prepared_for_async_transport"
     status: str = "prepared"
 
@@ -1332,10 +1336,17 @@ class ProactiveScheduler:
                 (str(reason), timestamp, claim.slot_id, claim.claim_token),
             ).rowcount)
 
-    def reserve_delivery(self, claim: SlotClaim, text: str, *, now: float | None = None) -> dict[str, Any]:
+    def reserve_delivery(
+        self, claim: SlotClaim, text: str, *, image_url: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
         """Durably reserve a unique slot/payload before transport I/O."""
         timestamp = _finite(time.time() if now is None else now, "now")
-        payload_hash = hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+        prepared_image_url = str(image_url).strip() if image_url else None
+        payload_hash = hashlib.sha256(json.dumps(
+            {"text": str(text), "image_url": prepared_image_url},
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
         con = self._begin()
         try:
             row = con.execute("SELECT * FROM proactive_delivery WHERE slot_id=?", (claim.slot_id,)).fetchone()
@@ -1348,10 +1359,12 @@ class ProactiveScheduler:
             ).fetchone()
             if current is None:
                 raise ValueError("claim is no longer current")
-            con.execute("INSERT INTO proactive_delivery(slot_id,state,payload_hash,prepared_payload,kill_generation,updated_at) VALUES(?,'prepared',?,?,?,?)",
-                        (claim.slot_id, payload_hash, str(text), self.config.kill_generation, timestamp))
+            con.execute("INSERT INTO proactive_delivery(slot_id,state,payload_hash,prepared_payload,prepared_image_url,kill_generation,updated_at) VALUES(?,'prepared',?,?,?,?,?)",
+                        (claim.slot_id, payload_hash, str(text), prepared_image_url,
+                         self.config.kill_generation, timestamp))
             self._finish(con)
             return {"state": "prepared", "payload_hash": payload_hash, "prepared_payload": str(text),
+                    "prepared_image_url": prepared_image_url,
                     "kill_generation": self.config.kill_generation, "attempt_count": 0, "not_before": None}
         except BaseException as exc:
             if con.in_transaction:
@@ -1693,10 +1706,12 @@ class ProactiveScheduler:
             ).fetchone()
         total, sent = int(row[0]), int(row[1])
         rate = sent / total if total else 0.0
-        if total and rate > 0.40:
+        from gateway.proactive_fetch import MIN_SEND_RATE_SAMPLES
+        alarm = total >= MIN_SEND_RATE_SAMPLES and rate > 0.40
+        if alarm:
             self.ownership_registry.open_circuit("send_rate_above_40_percent", now=timestamp)
         return {"total": total, "sent": sent, "send_rate": rate,
-                "circuit_opened": bool(total and rate > 0.40)}
+                "circuit_opened": alarm}
 
     def record_health(self, key: str, value: Mapping[str, Any], *, now: float | None = None) -> None:
         timestamp = _finite(time.time() if now is None else now, "now")
@@ -2088,7 +2103,8 @@ class ProactiveScheduler:
                 continue
             with self._connect() as con:
                 retry = con.execute(
-                    "SELECT prepared_payload FROM proactive_delivery WHERE slot_id=? AND state='retry_wait'",
+                    "SELECT prepared_payload,prepared_image_url FROM proactive_delivery "
+                    "WHERE slot_id=? AND state='retry_wait'",
                     (claim.slot_id,),
                 ).fetchone()
             if retry is not None:
@@ -2096,10 +2112,18 @@ class ProactiveScheduler:
                 if not payload:
                     self.finish_delivery(claim, state="failed", reason="retry_payload_missing", now=timestamp)
                 elif on_prepared is not None:
-                    on_prepared(route, claim, PreparedOutput(payload, reason="immutable_retry_replay"))
+                    on_prepared(route, claim, PreparedOutput(
+                        payload,
+                        optional_image_url=(
+                            str(retry["prepared_image_url"])
+                            if retry["prepared_image_url"] else None
+                        ),
+                        reason="immutable_retry_replay",
+                    ))
                 continue
             if claim.kind in {"interest_share", "exploration"} and on_interest_share is not None:
                 store = self._contact_store(route)
+                pipeline_result: Any = None
                 try:
                     pipeline_result = on_interest_share(route, claim, store)
                     pipeline_status = str(
@@ -2124,7 +2148,11 @@ class ProactiveScheduler:
                         ))
                 if pipeline_status == "prepared":
                     composed_text = str(getattr(pipeline_result, "composed_text", "") or "")
-                    self.reserve_delivery(claim, composed_text, now=timestamp)
+                    candidate = getattr(pipeline_result, "candidate", None)
+                    image_url = getattr(candidate, "optional_image_url", None)
+                    self.reserve_delivery(
+                        claim, composed_text, image_url=image_url, now=timestamp,
+                    )
                     if on_prepared is not None:
                         on_prepared(route, claim, pipeline_result)
                     continue

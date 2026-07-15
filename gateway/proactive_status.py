@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Mapping
 
 from gateway.proactive_scheduler import ProactiveConfig, ProactiveMode
+from gateway.proactive_fetch import MIN_SEND_RATE_SAMPLES
 
 _REQUIRED_MODEL = {"provider": "openai-codex", "model": "gpt-5.6-sol", "reasoning_effort": "medium"}
 
@@ -353,7 +354,10 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
     result["send_rate"] = (
         result["send_rate_sent"] / result["send_rate_total"] if result["send_rate_total"] else 0.0
     )
-    if result["send_rate_total"] and result["send_rate"] > 0.40:
+    if (
+        result["send_rate_total"] >= MIN_SEND_RATE_SAMPLES
+        and result["send_rate"] > 0.40
+    ):
         result["reasons"].append("send_rate_above_40_percent")
     result["reasons"] = sorted(set(result["reasons"]))
     result["dead"] = bool(result["reasons"])

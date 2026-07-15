@@ -361,6 +361,9 @@ def test_suppression_metrics_alarm_only_when_send_rate_exceeds_forty_percent(tmp
             sent_at=NOW + index if decision is GateDecision.SENT else None,
             outcome=None, outcome_at=None, created_at=NOW + index,
         ))
+        if index == 0:
+            early = suppression_metrics(store)
+            assert early.send_rate == 1.0 and early.alarm is False
     metrics = suppression_metrics(store)
     assert metrics.total == 5 and metrics.sent == 3 and metrics.suppressed == 2
     assert metrics.send_rate == pytest.approx(.6)

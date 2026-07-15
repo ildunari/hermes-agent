@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import hashlib
 import inspect
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,9 @@ from .schema import (
     RecommendationProjection, SignalType,
 )
 from .store import ContactMemoryStore, normalize_interest_topic
+
+
+logger = logging.getLogger(__name__)
 
 
 class ExtractorBackend(Protocol):
@@ -463,7 +467,16 @@ async def propose_turn_memories(store: ContactMemoryStore, extractor: Extractor 
             )
         except Exception:
             # Model proposals are fail-open and never bypass the projector.
-            pass
+            logger.warning(
+                "Contact semantic projection failed event_id=%s "
+                "interests=%d entities=%d recommendations=%d callbacks=%d",
+                communication_event_id,
+                len(semantic_projection.interests),
+                len(semantic_projection.entities),
+                len(semantic_projection.recommendations),
+                len(semantic_projection.callbacks),
+                exc_info=True,
+            )
     return proposal_ids
 
 

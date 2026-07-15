@@ -189,6 +189,18 @@ async def test_gateway_submission_is_profile_scoped_and_scope_gated(
     assert submitted[0].store.contact_id == "contact-a"
     assert submitted[0].metadata["source_id"] == "message:7"
     assert submitted[0].metadata["communication_event_id"] == "a" * 64
+    assert submitted[0].metadata["communication_event_ids"] == ("a" * 64,)
+
+    assert await _submit_contact_memory_extraction(
+        config_raw=config, trusted_scope=scope, profile_home=tmp_path,
+        source_id="message:batch", user_text="one\ntwo",
+        assistant_text="Got both.",
+        communication_event_ids=("b" * 64, "c" * 64),
+    )
+    assert submitted[1].metadata["communication_event_ids"] == (
+        "b" * 64, "c" * 64,
+    )
+    assert submitted[1].metadata["communication_event_id"] == "c" * 64
 
     assert not await _submit_contact_memory_extraction(
         config_raw=config, trusted_scope=None, profile_home=tmp_path,
@@ -198,7 +210,7 @@ async def test_gateway_submission_is_profile_scoped_and_scope_gated(
         config_raw=config, trusted_scope=scope, profile_home=tmp_path,
         source_id="", user_text=scope.source_text, assistant_text="reply",
     )
-    assert len(submitted) == 1
+    assert len(submitted) == 2
 
 
 @pytest.mark.asyncio
@@ -228,7 +240,7 @@ async def test_extractor_recommendation_without_canonical_event_writes_nothing(t
 
 @pytest.mark.asyncio
 async def test_extractor_mixed_semantic_output_uses_one_atomic_receipt_or_writes_nothing(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     store = ContactMemoryStore(tmp_path, "contact")
     event_id = "a" * 64
@@ -280,6 +292,8 @@ async def test_extractor_mixed_semantic_output_uses_one_atomic_receipt_or_writes
         store, backend, "u", "a",
         {"source_id": "turn-mixed", "communication_event_id": event_id},
     ) == []
+    assert "Contact semantic projection failed" in caplog.text
+    assert "entities=1" in caplog.text
     with sqlite3.connect(store.path) as con:
         for table in (
             "recommendation", "interest_event", "projected_entity", "semantic_callback",

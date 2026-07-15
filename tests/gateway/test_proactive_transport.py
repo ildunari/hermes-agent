@@ -16,11 +16,13 @@ ALLOW=(('poke','kosta-owner','owner'),('guest','stephen-lucier','guest'))
 
 class Adapter:
     platform=SimpleNamespace(value='bluebubbles')
-    def __init__(self,result): self.result=result; self.calls=0; self.texts=[]; self.auth_requests=[]
+    def __init__(self,result): self.result=result; self.calls=0; self.texts=[]; self.images=[]; self.auth_requests=[]
     async def resolve_authenticated_existing_dm(self,chat_id,user_id):
         self.auth_requests.append((chat_id,user_id))
         return ('iMessage;-;existing','fingerprint') if chat_id and user_id else None
     async def send(self,*args,**kwargs): self.calls+=1; self.texts.append(args[1]); await asyncio.sleep(0); return self.result
+    async def send_image(self,*args,**kwargs):
+        self.calls+=1; self.images.append((args[1],kwargs.get('caption'))); await asyncio.sleep(0); return self.result
 
 
 def setup(tmp_path: Path):
@@ -63,7 +65,7 @@ async def test_exactly_once_concurrent_delivery(tmp_path: Path):
     projected=ContactMemoryStore(tmp_path/'contact-memory','kosta-owner').get_proactive_send(slot)
     assert projected is not None and projected.sent_at==NOW
     circuit=scheduler.ownership_registry.global_send_status(now=NOW)
-    assert circuit['circuit_state']=='open' and circuit['circuit_reason']=='send_rate_above_40_percent'
+    assert circuit['circuit_state']=='closed' and not circuit['circuit_reason']
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(('send_result','expected','calls'),[(SendResult(False,error='timeout'), 'delivery_unknown',1),(SendResult(False,error='connect',retryable=True),'retry_wait',1),(SendResult(False,error='partial',raw_response={'partial_delivery':True}),'partial_delivery',1)])
@@ -147,6 +149,32 @@ async def test_retry_replays_immutable_payload_without_recomposition(tmp_path: P
     second=Adapter(SendResult(True,message_id='sent'))
     assert await deliver_prepared_exactly_once(scheduler=scheduler,delivery=transport(second,scheduler),route=ROUTE,claim=retry,text='recomposed',correlation_id='two',now=NOW+301)=='sent'
     assert first.texts==['original'] and second.texts==['original']
+
+
+@pytest.mark.asyncio
+async def test_image_delivery_is_one_atomic_retryable_payload(tmp_path: Path):
+    scheduler,claim,slot=setup(tmp_path)
+    first=Adapter(SendResult(False,error='connect',retryable=True))
+    assert await deliver_prepared_exactly_once(
+        scheduler=scheduler,delivery=transport(first,scheduler),route=ROUTE,claim=claim,
+        text='caption',image_url='https://example.com/first.jpg',
+        correlation_id='image-one',now=NOW,
+    )=='retry_wait'
+    retry=scheduler.claim_due(worker_id='retry-image',now=NOW+301)[0]
+    second=Adapter(SendResult(True,message_id='sent-image'))
+    assert await deliver_prepared_exactly_once(
+        scheduler=scheduler,delivery=transport(second,scheduler),route=ROUTE,claim=retry,
+        text='changed',image_url='https://example.com/changed.jpg',
+        correlation_id='image-two',now=NOW+301,
+    )=='sent'
+    assert first.texts==[] and second.texts==[]
+    assert first.images==second.images==[('https://example.com/first.jpg','caption')]
+    with scheduler._connect() as con:
+        row=con.execute(
+            'SELECT prepared_payload,prepared_image_url FROM proactive_delivery WHERE slot_id=?',
+            (slot,),
+        ).fetchone()
+    assert tuple(row)==('caption','https://example.com/first.jpg')
 
 
 @pytest.mark.asyncio
