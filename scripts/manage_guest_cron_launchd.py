@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -160,6 +161,20 @@ def _atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
+def _record_ticker_heartbeat(profile_home: Path, *, success: bool) -> None:
+    """Publish liveness for the one-shot runner using the standard cron files."""
+    payload = str(time.time()).encode("utf-8")
+    try:
+        _atomic_write(profile_home / "cron" / "ticker_heartbeat", payload)
+    except Exception:
+        return
+    if success:
+        try:
+            _atomic_write(profile_home / "cron" / "ticker_last_success", payload)
+        except Exception:
+            pass
+
+
 def _launchctl(
     runner: LaunchctlRunner, arguments: list[str]
 ) -> subprocess.CompletedProcess[str]:
@@ -293,8 +308,10 @@ def run_once(
                 timeout=RUN_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
+            _record_ticker_heartbeat(home, success=False)
             print(json.dumps({"status": "timeout", "timeout_seconds": RUN_TIMEOUT_SECONDS}, sort_keys=True))
             return 124
+    _record_ticker_heartbeat(home, success=completed.returncode == 0)
     print(json.dumps({"status": "completed", "returncode": completed.returncode}, sort_keys=True))
     return completed.returncode
 

@@ -92,6 +92,9 @@ def test_run_once_uses_exact_command_environment_cwd_and_timeout(runtime: dict[s
         runner=fake_run,
     )
     assert result == 7
+    heartbeat = runtime["profile_home"] / "cron" / "ticker_heartbeat"
+    assert float(heartbeat.read_text(encoding="utf-8")) > 0
+    assert not (runtime["profile_home"] / "cron" / "ticker_last_success").exists()
     assert calls == [
         (
             [str(runtime["executable"]), "--profile", "guest", "cron", "tick"],
@@ -109,6 +112,24 @@ def test_run_once_uses_exact_command_environment_cwd_and_timeout(runtime: dict[s
             },
         )
     ]
+
+
+def test_run_once_records_successful_tick_heartbeat(runtime: dict[str, Path]) -> None:
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0)
+
+    assert manager.run_once(
+        hermes_executable=runtime["executable"],
+        checkout=runtime["checkout"],
+        profile_home=runtime["profile_home"],
+        path="/safe/bin",
+        runner=fake_run,
+    ) == 0
+    cron_dir = runtime["profile_home"] / "cron"
+    heartbeat = float((cron_dir / "ticker_heartbeat").read_text(encoding="utf-8"))
+    success = float((cron_dir / "ticker_last_success").read_text(encoding="utf-8"))
+    assert heartbeat > 0
+    assert success == heartbeat
 
 
 def test_run_once_skips_overlap_without_spawning(runtime: dict[str, Path], capsys: pytest.CaptureFixture[str]) -> None:
