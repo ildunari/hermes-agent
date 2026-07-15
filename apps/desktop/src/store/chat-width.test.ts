@@ -1,6 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const KEY = 'hermes.desktop.chatWidth.v1'
+
+const storageData = new Map<string, string>()
+const localStorageStub: Storage = {
+  clear: () => storageData.clear(),
+  getItem: key => storageData.get(key) ?? null,
+  key: index => [...storageData.keys()][index] ?? null,
+  get length() {
+    return storageData.size
+  },
+  removeItem: key => storageData.delete(key),
+  setItem: (key, value) => storageData.set(key, value)
+}
 
 async function loadStore() {
   vi.resetModules()
@@ -10,8 +22,14 @@ async function loadStore() {
 
 describe('chat width store', () => {
   beforeEach(() => {
-    window.localStorage.clear()
+    vi.stubGlobal('localStorage', localStorageStub)
+    localStorageStub.clear()
     document.documentElement.style.removeProperty('--composer-width')
+  })
+
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
   })
 
   it('defaults to the existing normal conversation width', async () => {
