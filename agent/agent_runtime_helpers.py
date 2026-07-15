@@ -1011,7 +1011,14 @@ def try_recover_primary_transport(
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
 
-        if agent.api_mode == "anthropic_messages":
+        if agent.provider == "moa":
+            # MoA is a virtual provider with no real OpenAI client kwargs.
+            # Recreate its facade instead of trying to open a network client.
+            from agent.moa_loop import MoAClient
+
+            agent.client = MoAClient(agent.model or "default")
+            agent._anthropic_client = None
+        elif agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
             agent._anthropic_api_key = rt["anthropic_api_key"]
             agent._anthropic_base_url = rt["anthropic_base_url"]
@@ -1183,7 +1190,14 @@ def restore_primary_runtime(agent) -> bool:
         )
 
         # ── Rebuild client for the primary provider ──
-        if agent.api_mode == "anthropic_messages":
+        if agent.provider == "moa":
+            # Restoring after fallback must rebuild the virtual MoA facade,
+            # never OpenAI() with the intentionally empty client kwargs.
+            from agent.moa_loop import MoAClient
+
+            agent.client = MoAClient(agent.model or "default")
+            agent._anthropic_client = None
+        elif agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
             agent._anthropic_api_key = rt["anthropic_api_key"]
             agent._anthropic_base_url = rt["anthropic_base_url"]
@@ -1307,6 +1321,13 @@ def restore_primary_runtime(agent) -> bool:
                         entry_provider or "?",
                         primary_provider or "?",
                     )
+
+        # ── Restore reasoning_config if it was saved ──
+        # switch_model saves reasoning_config in _primary_runtime. If the
+        # snapshot predates that (older sessions), keep the current value.
+        saved_reasoning = rt.get("reasoning_config")
+        if saved_reasoning is not None:
+            agent.reasoning_config = dict(saved_reasoning)
 
         # ── Reset fallback chain for the new turn ──
         agent._fallback_activated = False
@@ -2083,6 +2104,24 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             api_mode=agent.api_mode,
         )
 
+    # ── Re-resolve reasoning_config from per-model override ──
+    # The new model may have a different reasoning_effort override. Re-read
+    # config so the override takes effect immediately on /model switch —
+    # resolved through the shared chokepoint (per-model > global; YAML
+    # boolean False = disabled).
+    try:
+        from hermes_constants import resolve_reasoning_config
+        from hermes_cli.config import load_config as _sm_load_config
+
+        _reasoning_cfg = _sm_load_config() or {}
+        agent.reasoning_config = resolve_reasoning_config(_reasoning_cfg, agent.model)
+        logger.info(
+            "switch_model: reasoning_config resolved for %s: %s",
+            agent.model, agent.reasoning_config,
+        )
+    except Exception as _reasoning_err:
+        logger.debug("switch_model: could not re-resolve reasoning_config: %s", _reasoning_err)
+
     # ── Invalidate cached system prompt so it rebuilds next turn ──
     agent._cached_system_prompt = None
 
@@ -2105,6 +2144,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         "client_kwargs": dict(agent._client_kwargs),
         "use_prompt_caching": agent._use_prompt_caching,
         "use_native_cache_layout": agent._use_native_cache_layout,
+        "reasoning_config": dict(agent.reasoning_config) if getattr(agent, "reasoning_config", None) else None,
         "compressor_model": getattr(_cc, "model", agent.model) if _cc else agent.model,
         "compressor_base_url": getattr(_cc, "base_url", agent.base_url) if _cc else agent.base_url,
         "compressor_api_key": getattr(_cc, "api_key", "") if _cc else "",

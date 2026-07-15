@@ -474,6 +474,10 @@ _API_KEY_PROVIDER_AUX_MODELS_FALLBACK: Dict[str, str] = {
     "kilocode": "google/gemini-3-flash-preview",
     "ollama-cloud": "nemotron-3-nano:30b",
     "tencent-tokenhub": "hy3-preview",
+    # NB: no "deepinfra" entry — its aux model lives on the ProviderProfile
+    # (plugins/model-providers/deepinfra: default_aux_model), which
+    # _get_aux_model_for_provider() reads first. Duplicating it here would be
+    # dead data that drifts when the profile's value is bumped.
 }
 
 # Legacy alias — callers that haven't been updated to _get_aux_model_for_provider()
@@ -488,6 +492,33 @@ _PROVIDER_VISION_MODELS: Dict[str, str] = {
     "xiaomi": "mimo-v2.5",
     "zai": "glm-5v-turbo",
 }
+
+
+def _resolve_provider_vision_default(provider: str) -> Optional[str]:
+    """Return the provider's preferred default vision model id, or None.
+
+    Static entries in :data:`_PROVIDER_VISION_MODELS` win first (xiaomi /
+    zai have dedicated vision-only model names that don't live in any
+    discoverable catalog). Otherwise the provider's :class:`ProviderProfile`
+    gets a chance to supply one via its ``default_vision_model()`` hook —
+    that's where catalog-backed providers (DeepInfra) resolve a live default,
+    keeping the discovery logic inside their plugin instead of a name-check
+    branch here.
+    """
+    static = _PROVIDER_VISION_MODELS.get(provider)
+    if static:
+        return static
+    try:
+        from providers import get_provider_profile
+        profile = get_provider_profile(provider)
+    except Exception:
+        return None
+    if profile is None:
+        return None
+    try:
+        return profile.default_vision_model()
+    except Exception:
+        return None
 
 # Providers whose endpoint does not accept image input, even though the
 # provider's broader ecosystem has vision models available elsewhere.  When
@@ -1336,6 +1367,7 @@ class _AnthropicCompletionsAdapter:
         model = kwargs.get("model", self._model)
         tools = kwargs.get("tools")
         tool_choice = kwargs.get("tool_choice")
+        reasoning_config = kwargs.get("_reasoning_config")
         # ZAI's Anthropic-compatible endpoint rejects max_tokens on vision
         # models (glm-4v-flash etc.) with error code 1210.  When the caller
         # signals this by setting _skip_zai_max_tokens in kwargs, omit it.
@@ -1356,15 +1388,35 @@ class _AnthropicCompletionsAdapter:
             elif choice_type in {"auto", "required", "none"}:
                 normalized_tool_choice = choice_type
 
+        # Reasoning priority: explicit per-call reasoning_config (MoA per-slot,
+        # passed as _reasoning_config by _build_call_kwargs) wins over an
+        # extra_body.reasoning dict (auxiliary.<task>.extra_body config).
+        # build_anthropic_kwargs translates the config dict into the native
+        # ``thinking`` field and handles models where thinking is mandatory.
+        _reasoning_cfg = reasoning_config
+        if _reasoning_cfg is None:
+            _eb = kwargs.get("extra_body")
+            if isinstance(_eb, dict):
+                _rc = _eb.get("reasoning")
+                if isinstance(_rc, dict):
+                    _reasoning_cfg = _rc
+
         anthropic_kwargs = build_anthropic_kwargs(
             model=model,
             messages=messages,
             tools=tools,
             max_tokens=max_tokens,
-            reasoning_config=None,
+            reasoning_config=_reasoning_cfg,
             tool_choice=normalized_tool_choice,
             is_oauth=self._is_oauth,
         )
+        # Preserve the explicit auxiliary/MoA slot effort even when the shared
+        # adapter applies a model-family default while assembling kwargs.
+        if isinstance(_reasoning_cfg, dict) and _reasoning_cfg.get("enabled") is not False:
+            explicit_effort = _reasoning_cfg.get("effort")
+            output_config = anthropic_kwargs.get("output_config")
+            if explicit_effort and isinstance(output_config, dict):
+                output_config["effort"] = explicit_effort
         # Opus 4.7+ rejects any non-default temperature/top_p/top_k; only set
         # temperature for models that still accept it. build_anthropic_kwargs
         # additionally strips these keys as a safety net — keep both layers.
@@ -5416,6 +5468,7 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
 _VISION_AUTO_PROVIDER_ORDER = (
     "openrouter",
     "nous",
+    "deepinfra",
 )
 
 
@@ -5473,6 +5526,21 @@ def _resolve_strict_vision_backend(
         return resolve_provider_client("openai-codex", model or "", is_vision=True, task="vision")
     if provider == "anthropic":
         return _try_anthropic()
+    if provider == "deepinfra":
+        # DeepInfra exposes vision-capable models (Llama-4 Scout/Maverick,
+        # Qwen3-VL, Gemma 3, Gemini) on the same OpenAI-compatible endpoint
+        # as its chat models. The default is discovered live via the profile's
+        # default_vision_model() hook (key-gated, chat-surface + vision tag) so
+        # we don't pin a hardcoded id that may rot when DeepInfra retires a
+        # model, and this module stays provider-agnostic.
+        vision_model = model or _resolve_provider_vision_default("deepinfra")
+        if not vision_model:
+            logger.debug(
+                "Vision auto-detect: deepinfra catalog unreachable or "
+                "returned no vision-tagged models — skipping"
+            )
+            return None, None
+        return resolve_provider_client("deepinfra", vision_model, is_vision=True)
     if provider == "custom":
         return _try_custom_endpoint()
     return None, None
@@ -5560,16 +5628,29 @@ def resolve_vision_provider_client(
         #      _PROVIDER_VISION_MODELS provides per-provider vision model
         #      overrides when the provider has a dedicated multimodal model
         #      that differs from the chat model (e.g. xiaomi → mimo-v2-omni,
-        #      zai → glm-5v-turbo). Nous is the exception: it has a dedicated
-        #      strict vision backend with tier-aware defaults, so it must not
-        #      fall through to the user's text chat model here.
-        #   2. OpenRouter  (vision-capable aggregator fallback)
+        #      zai → glm-5v-turbo). DeepInfra is similar but resolves its
+        #      default vision model live from the catalog (see
+        #      :func:`_resolve_provider_vision_default`). Nous is the
+        #      exception: it has a dedicated strict vision backend with
+        #      tier-aware defaults, so it must not fall through to the
+        #      user's text chat model here.
+        #   2. OpenRouter (vision-capable aggregator fallback)
         #   3. Nous Portal (vision-capable aggregator fallback)
-        #   4. Stop
+        #   4. DeepInfra   (OpenAI-compatible; vision model discovered
+        #                   live from the catalog — tried when
+        #                   DEEPINFRA_API_KEY is set)
+        #   5. Stop
         main_provider = _read_main_provider()
         main_model = _read_main_model()
         if main_provider and main_provider not in {"auto", ""}:
-            vision_model = _PROVIDER_VISION_MODELS.get(main_provider, main_model)
+            # A provider-specific vision default wins over the user's chat model:
+            # static overrides (xiaomi/zai) and catalog-backed discovery (the
+            # DeepInfra profile hook) both yield a *known* vision-capable model,
+            # whereas the pinned chat model is usually NOT multimodal (e.g. the
+            # DeepSeek-V4-Flash default) and _main_model_supports_vision can't be
+            # trusted to catch that. Only fall back to the chat model when no
+            # provider default is available (catalog unreachable).
+            vision_model = _resolve_provider_vision_default(main_provider) or main_model
             if main_provider == "nous":
                 sync_client, default_model = _resolve_strict_vision_backend(
                     main_provider, vision_model
@@ -6322,17 +6403,59 @@ def _effective_aux_timeout(task: str, timeout: Optional[float]) -> float:
 
 
 def _get_task_extra_body(task: str) -> Dict[str, Any]:
-    """Read auxiliary.<task>.extra_body and return a shallow copy when valid."""
+    """Read auxiliary.<task>.extra_body and return a shallow copy when valid.
+
+    Also folds in ``auxiliary.<task>.reasoning_effort`` as an
+    ``extra_body.reasoning`` config dict ({"enabled": ..., "effort": ...})
+    when set. An explicit ``extra_body.reasoning`` in config wins over the
+    ``reasoning_effort`` shorthand (it is the more specific wire control).
+    Downstream, each wire already translates ``extra_body.reasoning``:
+    chat.completions passes it through, the Codex Responses adapter maps it
+    to top-level ``reasoning``/``include``, and the Anthropic auxiliary
+    client maps it to ``build_anthropic_kwargs(reasoning_config=...)``.
+
+    MoA tasks are excluded by design: reasoning depth for MoA is a per-slot
+    setting in the MoA preset (``moa.presets.<name>.reference_models[].
+    reasoning_effort`` / ``aggregator.reasoning_effort``), not an
+    auxiliary-task knob — an ensemble-wide value would override the
+    per-slot ones.
+    """
     task_config = _get_auxiliary_task_config(task)
     raw = task_config.get("extra_body")
-    if isinstance(raw, dict):
-        return dict(raw)
-    return {}
+    result = dict(raw) if isinstance(raw, dict) else {}
+    if "reasoning" not in result:
+        effort = task_config.get("reasoning_effort")
+        if effort is not None and effort != "":
+            if task in ("moa_reference", "moa_aggregator"):
+                logger.warning(
+                    "auxiliary.%s.reasoning_effort is not supported — MoA "
+                    "reasoning depth is per-slot: set reasoning_effort on the "
+                    "preset's reference_models entries / aggregator instead "
+                    "(moa.presets.<name>...). Ignoring.",
+                    task,
+                )
+                return result
+            from hermes_constants import parse_reasoning_effort
+            parsed = parse_reasoning_effort(effort)
+            if parsed is not None:
+                result["reasoning"] = parsed
+            else:
+                logger.warning(
+                    "auxiliary.%s.reasoning_effort %r is not a valid level "
+                    "(none, minimal, low, medium, high, xhigh, max, ultra) — ignoring",
+                    task, effort,
+                )
+    return result
 
 
 def _get_task_reasoning_config(task: str) -> Optional[Dict[str, Any]]:
     """Parse ``auxiliary.<task>.reasoning_effort`` using the shared schema."""
     if not task:
+        return None
+    # MoA reasoning belongs to each preset slot. Ignore stale task-level keys
+    # here as well as in _get_task_extra_body so they cannot bypass the
+    # per-slot contract through the top-level reasoning_config call path.
+    if task in ("moa_reference", "moa_aggregator"):
         return None
     from hermes_constants import parse_reasoning_effort
 
@@ -6445,6 +6568,32 @@ def _convert_openai_images_to_anthropic(messages: list) -> list:
         converted.append({**msg, "content": new_content} if changed else msg)
     return converted
 
+
+_PROFILE_REASONING_KEYS = {
+    "reasoning",
+    "reasoning_effort",
+    "thinking",
+    "thinking_config",
+    "thinkingconfig",
+    "thinking_budget",
+    "thinkingbudget",
+    "enable_thinking",
+    "think",
+    "verbosity",
+}
+
+
+def _contains_profile_reasoning_fields(value: Any) -> bool:
+    """Return whether a profile payload contains a reasoning wire control."""
+    if not isinstance(value, dict):
+        return False
+    for key, nested in value.items():
+        normalized = str(key).strip().lower()
+        if normalized in _PROFILE_REASONING_KEYS:
+            return True
+        if _contains_profile_reasoning_fields(nested):
+            return True
+    return False
 
 
 def _retarget_request_overrides_for_model(
@@ -6629,9 +6778,15 @@ def _build_call_kwargs(
     # Reuse the same provider profiles as the main Chat Completions transport;
     # do not grow a second auxiliary provider-capability table.
     profile = _provider_profile_for_aux_route(provider, base_url)
+    profile_body: Dict[str, Any] = {}
     profile_extra: Dict[str, Any] = {}
     if profile is not None:
         try:
+            profile_body = profile.build_extra_body(
+                reasoning_config=reasoning_config,
+                model=model,
+                base_url=base_url,
+            ) or {}
             profile_extra, profile_top_level = profile.build_api_kwargs_extras(
                 reasoning_config=reasoning_config,
                 model=model,
@@ -6657,16 +6812,16 @@ def _build_call_kwargs(
         profile_extra.setdefault("reasoning", dict(reasoning_config))
 
     # Profile defaults first; explicit task/caller fields retain precedence.
-    merged_extra = dict(profile_extra or {})
+    merged_extra = dict(profile_body or {})
+    merged_extra.update(profile_extra or {})
     merged_extra.update(extra_body or {})
-    if provider == "nous":
-        merged_extra.setdefault("tags", []).extend(_nous_portal_tags())
+    if provider == "nous" and "tags" not in merged_extra:
+        merged_extra["tags"] = _nous_portal_tags()
 
     overrides = dict(request_overrides or {})
     override_extra = overrides.pop("extra_body", None)
     if isinstance(override_extra, dict):
         merged_extra.update(override_extra)
-
     if merged_extra:
         merged_extra = _normalize_vibeproxy_claude_extra_body(
             provider,
@@ -6676,6 +6831,21 @@ def _build_call_kwargs(
         kwargs["extra_body"] = merged_extra
     if overrides:
         kwargs.update(overrides)
+
+    # Native Anthropic Messages adapters do not consume ``extra_body``. Carry
+    # the normalized Hermes reasoning config through a private kwarg so the
+    # adapter can pass it into build_anthropic_kwargs(), where provider-aware
+    # thinking/output_config projection lives. Do not expose this private kwarg
+    # to ordinary OpenAI-compatible SDK clients, which would reject it.
+    if reasoning_config and isinstance(reasoning_config, dict):
+        provider_norm = str(provider or "").strip().lower()
+        effective_base = base_url or ""
+        if (
+            provider_norm == "anthropic"
+            or _endpoint_speaks_anthropic_messages(effective_base)
+            or _is_anthropic_compat_endpoint(provider_norm, effective_base)
+        ):
+            kwargs["_reasoning_config"] = dict(reasoning_config)
 
     return kwargs
 
@@ -6787,6 +6957,7 @@ def call_llm(
     timeout: float = None,
     extra_body: dict = None,
     request_overrides: Optional[Dict[str, Any]] = None,
+    reasoning_config: Optional[dict] = None,
     api_mode: str = None,
     stream: bool = False,
     stream_options: dict = None,
@@ -6811,6 +6982,8 @@ def call_llm(
         tools: Tool definitions (for function calling).
         timeout: Request timeout in seconds (None = read from auxiliary.{task}.timeout config).
         extra_body: Additional request body fields.
+        reasoning_config: Optional Hermes reasoning config for direct model calls
+              such as MoA reference/aggregator slots.
         stream: When True, return the raw SDK streaming iterator instead of a
             validated complete response. The caller is responsible for consuming
             chunks (and for any fallback). Used by the MoA aggregator so its
@@ -6833,7 +7006,8 @@ def call_llm(
     caller_extra_body = dict(extra_body or {})
     effective_extra_body = dict(task_extra_body)
     effective_extra_body.update(caller_extra_body)
-    reasoning_config = _get_task_reasoning_config(task)
+    if reasoning_config is None:
+        reasoning_config = _get_task_reasoning_config(task)
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
@@ -7490,6 +7664,7 @@ async def async_call_llm(
     timeout: float = None,
     extra_body: dict = None,
     request_overrides: Optional[Dict[str, Any]] = None,
+    reasoning_config: Optional[dict] = None,
 ) -> Any:
     """Centralized asynchronous LLM call.
 
@@ -7501,7 +7676,8 @@ async def async_call_llm(
     caller_extra_body = dict(extra_body or {})
     effective_extra_body = dict(task_extra_body)
     effective_extra_body.update(caller_extra_body)
-    reasoning_config = _get_task_reasoning_config(task)
+    if reasoning_config is None:
+        reasoning_config = _get_task_reasoning_config(task)
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(

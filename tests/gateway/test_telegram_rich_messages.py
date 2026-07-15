@@ -684,21 +684,20 @@ async def test_notification_opt_in_drops_disable_flag():
 
 
 @pytest.mark.asyncio
-async def test_table_only_uses_rich_when_rich_messages_opt_out():
-    """Pipe tables auto-route to sendRichMessage even without the full opt-in."""
+async def test_table_only_uses_legacy_when_rich_messages_opt_out():
+    """Pipe tables respect the rich_messages: false config and stay on legacy."""
     adapter = _make_adapter(extra={"rich_messages": False})
 
     result = await adapter.send("12345", TABLE_ONLY_CONTENT)
 
     assert result.success is True
-    api_kwargs = _rich_api_kwargs(adapter)
-    assert api_kwargs["rich_message"]["markdown"] == TABLE_ONLY_CONTENT
-    adapter._bot.send_message.assert_not_called()
+    adapter._bot.do_api_request.assert_not_called()
+    adapter._bot.send_message.assert_awaited()
 
 
 @pytest.mark.asyncio
 async def test_table_only_uses_rich_with_default_config():
-    """Default config keeps task lists on legacy but upgrades bare tables."""
+    """Local deployed default keeps native rich table rendering enabled."""
     config = PlatformConfig(enabled=True, token="fake-token")
     adapter = TelegramAdapter(config)
     bot = MagicMock()
@@ -715,8 +714,8 @@ async def test_table_only_uses_rich_with_default_config():
 
 
 @pytest.mark.asyncio
-async def test_dm_topic_resumed_send_uses_rich_for_table_without_reply_anchor():
-    """Resumed/synthetic DM-topic sends keep message_thread_id routing."""
+async def test_dm_topic_resumed_send_uses_legacy_for_table_when_opt_out():
+    """Resumed DM-topic sends respect rich_messages: false for tables."""
     adapter = _make_adapter(extra={"rich_messages": False})
 
     result = await adapter.send(
@@ -739,7 +738,8 @@ async def test_dm_topic_resumed_send_uses_rich_for_table_without_reply_anchor():
 
 
 @pytest.mark.asyncio
-async def test_finalize_edit_rich_includes_forum_topic_routing():
+async def test_finalize_edit_legacy_includes_forum_topic_routing():
+    """With rich_messages: false, table edits use legacy path with topic routing."""
     adapter = _make_adapter(extra={"rich_messages": False})
 
     result = await adapter.edit_message(
@@ -751,9 +751,8 @@ async def test_finalize_edit_rich_includes_forum_topic_routing():
     )
 
     assert result.success is True
-    api_kwargs = _rich_edit_kwargs(adapter)
-    assert api_kwargs["message_thread_id"] == 5
-    assert api_kwargs["rich_message"]["markdown"] == TABLE_ONLY_CONTENT
+    adapter._bot.do_api_request.assert_not_called()
+    adapter._bot.edit_message_text.assert_awaited()
 
 
 @pytest.mark.asyncio

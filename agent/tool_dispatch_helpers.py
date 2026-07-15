@@ -107,7 +107,6 @@ def _should_parallelize_tool_batch(tool_calls) -> bool:
     plan = _plan_tool_execution_groups(tool_calls)
     return len(plan) == 1 and len(plan[0]) > 1
 
-
 def _parallel_safety_for_tool(
     tool_name: str,
     function_args: dict,
@@ -183,16 +182,17 @@ def _plan_tool_execution_groups(tool_calls) -> tuple[tuple[int, ...], ...]:
         try:
             function_args = json.loads(tool_call.function.arguments)
         except Exception:
+            _raw = tool_call.function.arguments
             logging.debug(
-                "Could not parse args for %s — defaulting to sequential; raw=%s",
+                "Could not parse args for %s — treating as sequential barrier; raw=%s",
                 tool_name,
-                tool_call.function.arguments[:200],
+                _raw[:200] if isinstance(_raw, str) else repr(_raw)[:200],
             )
             function_args = {}
             malformed_indices.add(index)
         if not isinstance(function_args, dict):
             logging.debug(
-                "Non-dict args for %s (%s) — defaulting to sequential",
+                "Non-dict args for %s (%s) — treating as sequential barrier",
                 tool_name,
                 type(function_args).__name__,
             )
@@ -207,6 +207,19 @@ def _plan_tool_execution_groups(tool_calls) -> tuple[tuple[int, ...], ...]:
         for index, (name, args) in enumerate(specs)
     ]
     return _plan_tool_execution_groups_for_specs(effective_specs)
+
+
+def _plan_tool_batch_segments(tool_calls) -> List[tuple]:
+    """Compatibility view of the grouped planner as ordered call segments."""
+    segments: List[tuple] = []
+    for group in _plan_tool_execution_groups(tool_calls):
+        kind = "parallel" if len(group) > 1 else "sequential"
+        calls = [tool_calls[index] for index in group]
+        if kind == "sequential" and segments and segments[-1][0] == "sequential":
+            segments[-1][1].extend(calls)
+        else:
+            segments.append((kind, calls))
+    return segments
 
 
 def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Optional[Path]:
@@ -603,6 +616,7 @@ __all__ = [
     "_DESTRUCTIVE_PATTERNS",
     "_REDIRECT_OVERWRITE",
     "_is_destructive_command",
+    "_plan_tool_batch_segments",
     "_should_parallelize_tool_batch",
     "_plan_tool_execution_groups",
     "_plan_tool_execution_groups_for_specs",
