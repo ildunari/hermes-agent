@@ -295,6 +295,11 @@ export const ja = defineLocale({
       uiScaleTitle: 'UI スケール',
       uiScaleDesc: (percent: number) =>
         `アプリ全体の文字と UI を拡大縮小します。Cmd/Ctrl と +、-、0 でも変更できます。現在: ${percent}%`,
+      chatWidthTitle: 'チャット幅',
+      chatWidthDesc: '会話と入力欄が利用可能なチャット領域をどこまで使うかを設定します。',
+      chatWidthNormal: '標準',
+      chatWidthWide: 'ワイド',
+      chatWidthFull: '全幅',
       translucencyTitle: 'ウィンドウの透過',
       translucencyDesc: 'ウィンドウ全体を透過させてデスクトップを表示します。macOS と Windows のみ。',
       embedsTitle: 'インライン埋め込み',
