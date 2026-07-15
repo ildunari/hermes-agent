@@ -45,6 +45,26 @@ CHECKS = (
         ),
         "unattended Developer ID signing",
     ),
+    Check(
+        "agent/context_compressor.py",
+        ("_REPLAY_BUDGET_KEYS", "_serialized_length_for_budget"),
+        "upstream replay-budget accounting for compaction tail",
+    ),
+    Check(
+        "gateway/guest_access.py",
+        ("_HOST_HOME_PATH", "_HOST_HOME_PATH_RE", "Path.home()"),
+        "portable guest host-home denylist",
+    ),
+    Check(
+        "apps/desktop/src/i18n/local-carry.ts",
+        ("draftPendingNotice",),
+        "draft pending notice outside hot locale literals",
+    ),
+    Check(
+        "scripts/setup_local_merge_aids.sh",
+        ("rerere.autoupdate", "git-rr-cache"),
+        "shareable rerere setup helper",
+    ),
 )
 
 
