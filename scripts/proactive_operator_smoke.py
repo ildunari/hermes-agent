@@ -54,12 +54,12 @@ def arm_operator_smoke(
         raise ValueError("exact contact is not registered in proactive state")
     route = scheduler._route_for_contact(contact)
     state = scheduler.get_contact(route.contact_hash)
-    fingerprint = str((state or {}).get("route_fingerprint") or "")
-    if not fingerprint:
-        raise ValueError("exact existing DM route has no authenticated fingerprint")
+    if state is None:
+        raise ValueError("exact existing DM route is not registered")
+    commitment = scheduler.operator_route_commitment(route.as_dict())
     slot_id = scheduler.arm_operator_smoke(
         route,
-        route_fingerprint=fingerprint,
+        route_commitment=commitment,
         now=now,
     )
     return {

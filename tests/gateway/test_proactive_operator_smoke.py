@@ -59,7 +59,6 @@ def test_command_arms_tagged_observe_slot_for_bound_exact_dm(tmp_path: Path):
     for index in range(5):
         scheduler.note_inbound(ROUTE, message_id=f"m-{index}", received_at=NOW - 10 + index)
     _interest(tmp_path)
-    assert scheduler.bind_route_fingerprint(ROUTE, "existing-dm-fingerprint")
 
     result = arm_operator_smoke(
         profile_home=tmp_path,

@@ -998,7 +998,7 @@ def test_operator_smoke_is_exact_route_tagged_observe_blocked_and_active_overrid
         "ready": True, "type": "", "target": "", "delivery_ack": True,
     }, now=NOW)
     slot = live.arm_operator_smoke(
-        route, route_fingerprint="exact-existing-dm", now=NOW,
+        route, route_commitment=live.operator_route_commitment(route.as_dict()), now=NOW,
     )
     claim = live.claim_due(worker_id="smoke", now=NOW)[0]
     assert claim.slot_id == slot
@@ -1027,18 +1027,18 @@ def test_operator_smoke_is_exact_route_tagged_observe_blocked_and_active_overrid
     make_interest(ContactMemoryStore(observe_home / "contact-memory", "kosta-owner"))
     assert observe.bind_route_fingerprint(route, "exact-existing-dm")
     observed_slot = observe.arm_operator_smoke(
-        route, route_fingerprint="exact-existing-dm", now=NOW,
+        route, route_commitment=observe.operator_route_commitment(route.as_dict()), now=NOW,
     )
     observed_claim = observe.claim_due(worker_id="observe-smoke", now=NOW)[0]
     assert observed_claim.slot_id == observed_slot
     assert observe.final_delivery_check(route, observed_claim, now=NOW) == "mode_not_live"
 
-    with pytest.raises(ValueError, match="fingerprint"):
-        live.arm_operator_smoke(route, route_fingerprint="wrong", now=NOW + 1)
+    with pytest.raises(ValueError, match="commitment"):
+        live.arm_operator_smoke(route, route_commitment="wrong", now=NOW + 1)
     with pytest.raises(ValueError, match="DM-only"):
+        group = ContactRoute(**{**route.__dict__, "chat_type": "group"})
         live.arm_operator_smoke(
-            ContactRoute(**{**route.__dict__, "chat_type": "group"}),
-            route_fingerprint="exact-existing-dm", now=NOW + 1,
+            group, route_commitment=live.operator_route_commitment(group.as_dict()), now=NOW + 1,
         )
 
 

@@ -1209,11 +1209,11 @@ class ProactiveScheduler:
         self,
         route: ContactRoute,
         *,
-        route_fingerprint: str,
+        route_commitment: str,
         now: float | None = None,
         slot_id: str | None = None,
     ) -> str:
-        """Arm one audited immediate smoke for an already-bound exact DM route."""
+        """Arm one audited immediate smoke for an exact stored DM route."""
         timestamp = _finite(time.time() if now is None else now, "now")
         if not self.config.enabled:
             raise RuntimeError("proactive scheduling is disabled")
@@ -1222,10 +1222,10 @@ class ProactiveScheduler:
             raise ValueError("operator smoke is DM-only")
         if (route.profile_name, route.contact_id, route.principal) not in self.config.allowed_contacts:
             raise ValueError("operator smoke route is not in the exact allowlist")
-        fingerprint = str(route_fingerprint or "").strip()
-        if not fingerprint:
-            raise ValueError("operator smoke route fingerprint is required")
-        contact_hash = self.register_contact(route, now=timestamp)
+        commitment = str(route_commitment or "").strip()
+        if not commitment:
+            raise ValueError("operator smoke route commitment is required")
+        contact_hash = route.contact_hash
         interests = self._contact_store(route).eligible_interests(now=timestamp)
         if not interests:
             raise ValueError("operator smoke has no eligible interest")
@@ -1237,14 +1237,12 @@ class ProactiveScheduler:
         con = self._begin()
         try:
             contact = con.execute(
-                "SELECT route_json,route_fingerprint,inbound_version FROM proactive_contact "
+                "SELECT route_json,inbound_version FROM proactive_contact "
                 "WHERE contact_hash=? AND profile_name=? AND contact_id=?",
                 (contact_hash, route.profile_name, route.contact_id),
             ).fetchone()
-            if contact is None or contact["route_fingerprint"] != fingerprint:
-                raise ValueError(
-                    "operator smoke route fingerprint does not match the bound existing DM"
-                )
+            if contact is None:
+                raise ValueError("operator smoke route is not registered")
             stored_route = json.loads(contact["route_json"] or "{}")
             supplied_route = route.as_dict()
             if any(
@@ -1252,6 +1250,8 @@ class ProactiveScheduler:
                 for key in ("chat_type", "chat_id", "user_id", "session_id")
             ):
                 raise ValueError("operator smoke route does not match the stored existing DM")
+            if commitment != self.operator_route_commitment(stored_route):
+                raise ValueError("operator smoke route commitment does not match the existing DM")
             if con.execute(
                 "SELECT 1 FROM proactive_slot WHERE contact_hash=? "
                 "AND status IN ('armed','claimed')",
@@ -1264,7 +1264,7 @@ class ProactiveScheduler:
                 "session_id": route.session_id,
                 "operator_smoke": True,
                 "active_hours_override": True,
-                "route_fingerprint": fingerprint,
+                "route_commitment": commitment,
             }
             con.execute(
                 """INSERT INTO proactive_slot(
@@ -1287,6 +1287,17 @@ class ProactiveScheduler:
         except BaseException as exc:
             self._finish(con, exc)
             raise
+
+    @staticmethod
+    def operator_route_commitment(route: Mapping[str, Any]) -> str:
+        """Return a text-free commitment to one stored existing-DM route."""
+        canonical = {
+            key: str(route.get(key) or "")
+            for key in ("platform", "chat_type", "chat_id", "user_id", "session_id")
+        }
+        return hashlib.sha256(json.dumps(
+            canonical, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
 
     def schedule_checkin(
         self,
@@ -1554,7 +1565,7 @@ class ProactiveScheduler:
             row = con.execute(
                 """SELECT s.status,s.claim_token,s.inbound_version,s.payload_json,
                           c.inbound_version current_inbound,
-                          s.ingress_sequence,c.disabled_until,c.timezone,c.route_fingerprint,
+                          s.ingress_sequence,c.disabled_until,c.timezone,c.route_json,
                           d.kill_generation,
                           (SELECT COALESCE(max(rowid),0) FROM proactive_ingress_observed) current_ingress
                    FROM proactive_slot s
@@ -1576,7 +1587,8 @@ class ProactiveScheduler:
         operator_smoke = payload.get("operator_smoke") is True
         if operator_smoke and (
             payload.get("active_hours_override") is not True
-            or str(payload.get("route_fingerprint") or "") != str(row["route_fingerprint"] or "")
+            or str(payload.get("route_commitment") or "")
+            != self.operator_route_commitment(json.loads(row["route_json"] or "{}"))
         ):
             return "operator_smoke_tag_invalid"
         from datetime import datetime
