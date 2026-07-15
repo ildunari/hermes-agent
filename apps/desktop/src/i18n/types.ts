@@ -1415,7 +1415,6 @@ export interface Translations {
     urlHintPre: string
     attach: string
     queued: (count: number) => string
-    draftPendingNotice: string
     attachmentOnly: string
     emptyTurn: string
     attachments: (count: number) => string

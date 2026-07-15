@@ -1660,7 +1660,6 @@ export const ja = defineLocale({
     urlHintPre: '完全な URL を入力してください。例: ',
     attach: '添付',
     queued: count => `${count} 件キュー済み`,
-    draftPendingNotice: 'まだ下書きです — 送信すると現在の実行後にキューへ入ります。',
     attachmentOnly: '添付のみのターン',
     emptyTurn: '空のターン',
     attachments: count => `${count} 件の添付`,

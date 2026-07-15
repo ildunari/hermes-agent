@@ -265,7 +265,7 @@ async function addWorktree(repoPath, options, gitBin) {
       } catch {
         // The fetch isn't mandatory, but it would be nice to do if possible.
         // If it's not possible, just use the local ref of the remote branch.
-        // If it doesn't exist locally, we'll get an error anyways
+        // If it doesn't exist locally, we'll get an error anyways 
       }
     }
 
