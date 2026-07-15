@@ -18,6 +18,7 @@ const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g
 const RAW_URL_RE = /https?:\/\/[^\s<>"'`*]+[^\s<>"'`*.,;:!?]/g
 const LOCAL_PREVIEW_URL_RE = /(^|\s)https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?\/?[^\s<>"'`]*/gi
 const LOCAL_PREVIEW_ONLY_RE = /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?\/?$/i
+const LOOPBACK_URL_RE = /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:\/|$)/i
 const URL_ONLY_LINE_RE = /^\s*https?:\/\/\S+\s*$/i
 const CITATION_MARKER_RE = /(?<=[\p{L}\p{N})\].,!?:;"'”’])\[(?:\d+(?:\s*,\s*\d+)*)\](?!\()/gu
 
@@ -246,7 +247,11 @@ function normalizeFenceBlocks(text: string): string {
       continue
     }
 
-    if (closeIndex !== -1 && isUrlOnlyBlock(bodyLines)) {
+    // Public URL-only fences become compact clickable links. Keep loopback
+    // URLs fenced, though: normalizeVisibleProse intentionally strips local
+    // preview-server URLs, so demoting one here would erase an explicitly
+    // requested CLI/API endpoint from the answer.
+    if (closeIndex !== -1 && isUrlOnlyBlock(bodyLines) && !LOOPBACK_URL_RE.test(body.trim())) {
       extend(out, bodyLines)
       index = closeIndex + 1
 
