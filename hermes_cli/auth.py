@@ -995,6 +995,7 @@ def _auth_lock_path() -> Path:
 
 
 _auth_lock_holder = threading.local()
+_global_auth_lock_holder = threading.local()
 
 
 @contextmanager
@@ -1084,6 +1085,36 @@ def _auth_store_lock(timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS):
         _auth_lock_holder,
         timeout_seconds,
         "Timed out waiting for auth store lock",
+    ):
+        yield
+
+
+@contextmanager
+def _auth_store_lock_for_path(
+    auth_path: Optional[Path],
+    timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS,
+):
+    """Lock the auth store that actually owns a credential.
+
+    Named profiles normally lock their own ``auth.lock``. A provider inherited
+    from the global root must instead lock the root store; otherwise two profile
+    processes can concurrently consume the same rotating OAuth refresh token.
+    """
+    active_path = _auth_file_path()
+    target_path = auth_path or active_path
+    try:
+        is_active = target_path.resolve(strict=False) == active_path.resolve(strict=False)
+    except Exception:
+        is_active = target_path == active_path
+    if is_active:
+        with _auth_store_lock(timeout_seconds=timeout_seconds):
+            yield
+        return
+    with _file_lock(
+        target_path.with_suffix(".lock"),
+        _global_auth_lock_holder,
+        timeout_seconds,
+        f"Timed out waiting for auth store lock: {target_path}",
     ):
         yield
 
@@ -1329,7 +1360,9 @@ def is_runtime_provider_routable(provider_id: str) -> bool:
     return True
 
 
-def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
+def read_credential_pool(
+    provider_id: Optional[str] = None,
+) -> Dict[str, Any] | List[Dict[str, Any]]:
     """Return the persisted credential pool, or one provider slice.
 
     In profile mode, the profile's credential pool is authoritative. If a
@@ -1368,12 +1401,51 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
             merged[gp_key] = list(gp_entries)
         return merged
 
-    provider_entries = pool.get(provider_id)
-    if isinstance(provider_entries, list) and provider_entries:
-        return list(provider_entries)
-    # Profile has no entries for this provider — fall back to global.
-    global_entries = global_pool.get(provider_id)
-    return list(global_entries) if isinstance(global_entries, list) else []
+    entries, _source_path = read_credential_pool_with_source(provider_id)
+    return entries
+
+
+def read_credential_pool_with_source(provider_id: str) -> tuple[List[Dict[str, Any]], Path]:
+    """Read one provider pool and its owning auth.json from one locked snapshot."""
+    active_path = _auth_file_path()
+    global_path = _global_auth_file_path()
+    with _auth_store_lock():
+        local_store = _load_auth_store(active_path)
+        local_pool = local_store.get("credential_pool")
+        local_entries = local_pool.get(provider_id) if isinstance(local_pool, dict) else None
+        if isinstance(local_entries, list) and local_entries:
+            return list(local_entries), active_path
+        if provider_id == "openai-codex":
+            local_providers = local_store.get("providers")
+            local_state = (
+                local_providers.get("openai-codex")
+                if isinstance(local_providers, dict)
+                else None
+            )
+            local_tokens = local_state.get("tokens") if isinstance(local_state, dict) else None
+            if (
+                isinstance(local_tokens, dict)
+                and local_tokens.get("access_token")
+                and local_tokens.get("refresh_token")
+            ):
+                return [], active_path
+        if global_path is None:
+            return [], active_path
+        with _auth_store_lock_for_path(global_path):
+            global_store = _load_auth_store(global_path)
+            global_pool = global_store.get("credential_pool")
+            global_entries = (
+                global_pool.get(provider_id) if isinstance(global_pool, dict) else None
+            )
+            if isinstance(global_entries, list) and global_entries:
+                return list(global_entries), global_path
+    return [], active_path
+
+
+def credential_pool_source_path(provider_id: str) -> Path:
+    """Return the auth.json that owns the effective provider pool entries."""
+    _entries, source_path = read_credential_pool_with_source(provider_id)
+    return source_path
 
 
 def write_credential_pool(
@@ -1381,6 +1453,7 @@ def write_credential_pool(
     entries: List[Dict[str, Any]],
     *,
     removed_ids: Optional[Iterable[str]] = None,
+    target_path: Optional[Path] = None,
 ) -> Path:
     """Persist one provider's credential pool under auth.json.
 
@@ -1397,8 +1470,9 @@ def write_credential_pool(
     merge does not resurrect them from the on-disk copy.
     """
     removed = {rid for rid in (removed_ids or ()) if rid}
-    with _auth_store_lock():
-        auth_store = _load_auth_store()
+    destination = target_path or _auth_file_path()
+    with _auth_store_lock_for_path(destination):
+        auth_store = _load_auth_store(destination)
         pool = auth_store.get("credential_pool")
         if not isinstance(pool, dict):
             pool = {}
@@ -1424,7 +1498,7 @@ def write_credential_pool(
                 continue
             merged.append(sanitize_borrowed_credential_payload(disk_entry, provider_id))
         pool[provider_id] = merged
-        return _save_auth_store(auth_store)
+        return _save_auth_store(auth_store, target_path=destination)
 
 
 def suppress_credential_source(provider_id: str, source: str) -> None:

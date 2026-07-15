@@ -256,3 +256,246 @@ def test_codex_pool_refresh_holds_auth_store_lock_across_post(monkeypatch, tmp_p
     # The invariant: the single-use token POST ran inside the auth-store lock.
     assert lock_held["during_post"] is True
 
+
+def test_inherited_codex_pool_refresh_stays_owned_by_root(
+    profile_and_root, monkeypatch
+):
+    """Refreshing a root-fallback Codex row must not clone it into the profile."""
+    profile_path, root_path = profile_and_root
+    _write_store(profile_path, {"version": 1, "providers": {}, "credential_pool": {}})
+    _write_store(
+        root_path,
+        {
+            "version": 1,
+            "providers": {},
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "shared-codex",
+                        "label": "shared",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "old-access",
+                        "refresh_token": "old-refresh",
+                    }
+                ]
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        A,
+        "refresh_codex_oauth_pure",
+        lambda *_args, **_kwargs: {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "last_refresh": "2026-07-15T00:00:00Z",
+        },
+    )
+
+    pool = CP.load_pool("openai-codex")
+    entry = pool.entries()[0]
+    refreshed = pool._refresh_entry(entry, force=True)
+
+    assert refreshed is not None
+    assert refreshed.refresh_token == "new-refresh"
+    profile = _read_store(profile_path)
+    assert not profile.get("credential_pool", {}).get("openai-codex")
+    assert not profile.get("providers", {}).get("openai-codex")
+    root = _read_store(root_path)
+    root_entry = root["credential_pool"]["openai-codex"][0]
+    assert root_entry["access_token"] == "new-access"
+    assert root_entry["refresh_token"] == "new-refresh"
+
+
+def test_inherited_codex_pool_rereads_root_after_lock_wait(
+    profile_and_root, monkeypatch
+):
+    """A waiter adopts the winner's rotated root token instead of reusing it."""
+    profile_path, root_path = profile_and_root
+    _write_store(profile_path, {"version": 1, "providers": {}, "credential_pool": {}})
+    _write_store(
+        root_path,
+        {
+            "version": 1,
+            "providers": {},
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "shared-codex",
+                        "label": "shared",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "stale-access",
+                        "refresh_token": "stale-refresh",
+                    }
+                ]
+            },
+        },
+    )
+
+    pool = CP.load_pool("openai-codex")
+    stale_entry = pool.entries()[0]
+    root = _read_store(root_path)
+    root_entry = root["credential_pool"]["openai-codex"][0]
+    root_entry["access_token"] = "winner-access"
+    root_entry["refresh_token"] = "winner-refresh"
+    _write_store(root_path, root)
+
+    refresh_calls = []
+    monkeypatch.setattr(A, "_codex_access_token_is_expiring", lambda token, _skew=0: False)
+    monkeypatch.setattr(CP, "_codex_access_token_is_expiring", lambda token, _skew=0: False)
+    monkeypatch.setattr(
+        A,
+        "refresh_codex_oauth_pure",
+        lambda *_args, **_kwargs: refresh_calls.append(True),
+    )
+
+    resolved = pool._refresh_entry(stale_entry, force=True)
+
+    assert resolved is not None
+    assert resolved.refresh_token == "winner-refresh"
+    assert refresh_calls == []
+
+
+def test_profile_singleton_seeds_profile_without_overwriting_root_pool(
+    profile_and_root,
+):
+    """A local singleton owns a local pool and never mutates the root account."""
+    profile_path, root_path = profile_and_root
+    _write_store(
+        profile_path,
+        {
+            "version": 1,
+            "providers": {
+                "openai-codex": {
+                    "tokens": {
+                        "access_token": "profile-access",
+                        "refresh_token": "profile-refresh",
+                    }
+                }
+            },
+            "credential_pool": {},
+        },
+    )
+    _write_store(
+        root_path,
+        {
+            "version": 1,
+            "providers": {},
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "root-row",
+                        "label": "shared",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "root-access",
+                        "refresh_token": "root-refresh",
+                    }
+                ]
+            },
+        },
+    )
+
+    pool = CP.load_pool("openai-codex")
+
+    assert pool.entries()[0].refresh_token == "profile-refresh"
+    profile = _read_store(profile_path)
+    assert (
+        profile["credential_pool"]["openai-codex"][0]["refresh_token"]
+        == "profile-refresh"
+    )
+    root = _read_store(root_path)
+    assert (
+        root["credential_pool"]["openai-codex"][0]["refresh_token"]
+        == "root-refresh"
+    )
+
+
+def test_remove_inherited_codex_entry_updates_root(profile_and_root):
+    profile_path, root_path = profile_and_root
+    _write_store(profile_path, {"version": 1, "providers": {}, "credential_pool": {}})
+    _write_store(
+        root_path,
+        {
+            "version": 1,
+            "providers": {},
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "root-row",
+                        "label": "shared",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "root-access",
+                        "refresh_token": "root-refresh",
+                    }
+                ]
+            },
+        },
+    )
+
+    removed = CP.load_pool("openai-codex").remove_index(1)
+
+    assert removed is not None
+    assert removed.id == "root-row"
+    assert not _read_store(root_path)["credential_pool"]["openai-codex"]
+    assert not _read_store(profile_path)["credential_pool"].get("openai-codex")
+
+
+def test_terminal_inherited_codex_refresh_quarantines_root(profile_and_root, monkeypatch):
+    profile_path, root_path = profile_and_root
+    _write_store(profile_path, {"version": 1, "providers": {}, "credential_pool": {}})
+    _write_store(
+        root_path,
+        {
+            "version": 1,
+            "providers": {
+                "openai-codex": {
+                    "tokens": {
+                        "access_token": "dead-access",
+                        "refresh_token": "dead-refresh",
+                    }
+                }
+            },
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "root-device",
+                        "label": "shared",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "device_code",
+                        "access_token": "dead-access",
+                        "refresh_token": "dead-refresh",
+                    }
+                ]
+            },
+        },
+    )
+
+    def terminal_failure(*_args, **_kwargs):
+        raise A.AuthError(
+            "dead",
+            provider="openai-codex",
+            code="invalid_grant",
+            relogin_required=True,
+        )
+
+    monkeypatch.setattr(A, "refresh_codex_oauth_pure", terminal_failure)
+    pool = CP.load_pool("openai-codex")
+
+    assert pool._refresh_entry(pool.entries()[0], force=True) is None
+    root = _read_store(root_path)
+    assert not root["providers"]["openai-codex"]["tokens"].get("access_token")
+    assert not root["providers"]["openai-codex"]["tokens"].get("refresh_token")
+    assert not root["credential_pool"]["openai-codex"]
+    profile = _read_store(profile_path)
+    assert not profile.get("providers", {}).get("openai-codex")
+    assert not profile.get("credential_pool", {}).get("openai-codex")
+
