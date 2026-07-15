@@ -244,12 +244,17 @@ def _web_action_can_fetch(args: Mapping[str, Any]) -> bool:
     return action in {"fetch", "answer", "summary", "json", "links", "curlmd"} or mode in {"markdown", "html", "answer", "summary", "json", "links"}
 
 
+# Host home path for guest denylist matching. Prefer Path.home() so this arm
+# works on every machine, not just the Studio user that first authored it.
+_HOST_HOME_PATH = str(Path.home())
+_HOST_HOME_PATH_RE = re.escape(_HOST_HOME_PATH)
+
 _SENSITIVE_COMMAND_PATTERNS = (
     r"\bop\s+",                  # 1Password CLI
     r"\bsecurity\s+find-",        # keychain reads
     r"\blaunchctl\s+",            # service control
     r"\bhermes\s+(gateway|update|profile|config|skills?)\b",
-    r"\b(open|cat|less|more|tail|head)\s+[^\n]*(~|/Users/Kosta)(?![^\n]*\.hermes/profiles/guest)",
+    rf"\b(open|cat|less|more|tail|head)\s+[^\n]*(~|{_HOST_HOME_PATH_RE})(?![^\n]*\.hermes/profiles/guest)",
 )
 
 
@@ -477,7 +482,7 @@ def evaluate_guest_tool_call(function_name: str, function_args: Mapping[str, Any
         for marker in _SENSITIVE_PATH_MARKERS:
             if marker in code:
                 return GuestToolDecision(False, f"execute_code references blocked path marker {marker}")
-        if re.search(r"(/Users/Kosta|Path\(['\"]~|expanduser\(['\"]~)", code):
+        if re.search(rf"({_HOST_HOME_PATH_RE}|Path\(['\"]~|expanduser\(['\"]~)", code):
             return GuestToolDecision(False, "execute_code must not access host home paths in guest sessions")
         return GuestToolDecision(True)
 

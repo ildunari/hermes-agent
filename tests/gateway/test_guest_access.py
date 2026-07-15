@@ -164,6 +164,31 @@ def test_guest_terminal_policy_blocks_host_paths_and_1password(tmp_path):
     assert evaluate_guest_tool_call("terminal", {"command": "pwd", "workdir": "/Users/Kosta"}, root).allowed is False
 
 
+def test_guest_policy_blocks_host_home_from_path_home(tmp_path):
+    """Guest denylist must match Path.home(), not a hardcoded Studio path."""
+    from pathlib import Path as P
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+    home = str(P.home())
+    # Use a home path that is NOT covered by static _SENSITIVE_PATH_MARKERS so
+    # the Path.home()-based arm is the one that fires.
+    blocked_cat = evaluate_guest_tool_call(
+        "terminal",
+        {"command": f"cat {home}/Desktop/notes.txt", "workdir": str(root)},
+        root,
+    )
+    assert blocked_cat.allowed is False
+    blocked_code = evaluate_guest_tool_call(
+        "execute_code",
+        {"code": f"open({home!r} + '/Desktop/notes.txt').read()"},
+        root,
+    )
+    assert blocked_code.allowed is False
+    assert "host home" in blocked_code.reason
+
+
+
+
 def test_guest_fs_reads_and_writes_only_inside_sandbox(monkeypatch, tmp_path):
     root = tmp_path / "guest-workspace"
     monkeypatch.setenv("HERMES_GUEST_SANDBOX_ROOT", str(root))
