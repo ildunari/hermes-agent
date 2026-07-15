@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -41,6 +42,13 @@ _WEEK = 7 * 86_400.0
 _DAY = 86_400.0
 _DIRECT_TYPES = frozenset({"dm", "direct", "private"})
 _NEGATIVE_OUTCOMES = frozenset({"ignored", "dismissed"})
+_OUTCOME_VALENCE = {
+    "engaged": "positive",
+    "acknowledged": "neutral",
+    "ignored": "neutral",
+    "dismissed": "negative",
+}
+_OUTCOME_TEXT_LIMIT = 4000
 logger = logging.getLogger(__name__)
 
 _SCHEMA = """
@@ -103,15 +111,39 @@ CREATE TABLE IF NOT EXISTS proactive_action (
   sent_at REAL,
   outcome TEXT CHECK(outcome IN ('engaged','acknowledged','ignored','dismissed')),
   outcome_at REAL,
+  outcome_status TEXT CHECK(outcome_status IN ('provisional','confirmed')),
+  outcome_source_id TEXT,
   inbound_version INTEGER NOT NULL,
   reason TEXT NOT NULL,
   created_at REAL NOT NULL,
   CHECK((status='sent' AND sent_at IS NOT NULL) OR (status!='sent' AND sent_at IS NULL)),
-  CHECK((outcome IS NULL AND outcome_at IS NULL) OR
-        (outcome IS NOT NULL AND outcome_at IS NOT NULL AND sent_at IS NOT NULL))
+  CHECK((outcome IS NULL AND outcome_at IS NULL AND outcome_status IS NULL) OR
+        (outcome IS NOT NULL AND outcome_at IS NOT NULL AND outcome_status IS NOT NULL
+         AND sent_at IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS proactive_action_recent
   ON proactive_action(contact_hash, sent_at DESC, created_at DESC);
+CREATE TABLE IF NOT EXISTS proactive_outcome_confirmation (
+  action_id TEXT PRIMARY KEY REFERENCES proactive_action(action_id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('claimed','confirmed','failed')),
+  claimed_at REAL NOT NULL,
+  provisional_at REAL NOT NULL,
+  completed_at REAL,
+  provisional_outcome TEXT NOT NULL CHECK(provisional_outcome IN ('engaged','acknowledged','ignored','dismissed')),
+  confirmed_outcome TEXT CHECK(confirmed_outcome IN ('engaged','acknowledged','ignored','dismissed')),
+  confirmed_valence TEXT CHECK(confirmed_valence IN ('positive','neutral','negative')),
+  input_sha256 TEXT NOT NULL,
+  input_chars INTEGER NOT NULL CHECK(input_chars BETWEEN 0 AND 4000),
+  source_id TEXT NOT NULL,
+  error_code TEXT,
+  CHECK((status='claimed' AND completed_at IS NULL AND confirmed_outcome IS NULL
+         AND confirmed_valence IS NULL AND error_code IS NULL)
+     OR (status='confirmed' AND completed_at IS NOT NULL AND confirmed_outcome IS NOT NULL
+         AND confirmed_valence IS NOT NULL AND error_code IS NULL)
+     OR (status='failed' AND completed_at IS NOT NULL AND confirmed_outcome IS NULL
+         AND confirmed_valence IS NULL AND error_code IS NOT NULL))
+);
 CREATE TABLE IF NOT EXISTS proactive_delivery (
   slot_id TEXT PRIMARY KEY REFERENCES proactive_slot(slot_id),
   attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -185,6 +217,15 @@ def _initialize_schema(con: sqlite3.Connection) -> None:
     slot_columns = {str(row[1]) for row in con.execute("PRAGMA table_info(proactive_slot)")}
     if "ingress_sequence" not in slot_columns:
         con.execute("ALTER TABLE proactive_slot ADD COLUMN ingress_sequence INTEGER NOT NULL DEFAULT 0")
+    action_columns = {str(row[1]) for row in con.execute("PRAGMA table_info(proactive_action)")}
+    if "outcome_status" not in action_columns:
+        con.execute("ALTER TABLE proactive_action ADD COLUMN outcome_status TEXT")
+    con.execute(
+        "UPDATE proactive_action SET outcome_status='confirmed' "
+        "WHERE outcome IS NOT NULL AND outcome_status IS NULL"
+    )
+    if "outcome_source_id" not in action_columns:
+        con.execute("ALTER TABLE proactive_action ADD COLUMN outcome_source_id TEXT")
     con.execute("BEGIN IMMEDIATE")
     try:
         duplicates = con.execute(
@@ -1877,6 +1918,8 @@ class ProactiveScheduler:
             if row["outcome"] is not None:
                 if row["outcome"] != resolved:
                     raise ValueError("proactive action already has a different outcome")
+                if row["outcome_status"] == "provisional":
+                    raise ValueError("provisional outcome requires confirmation")
                 contact = con.execute(
                     "SELECT negative_streak,disabled_until FROM proactive_contact WHERE contact_hash=?",
                     (row["contact_hash"],),
@@ -1889,7 +1932,8 @@ class ProactiveScheduler:
                     "applied": False,
                 }
             con.execute(
-                "UPDATE proactive_action SET outcome=?,outcome_at=? WHERE action_id=? AND outcome IS NULL",
+                """UPDATE proactive_action SET outcome=?,outcome_at=?,outcome_status='confirmed'
+                   WHERE action_id=? AND outcome IS NULL""",
                 (resolved, timestamp, action_id),
             )
             contact = con.execute(
@@ -1917,6 +1961,219 @@ class ProactiveScheduler:
         except BaseException as exc:
             self._finish(con, exc)
             raise
+
+    def record_provisional_outcome(
+        self,
+        action_id: str,
+        outcome: ProactiveOutcome | str,
+        *,
+        source_id: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        timestamp = _finite(time.time() if now is None else now, "now")
+        resolved = ProactiveOutcome(str(getattr(outcome, "value", outcome))).value
+        source = str(source_id).strip()
+        if not source or len(source) > 500 or any(ord(ch) < 32 for ch in source):
+            raise ValueError("source_id is invalid")
+        con = self._begin()
+        try:
+            row = con.execute(
+                "SELECT outcome,outcome_status FROM proactive_action WHERE action_id=? AND status='sent'",
+                (action_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown sent proactive action: {action_id}")
+            if row["outcome"] is not None:
+                if row["outcome"] != resolved:
+                    raise ValueError("proactive action already has a different outcome")
+                self._finish(con)
+                return {
+                    "outcome": resolved,
+                    "outcome_status": str(row["outcome_status"]),
+                    "applied": False,
+                }
+            con.execute(
+                """UPDATE proactive_action SET outcome=?,outcome_at=?,
+                   outcome_status='provisional',outcome_source_id=?
+                   WHERE action_id=? AND outcome IS NULL""",
+                (resolved, timestamp, source, action_id),
+            )
+            self._finish(con)
+            return {"outcome": resolved, "outcome_status": "provisional", "applied": True}
+        except BaseException as exc:
+            self._finish(con, exc)
+            raise
+
+    async def confirm_action_outcome(
+        self,
+        route: ContactRoute,
+        action_id: str,
+        *,
+        inbound_text: str,
+        model: str,
+        extractor: Callable[..., Any],
+        source_id: str,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        timestamp = _finite(time.time() if now is None else now, "now")
+        con = self._begin()
+        try:
+            action = con.execute(
+                """SELECT outcome,outcome_at,outcome_status,contact_hash FROM proactive_action
+                   WHERE action_id=? AND status='sent'""",
+                (action_id,),
+            ).fetchone()
+            if action is None:
+                raise KeyError(f"unknown sent proactive action: {action_id}")
+            if action["contact_hash"] != route.contact_hash:
+                raise ValueError("contact route does not own proactive action")
+            existing = con.execute(
+                "SELECT * FROM proactive_outcome_confirmation WHERE action_id=?",
+                (action_id,),
+            ).fetchone()
+            if existing is not None:
+                self._finish(con)
+                return self._confirmation_result(existing, applied=False)
+            if action["outcome_status"] == "confirmed":
+                self._finish(con)
+                return {
+                    "outcome": str(action["outcome"]),
+                    "outcome_status": "confirmed",
+                    "valence": _OUTCOME_VALENCE[str(action["outcome"])],
+                    "applied": False,
+                }
+            if action["outcome"] is None or action["outcome_status"] != "provisional":
+                raise ValueError("proactive action has no provisional outcome")
+            pinned_model = str(model or "").strip()
+            if (
+                not pinned_model or len(pinned_model) > 200
+                or any(ord(ch) < 32 for ch in pinned_model)
+            ):
+                raise ValueError("model is invalid")
+            source = str(source_id).strip()
+            if not source or len(source) > 500 or any(ord(ch) < 32 for ch in source):
+                raise ValueError("source_id is invalid")
+            bounded_text = str(inbound_text or "")[:_OUTCOME_TEXT_LIMIT]
+            input_sha256 = hashlib.sha256(bounded_text.encode()).hexdigest()
+            provisional = str(action["outcome"])
+            con.execute(
+                """INSERT INTO proactive_outcome_confirmation(
+                   action_id,model,status,claimed_at,provisional_at,provisional_outcome,
+                   input_sha256,input_chars,source_id
+                   ) VALUES(?,?,'claimed',?,?,?,?,?,?)""",
+                (
+                    action_id, pinned_model, timestamp, float(action["outcome_at"]),
+                    provisional, input_sha256, len(bounded_text), source,
+                ),
+            )
+            self._finish(con)
+        except BaseException as exc:
+            if con.in_transaction:
+                self._finish(con, exc)
+            raise
+
+        try:
+            extracted = extractor(
+                model=pinned_model,
+                text=bounded_text,
+                provisional_outcome=provisional,
+            )
+            if inspect.isawaitable(extracted):
+                extracted = await extracted
+            if not isinstance(extracted, Mapping):
+                raise ValueError("extractor result must be an object")
+            confirmed = ProactiveOutcome(str(extracted.get("outcome") or "")).value
+            valence = str(extracted.get("valence") or "")
+            if _OUTCOME_VALENCE[confirmed] != valence:
+                raise ValueError("extractor valence does not match outcome")
+        except asyncio.CancelledError:
+            self._fail_outcome_confirmation(action_id, timestamp, "callback_cancelled")
+            raise
+        except Exception as exc:
+            error_code = "malformed_result" if isinstance(exc, ValueError) else "callback_unavailable"
+            audit = self._fail_outcome_confirmation(action_id, timestamp, error_code)
+            return self._confirmation_result(audit, applied=False)
+
+        con = self._begin()
+        try:
+            action = con.execute(
+                "SELECT * FROM proactive_action WHERE action_id=?", (action_id,)
+            ).fetchone()
+            if action["outcome_status"] != "provisional":
+                raise ValueError("confirmed proactive outcome cannot be rewritten")
+            contact = con.execute(
+                "SELECT negative_streak,disabled_until FROM proactive_contact WHERE contact_hash=?",
+                (action["contact_hash"],),
+            ).fetchone()
+            streak = int(contact["negative_streak"])
+            streak = streak + 1 if confirmed in _NEGATIVE_OUTCOMES else 0
+            disabled_until = (
+                timestamp + self.config.backoff_days * _DAY
+                if streak >= self.config.backoff_after_dismissals and contact["disabled_until"] is None
+                else contact["disabled_until"]
+            )
+            con.execute(
+                """UPDATE proactive_action SET outcome=?,outcome_at=?,outcome_status='confirmed'
+                   WHERE action_id=? AND outcome_status='provisional'""",
+                (confirmed, timestamp, action_id),
+            )
+            con.execute(
+                """UPDATE proactive_contact SET negative_streak=?,
+                   disabled_until=CASE WHEN ? IS NULL THEN disabled_until ELSE ? END,updated_at=?
+                   WHERE contact_hash=?""",
+                (streak, disabled_until, disabled_until, timestamp, action["contact_hash"]),
+            )
+            con.execute(
+                """UPDATE proactive_outcome_confirmation SET status='confirmed',completed_at=?,
+                   confirmed_outcome=?,confirmed_valence=? WHERE action_id=? AND status='claimed'""",
+                (timestamp, confirmed, valence, action_id),
+            )
+            audit = con.execute(
+                "SELECT * FROM proactive_outcome_confirmation WHERE action_id=?", (action_id,)
+            ).fetchone()
+            self._finish(con)
+        except BaseException as exc:
+            self._finish(con, exc)
+            raise
+        store = self._contact_store(route)
+        if store.get_proactive_send(action_id) is not None:
+            store.record_proactive_outcome(
+                action_id, confirmed, source_id=source, now=timestamp,
+            )
+        return self._confirmation_result(audit, applied=True)
+
+    def _fail_outcome_confirmation(
+        self, action_id: str, timestamp: float, error_code: str,
+    ) -> sqlite3.Row:
+        with self._connect() as failed:
+            failed.execute(
+                """UPDATE proactive_outcome_confirmation SET status='failed',completed_at=?,error_code=?
+                   WHERE action_id=? AND status='claimed'""",
+                (timestamp, error_code, action_id),
+            )
+            audit = failed.execute(
+                "SELECT * FROM proactive_outcome_confirmation WHERE action_id=?", (action_id,)
+            ).fetchone()
+        if audit is None:
+            raise RuntimeError("outcome confirmation audit disappeared")
+        return audit
+
+    @staticmethod
+    def _confirmation_result(row: sqlite3.Row, *, applied: bool) -> dict[str, Any]:
+        if row["status"] == "confirmed":
+            return {
+                "outcome": str(row["confirmed_outcome"]),
+                "outcome_status": "confirmed",
+                "valence": str(row["confirmed_valence"]),
+                "applied": applied,
+            }
+        return {
+            "outcome": str(row["provisional_outcome"]),
+            "outcome_status": "provisional",
+            "confirmation_status": str(row["status"]),
+            "error_code": row["error_code"],
+            "applied": False,
+        }
 
     def expire_unanswered(self, *, now: float | None = None) -> list[str]:
         timestamp = _finite(time.time() if now is None else now, "now")
@@ -2404,16 +2661,17 @@ def handle_inbound(
                 interest = store.get_interest(str(pending["interest_id"]))
                 topic = interest.topic if interest else ""
             outcome = scheduler.classify_outcome(text, topic)
-        scheduler.record_outcome(
-            contact_route,
+        provisional = scheduler.record_provisional_outcome(
             str(pending["action_id"]),
             outcome,
             source_id=f"inbound:{source_id}",
             now=received_at,
         )
         result["outcome"] = outcome.value
+        result["outcome_status"] = provisional["outcome_status"]
     else:
         result["outcome"] = None
+        result["outcome_status"] = None
     result["serious"] = serious
     return result
 

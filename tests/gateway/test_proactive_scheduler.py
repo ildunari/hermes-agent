@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -614,13 +615,16 @@ def test_inbound_hook_cancels_and_records_next_outcome_within_24h(tmp_path: Path
     )
     assert result["cancelled"] == 1
     assert result["outcome"] == "engaged"
+    assert result["outcome_status"] == "provisional"
     assert state.slot(slot_id)["status"] == "cancelled"
-    assert store.get_proactive_send("prior").outcome is ProactiveOutcome.ENGAGED
+    assert store.get_proactive_send("prior").outcome is None
+    assert store.get_interest("cars").ts_alpha == 2
     with state._connect() as con:
         action = con.execute(
-            "SELECT outcome FROM proactive_action WHERE action_id='prior'"
+            "SELECT outcome,outcome_status FROM proactive_action WHERE action_id='prior'"
         ).fetchone()
     assert action["outcome"] == "engaged"
+    assert action["outcome_status"] == "provisional"
 
     replay = handle_inbound(
         state_db=tmp_path / "state.db",
@@ -632,6 +636,204 @@ def test_inbound_hook_cancels_and_records_next_outcome_within_24h(tmp_path: Path
     )
     assert replay["inserted"] is False
     assert replay["outcome"] == "engaged"
+    assert replay["outcome_status"] == "provisional"
+
+
+@pytest.mark.asyncio
+async def test_provisional_outcome_is_confirmed_and_refined_once(tmp_path: Path):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    register_messages(state)
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+    sent(store, "prior", when=NOW - 100)
+    reply = "sports cars are honestly getting ridiculously fast now"
+    handle_inbound(
+        state_db=tmp_path / "state.db",
+        contact_memory_root=tmp_path / "contact-memory",
+        profile="poke", contact_id="kosta-owner", route=ROUTE,
+        timezone_name="America/New_York", source_id="reply",
+        text=reply, received_at=NOW, config=config(),
+    )
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(), profile="poke",
+    )
+
+    async def extractor(**request):
+        assert request == {
+            "model": "pinned/outcome-v1",
+            "text": reply,
+            "provisional_outcome": "engaged",
+        }
+        return {"outcome": "dismissed", "valence": "negative"}
+
+    result = await scheduler.confirm_action_outcome(
+        contact_route(), "prior", inbound_text=reply,
+        model="pinned/outcome-v1", extractor=extractor,
+        source_id="inbound:reply", now=NOW + 1,
+    )
+
+    assert result == {
+        "outcome": "dismissed", "outcome_status": "confirmed",
+        "valence": "negative", "applied": True,
+    }
+    assert store.get_proactive_send("prior").outcome is ProactiveOutcome.DISMISSED
+    interest = store.get_interest("cars")
+    assert (interest.ts_alpha, interest.ts_beta) == (2, 2)
+    with scheduler._connect() as con:
+        action = con.execute(
+            "SELECT outcome,outcome_status FROM proactive_action WHERE action_id='prior'"
+        ).fetchone()
+        audit = dict(con.execute(
+            "SELECT * FROM proactive_outcome_confirmation WHERE action_id='prior'"
+        ).fetchone())
+    assert dict(action) == {"outcome": "dismissed", "outcome_status": "confirmed"}
+    assert audit["provisional_outcome"] == "engaged"
+    assert audit["confirmed_outcome"] == "dismissed"
+    assert audit["confirmed_valence"] == "negative"
+    assert audit["model"] == "pinned/outcome-v1"
+    assert audit["provisional_at"] == NOW
+    assert audit["claimed_at"] == NOW + 1
+    assert audit["completed_at"] == NOW + 1
+    assert audit["source_id"] == "inbound:reply"
+    assert audit["input_chars"] == len(reply)
+    assert reply not in json.dumps(audit)
+    with pytest.raises(ValueError, match="different outcome"):
+        scheduler.set_action_outcome("prior", "engaged", now=NOW + 2)
+
+
+@pytest.mark.asyncio
+async def test_confirmation_claim_is_concurrent_and_replay_idempotent(tmp_path: Path):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    register_messages(state)
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+    sent(store, "prior", when=NOW - 100)
+    reply = "sports cars are honestly getting ridiculously fast now"
+    handle_inbound(
+        state_db=tmp_path / "state.db",
+        contact_memory_root=tmp_path / "contact-memory",
+        profile="poke", contact_id="kosta-owner", route=ROUTE,
+        timezone_name="America/New_York", source_id="reply",
+        text=reply, received_at=NOW, config=config(),
+    )
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(), profile="poke",
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    callback_count = 0
+
+    async def extractor(**request):
+        nonlocal callback_count
+        callback_count += 1
+        started.set()
+        await release.wait()
+        return {"outcome": "engaged", "valence": "positive"}
+
+    first_call = asyncio.create_task(scheduler.confirm_action_outcome(
+        contact_route(), "prior", inbound_text=reply,
+        model="pinned/outcome-v1", extractor=extractor,
+        source_id="inbound:reply", now=NOW + 1,
+    ))
+    await started.wait()
+    concurrent = await scheduler.confirm_action_outcome(
+        contact_route(), "prior", inbound_text=reply,
+        model="pinned/outcome-v1", extractor=extractor,
+        source_id="inbound:reply", now=NOW + 1,
+    )
+    release.set()
+    first = await first_call
+    replay = await scheduler.confirm_action_outcome(
+        contact_route(), "prior", inbound_text=reply,
+        model="ignored-on-replay", extractor=extractor,
+        source_id="inbound:reply", now=NOW + 2,
+    )
+
+    assert concurrent["confirmation_status"] == "claimed"
+    assert first == {
+        "outcome": "engaged", "outcome_status": "confirmed",
+        "valence": "positive", "applied": True,
+    }
+    assert replay == {**first, "applied": False}
+    assert callback_count == 1
+    interest = store.get_interest("cars")
+    assert (interest.ts_alpha, interest.ts_beta) == (3, 1)
+    with scheduler._connect() as con:
+        assert con.execute(
+            "SELECT count(*) FROM proactive_outcome_confirmation WHERE action_id='prior'"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "error_code"),
+    (("malformed", "malformed_result"), ("unavailable", "callback_unavailable")),
+)
+async def test_confirmation_failure_is_closed_audited_and_not_retried(
+    tmp_path: Path, mode: str, error_code: str,
+):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    register_messages(state)
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+    sent(store, "prior", when=NOW - 100)
+    inbound_text = "private payload " + "ordinary words " * 500
+    handle_inbound(
+        state_db=tmp_path / "state.db",
+        contact_memory_root=tmp_path / "contact-memory",
+        profile="poke", contact_id="kosta-owner", route=ROUTE,
+        timezone_name="America/New_York", source_id="reply",
+        text=inbound_text, received_at=NOW, config=config(),
+    )
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(), profile="poke",
+    )
+    calls = 0
+
+    async def extractor(**request):
+        nonlocal calls
+        calls += 1
+        assert len(request["text"]) == 4000
+        if mode == "unavailable":
+            raise RuntimeError("offline")
+        return {"outcome": "engaged", "valence": "negative"}
+
+    first = await scheduler.confirm_action_outcome(
+        contact_route(), "prior", inbound_text=inbound_text,
+        model="pinned/outcome-v1", extractor=extractor,
+        source_id="inbound:reply", now=NOW + 1,
+    )
+    replay = await scheduler.confirm_action_outcome(
+        contact_route(), "prior", inbound_text=inbound_text,
+        model="pinned/outcome-v1", extractor=extractor,
+        source_id="inbound:reply", now=NOW + 2,
+    )
+
+    assert first == replay == {
+        "outcome": "engaged", "outcome_status": "provisional",
+        "confirmation_status": "failed", "error_code": error_code,
+        "applied": False,
+    }
+    assert calls == 1
+    assert store.get_proactive_send("prior").outcome is None
+    interest = store.get_interest("cars")
+    assert (interest.ts_alpha, interest.ts_beta) == (2, 1)
+    with scheduler._connect() as con:
+        action = dict(con.execute(
+            "SELECT outcome,outcome_status FROM proactive_action WHERE action_id='prior'"
+        ).fetchone())
+        audit = dict(con.execute(
+            "SELECT * FROM proactive_outcome_confirmation WHERE action_id='prior'"
+        ).fetchone())
+    assert action == {"outcome": "engaged", "outcome_status": "provisional"}
+    assert audit["status"] == "failed"
+    assert audit["error_code"] == error_code
+    assert audit["input_chars"] == 4000
+    assert audit["input_sha256"] == hashlib.sha256(inbound_text[:4000].encode()).hexdigest()
+    assert inbound_text not in json.dumps(audit)
 
 
 def test_tick_marks_unanswered_send_ignored_after_24h_once(tmp_path: Path):
