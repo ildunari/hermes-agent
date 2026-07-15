@@ -1606,6 +1606,18 @@ class ContactMemoryStore:
                     elif prior == item:
                         continue
                     elif (
+                        item.enrichment_state is CommunicationEnrichmentState.PENDING
+                        and prior.enrichment_state is not CommunicationEnrichmentState.PENDING
+                        and replace(
+                            prior,
+                            enrichment_state=CommunicationEnrichmentState.PENDING,
+                        ) == item
+                    ):
+                        # The pre-ACK event can be replayed after the asynchronous
+                        # reviewer advanced pending evidence. Preserve the forward
+                        # enrichment and treat the stale ingress child as a no-op.
+                        continue
+                    elif (
                         replace(prior, enrichment_state=item.enrichment_state) == item
                         and prior.enrichment_state is CommunicationEnrichmentState.PENDING
                         and item.enrichment_state is not CommunicationEnrichmentState.PENDING

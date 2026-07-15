@@ -2024,16 +2024,36 @@ async def _persist_authenticated_communication_ingress(
     envelopes = getattr(event, "communication_ingress", ())
     if not isinstance(envelopes, tuple) or not envelopes:
         return ()
-    from gateway.contact_memory.live_ingress import persist_live_communication_ingress
-
-    result = await asyncio.to_thread(
+    from gateway.contact_memory.live_ingress import (
         persist_live_communication_ingress,
-        root=Path(profile_home).resolve() / "contact-memory",
-        contact_id=trusted_scope.contact_id,
-        principal=trusted_scope.principal,
-        envelopes=envelopes,
-        enqueue_link_research=enqueue_link_research,
+        recover_live_communication_event_ids,
     )
+
+    root = Path(profile_home).resolve() / "contact-memory"
+    try:
+        result = await asyncio.to_thread(
+            persist_live_communication_ingress,
+            root=root,
+            contact_id=trusted_scope.contact_id,
+            principal=trusted_scope.principal,
+            envelopes=envelopes,
+            enqueue_link_research=enqueue_link_research,
+        )
+    except Exception:
+        recovered = await asyncio.to_thread(
+            recover_live_communication_event_ids,
+            root=root,
+            contact_id=trusted_scope.contact_id,
+            envelopes=envelopes,
+        )
+        if len(recovered) != len(envelopes):
+            raise
+        logger.warning(
+            "Recovered %d durable communication events after enrichment failure",
+            len(recovered),
+            exc_info=True,
+        )
+        return recovered
     return result.event_ids
 
 

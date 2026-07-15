@@ -143,6 +143,30 @@ def _batch_identity(secret: bytes, contact_id: str, envelopes: Sequence[Communic
     return _opaque(secret, "imessage-batch-v1", contact_id + "\0" + "\0".join(source_ids))
 
 
+def recover_live_communication_event_ids(
+    *,
+    root: str | Path,
+    contact_id: str,
+    envelopes: Sequence[CommunicationIngressEnvelope],
+    secret: bytes | None = None,
+) -> tuple[str, ...]:
+    """Recover a fully durable batch after a post-ingest enrichment failure."""
+    immutable = tuple(envelopes)
+    if not immutable or not contact_id:
+        return ()
+    key = bytes(secret) if secret is not None else load_or_create_communication_key(root)
+    store = ContactMemoryStore(root, contact_id)
+    recovered: list[str] = []
+    for envelope in immutable:
+        source_id = _source_identity(key, envelope.source_message_id)
+        expected_event_id = _event_identity(key, contact_id, envelope.source_message_id)
+        stored = store.get_communication_event_by_source("imessage", source_id)
+        if stored is None or stored.event_id != expected_event_id:
+            return ()
+        recovered.append(stored.event_id)
+    return tuple(recovered)
+
+
 def persist_live_communication_ingress(
     *,
     root: str | Path,
@@ -163,11 +187,7 @@ def persist_live_communication_ingress(
     directions = {item.direction for item in immutable}
     if len(directions) != 1 or not directions <= {"inbound", "outbound"}:
         raise ValueError("live contact ingress cannot mix directions")
-    owner_reactions = directions == {"outbound"}
-    if owner_reactions and any(
-        item.event_kind not in {"reaction_add", "reaction_remove"} for item in immutable
-    ):
-        raise ValueError("outbound canonical ingress accepts only owner reactions")
+    owner_authored = directions == {"outbound"}
     if len({item.sender_identity for item in immutable}) != 1:
         raise ValueError("one ingress batch cannot mix transport senders")
     key = bytes(secret) if secret is not None else load_or_create_communication_key(root)
@@ -180,7 +200,7 @@ def persist_live_communication_ingress(
         existing = store.get_communication_event_by_source("imessage", source_id)
         target_roles[source_id] = existing.actor_role if existing is not None else (
             CommunicationActorRole.COUNTERPART
-            if owner_reactions else CommunicationActorRole.CONTACT
+            if owner_authored else CommunicationActorRole.CONTACT
         )
     for envelope in immutable:
         for relation_name, target in (
@@ -200,10 +220,10 @@ def persist_live_communication_ingress(
                 raise ValueError(f"unauthenticated {relation_name} target")
             expected_target = (
                 CommunicationActorRole.CONTACT
-                if owner_reactions else CommunicationActorRole.COUNTERPART
+                if owner_authored else CommunicationActorRole.COUNTERPART
             )
             if relation_name == "reaction" and target_role is not expected_target:
-                if owner_reactions:
+                if owner_authored:
                     raise ValueError("owner reaction target is not contact-authored")
                 raise ValueError("reaction target is not a counterpart")
             target_roles[target_source_id] = target_role
@@ -229,12 +249,12 @@ def persist_live_communication_ingress(
             source_id=source_id,
             occurred_at=envelope.occurred_at,
             direction=(
-                CommunicationDirection.OUTBOUND if owner_reactions
+                CommunicationDirection.OUTBOUND if owner_authored
                 else CommunicationDirection.INBOUND
             ),
             kind=kind,
             actor_role=(
-                CommunicationActorRole.COUNTERPART if owner_reactions
+                CommunicationActorRole.COUNTERPART if owner_authored
                 else CommunicationActorRole.CONTACT
             ),
             reaction_subtype=reaction_subtype,
@@ -251,7 +271,7 @@ def persist_live_communication_ingress(
                 url_identity=_opaque(key, "imessage-url-v1", url),
                 domain=(urllib.parse.urlsplit(url).hostname or "").casefold(),
                 sharer_role=(
-                    CommunicationActorRole.COUNTERPART if owner_reactions
+                    CommunicationActorRole.COUNTERPART if owner_authored
                     else CommunicationActorRole.CONTACT
                 ),
                 platform=classify_url(url)[0],

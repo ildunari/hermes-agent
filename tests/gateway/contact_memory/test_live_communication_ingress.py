@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 import json
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +28,7 @@ from gateway.contact_memory.schema import (
     CommunicationPrivacy,
     CommunicationReactionSubtype,
     CommunicationRelationType,
+    CommunicationEnrichmentState,
 )
 from gateway.contact_memory.store import ContactMemoryStore
 from gateway.platforms.base import CommunicationIngressEnvelope
@@ -228,6 +230,76 @@ def test_persistence_uses_original_facts_and_store_uniqueness(tmp_path, monkeypa
     assert "original" not in rows and "https://" not in rows and "msg-original" not in rows
 
 
+def test_reviewed_url_survives_pre_ack_replay_with_late_batch_relation(tmp_path, monkeypatch):
+    adapter = _adapter(monkeypatch)
+    root = tmp_path / "contact-memory"
+    contact_id = "stephen-lucier"
+    link = adapter._normalize_ingress_record(
+        _record("review-race-link", "https://example.com/watch?v=1"), received_at=1.0
+    )
+    first = persist_live_communication_ingress(
+        root=root, contact_id=contact_id, principal="guest",
+        envelopes=(link,), secret=_SECRET,
+    )
+    store = ContactMemoryStore(root, contact_id)
+    bundle = store.get_communication_bundle(first.event_ids[0])
+    assert bundle is not None and len(bundle.urls) == 1
+    reviewed = replace(
+        bundle.urls[0], enrichment_state=CommunicationEnrichmentState.REVIEWED
+    )
+    store.enrich_communication_event(first.event_ids[0], urls=(reviewed,))
+
+    followup = adapter._normalize_ingress_record(
+        _record("review-race-followup", "what do you think?"), received_at=2.0
+    )
+    replay = persist_live_communication_ingress(
+        root=root, contact_id=contact_id, principal="guest",
+        envelopes=(link, followup), secret=_SECRET,
+    )
+
+    assert replay.event_ids[0] == first.event_ids[0]
+    persisted = store.get_communication_bundle(first.event_ids[0])
+    assert persisted is not None
+    assert persisted.urls[0].enrichment_state is CommunicationEnrichmentState.REVIEWED
+    assert any(
+        relation.relation_type is CommunicationRelationType.BATCH_MEMBER_OF
+        for relation in persisted.relations
+    )
+
+
+@pytest.mark.asyncio
+async def test_gateway_recovers_fully_durable_ingress_instead_of_dropping_turn(
+    tmp_path, monkeypatch
+):
+    from gateway.run import TrustedContactScope, _persist_authenticated_communication_ingress
+    import gateway.contact_memory.live_ingress as ingress_module
+
+    adapter = _adapter(monkeypatch)
+    envelope = adapter._normalize_ingress_record(
+        _record("durable-before-enrichment-failure"), received_at=1.0
+    )
+    real_persist = ingress_module.persist_live_communication_ingress
+
+    def persist_then_fail(**kwargs):
+        real_persist(**kwargs)
+        raise ValueError("synthetic post-ingest enrichment failure")
+
+    monkeypatch.setattr(ingress_module, "persist_live_communication_ingress", persist_then_fail)
+    result = await _persist_authenticated_communication_ingress(
+        trusted_scope=TrustedContactScope("guest", "stephen-lucier"),
+        profile_home=tmp_path,
+        source=SimpleNamespace(
+            chat_type="dm", platform=SimpleNamespace(value="bluebubbles")
+        ),
+        event=SimpleNamespace(communication_ingress=(envelope,)),
+    )
+
+    assert len(result) == 1
+    assert ContactMemoryStore(
+        tmp_path / "contact-memory", "stephen-lucier"
+    ).get_communication_event(result[0]) is not None
+
+
 def test_batch_members_persist_in_order_without_collapsing(tmp_path, monkeypatch):
     adapter = _adapter(monkeypatch)
     envelopes = tuple(
@@ -366,6 +438,73 @@ def test_live_reply_target_roles_match_historical_same_and_counterpart_semantics
     assert relations[0].target_actor_role is CommunicationActorRole.CONTACT
     assert relations[1].target_actor_role is CommunicationActorRole.COUNTERPART
     assert relations[1].target_source_id == counterpart.source_id
+
+
+def test_contact_reply_to_authenticated_owner_outbound_is_preserved(tmp_path, monkeypatch):
+    adapter = _adapter(monkeypatch)
+    root = tmp_path / "contact-memory"
+    contact_id = "stephen-lucier"
+    outbound = adapter._normalize_ingress_record(
+        _record(
+            "owner-outbound-target", "did you see this?", isFromMe=True,
+            handle={"address": "guest@example.com"},
+        ),
+        received_at=1.0,
+    )
+    target = persist_live_communication_ingress(
+        root=root, contact_id=contact_id, principal="guest",
+        envelopes=(outbound,), secret=_SECRET,
+    )
+    reply = adapter._normalize_ingress_record(
+        _record(
+            "contact-reply-to-owner", "yes", replyToGuid="p:0/owner-outbound-target"
+        ),
+        received_at=2.0,
+    )
+    result = persist_live_communication_ingress(
+        root=root, contact_id=contact_id, principal="guest",
+        envelopes=(reply,), secret=_SECRET,
+    )
+
+    store = ContactMemoryStore(root, contact_id)
+    target_event = store.get_communication_event(target.event_ids[0])
+    bundle = store.get_communication_bundle(result.event_ids[0])
+    assert target_event is not None
+    assert target_event.direction is CommunicationDirection.OUTBOUND
+    assert target_event.actor_role is CommunicationActorRole.COUNTERPART
+    assert bundle is not None
+    relation = next(
+        item for item in bundle.relations
+        if item.relation_type is CommunicationRelationType.REPLY_TO
+    )
+    assert relation.target_actor_role is CommunicationActorRole.COUNTERPART
+
+
+@pytest.mark.asyncio
+async def test_owner_outbound_webhook_persists_without_agent_dispatch(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    persisted = []
+
+    async def ingress(event):
+        persisted.extend(event.communication_ingress)
+        return ("stored",)
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("owner outbound must not dispatch to the agent")
+
+    adapter.set_ingress_handler(ingress)
+    monkeypatch.setattr(adapter, "handle_message", forbidden)
+    response = await adapter._handle_webhook(_Request({
+        "type": "new-message",
+        "data": _record(
+            "owner-outbound-webhook", "outbound evidence", isFromMe=True,
+        ),
+    }))
+
+    assert response.status == 200
+    assert len(persisted) == 1
+    assert persisted[0].direction == "outbound"
+    assert persisted[0].event_kind == "text"
 
 
 @pytest.mark.parametrize("kind", ["reply", "reaction"])

@@ -1521,10 +1521,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             and item.event_kind in {"reaction_add", "reaction_remove"}
             for item in ingress
         )
-        if all(item.direction == "outbound" for item in ingress) and not owner_reaction_only:
-            return web.Response(text="ok")
+        owner_outbound_only = all(item.direction == "outbound" for item in ingress)
         if any(item.direction != "inbound" for item in ingress) and not owner_reaction_only:
-            return web.json_response({"error": "mixed message directions"}, status=400)
+            if not owner_outbound_only:
+                return web.json_response({"error": "mixed message directions"}, status=400)
         if len({(item.sender_identity, item.chat_type) for item in ingress}) != 1:
             return web.json_response({"error": "mixed message principals"}, status=400)
         record = dict(records[0])
@@ -1582,8 +1582,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             except Exception:
                 logger.exception("[bluebubbles] durable ingress failed")
                 return web.json_response({"error": "ingress unavailable"}, status=503)
-            if reaction_only:
+            if reaction_only or owner_outbound_only:
                 return web.Response(text="ok")
+
+        # Owner-authored records are canonical evidence and reply targets, but
+        # never reactive agent input. Without a durable ingress handler there is
+        # nowhere safe to store them, so acknowledge without dispatching.
+        if owner_outbound_only:
+            return web.Response(text="ok")
 
         # --- Inbound attachment handling ---
         attachments = [

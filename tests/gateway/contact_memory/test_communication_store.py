@@ -223,8 +223,11 @@ def test_child_enrichment_is_additive_idempotent_and_supports_review_transition(
     replay = store.enrich_communication_event(
         event.event_id, urls=(reviewed,), entity_mentions=(mention,)
     )
+    pending_enrichment_replay = store.enrich_communication_event(
+        event.event_id, urls=(pending,), entity_mentions=(mention,)
+    )
     ingress_replay = store.ingest_communication_event(event, urls=(pending,))
-    assert first == replay
+    assert first == replay == pending_enrichment_replay
     assert ingress_replay.deduplicated
     assert first.urls == (reviewed,)
     assert first.entity_mentions == (mention,)
