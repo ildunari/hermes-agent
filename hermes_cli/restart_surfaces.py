@@ -100,6 +100,15 @@ VERIFY_PORTS: dict[str, tuple[int, ...]] = {
     "hermes": (8642, 8643, 8644, 8776, 8787, 9119, 9120, 9192, 3192, 3100),
 }
 
+# Ports served by best-effort (required=False) targets — chiefly the dashboard
+# LaunchDaemon (9119) and the MacBook remote dashboard (9120). Their daemons use
+# ThrottleInterval=30, so a first-launch miss can't retry for 30s and a cold
+# HTTP handler can lag the listening socket. A slow best-effort dashboard must
+# NOT fail an otherwise-healthy restart whose required surfaces (gateways +
+# WebUI) are up — that false negative marked a clean restart as exit 1. Probe
+# them, log a warning if they lag, but keep them out of the exit-code decision.
+BEST_EFFORT_VERIFY_PORTS: frozenset[int] = frozenset({9119, 9120})
+
 GATEWAY_STATUS_PATHS: dict[str, Path] = {
     "ai.hermes.gateway": Path.home() / ".hermes" / "gateway_state.json",
     "ai.hermes.gateway-gpt": Path.home() / ".hermes" / "profiles" / "gpt" / "gateway_state.json",
@@ -658,46 +667,86 @@ def _verify_http_url(url: str, expected: tuple[int, ...] = (200, 401)) -> str | 
 
 
 def _verify_scope_health(scope: str, *, active_labels: set[str] | None = None) -> list[str]:
-    failures: list[str] = []
+    """Backward-compatible wrapper: return REQUIRED failures only.
+
+    Best-effort probes (dashboard ports) are checked separately via
+    :func:`_verify_scope_health_split` and must not drive the exit code.
+    """
+    required, _best_effort = _verify_scope_health_split(scope, active_labels=active_labels)
+    return required
+
+
+def _verify_scope_health_split(
+    scope: str, *, active_labels: set[str] | None = None
+) -> tuple[list[str], list[str]]:
+    """Probe scope health, partitioning failures into (required, best_effort).
+
+    Only required failures should fail the restart's exit code; best-effort
+    ones (a slow/throttled dashboard daemon) are logged as warnings so an
+    otherwise-healthy restart is not falsely reported as a failure.
+    """
+    required: list[str] = []
+    best_effort: list[str] = []
     ports = list(VERIFY_PORTS.get(scope, ()))
     # The MacBook remote dashboard is optional. Its absent port must not fail an
     # otherwise healthy restart when that LaunchAgent is not loaded.
     if active_labels is not None and "ai.hermes.desktop-remote-dashboard" not in active_labels:
         ports = [port for port in ports if port != 9120]
     if not ports:
-        return failures
+        return required, best_effort
+
+    def _bucket_for(port: int) -> list[str]:
+        return best_effort if port in BEST_EFFORT_VERIFY_PORTS else required
+
     for port in ports:
         failure = _verify_listen_port(port)
         if failure:
-            failures.append(failure)
-    probes = []
+            _bucket_for(port).append(failure)
+    # HTTP probes, tagged with the port they exercise so each lands in the
+    # correct bucket (dashboard 9119/9120 are best-effort; 8787 is required).
+    probes: list[tuple[int, str]] = []
     if scope in {"gateways", "hermes"}:
-        probes.append("http://127.0.0.1:8787/health")
-    probes.append("http://127.0.0.1:9119/")
+        probes.append((8787, "http://127.0.0.1:8787/health"))
+    probes.append((9119, "http://127.0.0.1:9119/"))
     if 9120 in ports:
-        probes.append("http://127.0.0.1:9120/")
-    probes.append("https://macstudio.tailf7342a.ts.net:9119/")
-    for url in probes:
+        probes.append((9120, "http://127.0.0.1:9120/"))
+    probes.append((9119, "https://macstudio.tailf7342a.ts.net:9119/"))
+    for port, url in probes:
         failure = _verify_http_url(url)
         if failure:
-            failures.append(failure)
-    return failures
+            _bucket_for(port).append(failure)
+    return required, best_effort
 
 
 def _wait_for_scope_health(
     scope: str,
     *,
     active_labels: set[str],
-    timeout: float = DEFAULT_HEALTH_WAIT_TIMEOUT,
-    interval: float = DEFAULT_HEALTH_WAIT_INTERVAL,
-) -> list[str]:
-    """Poll boundedly so normal launchd startup latency is not a false failure."""
+    timeout: float | None = None,
+    interval: float | None = None,
+) -> tuple[list[str], list[str]]:
+    """Poll boundedly so normal launchd startup latency is not a false failure.
+
+    Returns (required_failures, best_effort_failures). Only required failures
+    should drive the restart exit code. Keeps polling while REQUIRED failures
+    remain; a lingering best-effort dashboard lag does not extend the wait past
+    the point where every required surface is healthy.
+
+    ``timeout``/``interval`` default to the module-level constants resolved at
+    call time (not bound at def time) so tests can shrink the window via
+    monkeypatch without spinning to the real deadline.
+    """
+    if timeout is None:
+        timeout = DEFAULT_HEALTH_WAIT_TIMEOUT
+    if interval is None:
+        interval = DEFAULT_HEALTH_WAIT_INTERVAL
     deadline = time.monotonic() + max(0.0, timeout)
-    failures: list[str] = []
+    required: list[str] = []
+    best_effort: list[str] = []
     while True:
-        failures = _verify_scope_health(scope, active_labels=active_labels)
-        if not failures or time.monotonic() >= deadline:
-            return failures
+        required, best_effort = _verify_scope_health_split(scope, active_labels=active_labels)
+        if not required or time.monotonic() >= deadline:
+            return required, best_effort
         time.sleep(max(0.1, interval))
 
 
@@ -806,10 +855,14 @@ def restart_scope(
             if target.required:
                 failures.append(msg)
 
-    health_failures = _wait_for_scope_health(normalized, active_labels=active_labels)
-    for failure in health_failures:
+    required_failures, best_effort_failures = _wait_for_scope_health(
+        normalized, active_labels=active_labels
+    )
+    for failure in best_effort_failures:
+        _append_log(f"restart verification warning (best-effort): {failure}")
+    for failure in required_failures:
         _append_log(f"restart verification failed: {failure}")
-    failures.extend(health_failures)
+    failures.extend(required_failures)
 
     if failures:
         _append_log("restart completed with required failures: " + "; ".join(failures))

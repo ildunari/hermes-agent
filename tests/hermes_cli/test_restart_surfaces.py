@@ -191,14 +191,61 @@ def test_restart_scope_fails_when_verify_port_missing(monkeypatch, tmp_path):
 
     monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
     monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (target,))
-    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": (9119,)})
+    # 8642 is a REQUIRED gateway port (not in BEST_EFFORT_VERIFY_PORTS), so a
+    # missing listener must fail the restart.
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": (8642,)})
     monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
     monkeypatch.setattr(restart_surfaces, "_webui_busy_details", lambda _targets: [])
     monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    # Collapse the bounded health-wait so a persistent required failure returns
+    # immediately instead of polling to the real-time deadline.
+    monkeypatch.setattr(restart_surfaces, "DEFAULT_HEALTH_WAIT_TIMEOUT", 0.0)
     monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
 
     assert restart_surfaces.restart_scope("hermes", delay=0) == 1
-    assert "port 9119 is not listening" in (tmp_path / "restart.log").read_text()
+    assert "port 8642 is not listening" in (tmp_path / "restart.log").read_text()
+
+
+def test_restart_scope_tolerates_best_effort_dashboard_lag(monkeypatch, tmp_path):
+    """A slow/unresponsive best-effort dashboard (9119/9120) must NOT fail an
+    otherwise-healthy restart. The dashboard LaunchDaemon uses ThrottleInterval
+    =30 and can lag its HTTP handler behind the listening socket; treating that
+    as a hard failure marked a clean restart as exit 1 (the false-negative bug).
+    """
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway", required=True)
+
+    def fake_run(cmd, *, timeout=30):
+        class Proc:
+            stdout = ""
+            stderr = ""
+            returncode = 0
+
+        # Only the 9119 dashboard probes fail; every required check passes.
+        if cmd[:2] == ["bash", "-lc"]:
+            script = cmd[-1]
+            if "9119" in script:
+                Proc.returncode = 1
+                Proc.stdout = "000"
+        return Proc()
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (target,))
+    # Required 8642 (healthy) alongside best-effort 9119 (failing probes).
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"hermes": (8642, 9119)})
+    monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_webui_busy_details", lambda _targets: [])
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr(restart_surfaces, "DEFAULT_HEALTH_WAIT_TIMEOUT", 0.0)
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+
+    # Restart succeeds despite the dashboard lag...
+    assert restart_surfaces.restart_scope("hermes", delay=0) == 0
+    log = (tmp_path / "restart.log").read_text()
+    # ...and the lag is surfaced as a best-effort warning, not a hard failure.
+    assert "best-effort" in log
+    assert "9119" in log
 
 
 def test_health_wait_covers_one_launchd_throttled_retry():
