@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { $approvalModes, approvalModeForProfile } from '@/store/approval-mode'
 import { $activeGatewayProfile } from '@/store/profile'
+import { $currentUsage, setCurrentUsage } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
 import {
@@ -24,6 +25,7 @@ describe('applyRuntimeInfo approval mode', () => {
   beforeEach(() => {
     $approvalModes.set({})
     $activeGatewayProfile.set('work')
+    setCurrentUsage({ calls: 0, input: 0, output: 0, total: 0 })
   })
 
   it('reconciles session.info against the gateway profile', () => {
@@ -31,6 +33,22 @@ describe('applyRuntimeInfo approval mode', () => {
 
     expect(approvalModeForProfile('work')).toBe('smart')
     expect(approvalModeForProfile('default')).toBe('smart')
+  })
+
+  it('replaces usage rather than retaining context fields from another session', () => {
+    setCurrentUsage({
+      calls: 1,
+      context_max: 272_000,
+      context_percent: 61,
+      context_used: 166_800,
+      input: 1,
+      output: 1,
+      total: 2
+    })
+
+    applyRuntimeInfo({ usage: { calls: 0, input: 12, output: 8, total: 20 } })
+
+    expect($currentUsage.get()).toEqual({ calls: 0, input: 12, output: 8, total: 20 })
   })
 })
 

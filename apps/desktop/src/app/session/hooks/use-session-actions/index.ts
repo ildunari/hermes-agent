@@ -30,7 +30,7 @@ import {
   setCurrentCwd,
   setCurrentCwdTransient,
   setCurrentServiceTier,
-  setCurrentUsage,
+  setCurrentUsageSnapshot,
   setFreshDraftReady,
   setIntroSeed,
   setMessages,
@@ -142,12 +142,7 @@ export function useSessionActions({
       setSelectedStoredSessionId(null)
       selectedStoredSessionIdRef.current = null
       setMessages([])
-      setCurrentUsage({
-        calls: 0,
-        input: 0,
-        output: 0,
-        total: 0
-      })
+      setCurrentUsageSnapshot()
       setSessionStartedAt(null)
       setTurnStartedAt(null)
       // The composer's model/effort/fast is sticky UI state (persisted in
@@ -343,8 +338,18 @@ export function useSessionActions({
       setFreshDraftReady(false)
       clearNotifications()
       resetViewSync()
+      // The status bar belongs to the selected session. Clear the previous
+      // session's optional context fields before profile resolution or resume
+      // I/O can leave them visible under the newly selected route.
+      setCurrentUsageSnapshot()
       setSelectedStoredSessionId(storedSessionId)
       selectedStoredSessionIdRef.current = storedSessionId
+      // Disassociate foreground events from the session we are leaving. On a
+      // warm-cache switch we keep its transcript painted until the target cache
+      // is installed, but late usage events from the old runtime must already be
+      // treated as background events.
+      setActiveSessionId(null)
+      activeSessionIdRef.current = null
       // Optimistically clear any prior resume-failure latch for this session:
       // we're attempting a fresh resume, so the self-heal in use-route-resume
       // must not keep treating it as stranded. It's re-armed below only if THIS
@@ -383,8 +388,6 @@ export function useSessionActions({
       }
 
       if (!takeWarmCache()) {
-        setActiveSessionId(null)
-        activeSessionIdRef.current = null
         setMessages([])
       }
 
@@ -448,7 +451,7 @@ export function useSessionActions({
             }
 
             if (usage) {
-              setCurrentUsage(current => ({ ...current, ...usage }))
+              setCurrentUsageSnapshot(usage)
             }
 
             return
@@ -485,12 +488,11 @@ export function useSessionActions({
       applyStoredSessionPreviewRuntimeInfo(stored)
 
       if (stored) {
-        setCurrentUsage(current => ({
-          ...current,
+        setCurrentUsageSnapshot({
           input: stored.input_tokens || 0,
           output: stored.output_tokens || 0,
           total: (stored.input_tokens || 0) + (stored.output_tokens || 0)
-        }))
+        })
       }
 
       let resumedRunning = false
@@ -718,6 +720,7 @@ export function useSessionActions({
           : 0
 
         setFreshDraftReady(false)
+        setCurrentUsageSnapshot()
         upsertOptimisticSession(
           branched,
           routedSessionId,
@@ -901,12 +904,11 @@ export function useSessionActions({
           const stored = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
 
           if (stored) {
-            setCurrentUsage(current => ({
-              ...current,
+            setCurrentUsageSnapshot({
               input: stored.input_tokens || 0,
               output: stored.output_tokens || 0,
               total: (stored.input_tokens || 0) + (stored.output_tokens || 0)
-            }))
+            })
           }
 
           setMessages(previousMessages)

@@ -16,7 +16,7 @@ import {
   setCurrentProvider,
   setCurrentReasoningEffort,
   setCurrentServiceTier,
-  setCurrentUsage,
+  setCurrentUsageSnapshot,
   setSessions,
   setYoloActive
 } from '@/store/session'
@@ -324,7 +324,7 @@ export function applyRuntimeInfo(info: SessionRuntimeInfo | undefined): SessionR
   }
 
   if (info.usage) {
-    setCurrentUsage(current => ({ ...current, ...info.usage }))
+    setCurrentUsageSnapshot(info.usage)
   }
 
   return sessionState

@@ -34,7 +34,7 @@ import {
   setCurrentProvider,
   setCurrentReasoningEffort,
   setCurrentServiceTier,
-  setCurrentUsage,
+  setCurrentUsageSnapshot,
   setSessions,
   setTurnStartedAt,
   setYoloActive
@@ -135,11 +135,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       // model output or tool event proves summarization has finished and the
       // turn has resumed, so retire the phase label without waiting for the
       // whole turn to complete.
-      if (
-        sessionId &&
-        COMPACTION_RESUME_EVENT_TYPES.has(event.type) &&
-        compactedTurnRef.current.has(sessionId)
-      ) {
+      if (sessionId && COMPACTION_RESUME_EVENT_TYPES.has(event.type) && compactedTurnRef.current.has(sessionId)) {
         setSessionCompacting(sessionId, false)
       }
 
@@ -263,7 +259,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
 
         if (payload?.usage && (!explicitSid || isActiveEvent)) {
-          setCurrentUsage(current => ({ ...current, ...payload.usage }))
+          setCurrentUsageSnapshot(payload.usage)
         }
 
         if (typeof payload?.credential_warning === 'string' && payload.credential_warning) {
@@ -404,8 +400,8 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           }
         }
 
-        if (payload?.usage) {
-          setCurrentUsage(current => ({ ...current, ...payload.usage }))
+        if (payload?.usage && isActiveEvent) {
+          setCurrentUsageSnapshot(payload.usage)
         }
       } else if (event.type === 'session.title') {
         // Live auto-title push (titler runs async, after the turn's refresh).
@@ -525,7 +521,9 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         setApprovalRequest({
           // false only when a tirith warning forbids it; backend omits the field otherwise.
           allowPermanent: payload?.allow_permanent !== false,
-          choices: Array.isArray(payload?.choices) ? payload.choices.filter(choice => typeof choice === 'string') : undefined,
+          choices: Array.isArray(payload?.choices)
+            ? payload.choices.filter(choice => typeof choice === 'string')
+            : undefined,
           command,
           description,
           sessionId: sessionId ?? null,

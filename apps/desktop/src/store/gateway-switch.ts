@@ -6,6 +6,7 @@ import {
   setActiveSessionId,
   setAttentionSessionIds,
   setCronSessions,
+  setCurrentUsageSnapshot,
   setFreshDraftReady,
   setMessages,
   setMessagingPlatformTotals,
@@ -52,6 +53,7 @@ export function wipeSessionListsForGatewaySwitch(): void {
   setActiveSessionId(null)
   setSelectedStoredSessionId(null)
   setMessages([])
+  setCurrentUsageSnapshot()
   setFreshDraftReady(true)
 
   void queryClient.invalidateQueries()

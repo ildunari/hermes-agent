@@ -3,12 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { $sessionsLimit, resetSessionsLimit, SIDEBAR_SESSIONS_PAGE_SIZE } from '@/store/layout'
 import {
   $cronSessions,
+  $currentUsage,
   $freshDraftReady,
   $messagingSessions,
   $sessions,
   $sessionsLoading,
   $sessionsTotal,
   setCronSessions,
+  setCurrentUsage,
   setFreshDraftReady,
   setMessagingSessions,
   setSessions,
@@ -31,6 +33,15 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     setMessagingSessions([{ id: 'm1', title: 'tg', profile: 'default' } as never])
     setSessionsLoading(false)
     setFreshDraftReady(false)
+    setCurrentUsage({
+      calls: 1,
+      context_max: 272_000,
+      context_percent: 61,
+      context_used: 166_800,
+      input: 1,
+      output: 1,
+      total: 2
+    })
     $sessionsLimit.set(SIDEBAR_SESSIONS_PAGE_SIZE * 3)
   })
 
@@ -40,6 +51,7 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     setCronSessions([])
     setMessagingSessions([])
     setSessionsLoading(true)
+    setCurrentUsage({ calls: 0, input: 0, output: 0, total: 0 })
     $gatewaySwitching.set(false)
   })
 
@@ -53,5 +65,6 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     expect($sessionsLoading.get()).toBe(true)
     expect($sessionsLimit.get()).toBe(SIDEBAR_SESSIONS_PAGE_SIZE)
     expect($freshDraftReady.get()).toBe(true)
+    expect($currentUsage.get()).toEqual({ calls: 0, input: 0, output: 0, total: 0 })
   })
 })
