@@ -2262,21 +2262,26 @@ def _resolve_copilot_catalog_api_key() -> str:
     later valid entry is reachable when an earlier one is unsupported.
     """
     try:
-        from hermes_cli.auth import resolve_api_key_provider_credentials
-
-        creds = resolve_api_key_provider_credentials("copilot")
-        api_key = str(creds.get("api_key") or "").strip()
-        if api_key:
-            return api_key
-    except Exception:
-        pass
-
-    try:
-        from hermes_cli.auth import read_credential_pool
+        from hermes_cli.auth import (
+            read_credential_pool,
+            resolve_api_key_provider_credentials,
+        )
         from hermes_cli.copilot_auth import (
             exchange_copilot_token,
             validate_copilot_token,
         )
+
+        # The generic credential resolver can surface an ambient GH_TOKEN or
+        # GITHUB_TOKEN. Do not let an unsupported classic PAT short-circuit a
+        # later usable pool entry.
+        try:
+            creds = resolve_api_key_provider_credentials("copilot")
+            api_key = str(creds.get("api_key") or "").strip()
+            valid, _ = validate_copilot_token(api_key)
+            if valid:
+                return api_key
+        except Exception:
+            pass
 
         for entry in read_credential_pool("copilot"):
             if not isinstance(entry, dict):
@@ -2288,7 +2293,7 @@ def _resolve_copilot_catalog_api_key() -> str:
             if not valid:
                 continue
             try:
-                api_token, _expires_at = exchange_copilot_token(raw)
+                api_token, _expires_at, _base_url = exchange_copilot_token(raw)
             except Exception:
                 continue
             if api_token:
