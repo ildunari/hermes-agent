@@ -320,6 +320,11 @@ from hermes_cli.dashboard_auth.public_paths import (
     PUBLIC_API_PATHS as _PUBLIC_API_PATHS,
 )
 
+# Stable value for semantic watchdog validation. A marker check prevents an
+# upstream proxy, captive portal, or SPA fallback from turning an arbitrary
+# HTTP 200 into a false-positive dashboard health result.
+DASHBOARD_HEALTH_MARKER = "hermes-dashboard-ok"
+
 
 def _has_valid_session_token(request: Request) -> bool:
     """True if the request carries a valid dashboard session token.
@@ -2648,6 +2653,17 @@ def _collect_profile_gateway_topology() -> Dict[str, Any]:
         mode = "none"
 
     return {"profiles": profile_names, "gateway_mode": mode, "gateways": gateways}
+
+
+@app.get("/health")
+async def get_health():
+    """Return constant-time dashboard process health for external watchdogs.
+
+    Keep this handler deliberately static: it must remain responsive without
+    loading config, touching the filesystem/database, probing the gateway, or
+    entering a thread pool. Operational detail belongs in ``/api/status``.
+    """
+    return {"status": "ok", "marker": DASHBOARD_HEALTH_MARKER}
 
 
 @app.get("/api/status")
