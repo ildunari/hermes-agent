@@ -105,11 +105,27 @@ export async function openSessionInNewWindow(sessionId: string, opts?: { watch?:
   await openWindow(() => window.hermesDesktop.openSessionWindow(sessionId, opts), 'Could not open chat in a new window')
 }
 
-// Open a fresh compact window on the new-session draft.
-export async function openNewSessionInNewWindow(): Promise<void> {
+// Open a fresh compact window on the new-session draft, carried over to the
+// profile context the CURRENT window is on. Without the explicit profile the
+// new renderer boots on the Electron main's stored preference (usually
+// "default"), silently dropping the user's active profile.
+export async function openNewSessionInNewWindow(profile?: string): Promise<void> {
   if (!canOpenSessionWindow() || typeof window.hermesDesktop.openNewSessionWindow !== 'function') {
     return
   }
 
-  await openWindow(() => window.hermesDesktop.openNewSessionWindow(), 'Could not open new session window')
+  await openWindow(() => window.hermesDesktop.openNewSessionWindow(profile), 'Could not open new session window')
+}
+
+// The profile a new-session window was asked to open on (`profile` query param,
+// set by the opener). Null when absent — boot then falls back to the primary
+// backend's profile as before.
+export function newSessionWindowProfile(): null | string {
+  try {
+    const value = new URLSearchParams(window.location.search).get('profile')?.trim()
+
+    return value || null
+  } catch {
+    return null
+  }
 }
