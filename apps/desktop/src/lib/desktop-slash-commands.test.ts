@@ -85,6 +85,18 @@ describe('desktop slash command curation', () => {
     expect(desktopSlashUnavailableMessage('/journey')).toBeNull()
   })
 
+  it('keeps smart-update instructions outside the command pill', () => {
+    expect(isDesktopSlashCommand('/update-smart')).toBe(true)
+    expect(isDesktopSlashSuggestion('/update-smart')).toBe(true)
+    expect(resolveDesktopCommand('/update-smart')?.surface).toEqual({ kind: 'exec' })
+    // Free-form trailing text is an agent instruction, not a structured option
+    // that should be folded into the non-editable slash-command pill.
+    expect(resolveDesktopCommand('/update-smart')?.args).not.toBe(true)
+
+    expect(isDesktopSlashCommand('/update_smart')).toBe(true)
+    expect(isDesktopSlashSuggestion('/update_smart')).toBe(false)
+  })
+
   it('allows aliases to execute without cluttering the popover', () => {
     expect(isDesktopSlashSuggestion('/reset')).toBe(false)
     expect(isDesktopSlashCommand('/reset')).toBe(true)
