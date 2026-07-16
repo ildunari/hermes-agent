@@ -10,22 +10,94 @@ only consulted env vars / ``gh auth token`` and never read the
 credential pool.
 """
 
+import time
 from unittest.mock import patch
 
 from hermes_cli.models import _resolve_copilot_catalog_api_key
 
 
 class TestCopilotCatalogApiKeyResolution:
-    def test_valid_env_var_token_wins_over_pool(self):
-        """A supported env token still short-circuits the pool fallback."""
+    def test_exchangeable_env_var_token_wins_over_pool(self):
+        """An exchangeable env token still short-circuits the pool fallback."""
         with patch(
             "hermes_cli.auth.resolve_api_key_provider_credentials",
             return_value={"api_key": "gho_env_token"},
         ), patch(
             "hermes_cli.auth.read_credential_pool",
-        ) as mock_pool:
-            assert _resolve_copilot_catalog_api_key() == "gho_env_token"
+        ) as mock_pool, patch(
+            "hermes_cli.copilot_auth.exchange_copilot_token",
+            return_value=("tid=env;exp=9999999999", 9999999999.0, None),
+        ) as mock_exchange:
+            assert _resolve_copilot_catalog_api_key() == "tid=env;exp=9999999999"
+            mock_exchange.assert_called_once_with("gho_env_token")
             mock_pool.assert_not_called()
+
+    def test_malformed_or_expired_ambient_falls_through_to_valid_pool(self):
+        """A merely non-ghp ambient token must not hide a valid pool token."""
+        with patch(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            return_value={"api_key": "arbitrary-or-expired-token"},
+        ), patch(
+            "hermes_cli.auth.read_credential_pool",
+            return_value=[{"access_token": "gho_valid_pool"}],
+        ), patch(
+            "hermes_cli.copilot_auth.exchange_copilot_token",
+            side_effect=[
+                ValueError("ambient token expired"),
+                ("tid=pool;exp=9999999999", 9999999999.0, None),
+            ],
+        ) as mock_exchange:
+            assert _resolve_copilot_catalog_api_key() == "tid=pool;exp=9999999999"
+            assert [call.args[0] for call in mock_exchange.call_args_list] == [
+                "arbitrary-or-expired-token",
+                "gho_valid_pool",
+            ]
+
+    def test_all_nonclassic_candidates_invalid_returns_empty(self):
+        """Failed ambient and pool exchanges yield no catalog credential."""
+        with patch(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            return_value={"api_key": "expired-ambient-token"},
+        ), patch(
+            "hermes_cli.auth.read_credential_pool",
+            return_value=[{"access_token": "expired-pool-token"}],
+        ), patch(
+            "hermes_cli.copilot_auth.exchange_copilot_token",
+            side_effect=ValueError("token expired"),
+        ) as mock_exchange:
+            assert _resolve_copilot_catalog_api_key() == ""
+            assert mock_exchange.call_count == 2
+
+    def test_already_exchanged_token_is_accepted_without_exchange(self):
+        """A live Copilot API token (tid/exp fields) needs no second exchange."""
+        api_token = f"tid=ambient;exp={time.time() + 1800};sku=copilot_individual"
+        with patch(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            return_value={"api_key": api_token},
+        ), patch(
+            "hermes_cli.auth.read_credential_pool",
+        ) as mock_pool, patch(
+            "hermes_cli.copilot_auth.exchange_copilot_token",
+        ) as mock_exchange:
+            assert _resolve_copilot_catalog_api_key() == api_token
+            mock_exchange.assert_not_called()
+            mock_pool.assert_not_called()
+
+    def test_expired_exchanged_token_falls_through_without_reexchange(self):
+        """An expired tid token is neither accepted nor sent to GitHub exchange."""
+        expired = f"tid=ambient;exp={time.time() - 1};sku=copilot_individual"
+        with patch(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            return_value={"api_key": expired},
+        ), patch(
+            "hermes_cli.auth.read_credential_pool",
+            return_value=[{"access_token": "gho_valid_pool"}],
+        ), patch(
+            "hermes_cli.copilot_auth.exchange_copilot_token",
+            return_value=("tid=pool;exp=9999999999", 9999999999.0, None),
+        ) as mock_exchange:
+            assert _resolve_copilot_catalog_api_key() == "tid=pool;exp=9999999999"
+            mock_exchange.assert_called_once_with("gho_valid_pool")
 
     def test_classic_ambient_token_falls_through_to_valid_pool_token(self):
         """An ambient classic PAT must not hide a later usable pool credential."""

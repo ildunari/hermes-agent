@@ -2272,14 +2272,39 @@ def _resolve_copilot_catalog_api_key() -> str:
         )
 
         # The generic credential resolver can surface an ambient GH_TOKEN or
-        # GITHUB_TOKEN. Do not let an unsupported classic PAT short-circuit a
-        # later usable pool entry.
+        # GITHUB_TOKEN. It also deliberately returns the raw GitHub token when
+        # Copilot exchange fails, so token-shape validation alone is not proof
+        # that the credential can fetch the catalog. Accept a live, already
+        # exchanged Copilot token directly; otherwise require exchange to
+        # succeed before allowing the ambient candidate to hide the pool.
         try:
             creds = resolve_api_key_provider_credentials("copilot")
             api_key = str(creds.get("api_key") or "").strip()
             valid, _ = validate_copilot_token(api_key)
             if valid:
-                return api_key
+                fields = {}
+                for part in api_key.split(";"):
+                    key, separator, value = part.partition("=")
+                    if separator:
+                        fields[key.strip()] = value.strip()
+
+                if api_key.startswith("tid="):
+                    try:
+                        expires_at = float(fields.get("exp", ""))
+                    except (TypeError, ValueError):
+                        expires_at = 0.0
+                    if fields.get("tid") and expires_at > time.time():
+                        return api_key
+                else:
+                    try:
+                        exchanged, _expires_at, _base_url = exchange_copilot_token(
+                            api_key
+                        )
+                    except Exception:
+                        pass
+                    else:
+                        if exchanged:
+                            return exchanged
         except Exception:
             pass
 
