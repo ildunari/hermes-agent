@@ -7026,8 +7026,9 @@ function focusWindow(win) {
 function spawnSecondaryWindow({
   sessionId,
   watch,
-  newSession
-}: { sessionId?: string; watch?: boolean; newSession?: boolean } = {}) {
+  newSession,
+  profile
+}: { sessionId?: string; watch?: boolean; newSession?: boolean; profile?: string } = {}) {
   const icon = getAppIconPath()
 
   const win = new BrowserWindow({
@@ -7073,7 +7074,8 @@ function spawnSecondaryWindow({
       devServer: DEV_SERVER,
       rendererIndexPath: DEV_SERVER ? undefined : resolveRendererIndex(),
       watch,
-      newSession
+      newSession,
+      profile
     })
   )
 
@@ -7088,8 +7090,9 @@ function createSessionWindow(sessionId, { watch = false } = {}) {
 // Open a fresh compact window on the new-session draft (#/). Not registry-keyed:
 // like ⌘N in a browser, every press opens a new window — and a draft window that
 // later converts to a real session must not get refocused as if it were blank.
-function createNewSessionWindow() {
-  return spawnSecondaryWindow({ newSession: true })
+// `profile` (optional) carries the opener's active profile into the new window.
+function createNewSessionWindow(profile?: string) {
+  return spawnSecondaryWindow({ newSession: true, profile })
 }
 
 // The pet overlay: a single transparent, frameless, always-on-top window that
@@ -7436,8 +7439,8 @@ ipcMain.handle('hermes:window:openSession', async (_event, sessionId, opts) => {
 
   return { ok: true }
 })
-ipcMain.handle('hermes:window:openNewSession', async () => {
-  createNewSessionWindow()
+ipcMain.handle('hermes:window:openNewSession', async (_event, profile) => {
+  createNewSessionWindow(typeof profile === 'string' && profile.trim() ? profile.trim() : undefined)
 
   return { ok: true }
 })

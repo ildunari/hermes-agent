@@ -88,6 +88,20 @@ test('buildSessionWindowUrl routes new-session windows to the draft (#/)', () =>
   assert.equal(url, 'http://localhost:5173/?win=secondary&new=1#/')
 })
 
+test('buildSessionWindowUrl carries the opener profile on new-session windows, encoded, before the hash', () => {
+  const url = buildSessionWindowUrl(null, { devServer: 'http://localhost:5173', newSession: true, profile: 'my profile' })
+
+  assert.equal(url, 'http://localhost:5173/?win=secondary&new=1&profile=my%20profile#/')
+})
+
+test('buildSessionWindowUrl ignores a blank profile and non-new-session profile hints', () => {
+  const blank = buildSessionWindowUrl(null, { devServer: 'http://localhost:5173', newSession: true, profile: '  ' })
+  const notNew = buildSessionWindowUrl('abc', { devServer: 'http://localhost:5173', profile: 'coding' })
+
+  assert.equal(blank, 'http://localhost:5173/?win=secondary&new=1#/')
+  assert.equal(notNew, 'http://localhost:5173/?win=secondary#/abc')
+})
+
 test('registry opens one window per session and focuses on re-open', () => {
   const registry = createSessionWindowRegistry()
   let built = 0

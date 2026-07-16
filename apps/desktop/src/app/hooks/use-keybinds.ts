@@ -20,8 +20,10 @@ import {
   toggleSidebarOpen
 } from '@/store/layout'
 import {
+  $activeGatewayProfile,
   $newChatProfile,
   cycleProfile,
+  normalizeProfileKey,
   requestProfileCreate,
   switchProfileToSlot,
   switchToDefaultProfile,
@@ -138,7 +140,11 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       deps.startFreshSession()
       window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
     },
-    'session.newWindow': () => void openNewSessionInNewWindow(),
+    // Carry the live profile into the new window: its renderer boots from the
+    // Electron main's stored preference (usually the default profile), not
+    // from this window's in-memory gateway state — without the hint a ⌘⇧N
+    // from a non-default profile lands the draft on Default.
+    'session.newWindow': () => void openNewSessionInNewWindow(normalizeProfileKey($activeGatewayProfile.get())),
     'session.next': () => stepSession(1),
     'session.prev': () => stepSession(-1),
     ...sessionSlotHandlers,

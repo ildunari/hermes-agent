@@ -25,7 +25,13 @@ import {
 } from '@/store/gateway'
 import { $gatewaySwitching, wipeSessionListsForGatewaySwitch } from '@/store/gateway-switch'
 import { notify, notifyError } from '@/store/notifications'
-import { $activeGatewayProfile, normalizeProfileKey, touchActiveGatewayBackend } from '@/store/profile'
+import {
+  $activeGatewayProfile,
+  $newChatProfile,
+  ensureGatewayProfile,
+  normalizeProfileKey,
+  touchActiveGatewayBackend
+} from '@/store/profile'
 import {
   $activeSessionId,
   $attentionSessionIds,
@@ -39,6 +45,7 @@ import {
   setCurrentCwd,
   setSessionsLoading
 } from '@/store/session'
+import { newSessionWindowProfile } from '@/store/windows'
 import type { RpcEvent } from '@/types/hermes'
 
 // After this many consecutive failed reconnects (≈45s with the 1→15s backoff)
@@ -225,7 +232,10 @@ export function useGatewayBoot({
     // Adopt the profile the primary (window) backend booted as, so same-profile
     // resumes are no-op swaps and reconnects target the right backend.
     // Best-effort: a missing preference means "default". Shared by boot + soft
-    // switch.
+    // switch. A secondary new-session window can carry an explicit `profile`
+    // query param from its opener (⌘⇧N from a non-default profile); that wins
+    // over the stored preference so the fresh draft doesn't silently land on
+    // the primary backend's profile.
     async function adoptPrimaryProfile() {
       try {
         const pref = await desktop.profile?.get?.()
@@ -233,6 +243,13 @@ export function useGatewayBoot({
         $activeGatewayProfile.set(profileKey)
         setPrimaryGateway(gateway, profileKey)
         void ensureGatewayForProfile(profileKey)
+
+        const requested = newSessionWindowProfile()
+
+        if (requested && normalizeProfileKey(requested) !== normalizeProfileKey(profileKey)) {
+          $newChatProfile.set(normalizeProfileKey(requested))
+          await ensureGatewayProfile(requested)
+        }
       } catch {
         $activeGatewayProfile.set('default')
       }
