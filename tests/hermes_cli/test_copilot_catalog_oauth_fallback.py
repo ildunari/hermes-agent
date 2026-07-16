@@ -68,20 +68,22 @@ class TestCopilotCatalogApiKeyResolution:
             assert _resolve_copilot_catalog_api_key() == ""
             assert mock_exchange.call_count == 2
 
-    def test_already_exchanged_token_is_accepted_without_exchange(self):
-        """A live Copilot API token (tid/exp fields) needs no second exchange."""
-        api_token = f"tid=ambient;exp={time.time() + 1800};sku=copilot_individual"
+    def test_fake_future_tid_ambient_falls_through_to_valid_pool(self):
+        """Unverifiable ambient tid/exp fields must not hide a valid pool token."""
+        fake = f"tid=forged;exp={time.time() + 86400};sku=copilot_individual"
         with patch(
             "hermes_cli.auth.resolve_api_key_provider_credentials",
-            return_value={"api_key": api_token},
+            return_value={"api_key": fake},
         ), patch(
             "hermes_cli.auth.read_credential_pool",
+            return_value=[{"access_token": "gho_valid_pool"}],
         ) as mock_pool, patch(
             "hermes_cli.copilot_auth.exchange_copilot_token",
+            return_value=("tid=pool;exp=9999999999", 9999999999.0, None),
         ) as mock_exchange:
-            assert _resolve_copilot_catalog_api_key() == api_token
-            mock_exchange.assert_not_called()
-            mock_pool.assert_not_called()
+            assert _resolve_copilot_catalog_api_key() == "tid=pool;exp=9999999999"
+            mock_exchange.assert_called_once_with("gho_valid_pool")
+            mock_pool.assert_called_once_with("copilot")
 
     def test_expired_exchanged_token_falls_through_without_reexchange(self):
         """An expired tid token is neither accepted nor sent to GitHub exchange."""

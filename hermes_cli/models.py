@@ -2274,28 +2274,17 @@ def _resolve_copilot_catalog_api_key() -> str:
         # The generic credential resolver can surface an ambient GH_TOKEN or
         # GITHUB_TOKEN. It also deliberately returns the raw GitHub token when
         # Copilot exchange fails, so token-shape validation alone is not proof
-        # that the credential can fetch the catalog. Accept a live, already
-        # exchanged Copilot token directly; otherwise require exchange to
-        # succeed before allowing the ambient candidate to hide the pool.
+        # that the credential can fetch the catalog. Require a successful
+        # exchange for ambient raw tokens before allowing them to hide the
+        # pool. An ambient ``tid=...`` value is already in exchanged-token
+        # form and cannot be authenticated by exchanging it again; embedded
+        # ``tid``/``exp`` fields alone are attacker-controlled, so skip it.
         try:
             creds = resolve_api_key_provider_credentials("copilot")
             api_key = str(creds.get("api_key") or "").strip()
             valid, _ = validate_copilot_token(api_key)
             if valid:
-                fields = {}
-                for part in api_key.split(";"):
-                    key, separator, value = part.partition("=")
-                    if separator:
-                        fields[key.strip()] = value.strip()
-
-                if api_key.startswith("tid="):
-                    try:
-                        expires_at = float(fields.get("exp", ""))
-                    except (TypeError, ValueError):
-                        expires_at = 0.0
-                    if fields.get("tid") and expires_at > time.time():
-                        return api_key
-                else:
+                if not api_key.startswith("tid="):
                     try:
                         exchanged, _expires_at, _base_url = exchange_copilot_token(
                             api_key
