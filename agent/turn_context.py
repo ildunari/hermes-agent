@@ -482,8 +482,9 @@ def build_turn_context(
         _preflight_deferred = _defer_preflight(_preflight_tokens)
         # Codex app-server threads are compacted by the codex agent itself;
         # Hermes only initiates compaction in "hermes" mode (#36801).
+        _codex_app_server = getattr(agent, "api_mode", None) == "codex_app_server"
         _codex_native_auto = (
-            getattr(agent, "api_mode", None) == "codex_app_server"
+            _codex_app_server
             and str(
                 getattr(
                     agent,
@@ -495,7 +496,12 @@ def build_turn_context(
             in {"native", "off"}
         )
 
-        if not _preflight_deferred:
+        # Codex-owned threads report their real occupancy. The local Hermes
+        # transcript is not the provider thread (and may remain unmodified after
+        # any Codex compaction mode), so its rough estimate must never replace
+        # that real reading. The rough value below still drives Hermes-mode
+        # compaction decisions directly.
+        if not _preflight_deferred and not _codex_app_server:
             _last = _compressor.last_prompt_tokens
             # Do NOT overwrite the -1 sentinel (#36718).
             if _last >= 0 and _preflight_tokens > _last:

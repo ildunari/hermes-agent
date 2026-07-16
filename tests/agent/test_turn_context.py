@@ -45,6 +45,7 @@ class _FakeAgent:
         self.base_url = "https://openrouter.ai/api/v1"
         self.api_key = "sk-x"
         self.api_mode = "chat_completions"
+        self.codex_app_server_auto_compaction = "native"
         self.platform = "cli"
         self.quiet_mode = True
         self.max_iterations = 90
@@ -329,6 +330,32 @@ def test_preflight_compression_sets_explicit_compaction_flag_for_hook():
 
     invoke_hook.assert_called_once()
     assert invoke_hook.call_args.kwargs["compaction_applied"] is True
+
+
+@pytest.mark.parametrize("auto_mode", ["native", "off", "hermes"])
+def test_codex_preflight_preserves_real_provider_usage(auto_mode):
+    """A local transcript estimate must not replace Codex thread occupancy."""
+    agent = _FakeAgent()
+    agent.api_mode = "codex_app_server"
+    agent.codex_app_server_auto_compaction = auto_mode
+    agent.compression_enabled = True
+    agent.context_compressor = types.SimpleNamespace(
+        protect_first_n=0,
+        protect_last_n=0,
+        threshold_tokens=200_000,
+        context_length=272_000,
+        last_prompt_tokens=49_300,
+        last_real_prompt_tokens=49_300,
+        should_defer_preflight_to_real_usage=lambda _tokens: False,
+        should_compress=lambda _tokens: False,
+    )
+
+    with patch(
+        "agent.turn_context.estimate_request_tokens_rough", return_value=166_800
+    ):
+        _build(agent, conversation_history=[{"role": "assistant", "content": "prior"}])
+
+    assert agent.context_compressor.last_prompt_tokens == 49_300
 
 
 def test_run_conversation_consumes_turn_context_system_lane_without_second_pre_llm_hook():

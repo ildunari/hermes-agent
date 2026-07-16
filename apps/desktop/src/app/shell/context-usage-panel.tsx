@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { useI18n } from '@/i18n'
+import { contextSegmentPercent, resolveContextUsage } from '@/lib/context-usage'
 import { compactNumber } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import type { ContextBreakdown, ContextUsageCategory, UsageStats } from '@/types/hermes'
@@ -50,13 +51,9 @@ export function ContextUsagePanel({ currentUsage, requestGateway, sessionId }: C
     }
   }, [requestGateway, sessionId])
 
-  const contextMax = breakdown?.context_max ?? currentUsage.context_max ?? 0
-  const contextUsed = breakdown?.context_used ?? currentUsage.context_used ?? 0
+  const { contextMax, contextPercent: rawContextPercent, contextUsed } = resolveContextUsage(currentUsage, breakdown)
 
-  const contextPercent = Math.max(
-    0,
-    Math.min(100, Math.round(breakdown?.context_percent ?? currentUsage.context_percent ?? 0))
-  )
+  const contextPercent = Math.max(0, Math.min(100, Math.round(rawContextPercent)))
 
   const categories = useMemo(
     () =>
@@ -66,8 +63,6 @@ export function ContextUsagePanel({ currentUsage, requestGateway, sessionId }: C
       })),
     [breakdown?.categories, copy]
   )
-
-  const segmentTotal = categories.reduce((sum, category) => sum + category.tokens, 0) || contextUsed || 1
 
   return (
     <div className="flex w-72 flex-col gap-3 p-3 text-[0.75rem]" data-slot="context-usage-panel">
@@ -81,7 +76,7 @@ export function ContextUsagePanel({ currentUsage, requestGateway, sessionId }: C
 
       <p className="text-[0.6875rem] text-foreground">{copy.percentFull(contextPercent)}</p>
 
-      <ContextUsageBar categories={categories} segmentTotal={segmentTotal} />
+      <ContextUsageBar categories={categories} contextMax={contextMax} />
 
       <ul className="flex flex-col gap-1.5">
         {categories.map(category => (
@@ -106,10 +101,10 @@ export function ContextUsagePanel({ currentUsage, requestGateway, sessionId }: C
 
 function ContextUsageBar({
   categories,
-  segmentTotal
+  contextMax
 }: {
   categories: readonly ContextUsageCategory[]
-  segmentTotal: number
+  contextMax: number
 }) {
   return (
     <div
@@ -125,7 +120,7 @@ function ContextUsageBar({
           key={category.id}
           style={{
             background: category.color,
-            width: `${(category.tokens / segmentTotal) * 100}%`
+            width: `${contextSegmentPercent(category.tokens, contextMax)}%`
           }}
         />
       ))}

@@ -126,28 +126,39 @@ def compute_session_context_breakdown(
     ]
 
     estimated_total = sum(tokens for _, _, tokens in categories)
+    codex_managed_context = getattr(agent, "api_mode", None) == "codex_app_server"
 
     comp = getattr(agent, "context_compressor", None)
     context_max = int(getattr(comp, "context_length", 0) or 0) if comp else 0
     measured_used = int(getattr(comp, "last_prompt_tokens", 0) or 0) if comp else 0
-    context_used = measured_used if measured_used > 0 else estimated_total
+    context_used = (
+        measured_used
+        if measured_used > 0
+        else 0 if codex_managed_context else estimated_total
+    )
     context_percent = (
         max(0, min(100, round(context_used / context_max * 100)))
         if context_max
         else 0
     )
 
+    # Codex app-server owns the live thread in native/off modes. Its internal
+    # compaction does not rewrite Hermes' visible transcript, so assigning that
+    # transcript to live context categories would be confidently wrong. Keep
+    # the provider-reported occupancy but suppress the unverifiable slices.
+    category_payload = [
+        {
+            "color": _CATEGORY_COLORS.get(category_id, "var(--ui-text-tertiary)"),
+            "id": category_id,
+            "label": label,
+            "tokens": tokens,
+        }
+        for category_id, label, tokens in categories
+        if tokens > 0
+    ]
+
     return {
-        "categories": [
-            {
-                "color": _CATEGORY_COLORS.get(category_id, "var(--ui-text-tertiary)"),
-                "id": category_id,
-                "label": label,
-                "tokens": tokens,
-            }
-            for category_id, label, tokens in categories
-            if tokens > 0
-        ],
+        "categories": [] if codex_managed_context else category_payload,
         "context_max": context_max,
         "context_percent": context_percent,
         "context_used": context_used,
