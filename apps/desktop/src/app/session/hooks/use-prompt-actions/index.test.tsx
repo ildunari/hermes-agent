@@ -1506,6 +1506,72 @@ describe('usePromptActions submit session-context isolation (#54527)', () => {
     })
   })
 
+  it('submits the first prompt of a new chat WITH attachments — the route commit landing during attach sync is not user drift', async () => {
+    // Regression for the attachment double-send: react-router commits the
+    // route navigate()d inside createBackendSessionForSend on the NEXT render,
+    // not synchronously. A text-only send checks drift before that commit and
+    // passes; a send with attachments awaits image.attach first, the commit
+    // lands mid-await, and the post-sync drift check saw a token that differed
+    // from the stale pre-commit baseline captured at re-pin time — aborting
+    // its own submit. Symptom: session created + titled, but the message never
+    // reached prompt.submit; the user had to send the same draft twice.
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const selectedStoredSessionIdRef: MutableRefObject<string | null> = { current: null }
+    const activeSessionIdRef: MutableRefObject<string | null> = { current: null }
+    // Token shape mirrors the controller: `${pathname}:${search}:${hash}`.
+    let routeToken = '/::'
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'image.attach') {
+        // The render created by navigate() commits while the attach RPC is in
+        // flight — this is the window the old single-token baseline missed.
+        routeToken = '/stored-new-chat::'
+
+        return { attached: true, path: '/tmp/upload.png' } as never
+      }
+
+      return {} as never
+    })
+
+    const createBackendSessionForSend = vi.fn(async () => {
+      activeSessionIdRef.current = 'rt-new-chat'
+      selectedStoredSessionIdRef.current = 'stored-new-chat'
+      // navigate() was called, but `location` (and thus the token) has NOT
+      // updated yet — that only happens on the next React commit.
+
+      return 'rt-new-chat'
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        activeSessionId={null}
+        activeSessionIdRef={activeSessionIdRef}
+        createBackendSessionForSend={createBackendSessionForSend}
+        getRouteToken={() => routeToken}
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        selectedStoredSessionIdRef={selectedStoredSessionIdRef}
+        storedSessionId={null}
+      />
+    )
+    await waitFor(() => expect(handle).not.toBeNull())
+
+    const attachment = {
+      id: 'att-1',
+      kind: 'image',
+      label: 'upload.png',
+      path: '/Users/me/upload.png'
+    } as ComposerAttachment
+
+    expect(await handle!.submitText('first message with an image', { attachments: [attachment] })).toBe(true)
+    expect(calls.find(c => c.method === 'image.attach')?.params).toMatchObject({ session_id: 'rt-new-chat' })
+    expect(calls.find(c => c.method === 'prompt.submit')?.params).toMatchObject({ session_id: 'rt-new-chat' })
+  })
+
   it('aborts when the user switches sessions during the tail of a successful create', async () => {
     // createBackendSessionForSend awaits once more (armed-YOLO apply) AFTER
     // committing the refs and returning a real id, so a switch in that window

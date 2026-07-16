@@ -15,6 +15,7 @@ import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { setAwaitingResponse, setBusy, setMessages } from '@/store/session'
 
+import { routeTokenFor, sessionRoute } from '../../../routes'
 import type { ClientSessionState } from '../../../types'
 
 import {
@@ -117,16 +118,19 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
       // Pin the session context for the whole async submit pipeline. Without
       // this, a fast session switch during session.resume / file.attach can
-      // redirect the user's text into a different chat (#54527). Mutable —
-      // not const — because a new-chat submit legitimately re-homes to the
-      // session it creates (see the re-pin after createBackendSessionForSend).
+      // redirect the user's text into a different chat (#54527). The route
+      // baseline is a SET because react-router commits `location` on the next
+      // render, not synchronously at navigate() — after a new-chat create the
+      // observable token is legitimately either the pre-create route (render
+      // not committed yet) or the created session's route (committed), and
+      // which one you see depends on how long the awaits in between take.
       const startingActiveSessionId = activeSessionIdRef.current
       let startingStoredSessionId = selectedStoredSessionIdRef.current
-      let startingRouteToken = getRouteToken()
+      const allowedRouteTokens = new Set([getRouteToken()])
 
       const sessionContextDrifted = (): boolean =>
         selectedStoredSessionIdRef.current !== startingStoredSessionId ||
-        getRouteToken() !== startingRouteToken
+        !allowedRouteTokens.has(getRouteToken())
 
       // One submit in flight per session — drop any concurrent re-fire so a
       // stalled turn can't stack the same prompt into multiple real turns.
@@ -312,8 +316,24 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
         // Re-pin the baseline to the created chat for the rest of the
         // pipeline; the closures (seedOptimistic et al) see the new value.
+        // The route token needs BOTH the currently observable token and the
+        // predicted token of the created session's route: navigate() inside
+        // create marks the route for the next render, but `location` (which
+        // getRouteToken reads) only updates when React commits that render.
+        // A fast pipeline (no attachments) checks drift before the commit and
+        // sees the old token; a slow one (image.attach round-trips) checks
+        // after and sees the new token. Pinning only the stale pre-commit
+        // token made every first send WITH attachments read its own route
+        // commit as a user switch and abort after attach — message vanished
+        // from the transcript while the created session (and its title
+        // preview) survived, forcing a double-send (#65-composer).
         startingStoredSessionId = selectedStoredSessionIdRef.current
-        startingRouteToken = getRouteToken()
+        allowedRouteTokens.clear()
+        allowedRouteTokens.add(getRouteToken())
+
+        if (startingStoredSessionId) {
+          allowedRouteTokens.add(routeTokenFor(sessionRoute(startingStoredSessionId)))
+        }
 
         seedOptimistic(sessionId)
       }

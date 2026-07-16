@@ -90,6 +90,16 @@ export function sessionRoute(sessionId: string): string {
   return `${SESSION_ROUTE_PREFIX}${encodeURIComponent(sessionId)}`
 }
 
+/**
+ * The canonical route-token shape shared by the desktop controller (which
+ * derives it from the live location) and the submit pipeline's drift guard
+ * (which must predict the token of a route it just navigated to). Keep both
+ * sides on this helper so the format can't drift apart.
+ */
+export function routeTokenFor(pathname: string, search = '', hash = ''): string {
+  return `${pathname}:${search}:${hash}`
+}
+
 export function appViewForPath(pathname: string): AppView {
   if (isNewChatRoute(pathname) || routeSessionId(pathname)) {
     return 'chat'
