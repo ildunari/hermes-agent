@@ -9040,6 +9040,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         session_tokens = []
         home_token = None  # per-turn HERMES_HOME override for a resumed remote profile
         goal_followup = None  # set by the post-turn goal hook below
+        pending_steer_followup = None  # a /steer that landed after the last tool batch (below)
         try:
             from tools.approval import (
                 reset_current_session_key,
@@ -9276,6 +9277,16 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 lr = result.get("last_reasoning")
                 if isinstance(lr, str) and lr.strip():
                     last_reasoning = lr.strip()
+                # A /steer that arrived after the agent's final tool batch has
+                # no tool result left to attach to, so turn_finalizer hands it
+                # back as result["pending_steer"] instead of silently dropping
+                # it. Re-fire it as the next user turn below — but only for a
+                # cleanly completed turn: a hard interrupt (Stop) supersedes any
+                # pending steer, matching AIAgent.clear_interrupt().
+                if status == "complete":
+                    _steer = result.get("pending_steer")
+                    if isinstance(_steer, str) and _steer.strip():
+                        pending_steer_followup = _steer.strip()
             else:
                 raw = str(result)
                 status = "complete"
@@ -9450,6 +9461,30 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         # every auto follow-up below — drain it first and skip them this cycle;
         # the goal judge / notifications re-evaluate at the end of that turn.
         if _drain_queued_prompt(rid, sid, session):
+            return
+
+        # A /steer that landed too late to attach to a tool result (turn
+        # finished on its final assistant message) is real user intent that
+        # would otherwise vanish. Re-fire it as the next user turn — after an
+        # explicit queued prompt (newer intent wins) but before the auto goal
+        # loop. Same busy-guard + running handshake as the goal continuation so
+        # a racing user prompt takes precedence and we never double-run.
+        if pending_steer_followup:
+            with session["history_lock"]:
+                if session.get("running"):
+                    return
+                session["running"] = True
+            try:
+                _emit("message.start", sid)
+                _run_prompt_submit(rid, sid, session, pending_steer_followup)
+            except Exception as _steer_exc:
+                print(
+                    f"[tui_gateway] pending steer dispatch failed: "
+                    f"{type(_steer_exc).__name__}: {_steer_exc}",
+                    file=sys.stderr,
+                )
+                with session["history_lock"]:
+                    session["running"] = False
             return
 
         # Chain a goal-continuation turn if the judge said so. We do

@@ -5551,8 +5551,69 @@ def test_run_prompt_submit_registers_turn_thread_for_interrupt(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_pending_steer_refires_as_followup_turn(monkeypatch):
+    """A /steer that lands after the final tool batch (returned by the agent as
+    result['pending_steer']) must be re-fired as the next user turn, not
+    silently dropped. This is the 'steer stops you mid-track with no response'
+    bug: the backend hands the late steer back, but the gateway ignored it.
+    """
+    submits: list[str] = []
+
+    class _CapturingThread:
+        """Captures the target closure and runs it synchronously so the
+        threaded run() body executes deterministically in-test."""
+
+        def __init__(self, target=None, daemon=None):
+            self.target = target
+
+        def start(self):
+            if self.target is not None:
+                self.target()
+
+        def is_alive(self):
+            return False
+
+    # First run_conversation returns a late steer; any re-fired turn returns a
+    # plain result so the recursion terminates (no pending_steer second time).
+    run_results = [{"pending_steer": "also check the logs", "final_response": "done"}, {}]
+
+    def fake_run_conversation(*args, **kwargs):
+        return run_results.pop(0) if run_results else {}
+
+    agent = types.SimpleNamespace(
+        run_conversation=fake_run_conversation,
+        clear_interrupt=lambda: None,
+        model="m",
+        provider="p",
+    )
+    session = _session(agent=agent, running=True, session_key="steer-key")
+    server._sessions["sid"] = session
+
+    real_run_prompt_submit = server._run_prompt_submit
+
+    def spy_run_prompt_submit(rid, sid, sess, text):
+        submits.append(text)
+        return real_run_prompt_submit(rid, sid, sess, text)
+
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _CapturingThread)
+        monkeypatch.setattr(server, "_emit", lambda *a, **k: None)
+        monkeypatch.setattr(server, "_session_info", lambda *a, **k: {})
+        monkeypatch.setattr(server, "_drain_queued_prompt", lambda *a, **k: False)
+        monkeypatch.setattr(server, "_run_prompt_submit", spy_run_prompt_submit)
+
+        server._run_prompt_submit("1", "sid", session, "hello")
+
+        # The original turn plus one re-fired steer turn.
+        assert "hello" in submits
+        assert "also check the logs" in submits, (
+            f"pending steer was not re-fired as a follow-up turn; submits={submits}"
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_interrupt_drops_queued_prompt_for_session():
-    """Explicit stop cancels a queued next turn instead of auto-draining it."""
     calls = {"interrupted": False}
 
     class _LiveThread:
