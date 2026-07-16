@@ -187,6 +187,66 @@ def test_handoff_fail_marks_only_inflight_rows(monkeypatch):
         server._sessions.pop(sid, None)
 
 
+def test_interrupt_stale_running_emits_settle(monkeypatch):
+    """A Stop on a session whose run thread already died (stuck ``running``)
+    must both clear the flag AND emit ``session.info`` so the client's busy
+    state settles. Without the emit the desktop composer wedges on Stop and the
+    queued-prompt auto-drain (gated on !isBusy) never fires — the exact
+    'queued message never prompts / steer stops with no response' bug.
+    """
+
+    class FakeAgent:
+        model = "m"
+        provider = "p"
+
+        def interrupt(self):  # present so should_interrupt path is exercised
+            pass
+
+    events: list[dict] = []
+    monkeypatch.setattr(
+        server, "write_json",
+        lambda obj: events.append(obj) or True,
+    )
+    # Keep _session_info cheap + deterministic: it only needs to reflect running.
+    monkeypatch.setattr(
+        server, "_session_info",
+        lambda agent, session=None: {"running": bool((session or {}).get("running"))},
+    )
+
+    sid = "rt-stale-interrupt"
+    dead_thread = threading.Thread(target=lambda: None)
+    dead_thread.start()
+    dead_thread.join()  # guarantee is_alive() is False
+
+    session = {
+        "session_key": "stored-stale",
+        "history_lock": threading.RLock(),
+        "agent": FakeAgent(),
+        "running": True,
+        "_run_thread": dead_thread,
+        "inflight_turn": {"text": "hi"},
+    }
+    server._sessions[sid] = session
+    try:
+        monkeypatch.setattr(server, "_sess", lambda params, rid: (session, None))
+        resp = server._methods["session.interrupt"]("r1", {"session_id": sid})
+
+        assert resp["result"] == {"status": "interrupted"}
+        # Flag cleared server-side.
+        assert session["running"] is False
+        assert session["inflight_turn"] is None
+        # A session.info event carrying running:false reached the client.
+        session_infos = [
+            e for e in events
+            if e.get("method") == "event"
+            and e.get("params", {}).get("type") == "session.info"
+        ]
+        assert session_infos, "no session.info emitted on stale-interrupt recovery"
+        assert session_infos[-1]["params"]["payload"]["running"] is False
+    finally:
+        server._sessions.pop(sid, None)
+
+
 def test_session_context_explicit_cwd_for_ephemeral_task(monkeypatch, tmp_path):
     """Background/preview tasks use ephemeral ids absent from `_sessions`, so the
     parent workspace is passed explicitly; it must pin instead of clearing back
