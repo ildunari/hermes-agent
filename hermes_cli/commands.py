@@ -264,7 +264,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("update-desktop", "Run the Desktop-only smart update workflow for Studio and MacBook", "Session",
                aliases=("update_desktop",), args_hint="[instructions]"),
     CommandDef("usage", "Show token usage and rate limits; `reset` redeems a banked Codex limit reset", "Info",
-               args_hint="[reset [--force]]"),
+               aliases=("stats",), args_hint="[card|reset [--force]]"),
     CommandDef("credits", "Show Nous credit balance and top up", "Info"),
     CommandDef("billing", "Manage Nous terminal billing — buy credits, auto-reload, limits", "Info",
                cli_only=True),

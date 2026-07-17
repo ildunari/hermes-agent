@@ -2,6 +2,7 @@ from hermes_state import AsyncSessionDB
 """Tests for gateway /usage command — agent cache lookup and output fields."""
 
 import threading
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -22,6 +23,14 @@ def _make_mock_agent(**overrides):
         "session_output_tokens": 10_000,
         "session_cache_read_tokens": 5_000,
         "session_cache_write_tokens": 2_000,
+        "session_api_output_tokens": 10_000,
+        "session_api_wall_seconds": 250.0,
+        "session_tool_stats": {
+            "terminal": {"calls": 4, "errors": 1},
+            "delegate_task": {"calls": 2, "errors": 0},
+        },
+        "valid_tool_names": set(),
+        "session_start": datetime.now() - timedelta(minutes=5),
     }
     defaults.update(overrides)
     for k, v in defaults.items():
@@ -84,12 +93,12 @@ class TestUsageCachedAgent:
         assert "35,000" in result  # input tokens
         assert "10,000" in result  # output tokens
         assert "50,000" in result  # total
-        assert "30,000" in result  # context
-        assert "Compressions: 1" in result
-        # Cost and cache-hit reporting is removed everywhere.
+        assert "30k/200k" in result  # context gauge
+        assert "Cache" in result
+        assert "Tools" in result
+        assert "Subagents" in result
+        # Cost reporting remains intentionally absent.
         assert "$" not in result
-        assert "Cache read" not in result
-        assert "Cache write" not in result
         assert "Cost" not in result
 
     @pytest.mark.asyncio
@@ -106,7 +115,7 @@ class TestUsageCachedAgent:
             result = await runner._handle_usage_command(event)
 
         assert "80,000" in result   # running agent's total
-        assert "API calls: 10" in result
+        assert "API calls          10" in result
 
     @pytest.mark.asyncio
     async def test_sentinel_skipped_uses_cache(self):
@@ -124,7 +133,7 @@ class TestUsageCachedAgent:
             result = await runner._handle_usage_command(event)
 
         assert "claude-sonnet-4.6" in result
-        assert "Session Token Usage" in result
+        assert "Tokens total" in result
 
     @pytest.mark.asyncio
     async def test_no_agent_anywhere_falls_to_history(self):
@@ -159,8 +168,8 @@ class TestUsageCachedAgent:
             mock_cost.return_value = MagicMock(amount_usd=None, status="unknown")
             result = await runner._handle_usage_command(event)
 
-        assert "Cache read" not in result
-        assert "Cache write" not in result
+        assert "Cache" in result
+        assert "0% (0/40k)" in result
 
 
 class TestUsageAccountSection:
@@ -191,7 +200,7 @@ class TestUsageAccountSection:
             mock_cost.return_value = MagicMock(amount_usd=None, status="included")
             result = await runner._handle_usage_command(event)
 
-        assert "📊 **Session Token Usage**" in result
+        assert "Tokens total" in result
         assert "📈 **Account limits**" in result
         assert "Provider: openai-codex (Pro)" in result
 
@@ -316,8 +325,40 @@ class TestUsageReset:
         assert "Unknown /usage subcommand" in result
 
 
+class TestUsageCard:
+    @pytest.mark.asyncio
+    async def test_card_unavailable_falls_back_to_markdown(self, monkeypatch):
+        agent = _make_mock_agent(valid_tool_names={"terminal"})
+        runner = _make_runner(SK, cached_agent=agent)
+        monkeypatch.setattr("agent.account_usage.nous_credits_lines", lambda markdown=False: [])
+        event = MagicMock()
+        event.get_command_args.return_value = "card"
+
+        with patch("agent.rate_limit_tracker.format_rate_limit_compact", return_value="RPM: 50/60"):
+            result = await runner._handle_usage_command(event)
+
+        assert "render_message_card is not available" in result
+        assert "claude-sonnet-4.6 · openrouter" in result
+
+    @pytest.mark.asyncio
+    async def test_card_available_invokes_tool(self, monkeypatch):
+        agent = _make_mock_agent(valid_tool_names={"render_message_card"})
+        agent._invoke_tool.return_value = "MEDIA:/tmp/usage-card.png\nUsage card"
+        runner = _make_runner(SK, cached_agent=agent)
+        monkeypatch.setattr("agent.account_usage.nous_credits_lines", lambda markdown=False: [])
+        event = MagicMock()
+        event.get_command_args.return_value = "card"
+
+        result = await runner._handle_usage_command(event)
+
+        assert result.startswith("MEDIA:/tmp/usage-card.png")
+        call = agent._invoke_tool.call_args
+        assert call.args[0] == "render_message_card"
+        assert call.args[1]["kind"] == "metric_grid"
+
+
 class TestUsageContextBreakdown:
-    """The /usage output includes the per-category context breakdown."""
+    """The rich /usage output stays compact instead of appending breakdown rows."""
 
     @pytest.mark.asyncio
     async def test_breakdown_lines_rendered_for_live_agent(self):
@@ -348,16 +389,8 @@ class TestUsageContextBreakdown:
              patch("agent.context_breakdown.compute_session_context_breakdown", return_value=fake_payload):
             result = await runner._handle_usage_command(event)
 
-        # Localized header + at least the two non-zero category labels appear,
-        # each labelled as a percentage of the estimated total.
-        assert "Context breakdown" in result
-        assert "System prompt" in result
-        assert "Tool definitions" in result
-        assert "4,000" in result   # system prompt tokens, comma-formatted
-        assert "40%" in result     # 4000 / 10000
-        assert "60%" in result     # 6000 / 10000
-        # Zero-token category is dropped, not rendered.
-        assert "Conversation" not in result
+        assert "Context  " in result
+        assert "Context breakdown" not in result
 
     @pytest.mark.asyncio
     async def test_breakdown_failure_is_non_fatal(self):
@@ -373,6 +406,6 @@ class TestUsageContextBreakdown:
             result = await runner._handle_usage_command(event)
 
         # Core usage lines still render; no breakdown header.
-        assert "📊 **Session Token Usage**" in result
+        assert "Tokens total" in result
         assert "50,000" in result  # total tokens
         assert "Context breakdown" not in result

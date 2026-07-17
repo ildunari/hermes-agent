@@ -4032,7 +4032,8 @@ class GatewaySlashCommandsMixin:
         raw_args = event.get_command_args().strip()
         args = [a.lower() for a in raw_args.split()] if raw_args else []
         wants_reset = bool(args) and args[0] == "reset"
-        if args and not wants_reset:
+        wants_card = args == ["card"]
+        if args and not wants_reset and not wants_card:
             return t("gateway.usage.unknown_subcommand", args=raw_args)
 
         # Try running agent first (mid-turn), then cached agent (between turns)
@@ -4110,45 +4111,75 @@ class GatewaySlashCommandsMixin:
             credits_lines = []  # fail-open: never break /usage
 
         if agent and hasattr(agent, "session_total_tokens") and agent.session_api_calls > 0:
-            lines = []
+            from datetime import datetime
+            from gateway.usage_render import build_usage_card_args, render_usage_markdown
+            from hermes_cli.profiles import get_active_profile_name
 
-            # Rate limits (when available from provider headers)
+            ctx = agent.context_compressor
+            context_used = max(0, int(getattr(ctx, "last_prompt_tokens", 0) or 0))
+            context_length = max(0, int(getattr(ctx, "context_length", 0) or 0))
+            prompt_tokens = max(0, int(getattr(agent, "session_prompt_tokens", 0) or 0))
+            cache_read_tokens = max(0, int(getattr(agent, "session_cache_read_tokens", 0) or 0))
+            rate_seconds = max(0.0, float(getattr(agent, "session_api_wall_seconds", 0.0) or 0.0))
+            rate_tokens = max(0, int(getattr(agent, "session_api_output_tokens", 0) or 0))
+            started = getattr(agent, "session_start", None)
+            try:
+                duration_seconds = max(0.0, (datetime.now(tz=started.tzinfo) - started).total_seconds()) if started else 0.0
+            except (AttributeError, TypeError, ValueError):
+                duration_seconds = 0.0
+            tool_stats = getattr(agent, "session_tool_stats", None)
+            if not isinstance(tool_stats, dict):
+                tool_stats = {}
+            subagent_count = int((tool_stats.get("delegate_task") or {}).get("calls", 0) or 0)
+            source_profile = getattr(source, "profile", None)
+            if not isinstance(source_profile, str) or not source_profile.strip():
+                source_profile = get_active_profile_name()
+            snapshot = {
+                "model": getattr(agent, "model", None) or "unknown model",
+                "provider": getattr(agent, "provider", None) or provider or "unknown provider",
+                "profile": source_profile,
+                "context_used": context_used,
+                "context_length": context_length,
+                "input_tokens": getattr(agent, "session_input_tokens", 0) or 0,
+                "output_tokens": getattr(agent, "session_output_tokens", 0) or 0,
+                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                "cache_read_tokens": cache_read_tokens,
+                "prompt_tokens": prompt_tokens,
+                "api_calls": getattr(agent, "session_api_calls", 0) or 0,
+                "avg_output_tokens_per_second": rate_tokens / rate_seconds if rate_seconds else 0.0,
+                "duration_seconds": duration_seconds,
+                "tool_stats": tool_stats,
+                "subagent_count": subagent_count,
+            }
+            markdown = render_usage_markdown(snapshot)
+
+            if wants_card:
+                if "render_message_card" in set(getattr(agent, "valid_tool_names", None) or ()):
+                    try:
+                        card_result = await asyncio.to_thread(
+                            agent._invoke_tool,
+                            "render_message_card",
+                            build_usage_card_args(snapshot),
+                            f"usage-card:{session_key}",
+                        )
+                        card_lines = [str(card_result)]
+                        if account_lines:
+                            card_lines.extend(("", *account_lines))
+                        if credits_lines:
+                            card_lines.extend(("", *credits_lines))
+                        return "\n".join(card_lines)
+                    except Exception:
+                        markdown = "render_message_card failed; showing Markdown instead.\n\n" + markdown
+                else:
+                    markdown = "render_message_card is not available in this session; showing Markdown instead.\n\n" + markdown
+
+            lines = []
             rl_state = agent.get_rate_limit_state()
             if rl_state and rl_state.has_data:
                 from agent.rate_limit_tracker import format_rate_limit_compact
                 lines.append(t("gateway.usage.rate_limits", state=format_rate_limit_compact(rl_state)))
                 lines.append("")
-
-            # Session token usage — detailed breakdown matching CLI
-            input_tokens = getattr(agent, "session_input_tokens", 0) or 0
-            output_tokens = getattr(agent, "session_output_tokens", 0) or 0
-
-            lines.append(t("gateway.usage.header_session"))
-            lines.append(t("gateway.usage.label_model", model=agent.model))
-            lines.append(t("gateway.usage.label_input_tokens", count=f"{input_tokens:,}"))
-            lines.append(t("gateway.usage.label_output_tokens", count=f"{output_tokens:,}"))
-            lines.append(t("gateway.usage.label_total", count=f"{agent.session_total_tokens:,}"))
-            lines.append(t("gateway.usage.label_api_calls", count=agent.session_api_calls))
-
-            # Context window and compressions
-            ctx = agent.context_compressor
-            _lpt = ctx.last_prompt_tokens if ctx.last_prompt_tokens > 0 else 0
-            if _lpt:
-                pct = min(100, _lpt / ctx.context_length * 100) if ctx.context_length else 0
-                lines.append(t("gateway.usage.label_context", used=f"{_lpt:,}", total=f"{ctx.context_length:,}", pct=f"{pct:.0f}"))
-            if ctx.compression_count:
-                lines.append(t("gateway.usage.label_compressions", count=ctx.compression_count))
-
-            # Per-category context breakdown (estimated — chars/4 heuristic).
-            # Same engine the desktop popover uses (PR #54907). The system
-            # prompt / tools / skills / memory slices read off the live agent;
-            # the conversation slice is estimated from the session transcript.
-            breakdown_lines = await asyncio.to_thread(
-                self._context_breakdown_lines, agent, source
-            )
-            if breakdown_lines:
-                lines.append("")
-                lines.extend(breakdown_lines)
+            lines.extend(markdown.splitlines())
 
             if account_lines:
                 lines.append("")
