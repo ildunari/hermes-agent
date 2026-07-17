@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import enum
 import json
 import os
 import pwd
@@ -45,6 +46,14 @@ class RestartTarget:
 
     def service_name(self, uid: int) -> str:
         return f"{self.domain(uid)}/{self.label}"
+
+
+class RestartVerification(enum.Enum):
+    """Outcome of proving that a graceful launchd restart completed."""
+
+    RESTARTED = "restarted"
+    NOT_RESTARTED = "not_restarted"
+    UNVERIFIABLE = "unverifiable"
 
 
 GATEWAY_TARGETS: tuple[RestartTarget, ...] = (
@@ -614,17 +623,17 @@ def _graceful_restart_gateway(
     launchctl_result: subprocess.CompletedProcess[str],
     *,
     timeout: float,
-) -> str | None:
+) -> tuple[RestartVerification, str | None]:
     """Ask one gateway to drain and self-restart; never hard-kill it."""
     pid = _gateway_pid(target, launchctl_result)
     if pid is None:
-        return f"{service} has no verifiable gateway PID; refusing hard restart"
+        return RestartVerification.NOT_RESTARTED, f"{service} has no verifiable gateway PID; refusing hard restart"
     if not hasattr(signal, "SIGUSR1"):
-        return f"{service} cannot restart gracefully on this platform"
+        return RestartVerification.NOT_RESTARTED, f"{service} cannot restart gracefully on this platform"
     try:
         os.kill(pid, signal.SIGUSR1)
     except (OSError, PermissionError, ProcessLookupError) as exc:
-        return f"{service} graceful restart signal failed: {exc}"
+        return RestartVerification.NOT_RESTARTED, f"{service} graceful restart signal failed: {exc}"
 
     deadline = time.monotonic() + max(1.0, timeout)
     while time.monotonic() < deadline:
@@ -634,11 +643,34 @@ def _graceful_restart_gateway(
         # that stale/transient value is treated as success, the outer dedup set
         # incorrectly suppresses the user/gui twin without restarting either.
         current = _launchctl_print(service)
-        replacement_pid = _launchctl_pid(current)
-        if replacement_pid is not None and replacement_pid != pid:
-            return None
+        replacement_pid = _launchctl_pid(current) if current.returncode == 0 else None
+        if replacement_pid is not None:
+            if replacement_pid != pid:
+                return RestartVerification.RESTARTED, None
+        else:
+            # A failed/empty launchctl read is not proof that the old PID
+            # survived. Retry briefly; if launchd remains unreadable, dedupe the
+            # user/gui twin rather than risking a second signal to fresh work.
+            for _attempt in range(2):
+                time.sleep(0.1)
+                retry = _launchctl_print(service)
+                retry_pid = _launchctl_pid(retry) if retry.returncode == 0 else None
+                if retry_pid is None:
+                    continue
+                if retry_pid != pid:
+                    return RestartVerification.RESTARTED, None
+                break
+            else:
+                return (
+                    RestartVerification.UNVERIFIABLE,
+                    f"{service} restart verification was inconclusive after transient "
+                    "launchctl read failures",
+                )
         time.sleep(0.25)
-    return f"{service} did not complete its graceful self-restart within {timeout:g}s"
+    return (
+        RestartVerification.NOT_RESTARTED,
+        f"{service} did not complete its graceful self-restart within {timeout:g}s",
+    )
 
 
 def _verify_listen_port(port: int) -> str | None:
@@ -822,18 +854,22 @@ def restart_scope(
             continue
         if _gateway_status_path_for_target(target) is not None:
             gateway_timeout = min(max(safe_wait_timeout, 30.0), 600.0)
-            failure = _graceful_restart_gateway(
+            verification, detail = _graceful_restart_gateway(
                 target,
                 service,
                 before,
                 timeout=gateway_timeout,
             )
-            if failure:
+            if verification is RestartVerification.NOT_RESTARTED:
+                failure = detail or f"{service} restart was not verified"
                 failures.append(failure)
                 _append_log(failure)
                 continue
             restarted_services.add(service)
-            _append_log(f"{service} completed graceful self-restart")
+            if verification is RestartVerification.UNVERIFIABLE:
+                _append_log(f"restart verification warning: {detail}")
+            else:
+                _append_log(f"{service} completed graceful self-restart")
             continue
         kicked = _kickstart(service) if target.required else _kickstart_optional(target, service)
         if kicked.returncode != 0:

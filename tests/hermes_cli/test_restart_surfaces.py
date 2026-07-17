@@ -5,6 +5,7 @@ import pytest
 
 from hermes_cli.restart_surfaces import (
     RestartTarget,
+    RestartVerification,
     _gateway_pid as real_gateway_pid,
     _graceful_restart_gateway as real_graceful_restart_gateway,
     _webui_busy_details as real_webui_busy_details,
@@ -27,7 +28,7 @@ def _no_live_webui_probe(monkeypatch):
     # signal the live gateway PID found in this developer's status files.
     monkeypatch.setattr(
         "hermes_cli.restart_surfaces._graceful_restart_gateway",
-        lambda *_args, **_kwargs: None,
+        lambda *_args, **_kwargs: (RestartVerification.RESTARTED, None),
     )
 
 
@@ -117,7 +118,10 @@ def test_restart_scope_resolves_required_gateway_gui_alternate(monkeypatch, tmp_
     monkeypatch.setattr(
         restart_surfaces,
         "_graceful_restart_gateway",
-        lambda _target, service, _before, **_kwargs: graceful_services.append(service) or None,
+        lambda _target, service, _before, **_kwargs: (
+            graceful_services.append(service) or RestartVerification.RESTARTED,
+            None,
+        ),
     )
     monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
 
@@ -167,13 +171,14 @@ def test_graceful_gateway_restart_signals_and_waits_for_launchd_replacement(monk
     monkeypatch.setattr(restart_surfaces, "_launchctl_print", lambda _service: replacement)
     monkeypatch.setattr(restart_surfaces.os, "kill", lambda pid, sig: signals.append((pid, sig)))
 
-    failure = real_graceful_restart_gateway(
+    verification, failure = real_graceful_restart_gateway(
         target,
         "user/503/ai.hermes.gateway",
         before,
         timeout=10,
     )
 
+    assert verification is RestartVerification.RESTARTED
     assert failure is None
     assert signals == [(100, restart_surfaces.signal.SIGUSR1)]
 
@@ -204,13 +209,14 @@ def test_graceful_gateway_restart_does_not_trust_status_pid_without_launchd_rest
     monkeypatch.setattr(restart_surfaces.time, "sleep", lambda *_args: None)
     monkeypatch.setattr(restart_surfaces.os, "kill", lambda *_args: None)
 
-    failure = real_graceful_restart_gateway(
+    verification, failure = real_graceful_restart_gateway(
         target,
         "user/503/ai.hermes.gateway-poke",
         before,
         timeout=1,
     )
 
+    assert verification is RestartVerification.NOT_RESTARTED
     assert failure == (
         "user/503/ai.hermes.gateway-poke did not complete its graceful "
         "self-restart within 1s"
@@ -245,13 +251,67 @@ def test_restart_scope_does_not_skip_twin_after_unverified_restart(monkeypatch, 
     monkeypatch.setattr(
         restart_surfaces,
         "_graceful_restart_gateway",
-        lambda *_args, **_kwargs: graceful_calls.append(_args[1]) or "restart was not verified",
+        lambda *_args, **_kwargs: (
+            graceful_calls.append(_args[1]) or RestartVerification.NOT_RESTARTED,
+            "restart was not verified",
+        ),
     )
     monkeypatch.setattr(restart_surfaces, "_wait_for_scope_health", lambda *_args, **_kwargs: ([], []))
 
     assert restart_surfaces.restart_scope("gateways", delay=0) == 1
     assert graceful_calls == [loaded_service, loaded_service]
     assert "already restarted" not in (tmp_path / "restart.log").read_text()
+
+
+def test_restart_scope_dedupes_twin_when_restart_proof_is_transiently_unverifiable(
+    monkeypatch, tmp_path
+):
+    """Transient launchctl read failures must not signal the fresh twin twice."""
+    from hermes_cli import restart_surfaces
+
+    uid = restart_surfaces.os.getuid()
+    user_target = RestartTarget("user/{uid}", "ai.hermes.gateway-poke", required=False)
+    gui_target = RestartTarget("gui/{uid}", "ai.hermes.gateway-poke", required=False)
+    loaded_service = f"user/{uid}/ai.hermes.gateway-poke"
+    before = subprocess.CompletedProcess(
+        ["launchctl", "print"],
+        0,
+        stdout="\tpid = 100\n",
+        stderr="",
+    )
+    signals = []
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "targets_for_scope", lambda _scope: (user_target, gui_target))
+    monkeypatch.setattr(restart_surfaces, "VERIFY_PORTS", {"gateways": ()})
+    monkeypatch.setattr(restart_surfaces, "_gateway_busy_details", lambda _targets: [])
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_resolve_loaded_service",
+        lambda _requested: (loaded_service, before),
+    )
+    monkeypatch.setattr(restart_surfaces, "_gateway_pid", lambda *_args: 100)
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_graceful_restart_gateway",
+        real_graceful_restart_gateway,
+    )
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_launchctl_print",
+        lambda _service: subprocess.CompletedProcess(
+            ["launchctl", "print"], 1, stdout="", stderr="transient read failure"
+        ),
+    )
+    monkeypatch.setattr(restart_surfaces.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(restart_surfaces.time, "sleep", lambda *_args: None)
+    monkeypatch.setattr(restart_surfaces, "_wait_for_scope_health", lambda *_args, **_kwargs: ([], []))
+
+    assert restart_surfaces.restart_scope("gateways", delay=0) == 0
+    assert signals == [(100, restart_surfaces.signal.SIGUSR1)]
+    log = (tmp_path / "restart.log").read_text()
+    assert "verification was inconclusive" in log
+    assert "skipping duplicate" in log
 
 
 def test_restart_scope_fails_when_verify_port_missing(monkeypatch, tmp_path):
