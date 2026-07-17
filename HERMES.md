@@ -34,11 +34,11 @@ The live gateway runs whatever is checked out on `local/studio-slim`. A fix comm
 
 Therefore, treat merge-back as part of finishing the job, not an afterthought:
 
-- **When a fix is verified, land it deliberately.** Do not leave completed, tested work on a feature branch assuming "it's done." It is not done until it is on `local/studio-slim` (or explicitly queued for Kosta to merge, called out by name).
+- **When a fix is verified, land it deliberately.** Do not leave completed, tested work on a feature branch assuming "it's done." It is not done until it is on `local/studio-slim`.
 - **Merge smartly, not blindly.** Prefer `git cherry-pick` of the specific verified commits onto a fresh worktree cut from current `local/studio-slim`, resolve conflicts, run the branch's own tests, then fast-forward. Avoid merging stale branches that are hundreds of commits behind — rebase or cherry-pick the unique commits instead.
 - **Verify presence by patch content, not SHA.** Rebases and squashes change SHAs, so `git merge-base --is-ancestor` gives false "not merged" readings. Use `git cherry local/studio-slim <branch>` — a leading `+` means genuinely stranded, `-` means an equivalent is already live. Confirm with a `git grep` of the live branch for the actual changed code before concluding anything is missing.
 - **Close the loop.** After landing, tell Kosta exactly which commits went live and delete or clearly label the now-merged branch so it does not linger as phantom "unmerged" work.
-- **Landing to live still requires Kosta's explicit go-ahead** per the gateway rule above — deliberate merge-back means proposing and executing the merge cleanly when he approves, not auto-pushing to the running tree.
+- **Landing to live is pre-authorized — do not ask for merge approval.** Like safe restarts, the safety is in the mechanism, not in asking: verify the change works (tests, smoke test), run an adversarial review of the diff, then cherry-pick onto `local/studio-slim` and restart safely. Never gate a verified merge on a "can I merge?" question — Kosta will forget to answer and the fix strands. Asking is reserved for genuinely risky merges: unresolved conflicts touching unrelated subsystems, failing tests, or changes another agent is actively working on.
 
 ## Multi-Agent Collaboration
 
