@@ -1999,6 +1999,7 @@ export const ja = defineLocale({
       fast: '高速',
       effort: '努力度',
       minimal: '最小',
+      light: 'ライト',
       low: '低',
       medium: '中',
       high: '高',

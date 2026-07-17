@@ -280,6 +280,10 @@ export interface ModelOptionProvider {
 export interface ModelCapabilities {
   fast: boolean
   reasoning: boolean
+  /** Distinct effort values accepted by this model/provider route. Missing
+   *  means an older backend or unknown catalog, so the UI keeps Hermes' full
+   *  provider-neutral list for compatibility. */
+  reasoning_efforts?: string[]
 }
 
 export interface ModelOptionsResponse {

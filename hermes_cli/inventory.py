@@ -33,9 +33,11 @@ Substrate facts (verified May 2026):
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from typing import Optional
 
+logger = logging.getLogger(__name__)
 
 # ─── Public types ───────────────────────────────────────────────────────
 
@@ -182,7 +184,7 @@ def build_models_payload(
       mirroring the ``hermes model`` CLI picker. Adds network calls
       (pricing fetch + Nous tier check); only set for interactive pickers.
     - ``capabilities``: add a per-row ``capabilities`` map
-      ``{model: {fast, reasoning}}`` so pickers can gate the model-options
+      ``{model: {fast, reasoning, reasoning_efforts?}}`` so pickers can gate the model-options
       controls (fast toggle / reasoning) to what each model actually
       supports, instead of offering knobs the backend would reject.
     - ``force_fresh_nous_tier``: bypass the short Nous free-tier cache when
@@ -308,7 +310,7 @@ def build_models_payload(
 
 
 def _apply_capabilities(rows: list[dict]) -> None:
-    """Attach a ``{model: {fast, reasoning}}`` map to each provider row.
+    """Attach per-model fast/reasoning capabilities to each provider row.
 
     `fast` mirrors ``model_supports_fast_mode`` (the same gate the runtime
     enforces). `reasoning` comes from the models.dev catalog when known and
@@ -325,7 +327,7 @@ def _apply_capabilities(rows: list[dict]) -> None:
 
     for row in rows:
         slug = row.get("slug") or ""
-        caps: dict[str, dict[str, bool]] = {}
+        caps: dict[str, dict] = {}
 
         for model in row.get("models") or []:
             reasoning = True
@@ -337,10 +339,24 @@ def _apply_capabilities(rows: list[dict]) -> None:
                 except Exception:
                     reasoning = True
 
-            caps[model] = {
+            model_caps = {
                 "fast": bool(model_supports_fast_mode(model)),
                 "reasoning": reasoning,
             }
+            if slug.lower() == "openai-codex":
+                try:
+                    from hermes_cli.codex_models import get_codex_model_reasoning_efforts
+
+                    efforts = get_codex_model_reasoning_efforts(model)
+                    if efforts:
+                        model_caps["reasoning_efforts"] = efforts
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to resolve Codex reasoning efforts for %s: %s",
+                        model,
+                        exc,
+                    )
+            caps[model] = model_caps
 
         row["capabilities"] = caps
 

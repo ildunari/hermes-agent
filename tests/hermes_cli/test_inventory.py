@@ -228,6 +228,37 @@ def test_build_models_payload_does_not_call_provider_model_ids():
     mock_pm.assert_not_called()
 
 
+def test_build_models_payload_attaches_codex_reasoning_efforts():
+    rows = [{
+        "slug": "openai-codex",
+        "name": "OpenAI Codex",
+        "models": ["gpt-5.6-sol"],
+        "total_models": 1,
+        "is_current": True,
+        "is_user_defined": False,
+        "source": "built-in",
+    }]
+    ctx = _empty_ctx(provider="openai-codex", model="gpt-5.6-sol", base_url="")
+
+    with (
+        _list_auth_returning(rows),
+        patch(
+            "hermes_cli.codex_models.get_codex_model_reasoning_efforts",
+            return_value=["low", "medium", "high", "xhigh", "max"],
+        ),
+    ):
+        payload = build_models_payload(ctx, capabilities=True)
+
+    codex = next(row for row in payload["providers"] if row["slug"] == "openai-codex")
+    assert codex["capabilities"]["gpt-5.6-sol"]["reasoning_efforts"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+
+
 def test_build_models_payload_uses_cached_nous_tier_by_default():
     """Picker payloads should not force fresh Nous account checks.
 

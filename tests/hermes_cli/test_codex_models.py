@@ -1,7 +1,11 @@
 import json
 from unittest.mock import patch
 
-from hermes_cli.codex_models import DEFAULT_CODEX_MODELS, get_codex_model_ids
+from hermes_cli.codex_models import (
+    DEFAULT_CODEX_MODELS,
+    get_codex_model_ids,
+    get_codex_model_reasoning_efforts,
+)
 
 
 def test_get_codex_model_ids_prioritizes_default_and_cache(tmp_path, monkeypatch):
@@ -35,6 +39,61 @@ def test_get_codex_model_ids_prioritizes_default_and_cache(tmp_path, monkeypatch
     assert "gpt-5.4" in models
     assert "gpt-5.4-mini" in models
     assert "gpt-5-hidden-codex" not in models
+
+
+def test_get_codex_model_reasoning_efforts_reads_catalog_and_hides_wire_aliases(
+    tmp_path, monkeypatch
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-5.6-sol",
+                        "supported_reasoning_levels": [
+                            {"effort": "low"},
+                            {"effort": "medium"},
+                            {"effort": "high"},
+                            {"effort": "xhigh"},
+                            {"effort": "max"},
+                            {"effort": "ultra"},
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert get_codex_model_reasoning_efforts("gpt-5.6-sol") == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+
+
+def test_get_codex_model_reasoning_efforts_uses_family_fallback(tmp_path, monkeypatch):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert get_codex_model_reasoning_efforts("gpt-5.6-terra-pro") == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert get_codex_model_reasoning_efforts("gpt-5.5") == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
 
 
 def test_setup_wizard_codex_import_resolves():
@@ -87,13 +146,25 @@ def test_fetch_from_api_keeps_supported_in_api_false_models(monkeypatch):
     import sys
     from hermes_cli import codex_models
 
+    codex_models._CODEX_LIVE_REASONING_EFFORTS.clear()
+
     class _FakeResp:
         status_code = 200
 
         def json(self):
             return {
                 "models": [
-                    {"slug": "gpt-5.5", "priority": 0, "supported_in_api": True},
+                    {
+                        "slug": "gpt-5.5",
+                        "priority": 0,
+                        "supported_in_api": True,
+                        "supported_reasoning_levels": [
+                            {"effort": "low"},
+                            {"effort": "medium"},
+                            {"effort": "high"},
+                            {"effort": "xhigh"},
+                        ],
+                    },
                     {"slug": "gpt-5.3-codex-spark", "priority": 7, "supported_in_api": False},
                     {"slug": "gpt-5-internal", "priority": 99, "visibility": "hidden"},
                 ]
@@ -111,6 +182,69 @@ def test_fetch_from_api_keeps_supported_in_api_false_models(monkeypatch):
     assert "gpt-5.5" in models
     assert "gpt-5.3-codex-spark" in models
     assert "gpt-5-internal" not in models
+    assert codex_models.get_codex_model_reasoning_efforts("gpt-5.5") == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
+
+
+def test_unknown_future_codex_model_does_not_guess_efforts(tmp_path, monkeypatch):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert get_codex_model_reasoning_efforts("gpt-5.7-future") == []
+
+
+def test_successful_live_refresh_replaces_stale_reasoning_metadata(monkeypatch):
+    import sys
+    from hermes_cli import codex_models
+
+    responses = iter(
+        [
+            {
+                "models": [
+                    {
+                        "slug": "gpt-5.7-future",
+                        "supported_reasoning_levels": [{"effort": "low"}],
+                    }
+                ]
+            },
+            {"models": [{"slug": "gpt-5.7-future"}]},
+        ]
+    )
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return next(responses)
+
+    class _FakeHttpx:
+        @staticmethod
+        def get(url, headers=None, timeout=None):
+            return _FakeResp()
+
+    monkeypatch.setitem(sys.modules, "httpx", _FakeHttpx)
+    codex_models._CODEX_LIVE_REASONING_EFFORTS.clear()
+
+    codex_models._fetch_models_from_api("tok")
+    assert codex_models.get_codex_model_reasoning_efforts("gpt-5.7-future") == ["low"]
+
+    codex_models._fetch_models_from_api("tok")
+    assert codex_models.get_codex_model_reasoning_efforts("gpt-5.7-future") == []
+
+
+def test_malformed_codex_cache_logs_warning(tmp_path, monkeypatch, caplog):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "models_cache.json").write_text("not-json")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert get_codex_model_reasoning_efforts("unknown-model") == []
+    assert "Failed to read Codex model cache" in caplog.text
 
 
 def test_model_command_uses_runtime_access_token_for_codex_list(monkeypatch):

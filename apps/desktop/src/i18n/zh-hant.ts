@@ -1935,6 +1935,7 @@ export const zhHant = defineLocale({
       fast: '快速',
       effort: '推理強度',
       minimal: '最小',
+      light: '輕量',
       low: '低',
       medium: '中',
       high: '高',

@@ -1689,6 +1689,7 @@ export interface Translations {
       fast: string
       effort: string
       minimal: string
+      light: string
       low: string
       medium: string
       high: string

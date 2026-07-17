@@ -90,6 +90,8 @@ interface ModelEditSubmenuProps {
   provider: string
   /** Whether this model supports reasoning effort. */
   reasoning: boolean
+  /** Distinct efforts accepted by this model/provider route. */
+  reasoningEfforts?: readonly string[]
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
 }
 
@@ -101,13 +103,16 @@ export function ModelEditSubmenu({
   onSelectModel,
   provider,
   reasoning,
+  reasoningEfforts,
   requestGateway
 }: ModelEditSubmenuProps) {
   const { t } = useI18n()
   const copy = t.shell.modelOptions
   const activeSessionId = useStore($activeSessionId)
 
-  const effortValue = normalizeEffort(effort)
+  const effortOptions = supportedEffortOptions(reasoningEfforts)
+  const normalizedEffort = normalizeReasoningEffort(effort, reasoningEfforts)
+  const effortValue = normalizedEffort === 'none' ? '' : normalizedEffort
   const thinkingOn = isThinkingEnabled(effort)
 
   // Editing always records the model's global preset; the active model also gets
@@ -215,14 +220,16 @@ export function ModelEditSubmenu({
               <DropdownMenuSeparator className="mx-0" />
               <DropdownMenuLabel className={dropdownMenuSectionLabel}>{copy.effort}</DropdownMenuLabel>
               <DropdownMenuRadioGroup onValueChange={value => void patchReasoning(value)} value={effortValue}>
-                {EFFORT_OPTIONS.map(option => (
+                {effortOptions.map(option => (
                   <DropdownMenuRadioItem
                     className={dropdownMenuRow}
                     key={option.value}
                     onSelect={event => event.preventDefault()}
                     value={option.value}
                   >
-                    {copy[option.labelKey]}
+                    {normalize(provider) === 'openai-codex' && option.value === 'low'
+                      ? copy.light
+                      : copy[option.labelKey]}
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>
@@ -239,13 +246,37 @@ function isThinkingEnabled(effort: string): boolean {
   return normalize(effort || 'medium') !== 'none'
 }
 
-function normalizeEffort(effort: string): string {
-  const value = normalize(effort || 'medium')
-
-  // Thinking off → no effort selected in the radio group.
-  if (value === 'none') {
-    return ''
+function supportedEffortOptions(supported?: readonly string[]) {
+  if (!supported?.length) {
+    return EFFORT_OPTIONS
   }
 
-  return EFFORT_OPTIONS.some(option => option.value === value) ? value : 'medium'
+  const allowed = new Set(supported.map(normalize))
+
+  return EFFORT_OPTIONS.filter(option => allowed.has(option.value))
+}
+
+export function normalizeReasoningEffort(effort: string, supported?: readonly string[]): string {
+  const value = normalize(effort || 'medium')
+
+  // Preserve explicit thinking-off for config/session writes. The submenu
+  // converts it to an empty radio selection separately for presentation.
+  if (value === 'none') {
+    return 'none'
+  }
+
+  if (!supported?.length) {
+    return EFFORT_OPTIONS.some(option => option.value === value) ? value : 'medium'
+  }
+
+  const options = supportedEffortOptions(supported)
+  const allowed = new Set<string>(options.map(option => option.value))
+  const aliases: Record<string, string> = { minimal: 'low', ultra: 'max' }
+  const aliased = aliases[value] ?? value
+
+  if (allowed.has(aliased)) {
+    return aliased
+  }
+
+  return allowed.has('medium') ? 'medium' : (options[0]?.value ?? 'medium')
 }

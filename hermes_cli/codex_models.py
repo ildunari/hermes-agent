@@ -11,6 +11,24 @@ import os
 
 logger = logging.getLogger(__name__)
 
+_CODEX_EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
+_CODEX_LIVE_REASONING_EFFORTS: dict[str, List[str]] = {}
+_CODEX_MAX_EFFORT_FALLBACKS = {
+    "gpt-5.6-sol",
+    "gpt-5.6-sol-pro",
+    "gpt-5.6-terra",
+    "gpt-5.6-terra-pro",
+    "gpt-5.6-luna",
+    "gpt-5.6-luna-pro",
+}
+_CODEX_XHIGH_EFFORT_FALLBACKS = {
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
+}
+
 DEFAULT_CODEX_MODELS: List[str] = [
     # GPT-5.6 series (Sol/Terra/Luna + -pro high-effort modes) — GA 2026-07-09
     # (previewed 2026-06-26).
@@ -111,6 +129,7 @@ def _fetch_models_from_api(access_token: str) -> List[str]:
         return []
 
     sortable = []
+    live_reasoning_efforts: dict[str, List[str]] = {}
     for item in entries:
         if not isinstance(item, dict):
             continue
@@ -128,8 +147,13 @@ def _fetch_models_from_api(access_token: str) -> List[str]:
         priority = item.get("priority")
         rank = int(priority) if isinstance(priority, (int, float)) else 10_000
         sortable.append((rank, slug))
+        efforts = _canonical_codex_efforts(item.get("supported_reasoning_levels"))
+        if efforts:
+            live_reasoning_efforts[slug] = efforts
 
     sortable.sort(key=lambda x: (x[0], x[1]))
+    _CODEX_LIVE_REASONING_EFFORTS.clear()
+    _CODEX_LIVE_REASONING_EFFORTS.update(live_reasoning_efforts)
     return _add_forward_compat_models([slug for _, slug in sortable])
 
 
@@ -186,6 +210,62 @@ def _read_cache_models(codex_home: Path) -> List[str]:
         if slug not in deduped:
             deduped.append(slug)
     return deduped
+
+
+def get_codex_model_reasoning_efforts(model_id: str) -> List[str]:
+    """Return the distinct effort choices Hermes can send for a Codex model.
+
+    Codex's catalog is authoritative when available. Hermes' Codex Responses
+    transport maps ``minimal`` to ``low`` and GPT-5.6 ``ultra`` to ``max``, so
+    those product aliases are folded here instead of presenting duplicate UI
+    choices that produce the same request.
+    """
+    codex_home = Path(
+        os.getenv("CODEX_HOME", "").strip() or str(Path.home() / ".codex")
+    ).expanduser()
+    bare_model = str(model_id or "").strip().rsplit("/", 1)[-1]
+    cache_path = codex_home / "models_cache.json"
+
+    if live_efforts := _CODEX_LIVE_REASONING_EFFORTS.get(bare_model):
+        return list(live_efforts)
+
+    raw = {}
+    if cache_path.exists():
+        try:
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Failed to read Codex model cache %s: %s", cache_path, exc)
+
+    entries = raw.get("models") if isinstance(raw, dict) else None
+    if isinstance(entries, list):
+        for item in entries:
+            if not isinstance(item, dict) or item.get("slug") != bare_model:
+                continue
+            if resolved := _canonical_codex_efforts(item.get("supported_reasoning_levels")):
+                return resolved
+
+    # Offline/forward-compatible fallback. GPT-5.6 supports Max on the Codex
+    # route; the older GPT-5 families currently top out at Extra High.
+    if bare_model in _CODEX_MAX_EFFORT_FALLBACKS:
+        return list(_CODEX_EFFORT_ORDER)
+    if bare_model in _CODEX_XHIGH_EFFORT_FALLBACKS:
+        return list(_CODEX_EFFORT_ORDER[:-1])
+    return []
+
+
+def _canonical_codex_efforts(levels) -> List[str]:
+    """Fold Codex product aliases onto the distinct Responses wire values."""
+    if not isinstance(levels, list):
+        return []
+
+    resolved: List[str] = []
+    for level in levels:
+        effort = level.get("effort") if isinstance(level, dict) else level
+        effort = str(effort or "").strip().lower()
+        effort = {"minimal": "low", "ultra": "max"}.get(effort, effort)
+        if effort in _CODEX_EFFORT_ORDER and effort not in resolved:
+            resolved.append(effort)
+    return sorted(resolved, key=_CODEX_EFFORT_ORDER.index)
 
 
 def get_codex_model_ids(access_token: Optional[str] = None) -> List[str]:

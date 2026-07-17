@@ -2058,6 +2058,7 @@ export const en: Translations = {
       fast: 'Fast',
       effort: 'Effort',
       minimal: 'Minimal',
+      light: 'Light',
       low: 'Low',
       medium: 'Medium',
       high: 'High',

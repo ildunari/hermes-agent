@@ -10,7 +10,7 @@ import {
 import { $modelPresets, getModelPreset } from '@/store/model-presets'
 import { $activeSessionId } from '@/store/session'
 
-import { type FastControl, ModelEditSubmenu } from './model-edit-submenu'
+import { type FastControl, ModelEditSubmenu, normalizeReasoningEffort } from './model-edit-submenu'
 
 // Radix calls these on open; jsdom doesn't implement them.
 beforeAll(() => {
@@ -30,7 +30,13 @@ afterEach(() => {
 })
 
 // Render the submenu inside an open menu/sub so its content (switches) mounts.
-function renderSubmenu(opts: { fastControl: FastControl; reasoning: boolean; requestGateway: () => Promise<unknown> }) {
+function renderSubmenu(opts: {
+  fastControl: FastControl
+  provider?: string
+  reasoning: boolean
+  reasoningEfforts?: string[]
+  requestGateway: () => Promise<unknown>
+}) {
   return render(
     <DropdownMenu open>
       <DropdownMenuContent>
@@ -42,8 +48,9 @@ function renderSubmenu(opts: { fastControl: FastControl; reasoning: boolean; req
             isActive
             model="m1"
             onSelectModel={vi.fn()}
-            provider="p1"
+            provider={opts.provider ?? 'p1'}
             reasoning={opts.reasoning}
+            reasoningEfforts={opts.reasoningEfforts}
             requestGateway={opts.requestGateway as never}
           />
         </DropdownMenuSub>
@@ -51,6 +58,41 @@ function renderSubmenu(opts: { fastControl: FastControl; reasoning: boolean; req
     </DropdownMenu>
   )
 }
+
+describe('ModelEditSubmenu model-aware effort options', () => {
+  it('folds saved aliases onto the distinct Codex wire levels', () => {
+    const supported = ['low', 'medium', 'high', 'xhigh', 'max']
+
+    expect(normalizeReasoningEffort('minimal', supported)).toBe('low')
+    expect(normalizeReasoningEffort('ultra', supported)).toBe('max')
+  })
+
+  it('preserves provider-neutral levels without a capability list', () => {
+    expect(normalizeReasoningEffort('minimal')).toBe('minimal')
+    expect(normalizeReasoningEffort('ultra')).toBe('ultra')
+  })
+
+  it('preserves explicit thinking-off for session writes', () => {
+    expect(normalizeReasoningEffort('none', ['low', 'medium', 'high'])).toBe('none')
+  })
+
+  it('shows the Codex-supported levels without duplicate minimal or ultra choices', () => {
+    renderSubmenu({
+      fastControl: { kind: 'none' },
+      provider: 'openai-codex',
+      reasoning: true,
+      reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      requestGateway: vi.fn().mockResolvedValue({})
+    })
+
+    expect(screen.queryByText('Minimal')).toBeNull()
+    expect(screen.getByText('Light')).toBeTruthy()
+    expect(screen.getByText('Medium')).toBeTruthy()
+    expect(screen.getByText('Extra High')).toBeTruthy()
+    expect(screen.getByText('Max')).toBeTruthy()
+    expect(screen.queryByText('Ultra')).toBeNull()
+  })
+})
 
 // Regression: editing the active row before a live session exists must stay
 // preset-only — the gateway's config.set falls back to global config when no

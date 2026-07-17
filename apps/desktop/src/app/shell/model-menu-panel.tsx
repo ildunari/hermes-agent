@@ -46,7 +46,7 @@ import {
 } from '@/store/session'
 import type { ModelOptionProvider, ModelOptionsResponse } from '@/types/hermes'
 
-import { ModelEditSubmenu, resolveFastControl } from './model-edit-submenu'
+import { ModelEditSubmenu, normalizeReasoningEffort, resolveFastControl } from './model-edit-submenu'
 
 // Lets the host dropdown (model-pill) hand the panel a way to dismiss itself so
 // clicking a model row commits + closes, while the hover-revealed edit submenu
@@ -164,7 +164,9 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
   const selectFamily = async (family: ModelFamily, provider: ModelOptionProvider) => {
     const caps = provider.capabilities?.[family.id]
     const preset = modelPresets[modelPresetKey(provider.slug, family.id)] ?? {}
-    const nextEffort = preset.effort ?? (currentReasoningEffort || undefined)
+    const rawNextEffort = preset.effort ?? (currentReasoningEffort || undefined)
+
+    const nextEffort = rawNextEffort ? normalizeReasoningEffort(rawNextEffort, caps?.reasoning_efforts) : undefined
 
     // Variant-fast models (no speed param) express "fast" as a separate `-fast`
     // id, so honor the saved preset by selecting that sibling. Param-fast is
@@ -267,6 +269,12 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
                 const preset = modelPresets[modelPresetKey(group.provider.slug, family.id)] ?? {}
                 const effEffort = isCurrent ? currentReasoningEffort : (preset.effort ?? '')
                 const effFast = isCurrent ? currentFastMode : (preset.fast ?? false)
+                const normalizedEffort = normalizeReasoningEffort(effEffort, caps?.reasoning_efforts)
+
+                const effortLabel =
+                  normalize(group.provider.slug) === 'openai-codex' && normalizedEffort === 'low'
+                    ? t.shell.modelOptions.light
+                    : reasoningEffortLabel(normalizedEffort) || copy.medium
 
                 const fastControl = resolveFastControl(
                   activeId ?? family.id,
@@ -277,7 +285,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
 
                 const meta = [
                   fastControl.kind !== 'none' && fastControl.on ? copy.fast : null,
-                  (caps?.reasoning ?? true) ? reasoningEffortLabel(effEffort) || copy.medium : null
+                  (caps?.reasoning ?? true) ? effortLabel : null
                 ]
                   .filter(Boolean)
                   .join(' ')
@@ -324,6 +332,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
                       onSelectModel={nextModel => switchTo(nextModel, group.provider.slug)}
                       provider={group.provider.slug}
                       reasoning={caps?.reasoning ?? true}
+                      reasoningEfforts={caps?.reasoning_efforts}
                       requestGateway={requestGateway}
                     />
                   </DropdownMenuSub>
