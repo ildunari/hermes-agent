@@ -410,6 +410,7 @@ def run_codex_app_server_turn(
     # standard run_conversation() flow (line ~11823) before the early
     # return reaches us. Do NOT append again — that would duplicate.
 
+    api_started = time.monotonic()
     try:
         turn = agent._codex_session.run_turn(user_input=user_message)
     except Exception as exc:
@@ -432,6 +433,7 @@ def run_codex_app_server_turn(
             "partial": True,
             "error": str(exc),
         }
+    api_duration = time.monotonic() - api_started
 
     # If the turn signalled the underlying client is wedged (deadline
     # blown, post-tool watchdog tripped, OAuth refresh died, subprocess
@@ -489,6 +491,21 @@ def run_codex_app_server_turn(
     )
     _record_codex_app_server_compaction(agent, turn)
     usage_result = _record_codex_app_server_usage(agent, turn)
+    if usage_result:
+        from agent.conversation_loop import _accumulate_output_rate
+
+        _accumulate_output_rate(
+            agent,
+            output_tokens=usage_result.get("output_tokens", 0),
+            api_duration=api_duration,
+        )
+        if getattr(agent, "session_output_rate_available", True) is not False:
+            agent.session_output_rate_available = True
+    else:
+        # A missing token-usage event makes this turn impossible to include in a
+        # complete output-rate average. Prefer an explicit n/a over a partial,
+        # misleading number for the rest of the session.
+        agent.session_output_rate_available = False
     api_calls = 1
 
     # Now check the skill nudge AFTER iters were incremented — same

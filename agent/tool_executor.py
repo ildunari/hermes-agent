@@ -56,15 +56,27 @@ logger = logging.getLogger(__name__)
 
 
 def _record_tool_call_stats(agent, tool_name: str, *, is_error: bool) -> None:
-    """Record one executed tool outcome in session-scoped counters."""
-    stats = getattr(agent, "session_tool_stats", None)
-    if not isinstance(stats, dict):
-        stats = {}
-        agent.session_tool_stats = stats
-    row = stats.setdefault(str(tool_name or "unknown"), {"calls": 0, "errors": 0})
-    row["calls"] = int(row.get("calls", 0)) + 1
-    if is_error:
-        row["errors"] = int(row.get("errors", 0)) + 1
+    """Record one executed tool outcome without ever breaking tool delivery."""
+    name = str(tool_name or "unknown")
+    try:
+        stats = getattr(agent, "session_tool_stats", None)
+        if not isinstance(stats, dict):
+            stats = {}
+            agent.session_tool_stats = stats
+        row = stats.setdefault(name, {"calls": 0, "errors": 0})
+        row["calls"] = int(row.get("calls", 0)) + 1
+        if is_error:
+            row["errors"] = int(row.get("errors", 0)) + 1
+    except Exception:
+        logger.debug("tool-call accounting state was malformed; resetting", exc_info=True)
+        try:
+            stats = getattr(agent, "session_tool_stats", None)
+            if not isinstance(stats, dict):
+                stats = {}
+                agent.session_tool_stats = stats
+            stats[name] = {"calls": 1, "errors": int(bool(is_error))}
+        except Exception:
+            logger.debug("tool-call accounting reset failed", exc_info=True)
 
 
 def _budget_for_agent(agent) -> BudgetConfig:

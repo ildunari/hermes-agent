@@ -2006,6 +2006,7 @@ def init_agent(
     agent.session_cache_write_tokens = 0
     agent.session_api_output_tokens = 0
     agent.session_api_wall_seconds = 0.0
+    agent.session_output_rate_available = True
     agent.session_tool_stats = {}
     # Per-call cache telemetry used only to detect a demonstrated warm→cold
     # transition. It never participates in prompt construction.

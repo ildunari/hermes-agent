@@ -4112,7 +4112,7 @@ class GatewaySlashCommandsMixin:
 
         if agent and hasattr(agent, "session_total_tokens") and agent.session_api_calls > 0:
             from datetime import datetime
-            from gateway.usage_render import build_usage_card_args, render_usage_markdown
+            from gateway.usage_render import render_usage_card_direct, render_usage_markdown
             from hermes_cli.profiles import get_active_profile_name
 
             ctx = agent.context_compressor
@@ -4147,6 +4147,7 @@ class GatewaySlashCommandsMixin:
                 "prompt_tokens": prompt_tokens,
                 "api_calls": getattr(agent, "session_api_calls", 0) or 0,
                 "avg_output_tokens_per_second": rate_tokens / rate_seconds if rate_seconds else 0.0,
+                "output_rate_available": getattr(agent, "session_output_rate_available", True) is not False,
                 "duration_seconds": duration_seconds,
                 "tool_stats": tool_stats,
                 "subagent_count": subagent_count,
@@ -4156,13 +4157,8 @@ class GatewaySlashCommandsMixin:
             if wants_card:
                 if "render_message_card" in set(getattr(agent, "valid_tool_names", None) or ()):
                     try:
-                        card_result = await asyncio.to_thread(
-                            agent._invoke_tool,
-                            "render_message_card",
-                            build_usage_card_args(snapshot),
-                            f"usage-card:{session_key}",
-                        )
-                        card_lines = [str(card_result)]
+                        card_result = await asyncio.to_thread(render_usage_card_direct, snapshot)
+                        card_lines = [card_result]
                         if account_lines:
                             card_lines.extend(("", *account_lines))
                         if credits_lines:

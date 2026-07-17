@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping
 
 
@@ -86,7 +87,11 @@ def render_usage_markdown(snapshot: Mapping[str, Any], *, max_tools: int = 5) ->
         f"Tokens out         {_count(snapshot.get('output_tokens')):,}",
         f"Tokens total       {_count(snapshot.get('total_tokens')):,}",
         f"API calls          {_count(snapshot.get('api_calls')):,}",
-        f"Avg output tok/s   {_number(snapshot.get('avg_output_tokens_per_second')):.1f}",
+        (
+            f"Avg output tok/s   {_number(snapshot.get('avg_output_tokens_per_second')):.1f}"
+            if snapshot.get("output_rate_available", True)
+            else "Avg output tok/s   n/a (backend)"
+        ),
         f"Duration           {_duration(snapshot.get('duration_seconds'))}",
         "",
         "**Tools**",
@@ -99,6 +104,27 @@ def render_usage_markdown(snapshot: Mapping[str, Any], *, max_tools: int = 5) ->
         lines.append("No tool calls")
     lines.append(f"Subagents           {_count(snapshot.get('subagent_count')):,}")
     return "\n".join(lines)
+
+
+def render_usage_card_direct(snapshot: Mapping[str, Any]) -> str:
+    """Call the registered card handler directly, bypassing agent tool middleware."""
+    from tools.registry import registry
+
+    entry = registry.get_entry("render_message_card")
+    if entry is None or entry.is_async:
+        raise RuntimeError("render_message_card direct renderer is unavailable")
+
+    raw = entry.handler(build_usage_card_args(snapshot))
+    payload = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("render_message_card returned an invalid payload")
+    media = payload.get("media")
+    if payload.get("ok") and isinstance(media, str) and media:
+        return media
+    fallback = payload.get("fallback_markdown")
+    if isinstance(fallback, str) and fallback:
+        return fallback
+    raise RuntimeError(str(payload.get("error") or "render_message_card failed"))
 
 
 def build_usage_card_args(snapshot: Mapping[str, Any], *, max_tools: int = 5) -> dict[str, Any]:
@@ -130,7 +156,14 @@ def build_usage_card_args(snapshot: Mapping[str, Any], *, max_tools: int = 5) ->
             {"label": "Cache hit", "value": f"{cache_pct:.0f}%", "detail": f"{_compact_count(snapshot.get('cache_read_tokens'))} read"},
             {"label": "Tokens", "value": f"{_count(snapshot.get('total_tokens')):,}", "detail": f"{_count(snapshot.get('input_tokens')):,} in · {_count(snapshot.get('output_tokens')):,} out"},
             {"label": "API calls", "value": f"{_count(snapshot.get('api_calls')):,}"},
-            {"label": "Output speed", "value": f"{_number(snapshot.get('avg_output_tokens_per_second')):.1f} tok/s"},
+            {
+                "label": "Output speed",
+                "value": (
+                    f"{_number(snapshot.get('avg_output_tokens_per_second')):.1f} tok/s"
+                    if snapshot.get("output_rate_available", True)
+                    else "n/a (backend)"
+                ),
+            },
             {"label": "Duration", "value": _duration(snapshot.get("duration_seconds"))},
         ],
         "items": tool_items,

@@ -67,3 +67,14 @@ def test_build_usage_card_args_uses_same_snapshot_data():
     assert {"Context", "Cache hit", "Tokens", "API calls", "Output speed", "Duration"} <= labels
     assert any(item["label"] == "terminal" and "1 error" in item["detail"] for item in args["items"])
     assert any(item["label"] == "Subagents" and item["value"] == "4" for item in args["items"])
+
+
+def test_output_rate_is_na_when_backend_cannot_supply_complete_measurement():
+    snapshot = _snapshot(output_rate_available=False)
+
+    rendered = render_usage_markdown(snapshot)
+    args = build_usage_card_args(snapshot)
+
+    assert "Avg output tok/s   n/a (backend)" in rendered
+    speed = next(metric for metric in args["metrics"] if metric["label"] == "Output speed")
+    assert speed["value"] == "n/a (backend)"

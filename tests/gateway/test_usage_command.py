@@ -341,20 +341,21 @@ class TestUsageCard:
         assert "claude-sonnet-4.6 · openrouter" in result
 
     @pytest.mark.asyncio
-    async def test_card_available_invokes_tool(self, monkeypatch):
+    async def test_card_available_calls_registry_handler_without_agent_middleware(self, monkeypatch):
         agent = _make_mock_agent(valid_tool_names={"render_message_card"})
-        agent._invoke_tool.return_value = "MEDIA:/tmp/usage-card.png\nUsage card"
         runner = _make_runner(SK, cached_agent=agent)
         monkeypatch.setattr("agent.account_usage.nous_credits_lines", lambda markdown=False: [])
+        handler = MagicMock(return_value='{"ok": true, "media": "MEDIA:/tmp/usage-card.png"}')
+        entry = MagicMock(handler=handler, is_async=False)
+        monkeypatch.setattr("tools.registry.registry.get_entry", lambda name: entry)
         event = MagicMock()
         event.get_command_args.return_value = "card"
 
         result = await runner._handle_usage_command(event)
 
         assert result.startswith("MEDIA:/tmp/usage-card.png")
-        call = agent._invoke_tool.call_args
-        assert call.args[0] == "render_message_card"
-        assert call.args[1]["kind"] == "metric_grid"
+        assert handler.call_args.args[0]["kind"] == "metric_grid"
+        agent._invoke_tool.assert_not_called()
 
 
 class TestUsageContextBreakdown:

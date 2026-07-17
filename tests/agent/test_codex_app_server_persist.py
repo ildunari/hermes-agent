@@ -33,7 +33,7 @@ from hermes_state import SessionDB
 from run_agent import AIAgent
 
 
-def _make_turn():
+def _make_turn(token_usage_last=None):
     return SimpleNamespace(
         interrupted=False,
         error=None,
@@ -43,6 +43,7 @@ def _make_turn():
         tool_iterations=0,
         final_text="CODEX_ASSISTANT",
         should_retire=False,
+        token_usage_last=token_usage_last,
     )
 
 
@@ -74,6 +75,57 @@ def test_codex_success_flushes_and_reports_persisted():
     assert result["completed"] is True
     # With the agent as sole persister, the gateway must SKIP its DB write.
     assert result["agent_persisted"] is True
+
+
+def test_codex_success_accumulates_output_rate(monkeypatch):
+    agent = _make_agent(session_db=None)
+    agent.session_api_output_tokens = 10
+    agent.session_api_wall_seconds = 0.5
+    agent.session_api_calls = 0
+    agent.session_prompt_tokens = 0
+    agent.session_completion_tokens = 0
+    agent.session_total_tokens = 0
+    agent.session_input_tokens = 0
+    agent.session_output_tokens = 0
+    agent.session_cache_read_tokens = 0
+    agent.session_cache_write_tokens = 0
+    agent.session_reasoning_tokens = 0
+    agent.session_estimated_cost_usd = 0.0
+    agent._codex_session.run_turn.return_value = _make_turn({
+        "inputTokens": 20,
+        "outputTokens": 30,
+        "totalTokens": 50,
+    })
+    ticks = iter((100.0, 102.0))
+    monkeypatch.setattr("agent.codex_runtime.time.monotonic", lambda: next(ticks))
+
+    run_codex_app_server_turn(
+        agent,
+        user_message="hello",
+        original_user_message="hello",
+        messages=[{"role": "user", "content": "hello"}],
+        effective_task_id="task-1",
+    )
+
+    assert agent.session_api_output_tokens == 40
+    assert agent.session_api_wall_seconds == 2.5
+    assert agent.session_output_rate_available is True
+
+
+def test_codex_missing_usage_marks_output_rate_unavailable():
+    agent = _make_agent(session_db=None)
+    agent.session_api_calls = 0
+    agent._codex_session.run_turn.return_value = _make_turn()
+
+    run_codex_app_server_turn(
+        agent,
+        user_message="hello",
+        original_user_message="hello",
+        messages=[{"role": "user", "content": "hello"}],
+        effective_task_id="task-1",
+    )
+
+    assert agent.session_output_rate_available is False
 
 
 def test_codex_turn_persists_each_message_exactly_once():

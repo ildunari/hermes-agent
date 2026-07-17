@@ -75,9 +75,31 @@ logger = logging.getLogger(__name__)
 
 
 def _accumulate_output_rate(agent, *, output_tokens: int, api_duration: float) -> None:
-    """Accumulate successful API output/time without touching conversation data."""
-    agent.session_api_output_tokens = getattr(agent, "session_api_output_tokens", 0) + max(0, int(output_tokens or 0))
-    agent.session_api_wall_seconds = getattr(agent, "session_api_wall_seconds", 0.0) + max(0.0, float(api_duration or 0.0))
+    """Accumulate successful API output/time without ever breaking a turn."""
+    try:
+        agent.session_api_output_tokens = (
+            getattr(agent, "session_api_output_tokens", 0)
+            + max(0, int(output_tokens or 0))
+        )
+        agent.session_api_wall_seconds = (
+            getattr(agent, "session_api_wall_seconds", 0.0)
+            + max(0.0, float(api_duration or 0.0))
+        )
+    except Exception:
+        logger.debug("output-rate accounting state was malformed; resetting", exc_info=True)
+        try:
+            try:
+                prior_tokens = max(0, int(getattr(agent, "session_api_output_tokens", 0)))
+            except Exception:
+                prior_tokens = 0
+            try:
+                prior_seconds = max(0.0, float(getattr(agent, "session_api_wall_seconds", 0.0)))
+            except Exception:
+                prior_seconds = 0.0
+            agent.session_api_output_tokens = prior_tokens + max(0, int(output_tokens or 0))
+            agent.session_api_wall_seconds = prior_seconds + max(0.0, float(api_duration or 0.0))
+        except Exception:
+            logger.debug("output-rate accounting reset failed", exc_info=True)
 
 # Stable prefix of the local interrupt status string emitted when a turn is
 # cancelled while waiting on the provider. Surfaces (ACP, TUI) match on this
