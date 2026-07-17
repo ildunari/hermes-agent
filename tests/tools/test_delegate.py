@@ -350,7 +350,11 @@ class TestDelegateTask(unittest.TestCase):
     @patch("tools.delegate_tool._run_single_child")
     @patch("tools.delegate_tool._build_child_agent")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
-    def test_per_task_overrides_beat_top_level(self, resolve_creds, build_child, run_child):
+    @patch("tools.delegate_tool._load_configured_model_catalog")
+    def test_per_task_overrides_beat_top_level(
+        self, load_catalog, resolve_creds, build_child, run_child
+    ):
+        load_catalog.return_value = ("task-model", "top-model")
         parent = _make_mock_parent()
         parent.enabled_toolsets = ["terminal", "file", "web"]
         resolve_creds.side_effect = lambda cfg, _parent: {
@@ -376,7 +380,11 @@ class TestDelegateTask(unittest.TestCase):
     @patch("tools.delegate_tool._run_single_child")
     @patch("tools.delegate_tool._build_child_agent")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
-    def test_top_level_overrides_apply_to_single_task(self, resolve_creds, build_child, run_child):
+    @patch("tools.delegate_tool._load_configured_model_catalog")
+    def test_top_level_overrides_apply_to_single_task(
+        self, load_catalog, resolve_creds, build_child, run_child
+    ):
+        load_catalog.return_value = ("chosen",)
         parent = _make_mock_parent()
         resolve_creds.return_value = {"model": "chosen", "provider": "openrouter", "base_url": "u", "api_key": "k", "api_mode": "chat_completions"}
         build_child.return_value = MagicMock()
@@ -3341,6 +3349,76 @@ class TestSubagentApprovalCallback(unittest.TestCase):
         self.assertEqual(seen, [_subagent_auto_deny])
         # Parent's callback slot is still empty (TLS isolates threads).
         self.assertIsNone(_get_approval_callback())
+
+
+class TestConfiguredModelCatalog(unittest.TestCase):
+    def test_provider_prefixed_forms_accept_declared_bare_model(self):
+        from tools.delegate_tool import _unknown_explicit_model_error
+
+        catalog = ("gpt-5.6-sol",)
+        for requested in (
+            "@openai-codex:gpt-5.6-sol",
+            "openai-codex:gpt-5.6-sol",
+            "@OPENAI-CODEX:GPT-5.6-SOL",
+        ):
+            with self.subTest(requested=requested):
+                self.assertIsNone(_unknown_explicit_model_error(requested, catalog))
+
+    @patch("hermes_cli.config.load_config_readonly")
+    def test_v12_provider_default_model_is_declared(self, load_config):
+        from tools.delegate_tool import _load_configured_model_catalog
+
+        load_config.return_value = {
+            "providers": {
+                "acme": {
+                    "base_url": "https://acme.invalid/v1",
+                    "default_model": "acme-valid",
+                }
+            }
+        }
+
+        self.assertIn("acme-valid", _load_configured_model_catalog())
+
+    @patch("hermes_cli.config.load_config_readonly")
+    def test_fallback_chain_models_are_declared(self, load_config):
+        from tools.delegate_tool import _load_configured_model_catalog
+
+        load_config.return_value = {
+            "fallback_providers": [
+                {"provider": "openai-codex", "model": "fallback-modern"},
+            ],
+            "fallback_model": [
+                {"provider": "openrouter", "model": "fallback-legacy"},
+            ],
+        }
+
+        catalog = _load_configured_model_catalog()
+        self.assertIn("fallback-modern", catalog)
+        self.assertIn("fallback-legacy", catalog)
+
+    @patch("hermes_cli.config.load_config_readonly")
+    def test_moa_reference_and_aggregator_models_are_declared(self, load_config):
+        from tools.delegate_tool import _load_configured_model_catalog
+
+        load_config.return_value = {
+            "moa": {
+                "presets": {
+                    "review": {
+                        "reference_models": [
+                            {"provider": "openai-codex", "model": "moa-reference-only"},
+                        ],
+                        "aggregator": {
+                            "provider": "openrouter",
+                            "model": "moa-aggregator-only",
+                        },
+                    }
+                }
+            }
+        }
+
+        catalog = _load_configured_model_catalog()
+        self.assertIn("moa-reference-only", catalog)
+        self.assertIn("moa-aggregator-only", catalog)
 
 
 class TestFallbackModelInheritance(unittest.TestCase):

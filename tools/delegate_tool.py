@@ -3271,8 +3271,29 @@ def _declared_model_ids(raw) -> set[str]:
     if isinstance(raw, dict):
         return {str(model).strip() for model in raw if str(model).strip()}
     if isinstance(raw, list):
-        return {str(model).strip() for model in raw if str(model).strip()}
+        models: set[str] = set()
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                models.add(item.strip())
+            elif isinstance(item, dict):
+                model = str(item.get("model") or item.get("id") or item.get("name") or "").strip()
+                if model:
+                    models.add(model)
+        return models
     return set()
+
+
+def _model_ids_from_routes(raw) -> set[str]:
+    """Return model ids from one route mapping or a route chain."""
+    entries = raw if isinstance(raw, list) else [raw]
+    models: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        model = str(entry.get("model") or "").strip()
+        if model:
+            models.add(model)
+    return models
 
 
 def _load_configured_model_catalog() -> tuple[str, ...]:
@@ -3290,11 +3311,18 @@ def _load_configured_model_catalog() -> tuple[str, ...]:
         default_model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
         if default_model:
             models.add(default_model)
+    elif isinstance(model_cfg, str) and model_cfg.strip():
+        models.add(model_cfg.strip())
 
     providers = full.get("providers")
     if isinstance(providers, dict):
         for provider_cfg in providers.values():
             if isinstance(provider_cfg, dict):
+                default_model = str(
+                    provider_cfg.get("default_model") or provider_cfg.get("model") or ""
+                ).strip()
+                if default_model:
+                    models.add(default_model)
                 models.update(_declared_model_ids(provider_cfg.get("models")))
 
     custom_providers = full.get("custom_providers")
@@ -3302,10 +3330,25 @@ def _load_configured_model_catalog() -> tuple[str, ...]:
         for provider_cfg in custom_providers:
             if not isinstance(provider_cfg, dict):
                 continue
-            model_id = str(provider_cfg.get("model") or "").strip()
+            model_id = str(
+                provider_cfg.get("model") or provider_cfg.get("default_model") or ""
+            ).strip()
             if model_id:
                 models.add(model_id)
             models.update(_declared_model_ids(provider_cfg.get("models")))
+
+    models.update(_model_ids_from_routes(full.get("fallback_providers")))
+    models.update(_model_ids_from_routes(full.get("fallback_model")))
+
+    moa_cfg = full.get("moa")
+    if isinstance(moa_cfg, dict):
+        presets = moa_cfg.get("presets")
+        if isinstance(presets, dict):
+            for preset in presets.values():
+                if not isinstance(preset, dict):
+                    continue
+                models.update(_model_ids_from_routes(preset.get("reference_models")))
+                models.update(_model_ids_from_routes(preset.get("aggregator")))
 
     picker_cfg = full.get("model_picker")
     if isinstance(picker_cfg, dict):
@@ -3323,9 +3366,16 @@ def _unknown_explicit_model_error(requested: str, configured_models: tuple[str, 
     if not requested or not configured_models:
         return None
     by_lower = {model.lower(): model for model in configured_models}
-    if requested.lower() in by_lower:
-        return None
     requested_lower = requested.lower()
+    if requested_lower in by_lower:
+        return None
+    # Hermes accepts provider-qualified routing strings in both
+    # ``provider:model`` and ``@provider:model`` forms. The catalog stores model
+    # ids, so validate the suffix case-insensitively rather than rejecting a
+    # valid declared model solely because its provider was made explicit.
+    _provider, separator, bare_model = requested_lower.lstrip("@").partition(":")
+    if separator and bare_model.strip() in by_lower:
+        return None
     requested_tokens = {
         token for token in re.split(r"[^a-z0-9]+", requested_lower) if len(token) >= 4
     }
@@ -3358,8 +3408,8 @@ def _unknown_explicit_model_error(requested: str, configured_models: tuple[str, 
         hint = f" Did you mean: {candidates}?"
     return (
         f"requested unknown model override '{requested}'.{hint} "
-        "Use a model declared under config.yaml providers.*.models or "
-        "model_picker.visible_models, or omit model to inherit delegation defaults."
+        "Use a model declared in the main/provider catalog, fallback chain, MoA preset, "
+        "or model picker, or omit model to inherit delegation defaults."
     )
 
 
