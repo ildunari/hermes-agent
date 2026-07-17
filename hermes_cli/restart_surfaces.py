@@ -628,15 +628,11 @@ def _graceful_restart_gateway(
 
     deadline = time.monotonic() + max(1.0, timeout)
     while time.monotonic() < deadline:
-        status_path = _gateway_status_path_for_target(target)
-        if status_path is not None:
-            payload = _read_json(status_path) or {}
-            try:
-                replacement_pid = int(payload.get("pid") or 0)
-            except (TypeError, ValueError):
-                replacement_pid = 0
-            if replacement_pid > 0 and replacement_pid != pid and _pid_is_alive(replacement_pid):
-                return None
+        # launchd owns the service identity and is the authoritative proof that
+        # this specific label restarted. A status file can briefly advertise a
+        # different live PID while launchd still owns the original process; if
+        # that stale/transient value is treated as success, the outer dedup set
+        # incorrectly suppresses the user/gui twin without restarting either.
         current = _launchctl_print(service)
         replacement_pid = _launchctl_pid(current)
         if replacement_pid is not None and replacement_pid != pid:
