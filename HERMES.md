@@ -6,6 +6,8 @@ When this file is present, repo-root `AGENTS.md` is not auto-loaded by Hermes pr
 
 Shared cross-profile operating rules live in `~/.config/hermes-state/shared/instructions-library/`; do not duplicate them here.
 
+For debugging and repair work, follow the root-cause and durable-fix policy in `~/.config/hermes-state/shared/instructions-library/verification.md`; keep this file as a pointer instead of a competing copy.
+
 ## "Automated job" means an LLM-agent job, not a bare script
 
 When Kosta asks for an "automated job," "cron job," "nightly job," "automated run," or similar **without** explicitly saying "script," "code," "deterministic," or otherwise specifying a non-LLM mechanism, he always means an **automated LLM-agent-profile-based job**: a cron job with a model and a prompt that reasons about the day's work, verifies its own output against real evidence, and runs an adversarial sub-agent review of its decisions and pre-commit actions before acting. A deterministic script is only appropriate as a data-collection or change-detection helper feeding that LLM job, or when he explicitly asks for a script. Do not deliver a bare `no_agent` script when he asked for an automated job; default to the reasoning-agent shape and wire any script in as the job's evidence source, not its brain.
