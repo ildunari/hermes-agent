@@ -336,25 +336,6 @@ class TestDelegateTask(unittest.TestCase):
     @patch("tools.delegate_tool._resolve_delegation_credentials")
     @patch("tools.delegate_tool._load_config")
     @patch("hermes_cli.config.load_config_readonly")
-    def test_visible_models_do_not_shadow_provider_catalogs(self, monkeypatch):
-        """model_picker.visible_models (dict of lists) must not clobber the
-        provider-catalog dict — regression for a variable-shadowing crash that
-        broke every delegate_task call on configs with picker visibility."""
-        from tools import delegate_tool
-
-        cfg = {
-            "model": {"default": "gpt-5.6-sol", "models": {"openai-codex": ["gpt-5.6-sol"]}},
-            "model_picker": {"visible_models": {"openai-codex": ["gpt-5.6-sol"], "xai-oauth": ["grok-4.5"]}},
-        }
-        monkeypatch.setattr(
-            "hermes_cli.config.load_config_readonly", lambda: cfg
-        )
-        global_models, provider_catalogs = delegate_tool._load_configured_model_catalogs()
-        assert "gpt-5.6-sol" in global_models
-        assert "grok-4.5" in global_models
-        assert isinstance(provider_catalogs, dict)
-        assert "openai-codex" in provider_catalogs
-
     def test_provider_without_declared_catalog_keeps_global_model_acceptance(
         self, load_full_config, load_cfg, resolve_creds, build_child, run_child
     ):
@@ -3600,3 +3581,21 @@ class TestFallbackModelInheritance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_visible_models_do_not_shadow_provider_catalogs(monkeypatch):
+    """model_picker.visible_models (dict of lists) must not clobber the
+    provider-catalog dict — regression for a variable-shadowing crash that
+    broke every delegate_task call on configs with picker visibility."""
+    from tools import delegate_tool
+
+    cfg = {
+        "model": {"default": "gpt-5.6-sol", "models": {"openai-codex": ["gpt-5.6-sol"]}},
+        "model_picker": {"visible_models": {"openai-codex": ["gpt-5.6-sol"], "xai-oauth": ["grok-4.5"]}},
+    }
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: cfg)
+    global_models, provider_catalogs = delegate_tool._load_configured_model_catalogs()
+    assert "gpt-5.6-sol" in global_models
+    assert "grok-4.5" in global_models
+    assert isinstance(provider_catalogs, dict)
+    assert "openai-codex" in provider_catalogs
