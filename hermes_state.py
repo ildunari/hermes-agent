@@ -3094,7 +3094,7 @@ class SessionDB:
         billing_provider: Optional[str] = None,
         billing_base_url: Optional[str] = None,
         billing_mode: Optional[str] = None,
-        api_call_count: int = 0,
+        api_call_count: Optional[int] = 0,
         absolute: bool = False,
     ) -> None:
         """Update token counters and backfill model if not already set.
@@ -3130,7 +3130,7 @@ class SessionDB:
                    billing_base_url = COALESCE(billing_base_url, ?),
                    billing_mode = COALESCE(billing_mode, ?),
                    model = COALESCE(model, ?),
-                   api_call_count = ?
+                   api_call_count = COALESCE(?, api_call_count)
                    WHERE id = ?"""
         else:
             sql = """UPDATE sessions SET
@@ -3158,6 +3158,7 @@ class SessionDB:
             or cache_write_tokens or reasoning_tokens or api_call_count
             or estimated_cost_usd or actual_cost_usd
         )
+        api_call_count_param = api_call_count if (absolute or api_call_count is not None) else 0
         params = (
             input_tokens,
             output_tokens,
@@ -3174,7 +3175,7 @@ class SessionDB:
             billing_base_url if has_accounted_usage else None,
             billing_mode if has_accounted_usage else None,
             model if has_accounted_usage else None,
-            api_call_count,
+            api_call_count_param,
             session_id,
         )
         # Per-model usage attribution.  ``update_token_counts`` is the single
