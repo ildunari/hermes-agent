@@ -19,7 +19,9 @@ never the child's intermediate tool calls or reasoning.
 import copy
 import enum
 import json
+from difflib import get_close_matches
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 import os
@@ -2553,6 +2555,18 @@ def delegate_task(
                 "retryable": False,
             }})
 
+    # Caller-supplied model names are routing instructions, not hints. Validate
+    # them before provider resolution so a typo cannot silently inherit or fall
+    # back to a different runtime model. Config-owned delegation.model remains
+    # intentionally exempt and keeps the existing inheritance behavior.
+    configured_models = _load_configured_model_catalog()
+    for i, task in enumerate(task_list):
+        explicit_model = task.get("model") or model
+        if explicit_model:
+            model_error = _unknown_explicit_model_error(str(explicit_model), configured_models)
+            if model_error:
+                return tool_error(f"Task {i} {model_error}")
+
     # Resolve credentials independently so per-task provider/model choices cannot
     # bleed across parallel children. API keys remain config/runtime-owned.
     task_creds = []
@@ -3250,6 +3264,103 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
     }
+
+
+def _declared_model_ids(raw) -> set[str]:
+    """Return model ids from either config catalog shape (mapping or list)."""
+    if isinstance(raw, dict):
+        return {str(model).strip() for model in raw if str(model).strip()}
+    if isinstance(raw, list):
+        return {str(model).strip() for model in raw if str(model).strip()}
+    return set()
+
+
+def _load_configured_model_catalog() -> tuple[str, ...]:
+    """Load every model explicitly declared by the active Hermes config."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        full = load_config_readonly()
+    except Exception:
+        return ()
+
+    models: set[str] = set()
+    model_cfg = full.get("model")
+    if isinstance(model_cfg, dict):
+        default_model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
+        if default_model:
+            models.add(default_model)
+
+    providers = full.get("providers")
+    if isinstance(providers, dict):
+        for provider_cfg in providers.values():
+            if isinstance(provider_cfg, dict):
+                models.update(_declared_model_ids(provider_cfg.get("models")))
+
+    custom_providers = full.get("custom_providers")
+    if isinstance(custom_providers, list):
+        for provider_cfg in custom_providers:
+            if not isinstance(provider_cfg, dict):
+                continue
+            model_id = str(provider_cfg.get("model") or "").strip()
+            if model_id:
+                models.add(model_id)
+            models.update(_declared_model_ids(provider_cfg.get("models")))
+
+    picker_cfg = full.get("model_picker")
+    if isinstance(picker_cfg, dict):
+        visible = picker_cfg.get("visible_models")
+        if isinstance(visible, dict):
+            for provider_models in visible.values():
+                models.update(_declared_model_ids(provider_models))
+
+    return tuple(sorted(models, key=str.lower))
+
+
+def _unknown_explicit_model_error(requested: str, configured_models: tuple[str, ...]) -> str | None:
+    """Return a loud error for an unknown explicit delegation model override."""
+    requested = requested.strip()
+    if not requested or not configured_models:
+        return None
+    by_lower = {model.lower(): model for model in configured_models}
+    if requested.lower() in by_lower:
+        return None
+    requested_lower = requested.lower()
+    requested_tokens = {
+        token for token in re.split(r"[^a-z0-9]+", requested_lower) if len(token) >= 4
+    }
+    model_tokens = {
+        model_lower: {
+            token for token in re.split(r"[^a-z0-9]+", model_lower) if len(token) >= 4
+        }
+        for model_lower in by_lower
+    }
+    token_frequency = {
+        token: sum(token in tokens for tokens in model_tokens.values())
+        for token in requested_tokens
+    }
+    token_matches = sorted(
+        (
+            model_lower
+            for model_lower, tokens in model_tokens.items()
+            if requested_tokens.intersection(tokens)
+        ),
+        key=lambda model_lower: -sum(
+            1 / token_frequency[token]
+            for token in requested_tokens.intersection(model_tokens[model_lower])
+        ),
+    )
+    close_matches = get_close_matches(requested_lower, list(by_lower), n=3, cutoff=0.4)
+    suggestions = list(dict.fromkeys([*token_matches, *close_matches]))[:3]
+    hint = ""
+    if suggestions:
+        candidates = ", ".join(by_lower[item] for item in suggestions)
+        hint = f" Did you mean: {candidates}?"
+    return (
+        f"requested unknown model override '{requested}'.{hint} "
+        "Use a model declared under config.yaml providers.*.models or "
+        "model_picker.visible_models, or omit model to inherit delegation defaults."
+    )
 
 
 def _load_config() -> dict:

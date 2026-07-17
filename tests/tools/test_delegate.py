@@ -219,6 +219,88 @@ class TestStripBlockedTools(unittest.TestCase):
 
 
 class TestDelegateTask(unittest.TestCase):
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_configured_model_catalog")
+    @patch("tools.delegate_tool._load_config")
+    def test_unknown_explicit_model_fails_fast_with_near_miss(
+        self, load_cfg, load_catalog, resolve_creds, build_child
+    ):
+        load_cfg.return_value = {}
+        load_catalog.return_value = (
+            "claude-opus-4-8",
+            "gpt-5.6-luna",
+            "grok-composer-2.5-fast",
+        )
+
+        result = json.loads(
+            delegate_task(
+                goal="inspect the bug",
+                model="claude-luna",
+                parent_agent=_make_mock_parent(),
+            )
+        )
+
+        self.assertIn("unknown model override 'claude-luna'", result["error"])
+        self.assertIn("gpt-5.6-luna", result["error"])
+        resolve_creds.assert_not_called()
+        build_child.assert_not_called()
+
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_configured_model_catalog")
+    @patch("tools.delegate_tool._load_config")
+    def test_unknown_per_task_model_rejects_entire_batch_before_launch(
+        self, load_cfg, load_catalog, resolve_creds, build_child
+    ):
+        load_cfg.return_value = {}
+        load_catalog.return_value = (
+            "claude-opus-4-8",
+            "gpt-5.6-luna",
+            "grok-composer-2.5-fast",
+        )
+
+        result = json.loads(
+            delegate_task(
+                tasks=[
+                    {"goal": "valid child", "model": "gpt-5.6-luna"},
+                    {"goal": "mistyped child", "model": "composer-2.5"},
+                ],
+                parent_agent=_make_mock_parent(),
+            )
+        )
+
+        self.assertIn("Task 1", result["error"])
+        self.assertIn("unknown model override 'composer-2.5'", result["error"])
+        self.assertIn("grok-composer-2.5-fast", result["error"])
+        resolve_creds.assert_not_called()
+        build_child.assert_not_called()
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_configured_model_catalog")
+    @patch("tools.delegate_tool._load_config")
+    def test_absent_model_keeps_config_owned_inheritance(
+        self, load_cfg, load_catalog, resolve_creds, build_child, run_child
+    ):
+        load_cfg.return_value = {"model": "operator-configured-model"}
+        load_catalog.return_value = ("gpt-5.6-luna",)
+        resolve_creds.return_value = {
+            "model": "operator-configured-model",
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+        build_child.return_value = MagicMock()
+        run_child.return_value = {"task_index": 0, "status": "completed", "summary": "ok"}
+
+        result = json.loads(delegate_task(goal="inherit", parent_agent=_make_mock_parent()))
+
+        self.assertEqual(result["results"][0]["status"], "completed")
+        self.assertEqual(build_child.call_args.kwargs["model"], "operator-configured-model")
+
     @patch("tools.delegate_tool._run_single_child")
     @patch("tools.delegate_tool._build_child_agent")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
