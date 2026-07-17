@@ -306,6 +306,8 @@ export const ja = defineLocale({
       tableLayoutScroll: 'スクロール',
       translucencyTitle: 'ウィンドウの透過',
       translucencyDesc: 'ウィンドウ全体を透過させてデスクトップを表示します。macOS と Windows のみ。',
+      backdropTitle: 'チャット背景',
+      backdropDesc: '会話の背後に表示される淡い彫像の画像。',
       embedsTitle: 'インライン埋め込み',
       embedsDesc:
         'リッチプレビューは第三者サイト（YouTube、X など）から読み込まれます。確認は許可するまでプレースホルダーを表示し、常には自動で読み込み、オフはリンクのままにします。',
@@ -1536,6 +1538,9 @@ export const ja = defineLocale({
       newWorktreeTitle: '新しいワークツリー',
       newWorktreeDesc: 'このワークツリーのブランチ名を入力してください。',
       branchPlaceholder: '例: my-feature',
+      branchOff: () => ({ after: ' から分岐', before: '' }),
+      baseBranchPlaceholder: 'ブランチを検索…',
+      baseBranchNone: 'ブランチが見つかりません',
       startWorkFailed: 'ワークツリーを作成できませんでした',
       convertBranch: 'ブランチを変換…',
       convertBranchTitle: 'ブランチを変換',
@@ -1664,7 +1669,6 @@ export const ja = defineLocale({
     urlHintPre: '完全な URL を入力してください。例: ',
     attach: '添付',
     queued: count => `${count} 件キュー済み`,
-    draftPendingNotice: 'まだ下書きです — 送信すると現在の実行後にキューへ入ります。',
     attachmentOnly: '添付のみのターン',
     emptyTurn: '空のターン',
     attachments: count => `${count} 件の添付`,
@@ -2018,6 +2022,16 @@ export const ja = defineLocale({
       recentActivity: '最近のアクティビティ',
       viewAllLogs: 'すべてのログを見る →',
       messagingPlatforms: 'メッセージングプラットフォーム'
+    },
+    approvalMode: {
+      title: '承認モード',
+      ariaLabel: mode => `承認モード: ${mode}`,
+      manual: '手動',
+      manualDescription: '承認が必要な操作の前に確認します',
+      smart: 'スマート',
+      smartDescription: '必要な場合にのみ確認します',
+      off: 'オフ',
+      offDescription: '承認プロンプトなしで実行します'
     },
     statusbar: {
       unknown: '不明',

@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 from hermes_cli.timeouts import get_provider_request_timeout
 from agent.prompt_builder import format_steer_marker
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
+from agent.request_scoped_tools import get_request_scoped_handler
 from agent.trajectory import convert_scratchpad_to_think
 from agent.credential_pool import STATUS_EXHAUSTED
 from agent.error_classifier import FailoverReason
@@ -66,6 +67,8 @@ def agent_runtime_owns_post_tool_hook(agent: Any, function_name: str) -> bool:
     if function_name in AGENT_RUNTIME_POST_HOOK_TOOL_NAMES:
         return True
     if getattr(agent, "_context_engine_tool_names", None) and function_name in agent._context_engine_tool_names:
+        return True
+    if get_request_scoped_handler(agent, function_name) is not None:
         return True
     memory_manager = getattr(agent, "_memory_manager", None)
     return bool(memory_manager and memory_manager.has_tool(function_name))
@@ -1008,7 +1011,14 @@ def try_recover_primary_transport(
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
 
-        if agent.api_mode == "anthropic_messages":
+        if agent.provider == "moa":
+            # MoA is a virtual provider with no real OpenAI client kwargs.
+            # Recreate its facade instead of trying to open a network client.
+            from agent.moa_loop import MoAClient
+
+            agent.client = MoAClient(agent.model or "default")
+            agent._anthropic_client = None
+        elif agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
             agent._anthropic_api_key = rt["anthropic_api_key"]
             agent._anthropic_base_url = rt["anthropic_base_url"]
@@ -1180,7 +1190,14 @@ def restore_primary_runtime(agent) -> bool:
         )
 
         # ── Rebuild client for the primary provider ──
-        if agent.api_mode == "anthropic_messages":
+        if agent.provider == "moa":
+            # Restoring after fallback must rebuild the virtual MoA facade,
+            # never OpenAI() with the intentionally empty client kwargs.
+            from agent.moa_loop import MoAClient
+
+            agent.client = MoAClient(agent.model or "default")
+            agent._anthropic_client = None
+        elif agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
             agent._anthropic_api_key = rt["anthropic_api_key"]
             agent._anthropic_base_url = rt["anthropic_base_url"]
@@ -1304,6 +1321,13 @@ def restore_primary_runtime(agent) -> bool:
                         entry_provider or "?",
                         primary_provider or "?",
                     )
+
+        # ── Restore reasoning_config if it was saved ──
+        # switch_model saves reasoning_config in _primary_runtime. If the
+        # snapshot predates that (older sessions), keep the current value.
+        saved_reasoning = rt.get("reasoning_config")
+        if saved_reasoning is not None:
+            agent.reasoning_config = dict(saved_reasoning)
 
         # ── Reset fallback chain for the new turn ──
         agent._fallback_activated = False
@@ -2080,6 +2104,24 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             api_mode=agent.api_mode,
         )
 
+    # ── Re-resolve reasoning_config from per-model override ──
+    # The new model may have a different reasoning_effort override. Re-read
+    # config so the override takes effect immediately on /model switch —
+    # resolved through the shared chokepoint (per-model > global; YAML
+    # boolean False = disabled).
+    try:
+        from hermes_constants import resolve_reasoning_config
+        from hermes_cli.config import load_config as _sm_load_config
+
+        _reasoning_cfg = _sm_load_config() or {}
+        agent.reasoning_config = resolve_reasoning_config(_reasoning_cfg, agent.model)
+        logger.info(
+            "switch_model: reasoning_config resolved for %s: %s",
+            agent.model, agent.reasoning_config,
+        )
+    except Exception as _reasoning_err:
+        logger.debug("switch_model: could not re-resolve reasoning_config: %s", _reasoning_err)
+
     # ── Invalidate cached system prompt so it rebuilds next turn ──
     agent._cached_system_prompt = None
 
@@ -2102,6 +2144,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         "client_kwargs": dict(agent._client_kwargs),
         "use_prompt_caching": agent._use_prompt_caching,
         "use_native_cache_layout": agent._use_native_cache_layout,
+        "reasoning_config": dict(agent.reasoning_config) if getattr(agent, "reasoning_config", None) else None,
         "compressor_model": getattr(_cc, "model", agent.model) if _cc else agent.model,
         "compressor_base_url": getattr(_cc, "base_url", agent.base_url) if _cc else agent.base_url,
         "compressor_api_key": getattr(_cc, "api_key", "") if _cc else "",
@@ -2319,6 +2362,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                     ),
                 )
             return _finish_agent_tool(result, next_args)
+    elif (request_handler := get_request_scoped_handler(agent, function_name)) is not None:
+        def _execute(next_args: dict) -> Any:
+            return _finish_agent_tool(request_handler(next_args), next_args)
     elif agent._memory_manager and agent._memory_manager.has_tool(function_name):
         def _execute(next_args: dict) -> Any:
             return _finish_agent_tool(agent._memory_manager.handle_tool_call(function_name, next_args), next_args)
@@ -2441,11 +2487,13 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
         return None
 
     # Cheap fast-paths first — these cover the common case.
+    from agent.request_scoped_tools import get_effective_tool_names
+    valid_tool_names = get_effective_tool_names(agent)
     lowered = tool_name.lower()
-    if lowered in agent.valid_tool_names:
+    if lowered in valid_tool_names:
         return lowered
     normalized = _norm(tool_name)
-    if normalized in agent.valid_tool_names:
+    if normalized in valid_tool_names:
         return normalized
 
     # Build the full candidate set for class-like emissions.
@@ -2462,11 +2510,11 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
         cands |= extra
 
     for c in cands:
-        if c and c in agent.valid_tool_names:
+        if c and c in valid_tool_names:
             return c
 
     # Fuzzy match as last resort.
-    matches = get_close_matches(lowered, agent.valid_tool_names, n=1, cutoff=0.7)
+    matches = get_close_matches(lowered, valid_tool_names, n=1, cutoff=0.7)
     if matches:
         return matches[0]
 

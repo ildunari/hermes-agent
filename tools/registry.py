@@ -45,11 +45,20 @@ def _module_registers_tools(module_path: Path) -> bool:
 
     Only inspects module-body statements so that helper modules which happen
     to call ``registry.register()`` inside a function are not picked up.
+
+    A cheap text prefilter avoids the ``ast.parse`` cost for files that do not
+    mention both ``registry`` and ``register`` — a necessary condition for a
+    top-level ``registry.register()`` call to exist.
     """
     try:
         source = module_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if "registry" not in source or "register" not in source:
+        return False
+    try:
         tree = ast.parse(source, filename=str(module_path))
-    except (OSError, SyntaxError):
+    except SyntaxError:
         return False
 
     return any(_is_registry_register_call(stmt) for stmt in tree.body)
@@ -446,7 +455,6 @@ class ToolRegistry:
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn
             self._generation += 1
-            invalidate_check_fn_cache()
 
     def deregister(self, name: str) -> None:
         """Remove a tool from the registry.
@@ -513,7 +521,6 @@ class ToolRegistry:
                     if target != entry.toolset
                 }
             self._generation += 1
-            invalidate_check_fn_cache()
         logger.debug("Deregistered tool: %s", name)
 
     # ------------------------------------------------------------------

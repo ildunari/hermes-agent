@@ -10,11 +10,13 @@ import { $projectScope, $projectTree, ALL_PROJECTS } from '@/store/projects'
 import {
   $activeSessionId,
   $currentCwd,
+  $currentUsage,
   $messages,
   $newChatWorkspaceTarget,
   $resumeFailedSessionId,
   setActiveSessionId,
   setCurrentCwd,
+  setCurrentUsage,
   setMessages,
   setNewChatWorkspaceTarget,
   setResumeFailedSessionId,
@@ -35,7 +37,10 @@ vi.mock('@/hermes', async importOriginal => ({
 }))
 
 const RUNTIME_SESSION_ID = 'rt-new-001'
-type HarnessHandle = Pick<ReturnType<typeof useSessionActions>, 'createBackendSessionForSend' | 'startFreshSessionDraft'>
+type HarnessHandle = Pick<
+  ReturnType<typeof useSessionActions>,
+  'createBackendSessionForSend' | 'startFreshSessionDraft'
+>
 
 function storedSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -74,6 +79,7 @@ function Harness({
     getRouteToken: () => 'token',
     navigate: vi.fn() as never,
     requestGateway,
+    resetViewSync: vi.fn(),
     runtimeIdByStoredSessionIdRef: ref(new Map<string, string>()),
     selectedStoredSessionId: null,
     selectedStoredSessionIdRef: ref<string | null>(null),
@@ -208,27 +214,31 @@ describe('createBackendSessionForSend profile routing', () => {
 // (b) arm $resumeFailedSessionId so use-route-resume can retry. A resume that
 // succeeds must NOT leave the flag armed.
 function ResumeHarness({
+  activeSessionIdRef,
   onReady,
   requestGateway,
   runtimeIdByStoredSessionIdRef,
   sessionStateByRuntimeIdRef
 }: {
+  activeSessionIdRef?: MutableRefObject<null | string>
   onReady: (resume: (storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) => void
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   runtimeIdByStoredSessionIdRef?: MutableRefObject<Map<string, string>>
   sessionStateByRuntimeIdRef?: MutableRefObject<Map<string, ClientSessionState>>
 }) {
   const ref = <T,>(value: T): MutableRefObject<T> => ({ current: value })
+  const liveActiveSessionIdRef = activeSessionIdRef ?? ref<string | null>(null)
 
   const actions = useSessionActions({
-    activeSessionId: null,
-    activeSessionIdRef: ref<string | null>(null),
+    activeSessionId: liveActiveSessionIdRef.current,
+    activeSessionIdRef: liveActiveSessionIdRef,
     busyRef: ref(false),
     creatingSessionRef: ref(false),
     ensureSessionState: () => ({}) as ClientSessionState,
     getRouteToken: () => 'token',
     navigate: vi.fn() as never,
     requestGateway,
+    resetViewSync: vi.fn(),
     runtimeIdByStoredSessionIdRef: runtimeIdByStoredSessionIdRef ?? ref(new Map<string, string>()),
     selectedStoredSessionId: null,
     selectedStoredSessionIdRef: ref<string | null>(null),
@@ -251,6 +261,7 @@ describe('resumeSession failure recovery', () => {
     setResumeFailedSessionId(null)
     setMessages([])
     setSessions([])
+    setCurrentUsage({ calls: 0, input: 0, output: 0, total: 0 })
     vi.restoreAllMocks()
   })
 
@@ -348,6 +359,33 @@ describe('resumeSession failure recovery', () => {
     await runResume(requestGateway)
 
     expect($resumeFailedSessionId.get()).toBeNull()
+  })
+
+  it('clears context usage from the previously viewed session on a cold resume', async () => {
+    setCurrentUsage({
+      calls: 1,
+      context_max: 272_000,
+      context_percent: 61,
+      context_used: 166_800,
+      input: 1,
+      output: 1,
+      total: 2
+    })
+    setSessions([storedSession({ input_tokens: 12, output_tokens: 8 })])
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.resume') {
+        return { session_id: 'runtime-1', resumed: params?.session_id, messages: [], info: {} } as never
+      }
+
+      return {} as never
+    })
+
+    vi.mocked(getSessionMessages).mockResolvedValue({ messages: [] } as never)
+
+    await runResume(requestGateway)
+
+    expect($currentUsage.get()).toEqual({ calls: 0, input: 12, output: 8, total: 20 })
   })
 
   it('resumes via the gateway default (deferred build) — not lazy, no eager opt-out', async () => {
@@ -476,6 +514,7 @@ function BranchHarness({
     getRouteToken: () => 'token',
     navigate: vi.fn() as never,
     requestGateway,
+    resetViewSync: vi.fn(),
     runtimeIdByStoredSessionIdRef: ref(new Map<string, string>()),
     selectedStoredSessionId: null,
     selectedStoredSessionIdRef: ref<string | null>(null),
@@ -495,6 +534,7 @@ describe('branchStoredSession desktop source tagging', () => {
   afterEach(() => {
     cleanup()
     setSessions([])
+    setCurrentUsage({ calls: 0, input: 0, output: 0, total: 0 })
     vi.restoreAllMocks()
   })
 
@@ -512,6 +552,15 @@ describe('branchStoredSession desktop source tagging', () => {
     })
 
     setSessions([storedSession({ id: 'stored-parent', message_count: 1 })])
+    setCurrentUsage({
+      calls: 1,
+      context_max: 272_000,
+      context_percent: 61,
+      context_used: 166_800,
+      input: 1,
+      output: 1,
+      total: 2
+    })
     vi.mocked(getSessionMessages).mockResolvedValue({
       messages: [{ content: 'branch me', role: 'user', timestamp: 1 }],
       session_id: 'stored-parent'
@@ -527,15 +576,19 @@ describe('branchStoredSession desktop source tagging', () => {
       parent_session_id: 'stored-parent',
       source: 'desktop'
     })
+    expect($currentUsage.get()).toEqual({ calls: 0, input: 0, output: 0, total: 0 })
   })
 
   it('creates the branch in the parent session profile, not the active profile argument', async () => {
     let createParams: Record<string, unknown> | undefined
+
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       if (method === 'session.create') {
         createParams = params
+
         return { session_id: 'branch-runtime', stored_session_id: 'branch-stored' } as never
       }
+
       return {} as never
     })
 
@@ -545,7 +598,9 @@ describe('branchStoredSession desktop source tagging', () => {
       session_id: 'stored-parent'
     } as never)
 
-    let branchStoredSession: ((storedSessionId: string, sessionProfile?: string | null) => Promise<boolean>) | null = null
+    let branchStoredSession: ((storedSessionId: string, sessionProfile?: string | null) => Promise<boolean>) | null =
+      null
+
     render(<BranchHarness onReady={branch => (branchStoredSession = branch)} requestGateway={requestGateway} />)
     await waitFor(() => expect(branchStoredSession).not.toBeNull())
 
@@ -641,6 +696,16 @@ describe('resumeSession warm-cache mapping integrity', () => {
       return {} as never
     })
 
+    setCurrentUsage({
+      calls: 1,
+      context_max: 272_000,
+      context_percent: 61,
+      context_used: 166_800,
+      input: 1,
+      output: 1,
+      total: 2
+    })
+
     let resume: ((storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) | null = null
     render(
       <ResumeHarness
@@ -657,6 +722,45 @@ describe('resumeSession warm-cache mapping integrity', () => {
     const methods = requestGateway.mock.calls.map(([method]) => method)
     expect(methods).not.toContain('session.resume')
     expect(runtimeIdByStoredSessionIdRef.current.get('stored-A')).toBe('rt-A')
+    expect($currentUsage.get()).toEqual({ calls: 0, input: 0, output: 0, total: 0 })
+  })
+
+  it('disassociates the previous runtime before awaiting a warm-cache switch', async () => {
+    const activeSessionIdRef: MutableRefObject<null | string> = { current: 'rt-old' }
+
+    const runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>> = {
+      current: new Map([['stored-A', 'rt-A']])
+    }
+
+    const sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>> = {
+      current: new Map([['rt-A', clientState('stored-A')]])
+    }
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.usage') {
+        return { calls: 0, input: 0, output: 0, total: 0 } as never
+      }
+
+      return {} as never
+    })
+
+    let resume: ((storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) | null = null
+    render(
+      <ResumeHarness
+        activeSessionIdRef={activeSessionIdRef}
+        onReady={r => (resume = r)}
+        requestGateway={requestGateway}
+        runtimeIdByStoredSessionIdRef={runtimeIdByStoredSessionIdRef}
+        sessionStateByRuntimeIdRef={sessionStateByRuntimeIdRef}
+      />
+    )
+    await waitFor(() => expect(resume).not.toBeNull())
+
+    const switching = resume!('stored-A', true)
+
+    expect(activeSessionIdRef.current).toBeNull()
+    await switching
+    expect(activeSessionIdRef.current).toBe('rt-A')
   })
 })
 
@@ -698,5 +802,4 @@ describe('createBackendSessionForSend workspace target', () => {
 
     expect(params).toMatchObject({ cwd: '/clicked-workspace' })
   })
-
 })

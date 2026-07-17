@@ -390,6 +390,8 @@ export const zh: Translations = {
       tableLayoutScroll: '滚动',
       translucencyTitle: '窗口透明',
       translucencyDesc: '让整个窗口透出桌面。仅支持 macOS 和 Windows。',
+      backdropTitle: '聊天背景',
+      backdropDesc: '对话后方那张淡淡的雕像图片。',
       embedsTitle: '内嵌预览',
       embedsDesc:
         '富预览会从第三方网站（YouTube、X 等）加载。询问会在你允许前显示占位符；总是会自动加载；关闭则保留纯链接。',
@@ -1770,6 +1772,9 @@ export const zh: Translations = {
       newWorktreeTitle: '新建工作树',
       newWorktreeDesc: '为这个工作树命名分支。',
       branchPlaceholder: '例如 my-feature',
+      branchOff: () => ({ after: ' 分支', before: '从 ' }),
+      baseBranchPlaceholder: '搜索分支…',
+      baseBranchNone: '未找到分支',
       startWorkFailed: '无法创建工作树',
       convertBranch: '转换分支…',
       convertBranchTitle: '转换分支',
@@ -1901,7 +1906,6 @@ export const zh: Translations = {
     urlHintPre: '请包含完整 URL，例如 ',
     attach: '附加',
     queued: count => `${count} 条排队`,
-    draftPendingNotice: '仅为草稿——按发送可在当前运行后排队。',
     attachmentOnly: '仅附件回合',
     emptyTurn: '空回合',
     attachments: count => `${count} 个附件`,
@@ -2241,6 +2245,16 @@ export const zh: Translations = {
       recentActivity: '最近活动',
       viewAllLogs: '查看全部日志 →',
       messagingPlatforms: '消息平台'
+    },
+    approvalMode: {
+      title: '审批模式',
+      ariaLabel: mode => `审批模式：${mode}`,
+      manual: '手动',
+      manualDescription: '执行需要审批的操作前询问',
+      smart: '智能',
+      smartDescription: '自动评估操作，并在需要时询问',
+      off: '关闭',
+      offDescription: '不显示审批提示，直接运行'
     },
     statusbar: {
       unknown: '未知',

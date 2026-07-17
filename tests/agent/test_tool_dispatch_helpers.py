@@ -14,8 +14,58 @@ from agent.tool_dispatch_helpers import (
     _extract_file_mutation_targets,
     _is_untrusted_tool,
     _maybe_wrap_untrusted,
+    _plan_tool_execution_groups,
     make_tool_result_message,
 )
+
+
+class _ToolCall:
+    def __init__(self, name, arguments="{}"):
+        self.function = type(
+            "Function", (), {"name": name, "arguments": arguments}
+        )()
+
+
+def _groups(*calls):
+    return _plan_tool_execution_groups(list(calls))
+
+
+class TestOrderedToolExecutionPlan:
+    def test_builds_ordered_maximal_safe_groups_around_serial_barrier(self):
+        assert _groups(
+            _ToolCall("web_search"),
+            _ToolCall("read_file", '{"path":"a.txt"}'),
+            _ToolCall("terminal", '{"command":"pwd"}'),
+            _ToolCall("read_file", '{"path":"b.txt"}'),
+            _ToolCall("write_file", '{"path":"c.txt","content":"x"}'),
+        ) == ((0, 1), (2,), (3, 4))
+
+    def test_path_overlap_splits_groups_without_crossing_intervening_mutation(self):
+        assert _groups(
+            _ToolCall("write_file", '{"path":"a.txt","content":"one"}'),
+            _ToolCall("patch", '{"path":"a.txt","old_string":"one","new_string":"two"}'),
+            _ToolCall("read_file", '{"path":"b.txt"}'),
+        ) == ((0,), (1, 2))
+
+    @pytest.mark.parametrize(
+        "action",
+        ["poll", "log", "wait", "kill", "write", "submit", "close"],
+    )
+    def test_only_process_list_is_parallel_safe(self, action):
+        assert _groups(
+            _ToolCall("process", f'{{"action":"{action}"}}'),
+            _ToolCall("web_search"),
+        ) == ((0,), (1,))
+        assert _groups(
+            _ToolCall("process", '{"action":"list"}'),
+            _ToolCall("web_search"),
+        ) == ((0, 1),)
+
+    def test_arbitrary_terminal_calls_are_never_parallelized(self):
+        assert _groups(
+            _ToolCall("terminal", '{"command":"pwd"}'),
+            _ToolCall("terminal", '{"command":"git status"}'),
+        ) == ((0,), (1,))
 
 
 # =========================================================================

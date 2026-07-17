@@ -2635,7 +2635,11 @@ def _build_service_path_dirs(project_root: Path | None = None) -> list[str]:
 
     candidates = []
 
-    venv_bin = project_root / "venv" / "bin"
+    # Keep service PATH on the same canonical ladder used by get_python_path:
+    # current .venv first, then legacy venv, then the running interpreter.
+    dot_venv_bin = project_root / ".venv" / "bin"
+    legacy_venv_bin = project_root / "venv" / "bin"
+    venv_bin = dot_venv_bin if _is_dir(dot_venv_bin) else legacy_venv_bin
     if _is_dir(venv_bin):
         candidates.append(str(venv_bin))
     elif sys.prefix != sys.base_prefix:

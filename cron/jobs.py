@@ -209,7 +209,13 @@ def _job_running_in_this_process(job_id: str) -> bool:
         from cron.scheduler import get_running_job_ids
         return job_id in get_running_job_ids()
     except Exception:
-        return False
+        logger.warning(
+            "Cron running-set liveness check failed for job %r; keeping the "
+            "entry to avoid deleting a possibly live one-shot run",
+            job_id,
+            exc_info=True,
+        )
+        return True
 
 
 def _jobs_lock_file() -> Path:
@@ -1466,7 +1472,9 @@ def remove_job(job_id: str) -> bool:
 
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None,
+                 delivery_ack_metadata: Optional[Dict[str, Any]] = None,
+                 probe_run_snapshot: Optional[Dict[str, Any]] = None):
     """
     Mark a job as having been run.
     
@@ -1480,12 +1488,50 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
+                current_binding = job.get("probe_binding")
+                # The run snapshot is captured before execution and accompanies
+                # every probe completion, including failures and exceptions.
+                # Older direct callers supplied only ACK metadata, so retain it
+                # as a compatibility snapshot for successful proof writes.
+                completion_binding = (
+                    probe_run_snapshot
+                    if probe_run_snapshot is not None
+                    else delivery_ack_metadata
+                )
+                if (
+                    isinstance(completion_binding, dict)
+                    and completion_binding != current_binding
+                ):
+                    # This completion belongs to another probe generation.
+                    # Reject the entire update while still under the jobs lock:
+                    # status, timestamps, ACK, counters, schedule, and current
+                    # generation claims must all remain untouched.
+                    return
                 now = _hermes_now().isoformat()
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
                 job["last_error"] = error if not success else None
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
+                # A delivery proof is useful only when it describes the exact
+                # probe configuration that is still installed.  The scheduler
+                # passes the binding from the job snapshot it actually ran;
+                # compare it under the jobs lock so a target/script generation
+                # changed during delivery cannot inherit the old run's ACK.
+                if (
+                    success and delivery_error is None
+                    and isinstance(delivery_ack_metadata, dict)
+                    and isinstance(current_binding, dict)
+                    and delivery_ack_metadata == current_binding
+                ):
+                    job["last_probe_delivery_ack"] = {
+                        **delivery_ack_metadata,
+                        "run_at": now,
+                    }
+                # A stale in-flight probe must neither grant an ACK to a new
+                # binding nor erase an ACK that the new binding already earned.
+                # Reconciliation clears the proof when it installs that new
+                # binding; a mismatched completion is therefore a no-op here.
                 # Clear any external-fire claim so a re-armed recurring job can
                 # be claimed again on its next fire (Phase 4C CAS).
                 job["fire_claim"] = None

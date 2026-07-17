@@ -94,6 +94,12 @@ def _event():
     )
 
 
+def _trusted_scope():
+    return gateway_run.TrustedContactScope(
+        principal="guest", contact_id="contact-a"
+    )
+
+
 def _source():
     return SessionSource(
         platform=Platform.TELEGRAM,
@@ -241,4 +247,96 @@ async def test_normal_path_skip_db_when_agent_has_session_db(
 
     _assert_user_call_has_skip_db(
         runner.session_store.append_to_transcript.call_args_list, True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "agent_result",
+    [
+        {
+            "failed": True,
+            "final_response": None,
+            "error": "429 Too Many Requests",
+            "messages": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        },
+        {
+            "final_response": "Hello!",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "Hello!"},
+            ],
+            "tools": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        },
+    ],
+    ids=["early-failure", "normal"],
+)
+async def test_contact_scope_reaches_agent_on_all_result_paths(
+    monkeypatch, tmp_path, agent_result
+):
+    """The authenticated scope must be bound before result-path branching."""
+    runner = _bootstrap(monkeypatch, tmp_path)
+    runner._run_agent = AsyncMock(return_value=agent_result)
+
+    await runner._handle_message_with_agent(
+        _event(),
+        _source(),
+        "agent:main:telegram:group:-1001:12345",
+        1,
+        trusted_contact_scope=_trusted_scope(),
+    )
+
+    run_call = runner._run_agent.await_args
+    assert run_call is not None
+    assert run_call.kwargs["trusted_contact_scope"] == _trusted_scope()
+    _assert_user_call_has_skip_db(
+        runner.session_store.append_to_transcript.call_args_list, True
+    )
+
+
+@pytest.mark.asyncio
+async def test_successful_contact_turn_forwards_canonical_ids_to_extraction(
+    monkeypatch, tmp_path
+):
+    """A valid answer must not fail after generation at the extraction boundary."""
+    runner = _bootstrap(monkeypatch, tmp_path)
+    runner._run_agent = AsyncMock(return_value={
+        "completed": True,
+        "api_calls": 1,
+        "final_response": "Done.",
+        "messages": [
+            {"role": "user", "content": "compare these"},
+            {"role": "assistant", "content": "Done."},
+        ],
+        "tools": [],
+        "history_offset": 0,
+        "last_prompt_tokens": 0,
+    })
+    submit = AsyncMock(return_value=True)
+    monkeypatch.setattr(gateway_run, "_submit_contact_memory_extraction", submit)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config_for_profile",
+        lambda _profile: {"agent": {"contact_memory": {"enabled": True}}},
+    )
+
+    result = await runner._handle_message_with_agent(
+        _event(),
+        _source(),
+        "agent:main:telegram:group:-1001:12345",
+        1,
+        trusted_contact_scope=_trusted_scope(),
+        canonical_event_ids=("canonical-event-1",),
+    )
+
+    assert result == "Done."
+    submit.assert_awaited_once()
+    submit_call = submit.await_args
+    assert submit_call is not None
+    assert submit_call.kwargs["communication_event_ids"] == (
+        "canonical-event-1",
     )

@@ -56,6 +56,7 @@ class ContactPolicy:
     allowed_surfaces: frozenset[str] = field(default_factory=lambda: frozenset({"bluebubbles"}))
     allowed_outbound_recipients: frozenset[str] = field(default_factory=lambda: frozenset({"self", "admin"}))
     tool_policy: str = "family_default"
+    timezone: str = "UTC"
 
     def bluebubbles_identity_set(self) -> frozenset[str]:
         return frozenset(
@@ -78,6 +79,9 @@ class ContactRegistry:
     admin_delivery_target: str | None = None
     guest_profile: str = "guest"
     owner_profile: str = "gpt"
+    # Optional contact namespace exposed to the authenticated owner/Poke route.
+    # It is configuration, never inferred from message text or memories.
+    owner_contact_id: str | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> "ContactRegistry":
@@ -116,6 +120,7 @@ class ContactRegistry:
                     allowed_surfaces=frozenset(str(x).strip().lower() for x in raw.get("allowed_surfaces", ["bluebubbles"]) if str(x).strip()),
                     allowed_outbound_recipients=frozenset(str(x).strip().lower() for x in raw.get("allowed_outbound_recipients", ["self", "admin"]) if str(x).strip()),
                     tool_policy=str(raw.get("tool_policy") or "family_default"),
+                    timezone=str(raw.get("timezone") or "UTC"),
                 )
             )
         return cls(
@@ -124,6 +129,11 @@ class ContactRegistry:
             admin_delivery_target=data.get("admin_delivery_target"),
             guest_profile=str(data.get("guest_profile") or "guest"),
             owner_profile=str(data.get("owner_profile") or "gpt"),
+            owner_contact_id=(
+                str(data.get("owner_contact_id")).strip()
+                if data.get("owner_contact_id")
+                else None
+            ),
         )
 
     def find_bluebubbles_contact(self, identity: str | None) -> ContactPolicy | None:
@@ -148,6 +158,7 @@ class BlueBubblesRouteDecision:
     contact_display_name: str | None = None
     contact_role: str | None = None
     reason: str = ""
+    contact_timezone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -233,12 +244,17 @@ def _web_action_can_fetch(args: Mapping[str, Any]) -> bool:
     return action in {"fetch", "answer", "summary", "json", "links", "curlmd"} or mode in {"markdown", "html", "answer", "summary", "json", "links"}
 
 
+# Host home path for guest denylist matching. Prefer Path.home() so this arm
+# works on every machine, not just the Studio user that first authored it.
+_HOST_HOME_PATH = str(Path.home())
+_HOST_HOME_PATH_RE = re.escape(_HOST_HOME_PATH)
+
 _SENSITIVE_COMMAND_PATTERNS = (
     r"\bop\s+",                  # 1Password CLI
     r"\bsecurity\s+find-",        # keychain reads
     r"\blaunchctl\s+",            # service control
     r"\bhermes\s+(gateway|update|profile|config|skills?)\b",
-    r"\b(open|cat|less|more|tail|head)\s+[^\n]*(~|/Users/Kosta)(?![^\n]*\.hermes/profiles/guest)",
+    rf"\b(open|cat|less|more|tail|head)\s+[^\n]*(~|{_HOST_HOME_PATH_RE})(?![^\n]*\.hermes/profiles/guest)",
 )
 
 
@@ -342,7 +358,16 @@ def classify_bluebubbles_route(source: Any, raw_message: Mapping[str, Any] | Non
     chat_type = (getattr(source, "chat_type", None) or "dm").lower()
 
     if registry.is_owner_identity(sender):
-        return BlueBubblesRouteDecision(GuestRoute.OWNER, registry.owner_profile, reason="owner sender")
+        if registry.owner_contact_id != "kosta-owner":
+            return BlueBubblesRouteDecision(
+                GuestRoute.DENY, None, reason="owner contact namespace must be kosta-owner"
+            )
+        return BlueBubblesRouteDecision(
+            GuestRoute.OWNER,
+            registry.owner_profile,
+            contact_id=registry.owner_contact_id,
+            reason="owner sender",
+        )
 
     contact = registry.find_bluebubbles_contact(sender)
     contact_allowed = bool(contact and "bluebubbles" in contact.allowed_surfaces)
@@ -356,6 +381,7 @@ def classify_bluebubbles_route(source: Any, raw_message: Mapping[str, Any] | Non
                 contact.display_name,
                 contact.role,
                 "approved guest in group",
+                contact.timezone,
             )
         return BlueBubblesRouteDecision(GuestRoute.DENY, None, reason="unknown or unapproved sender in group")
 
@@ -367,6 +393,7 @@ def classify_bluebubbles_route(source: Any, raw_message: Mapping[str, Any] | Non
             contact.display_name,
             contact.role,
             "approved guest dm",
+            contact.timezone,
         )
 
     return BlueBubblesRouteDecision(GuestRoute.DENY, None, reason="unknown or unapproved sender")
@@ -455,7 +482,7 @@ def evaluate_guest_tool_call(function_name: str, function_args: Mapping[str, Any
         for marker in _SENSITIVE_PATH_MARKERS:
             if marker in code:
                 return GuestToolDecision(False, f"execute_code references blocked path marker {marker}")
-        if re.search(r"(/Users/Kosta|Path\(['\"]~|expanduser\(['\"]~)", code):
+        if re.search(rf"({_HOST_HOME_PATH_RE}|Path\(['\"]~|expanduser\(['\"]~)", code):
             return GuestToolDecision(False, "execute_code must not access host home paths in guest sessions")
         return GuestToolDecision(True)
 

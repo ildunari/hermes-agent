@@ -1967,9 +1967,10 @@ class SessionStore:
                     # Stale routing self-heal (#54878): the in-memory entry
                     # points at a session that has ALREADY been ended in
                     # state.db.  Drop it and fall through to recovery/create.
-                    # Recovery finder reopens ``agent_close`` rows (preserving
-                    # the transcript) but returns None for other end_reasons
-                    # (e.g. /new), starting a fresh session.
+                    # Recovery finder reopens ``agent_close`` and mistaken
+                    # ``ws_orphan_reap`` rows (preserving the transcript) but
+                    # returns None for other end_reasons (e.g. /new), starting
+                    # a fresh session.
                     logger.warning(
                         "gateway.session: routing key %r -> %s is ended in "
                         "state.db but still live in sessions.json; dropping "
@@ -2300,6 +2301,10 @@ class SessionStore:
                             "has_active_processes_fn raised during prune for %s: %s",
                             entry.session_key, exc,
                         )
+                        # Fail safe: if we can't tell whether a background
+                        # process is attached, keep the entry rather than
+                        # risk orphaning live work.
+                        continue
                 if entry.updated_at < cutoff:
                     removed_keys.append(key)
             for key in removed_keys:
@@ -2627,6 +2632,15 @@ class SessionStore:
         except Exception as e:
             logger.debug("Could not load messages from DB: %s", e)
             return []
+
+    def load_recent_user_turns(self, session_id: str, *, limit: int = 3) -> List[str]:
+        """Load only the bounded user-message suffix needed for register carry."""
+        if not self._db:
+            return []
+        rows = self._db.list_recent_user_messages(
+            session_id, limit=max(1, min(int(limit), 3))
+        )
+        return [str(row.get("content") or "") for row in reversed(rows)]
 
     def rewind_session(self, session_id: str, n: int = 1) -> Optional[Dict[str, Any]]:
         """Back up ``n`` user turns via soft-delete, keeping rows for audit.

@@ -108,6 +108,29 @@ class TestBlueBubblesConfigLoading:
 
 
 class TestBlueBubblesHelpers:
+    @pytest.mark.asyncio
+    async def test_authenticated_existing_dm_requires_exact_current_participant(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+
+        async def exact(path, payload):
+            return {"data": [{"guid": "iMessage;-;one", "participants": [{"address": "owner@example.com"}]}]}
+
+        monkeypatch.setattr(adapter, "_api_post", exact)
+        resolved = await adapter.resolve_authenticated_existing_dm(
+            "iMessage;-;one", "owner@example.com"
+        )
+        assert resolved is not None and resolved[0] == "iMessage;-;one"
+
+        async def group(path, payload):
+            return {"data": [{"guid": "iMessage;-;one", "participants": [
+                {"address": "owner@example.com"}, {"address": "other@example.com"},
+            ]}]}
+
+        monkeypatch.setattr(adapter, "_api_post", group)
+        assert await adapter.resolve_authenticated_existing_dm(
+            "iMessage;-;one", "owner@example.com"
+        ) is None
+
     def test_check_requirements(self, monkeypatch):
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
         monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
@@ -231,6 +254,54 @@ class TestBlueBubblesHelpers:
 
         assert result.success is True
         assert sent == ["first thought", "second thought"]
+
+    @pytest.mark.asyncio
+    async def test_split_bubbles_add_typing_and_length_scaled_delay(self, monkeypatch):
+        adapter = _make_adapter(
+            monkeypatch,
+            split_outbound_paragraphs=True,
+            bubble_delay_min_ms=100,
+            bubble_delay_max_ms=100,
+            bubble_typing_chars_per_second=10,
+        )
+        sent = []
+        typing = []
+        sleeps = []
+
+        async def fake_resolve_chat_guid(chat_id):
+            return "iMessage;-;user@example.com"
+
+        async def fake_typing(chat_id):
+            typing.append(chat_id)
+            return True
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        class FakeResponse:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"data": {"guid": "msg"}}
+
+        class FakeClient:
+            async def post(self, url, json=None, **kwargs):
+                assert json is not None
+                sent.append(json["message"])
+                return FakeResponse()
+
+        adapter.client = FakeClient()  # type: ignore[assignment]
+        monkeypatch.setattr(adapter, "_resolve_chat_guid", fake_resolve_chat_guid)
+        monkeypatch.setattr(adapter, "send_typing", fake_typing)
+        monkeypatch.setattr("gateway.platforms.bluebubbles.asyncio.sleep", fake_sleep)
+
+        result = await adapter.send("user@example.com", "wait\n\nwhat happened")
+
+        assert result.success is True
+        assert sent == ["wait", "what happened"]
+        assert typing == ["user@example.com"]
+        assert sleeps == [pytest.approx(1.4)]
 
     @pytest.mark.asyncio
     async def test_send_marks_late_chunk_failure_as_partial_delivery(self, monkeypatch):
@@ -388,6 +459,7 @@ class TestBlueBubblesHelpers:
     @pytest.mark.asyncio
     async def test_disconnect_unregisters_after_successful_registration(self, monkeypatch):
         adapter = _make_adapter(monkeypatch)
+        adapter.webhook_register = True
         adapter._registered_webhook = True
         called = False
 
@@ -994,7 +1066,7 @@ class TestBlueBubblesWebhookParsing:
         assert record["text"] == "hello"
 
     @pytest.mark.asyncio
-    async def test_webhook_deduplicates_message_guid(self, monkeypatch):
+    async def test_webhook_replays_reach_authoritative_store_dedupe(self, monkeypatch):
         import asyncio
         import json
 
@@ -1030,9 +1102,11 @@ class TestBlueBubblesWebhookParsing:
         if adapter._background_tasks:
             await asyncio.gather(*adapter._background_tasks)
 
-        assert len(seen) == 1
+        assert len(seen) == 2
+        assert all(event.message_id == "message-guid-1" for event in seen)
+
     @pytest.mark.asyncio
-    async def test_webhook_dedupe_cache_is_bounded(self, monkeypatch):
+    async def test_webhook_does_not_claim_process_cache_before_persistence(self, monkeypatch):
         import asyncio
         import json
 
@@ -1068,7 +1142,7 @@ class TestBlueBubblesWebhookParsing:
             await asyncio.gather(*adapter._background_tasks)
 
         assert len(seen) == 2
-        assert len(adapter._seen_message_guids) == 1
+        assert len(adapter._seen_message_guids) == 0
 
 
 class TestBlueBubblesGuidResolution:

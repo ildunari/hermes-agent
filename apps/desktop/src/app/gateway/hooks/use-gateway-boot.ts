@@ -28,6 +28,7 @@ import { notify, notifyError } from '@/store/notifications'
 import {
   $activeGatewayProfile,
   $newChatProfile,
+  ensureGatewayProfile,
   normalizeProfileKey,
   touchActiveGatewayBackend
 } from '@/store/profile'
@@ -237,9 +238,13 @@ export function useGatewayBoot({
 
     // Adopt the profile the primary (window) backend booted as, so same-profile
     // resumes are no-op swaps and reconnects target the right backend.
-    // Best-effort: a missing preference means "default". A Cmd+Shift+N window
-    // already connected directly to its requested profile above, so never read
-    // or briefly publish the Electron main's stored/default profile here.
+    // Best-effort: a missing preference means "default". Shared by boot + soft
+    // switch. A Cmd+Shift+N window already connected directly to its requested
+    // profile above (a secondary new-session window can carry an explicit
+    // `profile` query param from its opener), so that explicit profile wins over
+    // the stored preference — never read or briefly publish the Electron main's
+    // stored/default profile here, so the fresh draft doesn't silently land on
+    // the primary backend's profile.
     async function adoptPrimaryProfile() {
       try {
         const pref = initialProfile ? null : await desktop.profile?.get?.()
@@ -252,6 +257,13 @@ export function useGatewayBoot({
         $activeGatewayProfile.set(profileKey)
         setPrimaryGateway(gateway, profileKey)
         void ensureGatewayForProfile(profileKey)
+
+        const requested = newSessionWindowProfile()
+
+        if (requested && normalizeProfileKey(requested) !== normalizeProfileKey(profileKey)) {
+          $newChatProfile.set(normalizeProfileKey(requested))
+          await ensureGatewayProfile(requested)
+        }
       } catch {
         $activeGatewayProfile.set('default')
       }
@@ -332,6 +344,7 @@ export function useGatewayBoot({
 
       applyDesktopBootProgress(payload)
     })
+
     void desktop
       .getBootProgress()
       .then(snapshot => applyDesktopBootProgress(snapshot))
@@ -375,7 +388,8 @@ export function useGatewayBoot({
       }
     })
 
-    const offEvent = gateway.onEvent(event => callbacksRef.current.handleGatewayEvent(event))
+    const sourceProfile = normalizeProfileKey($activeGatewayProfile.get())
+    const offEvent = gateway.onEvent(event => callbacksRef.current.handleGatewayEvent({ ...event, profile: sourceProfile }))
 
     // Wake signals: power resume (macOS/Windows), network coming back, and the
     // window regaining focus/visibility. Each nudges an immediate reconnect.

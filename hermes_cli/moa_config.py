@@ -103,6 +103,22 @@ def _coerce_int_or_none(value: Any) -> int | None:
     return n if n > 0 else None
 
 
+def _clean_reasoning_effort(value: Any) -> str | None:
+    """Return a canonical per-slot reasoning effort, or None when unset/invalid."""
+    if value is None or value is True:
+        return None
+    if value is False:
+        return "none"
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text in {"none", "false", "disabled"}:
+        return "none"
+    if text in {"minimal", "low", "medium", "high", "xhigh", "max"}:
+        return text
+    return None
+
+
 def _clean_slot(slot: Any) -> dict[str, Any] | None:
     if not isinstance(slot, dict):
         return None
@@ -123,7 +139,7 @@ def _clean_slot(slot: Any) -> dict[str, Any] | None:
         service_tier = _default_service_tier(provider, model)
     if service_tier in {"fast", "priority", "on"}:
         cleaned["service_tier"] = "fast"
-    effort = str(slot.get("reasoning_effort") or "").strip().lower()
+    effort = _clean_reasoning_effort(slot.get("reasoning_effort"))
     if not effort:
         effort = _default_reasoning_effort(provider, model)
     if effort:

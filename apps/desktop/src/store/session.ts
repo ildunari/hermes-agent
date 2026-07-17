@@ -367,6 +367,23 @@ export const workspaceCwdForNewSession = (): string => {
 
 export const setCurrentBranch = (next: Updater<string>) => updateAtom($currentBranch, next)
 export const setCurrentUsage = (next: Updater<UsageStats>) => updateAtom($currentUsage, next)
+
+/** Replace usage at a session boundary without carrying optional context fields
+ * from the previously viewed session. Incremental stream updates still use
+ * setCurrentUsage's updater form; complete session snapshots use this helper. */
+export function setCurrentUsageSnapshot(usage: Partial<UsageStats> = {}): void {
+  setCurrentUsage({
+    calls: usage.calls ?? 0,
+    ...(usage.context_max === undefined ? {} : { context_max: usage.context_max }),
+    ...(usage.context_percent === undefined ? {} : { context_percent: usage.context_percent }),
+    ...(usage.context_used === undefined ? {} : { context_used: usage.context_used }),
+    ...(usage.cost_usd === undefined ? {} : { cost_usd: usage.cost_usd }),
+    input: usage.input ?? 0,
+    output: usage.output ?? 0,
+    total: usage.total ?? 0
+  })
+}
+
 export const setSessionStartedAt = (next: Updater<number | null>) => updateAtom($sessionStartedAt, next)
 export const setTurnStartedAt = (next: Updater<number | null>) => updateAtom($turnStartedAt, next)
 export const setIntroPersonality = (next: Updater<string>) => updateAtom($introPersonality, next)

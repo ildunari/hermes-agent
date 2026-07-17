@@ -202,7 +202,13 @@ def test_build_models_payload_returns_expected_shape():
     assert payload["provider"] == "openrouter"
     assert payload["providers"][0]["slug"] == "moa"
     assert payload["providers"][0]["models"] == ["default"]
-    assert payload["providers"][1:] == rows
+    assert payload["providers"][1]["models"] == rows[0]["models"]
+    assert payload["providers"][1]["model_labels"] == {"m1": "M1"}
+    assert {
+        key: value
+        for key, value in payload["providers"][1].items()
+        if key != "model_labels"
+    } == rows[0]
 
 
 def test_build_models_payload_does_not_call_provider_model_ids():

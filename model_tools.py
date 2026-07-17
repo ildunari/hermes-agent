@@ -1068,6 +1068,19 @@ def handle_function_call(
         function_args = {}
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
 
+    # Enforce guest policy at the shared dispatch seam, including deferred tools.
+    _guest_policy_active = False
+    try:
+        from gateway.guest_access import enforce_guest_tool_call, is_guest_policy_enabled
+        _guest_policy_active = is_guest_policy_enabled()
+        guest_block = enforce_guest_tool_call(function_name, function_args)
+        if guest_block is not None:
+            return guest_block
+    except Exception as guest_policy_error:
+        logger.debug("guest tool policy guard error: %s", guest_policy_error)
+        if os.environ.get("HERMES_GUEST_POLICY") or _guest_policy_active:
+            return json.dumps({"error": "Guest policy guard failed closed", "guest_policy": True}, ensure_ascii=False)
+
     # ── Tool Search bridge dispatch ──────────────────────────────────
     # tool_search and tool_describe are pure catalog reads — handle them
     # inline. tool_call is unwrapped to the underlying tool so that every

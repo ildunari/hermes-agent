@@ -11,7 +11,9 @@ import asyncio
 import json
 import os
 import pwd
+import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -54,12 +56,14 @@ GATEWAY_TARGETS: tuple[RestartTarget, ...] = (
     RestartTarget("user/{uid}", "ai.hermes.gateway-design", required=False, description="design profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-bookie", required=False, description="bookie profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-scientist", required=False, description="scientist profile gateway"),
+    RestartTarget("user/{uid}", "ai.hermes.gateway-poke", required=False, description="Poke/BlueBubbles profile gateway"),
     # Some profile LaunchAgents with LimitLoadToSessionType Aqua/Background load
     # into the gui domain instead of user. Keep both optional targets so a full
     # restart touches whichever domain launchd actually chose.
     RestartTarget("gui/{uid}", "ai.hermes.gateway-design", required=False, description="design profile gateway"),
     RestartTarget("gui/{uid}", "ai.hermes.gateway-bookie", required=False, description="bookie profile gateway"),
     RestartTarget("gui/{uid}", "ai.hermes.gateway-scientist", required=False, description="scientist profile gateway"),
+    RestartTarget("gui/{uid}", "ai.hermes.gateway-poke", required=False, description="Poke/BlueBubbles profile gateway"),
     # The WebUI/dashboard LaunchAgent owns the local dashboard backend on 9119.
     # It must move with /restart-gateways after smart updates; otherwise the
     # gateways can restart on new code while the dashboard keeps an old process.
@@ -92,7 +96,7 @@ FULL_HERMES_TARGETS: tuple[RestartTarget, ...] = (
 )
 
 VERIFY_PORTS: dict[str, tuple[int, ...]] = {
-    "gateways": (8642, 8643, 8644, 9119, 9120),
+    "gateways": (8642, 8643, 8644, 8787, 9119, 9120),
     "hermes": (8642, 8643, 8644, 8776, 8787, 9119, 9120, 9192, 3192, 3100),
 }
 
@@ -105,6 +109,7 @@ GATEWAY_STATUS_PATHS: dict[str, Path] = {
     "ai.hermes.gateway-design": Path.home() / ".hermes" / "profiles" / "design" / "gateway_state.json",
     "ai.hermes.gateway-bookie": Path.home() / ".hermes" / "profiles" / "bookie" / "gateway_state.json",
     "ai.hermes.gateway-scientist": Path.home() / ".hermes" / "profiles" / "scientist" / "gateway_state.json",
+    "ai.hermes.gateway-poke": Path.home() / ".hermes" / "profiles" / "poke" / "gateway_state.json",
 }
 # A queued restart should behave like a staged operation: if another Hermes
 # session is still running, wait for it to drain instead of forcing Kosta to
@@ -112,6 +117,12 @@ GATEWAY_STATUS_PATHS: dict[str, Path] = {
 # hiding a failed restart forever while covering normal long agent runs.
 DEFAULT_SAFE_WAIT_TIMEOUT = 24 * 60 * 60
 DEFAULT_SAFE_WAIT_INTERVAL = 2.0
+# The system dashboard LaunchDaemon uses ThrottleInterval=30. A failed first
+# launch (for example, while an updated editable checkout is refreshing
+# bytecode) cannot be retried before that interval expires, so readiness must
+# cover at least one throttled retry plus normal dashboard startup.
+DEFAULT_HEALTH_WAIT_TIMEOUT = 60.0
+DEFAULT_HEALTH_WAIT_INTERVAL = 0.5
 
 # WebUI busy probe: the WebUI (ai.hermes.webui) hosts live chat turns whose
 # worker state dies with the process. /health reports `active_runs` (worker
@@ -356,12 +367,7 @@ def _gateway_status_path_for_target(target: RestartTarget) -> Path | None:
 
 
 def _webui_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
-    """Report the WebUI as busy while it has live chat worker runs.
-
-    Only consulted when the restart set actually includes a WebUI target.
-    A dead/unreachable WebUI is NOT busy (restart should proceed and revive
-    it); only a healthy server reporting active_runs > 0 blocks.
-    """
+    """Report active WebUI work, failing closed when health cannot be trusted."""
     if not any(target.label in WEBUI_BUSY_LABELS for target in targets):
         return []
     try:
@@ -369,12 +375,18 @@ def _webui_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
 
         with urllib.request.urlopen(WEBUI_HEALTH_URL, timeout=WEBUI_HEALTH_TIMEOUT) as resp:
             payload = json.loads(resp.read().decode("utf-8", "replace"))
-    except Exception:
-        return []
-    try:
-        active_runs = int(payload.get("active_runs") or 0)
-    except (TypeError, ValueError):
-        active_runs = 0
+        if not isinstance(payload, dict):
+            raise ValueError("health payload is not an object")
+        active_runs = payload["active_runs"]
+        if isinstance(active_runs, bool) or not isinstance(active_runs, int):
+            raise ValueError("active_runs is not an integer")
+        if active_runs < 0:
+            raise ValueError("active_runs is negative")
+    except Exception as exc:
+        return [
+            "ai.hermes.webui: health probe unavailable or invalid; "
+            f"refusing restart ({type(exc).__name__})"
+        ]
     if active_runs > 0:
         oldest = payload.get("oldest_run_age_seconds")
         detail = f"ai.hermes.webui: active_runs={active_runs}"
@@ -424,6 +436,26 @@ def _wait_for_safe_restart(
             _append_log("safe restart check passed")
             return True, []
         _append_log("safe restart waiting: " + " | ".join(last_busy))
+        if time.monotonic() >= deadline:
+            return False, last_busy
+        time.sleep(max(0.1, interval))
+
+
+def _wait_for_webui_safe_restart(
+    target: RestartTarget,
+    *,
+    timeout: float = DEFAULT_SAFE_WAIT_TIMEOUT,
+    interval: float = DEFAULT_SAFE_WAIT_INTERVAL,
+) -> tuple[bool, list[str]]:
+    """Re-check only WebUI work at its immediate restart boundary."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    last_busy: list[str] = []
+    while True:
+        last_busy = _webui_busy_details((target,))
+        if not last_busy:
+            _append_log("final WebUI safe restart check passed")
+            return True, []
+        _append_log("final WebUI safe restart waiting: " + " | ".join(last_busy))
         if time.monotonic() >= deadline:
             return False, last_busy
         time.sleep(max(0.1, interval))
@@ -481,7 +513,7 @@ def _write_completion_marker(marker_path: str | None, scope: str, exit_code: int
         return
     try:
         path = Path(marker_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         payload = {
             "status": "complete",
             "scope": normalize_scope(scope),
@@ -490,7 +522,22 @@ def _write_completion_marker(marker_path: str | None, scope: str, exit_code: int
             "completed_at": _timestamp(),
             "log_path": str(LOG_PATH),
         }
-        path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                fd = -1
+                handle.write(json.dumps(payload, separators=(",", ":")))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
         _append_log(f"completion marker wrote to {path}")
     except Exception as exc:
         _append_log(f"completion marker failed: {exc}")
@@ -523,6 +570,70 @@ def _resolve_loaded_service(service: str) -> tuple[str, subprocess.CompletedProc
             _append_log(f"{service} not loaded; using loaded alternate {alternate}")
             return alternate, alt_result
     return service, result
+
+
+def _launchctl_pid(result: subprocess.CompletedProcess[str]) -> int | None:
+    """Extract a positive PID from ``launchctl print`` output."""
+    match = re.search(r"^\s*pid\s*=\s*(\d+)\s*$", result.stdout or "", re.MULTILINE)
+    if not match:
+        return None
+    pid = int(match.group(1))
+    return pid if pid > 0 else None
+
+
+def _gateway_pid(target: RestartTarget, launchctl_result: subprocess.CompletedProcess[str]) -> int | None:
+    launchd_pid = _launchctl_pid(launchctl_result)
+    if launchd_pid is None:
+        return None
+    status_path = _gateway_status_path_for_target(target)
+    if status_path is not None:
+        payload = _read_json(status_path) or {}
+        from gateway.status import get_runtime_status_running_pid
+
+        runtime_pid = get_runtime_status_running_pid(
+            payload,
+            expected_home=status_path.parent,
+        )
+        if runtime_pid == launchd_pid:
+            return launchd_pid
+    return None
+
+
+def _graceful_restart_gateway(
+    target: RestartTarget,
+    service: str,
+    launchctl_result: subprocess.CompletedProcess[str],
+    *,
+    timeout: float,
+) -> str | None:
+    """Ask one gateway to drain and self-restart; never hard-kill it."""
+    pid = _gateway_pid(target, launchctl_result)
+    if pid is None:
+        return f"{service} has no verifiable gateway PID; refusing hard restart"
+    if not hasattr(signal, "SIGUSR1"):
+        return f"{service} cannot restart gracefully on this platform"
+    try:
+        os.kill(pid, signal.SIGUSR1)
+    except (OSError, PermissionError, ProcessLookupError) as exc:
+        return f"{service} graceful restart signal failed: {exc}"
+
+    deadline = time.monotonic() + max(1.0, timeout)
+    while time.monotonic() < deadline:
+        status_path = _gateway_status_path_for_target(target)
+        if status_path is not None:
+            payload = _read_json(status_path) or {}
+            try:
+                replacement_pid = int(payload.get("pid") or 0)
+            except (TypeError, ValueError):
+                replacement_pid = 0
+            if replacement_pid > 0 and replacement_pid != pid and _pid_is_alive(replacement_pid):
+                return None
+        current = _launchctl_print(service)
+        replacement_pid = _launchctl_pid(current)
+        if replacement_pid is not None and replacement_pid != pid:
+            return None
+        time.sleep(0.25)
+    return f"{service} did not complete its graceful self-restart within {timeout:g}s"
 
 
 def _verify_listen_port(port: int) -> str | None:
@@ -560,7 +671,7 @@ def _verify_scope_health(scope: str, *, active_labels: set[str] | None = None) -
         if failure:
             failures.append(failure)
     probes = []
-    if scope == "hermes":
+    if scope in {"gateways", "hermes"}:
         probes.append("http://127.0.0.1:8787/health")
     probes.append("http://127.0.0.1:9119/")
     if 9120 in ports:
@@ -577,8 +688,8 @@ def _wait_for_scope_health(
     scope: str,
     *,
     active_labels: set[str],
-    timeout: float = 20.0,
-    interval: float = 0.5,
+    timeout: float = DEFAULT_HEALTH_WAIT_TIMEOUT,
+    interval: float = DEFAULT_HEALTH_WAIT_INTERVAL,
 ) -> list[str]:
     """Poll boundedly so normal launchd startup latency is not a false failure."""
     deadline = time.monotonic() + max(0.0, timeout)
@@ -634,6 +745,21 @@ def restart_scope(
     restarted_services: set[str] = set()
     active_labels: set[str] = set()
     for target in targets:
+        # The scope-level drain above can be followed by many slow launchd
+        # operations before the WebUI target is reached. Re-check at the
+        # destructive boundary so a chat run that started in that gap is not
+        # killed by this restart.
+        if target.label in WEBUI_BUSY_LABELS:
+            safe, busy = _wait_for_webui_safe_restart(
+                target,
+                timeout=safe_wait_timeout,
+                interval=safe_wait_interval,
+            )
+            if not safe:
+                msg = "final WebUI safe restart wait timed out: " + " | ".join(busy)
+                failures.append(msg)
+                _append_log(msg)
+                break
         requested_service = target.service_name(uid)
         service, before = _resolve_loaded_service(requested_service)
         if before.returncode != 0:
@@ -648,6 +774,21 @@ def restart_scope(
                 f"{requested_service} resolves to already restarted {service}; "
                 "skipping duplicate"
             )
+            continue
+        if _gateway_status_path_for_target(target) is not None:
+            gateway_timeout = min(max(safe_wait_timeout, 30.0), 600.0)
+            failure = _graceful_restart_gateway(
+                target,
+                service,
+                before,
+                timeout=gateway_timeout,
+            )
+            if failure:
+                failures.append(failure)
+                _append_log(failure)
+                continue
+            restarted_services.add(service)
+            _append_log(f"{service} completed graceful self-restart")
             continue
         kicked = _kickstart(service) if target.required else _kickstart_optional(target, service)
         if kicked.returncode != 0:
@@ -739,7 +880,7 @@ def enqueue_detached_restart(
             start_new_session=True,
             close_fds=True,
         )
-    notify_note = " I'll send a follow-up here when it finishes." if (notify_origin or notify_tty or completion_marker) else ""
+    notify_note = " I'll send a follow-up here when it finishes." if (notify_origin or notify_tty) else ""
     drain_note = "active gateway tasks and live WebUI chat turns"
     return (
         f"Queued detached Hermes {normalized} restart. "

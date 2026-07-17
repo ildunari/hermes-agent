@@ -89,6 +89,32 @@ interface Props {
   alwaysGlobal?: boolean;
 }
 
+function prettifyModelId(id: string): string {
+  const raw = String(id || "").trim();
+  if (!raw) return "";
+  const short = raw.includes("/") ? raw.split("/").pop() || raw : raw;
+  const tokens = short.replace(/_/g, "-").split(/[-\s]+/).filter(Boolean);
+  const TOKEN: Record<string, string> = {
+    gpt: "GPT", grok: "Grok", sol: "Sol", terra: "Terra", luna: "Luna",
+    opus: "Opus", sonnet: "Sonnet", haiku: "Haiku", claude: "Claude",
+    pro: "Pro", mini: "Mini", fast: "Fast", composer: "Composer", codex: "Codex",
+  };
+  const out: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (/^\d+$/.test(t) && i + 1 < tokens.length && /^\d+$/.test(tokens[i + 1])) {
+      out.push(`${t}.${tokens[i + 1]}`);
+      i++;
+      continue;
+    }
+    if (/^\d+(?:\.\d+)?$/.test(t)) { out.push(t); continue; }
+    const lower = t.toLowerCase();
+    out.push(TOKEN[lower] || (t.charAt(0).toUpperCase() + t.slice(1)));
+  }
+  return out.join(" ") || short;
+}
+
+
 export function ModelPickerDialog(props: Props) {
   const {
     gw,
@@ -236,7 +262,7 @@ export function ModelPickerDialog(props: Props) {
         return label ? `${label} ${m}` : m;
       }).map((r) => ({
         model: r.item,
-        label: selectedProvider?.model_labels?.[r.item] ?? r.item,
+        label: selectedProvider?.model_labels?.[r.item] ?? prettifyModelId(r.item),
         positions: selectedProvider?.model_labels?.[r.item] ? [] : r.positions,
       })),
     [models, selectedProvider, trimmedQuery],

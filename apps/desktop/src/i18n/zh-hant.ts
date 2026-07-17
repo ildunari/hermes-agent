@@ -299,6 +299,8 @@ export const zhHant = defineLocale({
       tableLayoutScroll: '捲動',
       translucencyTitle: '視窗透明',
       translucencyDesc: '讓整個視窗透出桌面。僅支援 macOS 與 Windows。',
+      backdropTitle: '聊天背景',
+      backdropDesc: '對話後方那張淡淡的雕像圖片。',
       embedsTitle: '內嵌預覽',
       embedsDesc:
         '豐富預覽會從第三方網站（YouTube、X 等）載入。詢問會在你允許前顯示佔位符；一律會自動載入；關閉則保留純連結。',
@@ -1488,6 +1490,9 @@ export const zhHant = defineLocale({
       newWorktreeTitle: '新增工作樹',
       newWorktreeDesc: '為這個工作樹命名分支。',
       branchPlaceholder: '例如 my-feature',
+      branchOff: () => ({ after: ' 分支', before: '從 ' }),
+      baseBranchPlaceholder: '搜尋分支…',
+      baseBranchNone: '未找到分支',
       startWorkFailed: '無法建立工作樹',
       convertBranch: '轉換分支…',
       convertBranchTitle: '轉換分支',
@@ -1615,7 +1620,6 @@ export const zhHant = defineLocale({
     urlHintPre: '請輸入完整 URL，例如 ',
     attach: '附加',
     queued: count => `${count} 個排隊中`,
-    draftPendingNotice: '仍是草稿——按傳送可在目前執行後排隊。',
     attachmentOnly: '僅附件回合',
     emptyTurn: '空回合',
     attachments: count => `${count} 個附件`,
@@ -1954,6 +1958,16 @@ export const zhHant = defineLocale({
       recentActivity: '最近活動',
       viewAllLogs: '查看全部記錄 →',
       messagingPlatforms: '訊息平台'
+    },
+    approvalMode: {
+      title: '核准模式',
+      ariaLabel: mode => `核准模式：${mode}`,
+      manual: '手動',
+      manualDescription: '執行需要核准的操作前詢問',
+      smart: '智慧',
+      smartDescription: '自動評估操作，並在需要時詢問',
+      off: '關閉',
+      offDescription: '不顯示核准提示，直接執行'
     },
     statusbar: {
       unknown: '未知',

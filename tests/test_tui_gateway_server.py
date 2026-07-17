@@ -2841,6 +2841,95 @@ def test_config_set_yolo_global_scope_writes_approvals_mode(tmp_path, monkeypatc
     assert yaml.safe_load(cfg_path.read_text())["approvals"]["mode"] == "manual"
 
 
+def test_config_get_approval_mode_uses_smart_default_when_key_is_missing(
+    tmp_path, monkeypatch
+):
+    import yaml
+
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"approvals": {"timeout": 15}})
+    )
+
+    response = server.handle_request(
+        {"id": "1", "method": "config.get", "params": {"key": "approvals.mode"}}
+    )
+    assert response["result"]["value"] == "smart"
+
+
+def test_config_get_approval_mode_fails_safe_to_manual_for_invalid_explicit_value(
+    tmp_path, monkeypatch
+):
+    import yaml
+
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"approvals": {"mode": "sometimes"}})
+    )
+
+    response = server.handle_request(
+        {"id": "1", "method": "config.get", "params": {"key": "approvals.mode"}}
+    )
+    assert response["result"]["value"] == "manual"
+
+
+def test_config_get_approval_mode_normalizes_yaml_off(tmp_path, monkeypatch):
+    import yaml
+
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"approvals": {"mode": False}})
+    )
+
+    response = server.handle_request(
+        {"id": "1", "method": "config.get", "params": {"key": "approvals.mode"}}
+    )
+    assert response["result"]["value"] == "off"
+
+
+def test_config_set_approval_mode_persists_three_way_value_and_emits_live_status(
+    tmp_path, monkeypatch
+):
+    import yaml
+
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+    server._sessions["sid"] = {"agent": object(), "session_key": "profile-session"}
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "config.set",
+                "params": {"key": "approvals.mode", "value": "manual"},
+            }
+        )
+    finally:
+        server._sessions.clear()
+
+    assert resp["result"] == {"key": "approvals.mode", "value": "manual"}
+    assert yaml.safe_load((tmp_path / "config.yaml").read_text())["approvals"]["mode"] == "manual"
+    assert emitted and emitted[0][0:2] == ("session.info", "sid")
+    assert emitted[0][2]["approval_mode"] == "manual"
+
+
+def test_desktop_contract_includes_approval_mode_rpc():
+    assert server.DESKTOP_BACKEND_CONTRACT >= 3
+
+
+def test_config_set_approval_mode_rejects_unknown_value():
+    resp = server.handle_request(
+        {
+            "id": "1",
+            "method": "config.set",
+            "params": {"key": "approvals.mode", "value": "sometimes"},
+        }
+    )
+
+    assert resp["error"]["code"] == 4002
+
+
 def test_config_set_yolo_global_scope_honors_explicit_value(tmp_path, monkeypatch):
     """An explicit value pins global approvals.mode regardless of prior state."""
     import yaml
@@ -3714,6 +3803,53 @@ def test_config_set_model_global_persists(monkeypatch):
     assert saved_values["model.default"] == "anthropic/claude-sonnet-4.6"
     assert saved_values["model.provider"] == "anthropic"
     assert saved_values["model.base_url"] == "https://api.anthropic.com"
+
+
+def test_config_set_model_global_uses_session_profile_home(tmp_path, monkeypatch):
+    """A dashboard multiplexing profiles must persist into the session owner.
+
+    The Desktop can connect a Coding session through a dashboard launched as the
+    GPT profile.  Model resolution and explicit global persistence must use the
+    session's bound profile home, not the dashboard process home.
+    """
+    launch_home = tmp_path / "profiles" / "gpt"
+    session_home = tmp_path / "profiles" / "coding"
+    launch_home.mkdir(parents=True)
+    session_home.mkdir(parents=True)
+    seen = []
+
+    session = _session()
+    session["profile_home"] = str(session_home)
+    server._sessions["sid"] = session
+
+    def fake_apply(_sid, _session, _raw, **_kwargs):
+        from hermes_constants import get_hermes_home
+
+        seen.append(get_hermes_home())
+        return {"value": "new/model", "warning": ""}
+
+    monkeypatch.setattr(server, "_apply_model_switch", fake_apply)
+    monkeypatch.setenv("HERMES_HOME", str(launch_home))
+
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "config.set",
+                "params": {
+                    "session_id": "sid",
+                    "key": "model",
+                    "value": "new/model --global",
+                },
+            }
+        )
+        assert resp["result"]["value"] == "new/model"
+        assert seen == [session_home]
+        from hermes_constants import get_hermes_home
+
+        assert get_hermes_home() == launch_home
+    finally:
+        server._sessions.pop("sid", None)
 
 
 def test_config_set_model_explicit_provider_skips_broken_default_init(monkeypatch):
@@ -7159,12 +7295,14 @@ def test_browser_manage_connect_default_local_retries_after_launch(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", _opener)
     with patch.dict(sys.modules, {"tools.browser_tool": fake}):
         with patch(
-            "hermes_cli.browser_connect.try_launch_chrome_debug", return_value=True
-        ):
+            "hermes_cli.browser_connect.launch_chrome_debug",
+            return_value=ChromeDebugLaunch(launched=True),
+        ) as launch_mock:
             resp = server.handle_request(
                 {"id": "1", "method": "browser.manage", "params": {"action": "connect"}}
             )
 
+    launch_mock.assert_called_once()
     assert resp["result"]["connected"] is True
     assert resp["result"]["url"] == "http://127.0.0.1:9222"
     assert resp["result"]["messages"] == [
@@ -7599,7 +7737,7 @@ def _setup_make_agent_mocks(monkeypatch, cfg):
         },
     )
     monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "off")
-    monkeypatch.setattr(server, "_load_reasoning_config", lambda: None)
+    monkeypatch.setattr(server, "_load_reasoning_config", lambda model="": None)
     monkeypatch.setattr(server, "_load_service_tier", lambda: None)
     monkeypatch.setattr(server, "_load_enabled_toolsets", lambda: None)
     monkeypatch.setattr(server, "_get_db", lambda: None)

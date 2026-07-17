@@ -39,7 +39,11 @@ from typing import Any, List, Optional
 # the module) fail with ModuleNotFoundError for hermes_time et al.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hermes_constants import get_hermes_home
+from hermes_constants import (
+    get_hermes_home,
+    reset_hermes_home_override,
+    set_hermes_home_override,
+)
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import load_config, _expand_env_vars
 from hermes_cli.fallback_config import get_fallback_chain
@@ -352,6 +356,10 @@ _parallel_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _parallel_pool_max_workers: Optional[int] = None
 _running_job_ids: set = set()
 _running_lock = threading.Lock()
+# Probe identity captured at dispatch, keyed by the physical in-flight run.
+# The shutdown timeout path uses this same frozen snapshot when it completes
+# the run from a different thread.
+_running_probe_snapshots: dict = {}
 
 # Job IDs the gateway shutdown path force-killed the tool subprocess of
 # while still in ``_running_job_ids`` (see ``mark_running_jobs_interrupted``
@@ -408,11 +416,17 @@ def mark_running_jobs_interrupted(reason: str) -> list:
     """
     with _running_lock:
         job_ids = list(_running_job_ids)
+        probe_snapshots = {
+            job_id: _running_probe_snapshots.get(job_id) for job_id in job_ids
+        }
         _interrupted_job_ids.update(job_ids)
     marked = []
     for job_id in job_ids:
         try:
-            mark_job_run(job_id, False, reason)
+            mark_job_run(
+                job_id, False, reason,
+                probe_run_snapshot=probe_snapshots.get(job_id),
+            )
             marked.append(job_id)
         except Exception as e:
             logger.warning("Failed to mark job %s interrupted: %s", job_id, e)
@@ -1468,6 +1482,30 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     Returns None on success, or an error string on failure.
     """
     targets = _resolve_delivery_targets(job)
+
+    # Fail closed before either the normal-profile or delegated-profile send
+    # path can load an adapter. Internal maintenance/probe/bootstrap output is
+    # operational telemetry, never conversation content. This also covers
+    # old/tampered records that predate ``delivery_profile``.
+    internal_names = {
+        "contact memory interest maintenance",
+        "proactive rollout health watchdog",
+        "proactive alarm sink end-to-end probe",
+    }
+    internal_script_markers = (
+        "maintenance", "watchdog", "bootstrap", "dry_run", "dry-run", "probe",
+    )
+    job_name = str(job.get("name") or "").strip().lower()
+    script_name = Path(str(job.get("script") or "")).name.lower()
+    is_internal = job_name in internal_names or any(
+        marker in script_name for marker in internal_script_markers
+    )
+    if is_internal:
+        if any(str(target.get("platform") or "").lower() == "bluebubbles" for target in targets):
+            msg = "internal maintenance/watchdog/bootstrap/dry-run delivery to BlueBubbles is forbidden"
+            logger.error("Job '%s': %s", job.get("id", "?"), msg)
+            return msg
+
     if not targets:
         deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
         if deliver_value == "local":
@@ -1555,8 +1593,33 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         _, mirror_text = BasePlatformAdapter.extract_media(content)
         mirror_text = (mirror_text or "").strip()
 
+    delivery_profile = job.get("delivery_profile")
     try:
-        config = load_gateway_config()
+        if delivery_profile is None:
+            config = load_gateway_config()
+        else:
+            from gateway.cron_delivery_profile import validate_delegated_alarm_delivery
+            source_home = _get_hermes_home().resolve()
+            if source_home.name not in {"poke", "guest"} or job.get("name") not in {
+                "Proactive rollout health watchdog",
+                "Proactive alarm sink end-to-end probe",
+            }:
+                raise ValueError("delivery_profile is restricted to installed Poke/Guest proactive alarms")
+            if not targets:
+                raise ValueError("delegated delivery requires one explicit target")
+            first = targets[0]
+            if any(t.get("platform") != first.get("platform") or t.get("chat_id") != first.get("chat_id") for t in targets):
+                raise ValueError("delegated delivery cannot fan out across destinations")
+            _, config, _, _ = validate_delegated_alarm_delivery(
+                source_home, str(delivery_profile), {
+                    "platform": str(first["platform"]),
+                    "address": str(first["chat_id"]),
+                    "target": str(job.get("deliver") or ""),
+                },
+            )
+            # Never borrow the source profile's live adapter. Delegation is
+            # outbound-only and cannot create a second ingress owner.
+            adapters = None
     except Exception as e:
         msg = f"failed to load gateway config: {e}"
         logger.error("Job '%s': %s", job["id"], msg)
@@ -2085,9 +2148,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 _DEFAULT_SCRIPT_TIMEOUT = 3600  # seconds (1 hour)
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _SCRIPT_TIMEOUT = _DEFAULT_SCRIPT_TIMEOUT
+_RUN_CLAIM_HEARTBEAT_SECONDS = 60.0
 
 
-def _get_script_timeout() -> int:
+def _get_script_timeout(hermes_home: Path | None = None) -> int:
     """Resolve cron pre-run script timeout from module/env/config with a safe default."""
     if _SCRIPT_TIMEOUT != _DEFAULT_SCRIPT_TIMEOUT:
         try:
@@ -2106,6 +2170,7 @@ def _get_script_timeout() -> int:
         except Exception:
             logger.warning("Invalid HERMES_CRON_SCRIPT_TIMEOUT=%r; using config/default", env_value)
 
+    token = set_hermes_home_override(hermes_home) if hermes_home is not None else None
     try:
         cfg = load_config() or {}
         cron_cfg = cfg.get("cron", {}) if isinstance(cfg, dict) else {}
@@ -2116,6 +2181,9 @@ def _get_script_timeout() -> int:
                 return timeout
     except Exception as exc:
         logger.debug("Failed to load cron script timeout from config: %s", exc)
+    finally:
+        if token is not None:
+            reset_hermes_home_override(token)
 
     return _DEFAULT_SCRIPT_TIMEOUT
 
@@ -2151,7 +2219,13 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         (success, output) — on failure *output* contains the error message so the
         LLM can report the problem to the user.
     """
-    scripts_dir = _get_hermes_home() / "scripts"
+    # Resolve the profile once and use that same value for both path lookup and
+    # the child environment.  Cron can be scoped through the context-local or
+    # module override without changing process-global os.environ; inheriting
+    # the latter here could therefore execute a script from profile A while
+    # making its config/env loaders read profile B.
+    hermes_home = _get_hermes_home().expanduser().resolve()
+    scripts_dir = hermes_home / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     scripts_dir_resolved = scripts_dir.resolve()
 
@@ -2176,7 +2250,7 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     if not path.is_file():
         return False, f"Script path is not a file: {path}"
 
-    script_timeout = _get_script_timeout()
+    script_timeout = _get_script_timeout(hermes_home)
 
     # Pick an interpreter by extension.  Bash for .sh/.bash, Python for
     # everything else.  We deliberately do NOT honour the file's own
@@ -2206,13 +2280,19 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         from tools.environments.local import _sanitize_subprocess_env
 
         popen_kwargs = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
+        child_env = _sanitize_subprocess_env(os.environ.copy())
+        # _sanitize_subprocess_env preserves ambient HERMES_HOME (and may
+        # bridge a context override), but the scheduler's resolved profile is
+        # authoritative for this job.  Pin it after sanitization so script,
+        # config, cron state, and profile-owned credentials cannot diverge.
+        child_env["HERMES_HOME"] = str(hermes_home)
         result = subprocess.run(
             argv,
             capture_output=True,
             text=True,
             timeout=script_timeout,
             cwd=str(path.parent),
-            env=_sanitize_subprocess_env(os.environ.copy()),
+            env=child_env,
             **popen_kwargs,
         )
         stdout = (result.stdout or "").strip()
@@ -2242,6 +2322,71 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         return False, f"Script timed out after {script_timeout}s: {path}"
     except Exception as exc:
         return False, f"Script execution failed: {exc}"
+
+
+def _run_job_script_with_claim_heartbeat(
+    job: dict, script_path: str
+) -> tuple[bool, str]:
+    """Run a cron script while keeping its owned one-shot claim fresh.
+
+    Script execution is synchronous and may legitimately outlive the stale
+    claim TTL.  Without a concurrent heartbeat, another scheduler process can
+    mistake the live run for a dead owner and dispatch the same one-shot again.
+    Recurring jobs and unclaimed/manual runs have no durable one-shot claim and
+    therefore use the ordinary script path without starting a thread.
+
+    The claim owner is captured from the dispatched job and never re-read from
+    storage.  ``heartbeat_run_claim`` compares that stable owner before every
+    refresh, so a stale runner cannot extend a replacement owner's claim.
+    """
+    schedule = job.get("schedule")
+    claim = job.get("run_claim")
+    owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
+    if not (
+        isinstance(schedule, dict)
+        and schedule.get("kind") == "once"
+        and owner
+    ):
+        return _run_job_script(script_path)
+
+    job_id = str(job.get("id") or "")
+    stop = threading.Event()
+    heartbeat_context = contextvars.copy_context()
+
+    def _heartbeat_loop() -> None:
+        while not stop.wait(_RUN_CLAIM_HEARTBEAT_SECONDS):
+            try:
+                heartbeat_run_claim(job_id, expected_owner=owner)
+            except Exception:
+                logger.debug(
+                    "Job '%s': script run_claim heartbeat failed",
+                    job_id,
+                    exc_info=True,
+                )
+
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_context.run,
+        args=(_heartbeat_loop,),
+        name="cron-script-claim-heartbeat",
+        daemon=True,
+    )
+    try:
+        heartbeat_thread.start()
+    except Exception:
+        logger.debug(
+            "Job '%s': could not start script run_claim heartbeat",
+            job_id,
+            exc_info=True,
+        )
+        return _run_job_script(script_path)
+
+    try:
+        return _run_job_script(script_path)
+    finally:
+        stop.set()
+        # Event.wait() wakes immediately.  Keep completion bounded if the
+        # heartbeat is already waiting on another process's jobs-file lock.
+        heartbeat_thread.join(timeout=1.0)
 
 
 def _parse_wake_gate(script_output: str) -> bool:
@@ -2651,7 +2796,7 @@ def run_job(
                 _prior_cwd = None
 
         try:
-            ok, output = _run_job_script(script_path)
+            ok, output = _run_job_script_with_claim_heartbeat(job, script_path)
         finally:
             if _prior_cwd is not None:
                 try:
@@ -2726,10 +2871,68 @@ def run_job(
 
     # Initialize SQLite session store so cron job messages are persisted
     # and discoverable via session_search (same pattern as gateway/run.py).
+    #
+    # Bounded with its own timeout (separate from HERMES_CRON_TIMEOUT, which
+    # only watches the agent's run_conversation below): SessionDB.__init__
+    # opens/migrates state.db synchronously and has no timeout of its own
+    # against a wedged sqlite3.connect (e.g. a stale flock left by a crashed
+    # sibling process). An unbounded hang here is invisible to every other
+    # cron safeguard, because it happens BEFORE _submit_with_guard's future
+    # exists — the finally block that releases the job from
+    # _running_job_ids never runs, so the job stays wedged "running" until
+    # the whole gateway process is restarted, silently skipping every
+    # scheduled fire in between with "already running — skipping".
     _session_db = None
     try:
         from hermes_state import SessionDB
-        _session_db = SessionDB()
+
+        # Resolve timeout: env override → config.yaml → default 10s.
+        # Mirrors the script_timeout_seconds resolution pattern.
+        _session_db_timeout: float | None = None
+        _raw_env_timeout = os.getenv("HERMES_CRON_SESSION_DB_TIMEOUT", "").strip()
+        if _raw_env_timeout:
+            try:
+                _session_db_timeout = float(_raw_env_timeout)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Invalid HERMES_CRON_SESSION_DB_TIMEOUT=%r; using config/default",
+                    _raw_env_timeout,
+                )
+        if _session_db_timeout is None:
+            try:
+                from hermes_cli.config import load_config
+                _cfg = load_config() or {}
+                _cron_cfg = _cfg.get("cron", {}) if isinstance(_cfg, dict) else {}
+                _configured = _cron_cfg.get("session_db_timeout_seconds")
+                if _configured is not None:
+                    _session_db_timeout = float(_configured)
+            except Exception as exc:
+                logger.debug(
+                    "Failed to load cron.session_db_timeout_seconds from config: %s",
+                    exc,
+                )
+        if _session_db_timeout is None:
+            _session_db_timeout = 10.0
+
+        if _session_db_timeout > 0:
+            _session_db_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                _session_db = _session_db_pool.submit(SessionDB).result(timeout=_session_db_timeout)
+            finally:
+                # Don't wait for a wedged connect() to unwind — abandon the
+                # worker thread (same pattern as the agent inactivity timeout
+                # further down) rather than blocking shutdown on it too.
+                _session_db_pool.shutdown(wait=False)
+        else:
+            # 0 = unlimited (legacy behavior, opt-in for debugging)
+            _session_db = SessionDB()
+    except concurrent.futures.TimeoutError:
+        logger.error(
+            "Job '%s': SessionDB init did not return within %.0fs — proceeding "
+            "without a session store for this run instead of blocking it "
+            "forever",
+            job.get("id", "?"), _session_db_timeout,
+        )
     except Exception as e:
         logger.debug("Job '%s': SQLite session store not available: %s", job.get("id", "?"), e)
 
@@ -2740,7 +2943,7 @@ def run_job(
     prerun_script = None
     script_path = job.get("script")
     if script_path:
-        prerun_script = _run_job_script(script_path)
+        prerun_script = _run_job_script_with_claim_heartbeat(job, script_path)
         _ran_ok, _script_output = prerun_script
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info(
@@ -2979,20 +3182,22 @@ def run_job(
         except Exception:
             pass
 
-        # Reasoning config from job, cron config, then config.yaml. Preserve raw
-        # YAML booleans: False means thinking disabled in parse_reasoning_effort.
-        from hermes_constants import parse_reasoning_effort
+        # Explicit per-job/per-cron effort wins; otherwise resolve the effective
+        # model's per-model override and then the global agent default.
+        # Preserve raw YAML booleans: False means thinking disabled.
+        from hermes_constants import parse_reasoning_effort, resolve_reasoning_config
         _cron_cfg_raw = _cfg.get("cron") if isinstance(_cfg, dict) else None
-        _agent_cfg_raw = _cfg.get("agent") if isinstance(_cfg, dict) else None
         _cron_cfg_for_reasoning = _cron_cfg_raw if isinstance(_cron_cfg_raw, dict) else {}
-        _agent_cfg_for_reasoning = _agent_cfg_raw if isinstance(_agent_cfg_raw, dict) else {}
         if "reasoning_effort" in job:
-            effort = job.get("reasoning_effort")
+            reasoning_config = parse_reasoning_effort(job.get("reasoning_effort"))
         elif "reasoning_effort" in _cron_cfg_for_reasoning:
-            effort = _cron_cfg_for_reasoning.get("reasoning_effort")
+            reasoning_config = parse_reasoning_effort(
+                _cron_cfg_for_reasoning.get("reasoning_effort")
+            )
         else:
-            effort = _agent_cfg_for_reasoning.get("reasoning_effort", "")
-        reasoning_config = parse_reasoning_effort(effort)
+            reasoning_config = resolve_reasoning_config(
+                _cfg if isinstance(_cfg, dict) else {}, str(model)
+            )
 
         # Prefill messages from env or config.yaml. The top-level
         # prefill_messages_file key is canonical; agent.prefill_messages_file is
@@ -3248,7 +3453,6 @@ def run_job(
         _run_claim_owner = (
             str(_run_claim.get("by") or "") if isinstance(_run_claim, dict) else ""
         )
-        _CLAIM_HEARTBEAT_SECONDS = 60.0
         _last_claim_heartbeat = time.monotonic()
 
         def _heartbeat_run_claim_if_due():
@@ -3256,7 +3460,7 @@ def run_job(
             if not _is_oneshot or not _run_claim_owner:
                 return
             _mono = time.monotonic()
-            if _mono - _last_claim_heartbeat < _CLAIM_HEARTBEAT_SECONDS:
+            if _mono - _last_claim_heartbeat < _RUN_CLAIM_HEARTBEAT_SECONDS:
                 return
             _last_claim_heartbeat = _mono
             try:
@@ -3543,6 +3747,11 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
     Returns True if the job was processed (even if the job itself failed —
     failure is recorded via ``mark_job_run``), False only if processing raised.
     """
+    # Freeze all probe identity axes before the run claim and execution. This
+    # detached copy is the only binding completion code may use, even if the
+    # installed job is reconciled while this run is in flight.
+    binding = job.get("probe_binding")
+    probe_run_snapshot = dict(binding) if isinstance(binding, dict) else None
     try:
         # Pre-run dispatch claim (issue #38758): atomically commit a finite
         # one-shot's dispatch BEFORE its side effect runs, so a tick that dies
@@ -3663,13 +3872,46 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
         if not _consume_interrupted_flag(job["id"]):
-            mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+            # Persist proof only from this real execution + delivery path.  A
+            # stale in-flight run carries its snapshot binding and is rejected
+            # atomically by mark_job_run if install/config changed meanwhile.
+            probe_binding = probe_run_snapshot
+            expected_probe_output = None
+            if isinstance(probe_binding, dict):
+                nonce = str(probe_binding.get("nonce") or "")
+                generation = str(probe_binding.get("generation") or "")
+                if nonce and generation:
+                    expected_probe_output = (
+                        f"HERMES_PROACTIVE_ALARM_PROBE_ACK_REQUEST {nonce} {generation}"
+                    )
+            ack_metadata = (
+                dict(probe_binding)
+                if should_deliver and success and delivery_error is None
+                and expected_probe_output is not None
+                # Bind the proof to what the real script emitted and to the
+                # exact transport target/script carried by this run snapshot.
+                and deliver_content.strip() == expected_probe_output
+                and job.get("deliver") == probe_binding.get("target")
+                and job.get("script") == probe_binding.get("script")
+                else None
+            )
+            mark_kwargs = {"delivery_error": delivery_error}
+            if ack_metadata is not None:
+                mark_kwargs["delivery_ack_metadata"] = ack_metadata
+            mark_job_run(
+                job["id"], success, error,
+                probe_run_snapshot=probe_run_snapshot,
+                **mark_kwargs,
+            )
         return True
 
     except Exception as e:
         logger.error("Error processing job %s: %s", job['id'], e)
         if not _consume_interrupted_flag(job["id"]):
-            mark_job_run(job["id"], False, str(e))
+            mark_job_run(
+                job["id"], False, str(e),
+                probe_run_snapshot=probe_run_snapshot,
+            )
         return False
 
 
@@ -3691,7 +3933,14 @@ def _notify_provider_jobs_changed() -> None:
         logger.debug("on_jobs_changed notify failed: %s", e)
 
 
-def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> int:
+def tick(
+    verbose: bool = True,
+    adapters=None,
+    loop=None,
+    sync: bool = True,
+    *,
+    can_dispatch=None,
+):
     """
     Check and run all due jobs.
     
@@ -3702,7 +3951,9 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         verbose: Whether to print status messages
         adapters: Optional dict mapping Platform → live adapter (from gateway)
         loop: Optional asyncio event loop (from gateway) for live adapter sends
-    
+        can_dispatch: Optional synchronous gate; false leaves due jobs untouched
+            for the next allowed tick
+
     Returns:
         Number of jobs executed (0 if another tick is already running)
     """
@@ -3724,6 +3975,10 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         return 0
 
     try:
+        if can_dispatch is not None and not can_dispatch():
+            logger.debug("Cron dispatch paused while gateway drains existing work")
+            return 0
+
         due_jobs = get_due_jobs()
 
         if verbose and not due_jobs:
@@ -3811,6 +4066,10 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     logger.info("Job '%s' already running — skipping", job.get("name", job_id))
                     return None
                 _running_job_ids.add(job_id)
+                binding = job.get("probe_binding")
+                _running_probe_snapshots[job_id] = (
+                    dict(binding) if isinstance(binding, dict) else None
+                )
             _ctx = contextvars.copy_context()
 
             def _run_and_release(j=job, ctx=_ctx):
@@ -3819,6 +4078,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 finally:
                     with _running_lock:
                         _running_job_ids.discard(j["id"])
+                        _running_probe_snapshots.pop(j["id"], None)
 
             try:
                 return pool.submit(_run_and_release)
@@ -3828,6 +4088,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 if _interpreter_shutting_down(submit_err):
                     with _running_lock:
                         _running_job_ids.discard(job_id)
+                        _running_probe_snapshots.pop(job_id, None)
                     logger.warning(
                         "Job '%s' not dispatched — interpreter is shutting down",
                         job.get("name", job_id),

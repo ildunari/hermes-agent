@@ -57,14 +57,26 @@ class Worker:
                 try: self.session.close()
                 except Exception: pass
     def cancel(self):
-        with self.lock:
-            self.cancel_requested=True
-            if self.session: self.session.request_interrupt()
+        # Do not take ``self.lock`` here. A follow-up turn may be holding it,
+        # and cancellation must remain an out-of-band, non-blocking signal.
+        # CodexAppServerSession.request_interrupt() is idempotent and
+        # thread-safe via its internal Event.
+        self.cancel_requested=True
+        session=self.session
+        if session: session.request_interrupt()
     def send(self,message,timeout=None):
         with self.lock:
             rec=self.registry.get(self.job_id)
             if not rec or rec.status not in {'running','awaiting_approval'}: return {'status':'error','error':'job is not running'}
             if not self.session: return {'status':'error','error':'job session unavailable'}
+            # CodexAppServerSession supports only one caller-driven turn at a
+            # time. A concurrent run_turn blocks the socket handler and used
+            # to make send, then cancel, hit the client's 30-second timeout.
+            if self.thread.is_alive():
+                return {
+                    'status':'error',
+                    'error':'job turn is still running; mid-turn send is not supported. Use logs/status, or cancel and create a new job with the revised prompt.',
+                }
             result=self.session.run_turn(message, turn_timeout=float(timeout or SYNC_TIMEOUT_DEFAULT)); self.registry.append_transcript(self.job_id, {'followup':message,'final_text':result.final_text,'error':result.error,'transcript':result.projected_messages})
             return {'status':'completed' if not result.error else 'error','final_text':result.final_text,'error_text':result.error,'tool_iterations':result.tool_iterations}
 class Supervisor:

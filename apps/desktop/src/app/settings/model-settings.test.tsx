@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -32,7 +33,8 @@ vi.mock('@/hermes', () => ({
   saveMoaModels: (body: unknown) => saveMoaModels(body),
   setEnvVar: (key: string, value: string) => setEnvVar(key, value),
   getHermesConfigRecord: () => getHermesConfigRecord(),
-  saveHermesConfig: (config: unknown) => saveHermesConfig(config)
+  saveHermesConfig: (config: unknown) => saveHermesConfig(config),
+  setApiRequestProfile: vi.fn()
 }))
 
 vi.mock('@/store/onboarding', () => ({
@@ -71,11 +73,41 @@ afterEach(() => {
 
 async function renderModelSettings() {
   const { ModelSettings } = await import('./model-settings')
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
-  return render(<ModelSettings />)
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <ModelSettings />
+    </QueryClientProvider>
+  )
 }
 
 describe('ModelSettings', () => {
+  it('renders display-only model labels while preserving raw CLI Proxy route IDs', async () => {
+    getGlobalModelInfo.mockResolvedValueOnce({ provider: 'vibeproxy', model: 'gemini-3.1-pro-low' })
+    getGlobalModelOptions.mockResolvedValueOnce({
+      providers: [
+        {
+          name: 'CLI Proxy',
+          slug: 'vibeproxy',
+          models: ['gemini-3.1-pro-low'],
+          model_labels: { 'gemini-3.1-pro-low': 'Gemini 3.1 Pro' },
+          authenticated: true,
+          capabilities: { 'gemini-3.1-pro-low': { reasoning: true, fast: false } }
+        }
+      ]
+    })
+
+    await renderModelSettings()
+    await waitFor(() => expect(getGlobalModelOptions).toHaveBeenCalled())
+
+    const triggers = await screen.findAllByRole('combobox')
+    fireEvent.click(triggers[1])
+
+    expect((await screen.findAllByText('Gemini 3.1 Pro')).length).toBeGreaterThan(0)
+    expect(screen.queryByText('gemini-3.1-pro-low')).toBeNull()
+  })
+
   it('loads the current main model and lists configured providers only', async () => {
     await renderModelSettings()
 

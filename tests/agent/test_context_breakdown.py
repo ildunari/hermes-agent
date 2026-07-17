@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agent.context_breakdown import compute_session_context_breakdown
 
 
@@ -58,3 +60,38 @@ def test_breakdown_uses_measured_context_when_available():
 
     assert data["context_used"] == 42_000
     assert data["context_percent"] == 21
+
+
+@pytest.mark.parametrize("auto_mode", ["native", "off", "hermes"])
+def test_breakdown_hides_false_categories_for_codex_thread(auto_mode):
+    agent, parts = _make_agent(last_prompt_tokens=49_300, context_length=272_000)
+    agent.api_mode = "codex_app_server"
+    agent.codex_app_server_auto_compaction = auto_mode
+
+    with patch("agent.system_prompt.build_system_prompt_parts", return_value=parts):
+        data = compute_session_context_breakdown(
+            agent,
+            [{"role": "user", "content": "local transcript is not the Codex thread"}],
+        )
+
+    assert data["context_used"] == 49_300
+    assert data["context_percent"] == 18
+    assert data["categories"] == []
+    assert data["estimated_total"] > 0
+
+
+@pytest.mark.parametrize("last_prompt_tokens", [0, -1])
+def test_breakdown_keeps_unknown_codex_occupancy_unknown(last_prompt_tokens):
+    agent, parts = _make_agent(
+        last_prompt_tokens=last_prompt_tokens, context_length=272_000
+    )
+    agent.api_mode = "codex_app_server"
+
+    with patch("agent.system_prompt.build_system_prompt_parts", return_value=parts):
+        data = compute_session_context_breakdown(
+            agent, [{"role": "user", "content": "hello"}]
+        )
+
+    assert data["context_used"] == 0
+    assert data["context_percent"] == 0
+    assert data["categories"] == []

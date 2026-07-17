@@ -62,9 +62,17 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
     ``direct_messages_topic_id`` when no reply anchor exists.
     """
     thread_id = getattr(source, "thread_id", None)
-    if thread_id is None:
+    metadata = {"thread_id": thread_id} if thread_id is not None else {}
+    # Slack workspace identity is durable routing state, not ephemeral event
+    # metadata. Carry it on every outbound path (including unthreaded sends)
+    # so a multi-workspace Socket Mode gateway never falls back to its primary
+    # WebClient after an async, stream, or recovery boundary.
+    if _platform_name(getattr(source, "platform", None)) == "slack":
+        scope_id = getattr(source, "scope_id", None)
+        if scope_id:
+            metadata["slack_team_id"] = str(scope_id)
+    if not metadata:
         return None
-    metadata = {"thread_id": thread_id}
     chat_type = getattr(source, "chat_type", None)
     is_telegram_dm = _platform_name(getattr(source, "platform", None)) == "telegram" and chat_type == "dm"
     if is_telegram_dm:
@@ -1081,10 +1089,33 @@ def _profile_cache_roots() -> List[Path]:
     return roots
 
 
+def _kanban_attachment_roots() -> List[Path]:
+    """Return durable Kanban attachment roots without importing kanban_db."""
+    override = os.environ.get("HERMES_KANBAN_ATTACHMENTS_ROOT", "").strip()
+    if override:
+        return [Path(override).expanduser()]
+    home_override = os.environ.get("HERMES_KANBAN_HOME", "").strip()
+    root = Path(home_override).expanduser() if home_override else _HERMES_ROOT
+    roots = [root / "kanban" / "attachments"]
+    boards_root = root / "kanban" / "boards"
+    try:
+        board_dirs = [
+            path for path in boards_root.iterdir()
+            if path.is_dir() and not path.is_symlink()
+            and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", path.name)
+            and (path / "kanban.db").is_file()
+        ]
+    except OSError:
+        return roots
+    roots.extend(path / "attachments" for path in board_dirs)
+    return roots
+
+
 def _media_delivery_allowed_roots() -> List[Path]:
     """Return roots from which model-emitted local media may be delivered."""
     roots = [Path(root) for root in MEDIA_DELIVERY_SAFE_ROOTS]
     roots.extend(_profile_cache_roots())
+    roots.extend(_kanban_attachment_roots())
     extra_roots = os.environ.get(MEDIA_DELIVERY_ALLOW_DIRS_ENV, "")
     for chunk in extra_roots.split(os.pathsep):
         for raw_root in chunk.split(","):
@@ -1734,6 +1765,79 @@ class ProcessingOutcome(Enum):
     CANCELLED = "cancelled"
 
 
+@dataclass(frozen=True)
+class CommunicationIngressAttachment:
+    """Sanitized immutable attachment facts captured before media download."""
+
+    source_attachment_id: str
+    media_kind: str
+    mime_type: Optional[str] = None
+    uti: Optional[str] = None
+    size_bytes: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_attachment_id, str) or not self.source_attachment_id:
+            raise ValueError("source_attachment_id is required")
+        if self.media_kind not in {"image", "video", "audio", "document", "other"}:
+            raise ValueError("media_kind is invalid")
+        if self.size_bytes is not None and (
+            isinstance(self.size_bytes, bool)
+            or not isinstance(self.size_bytes, int)
+            or not 0 <= self.size_bytes <= 10_000_000_000
+        ):
+            raise ValueError("size_bytes is outside the allowed range")
+
+
+@dataclass(frozen=True)
+class CommunicationIngressEnvelope:
+    """Versioned transport-only communication facts from one source record."""
+
+    version: int
+    source_message_id: str
+    received_at: float
+    occurred_at: float
+    timestamp_source: str
+    chat_type: str
+    direction: str
+    sender_identity: str
+    visible_text: str
+    visible_urls: Tuple[str, ...] = ()
+    attachments: Tuple[CommunicationIngressAttachment, ...] = ()
+    reply_target: Optional[str] = None
+    reaction_target: Optional[str] = None
+    reaction_kind: Optional[str] = None
+    event_kind: str = "text"
+
+    def __post_init__(self) -> None:
+        if self.version != 1:
+            raise ValueError("unsupported communication ingress envelope version")
+        for name in ("source_message_id", "timestamp_source", "sender_identity"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise ValueError(f"{name} is required")
+        if self.chat_type not in {"dm", "group"}:
+            raise ValueError("chat_type is invalid")
+        if self.direction not in {"inbound", "outbound"}:
+            raise ValueError("direction is invalid")
+        if not isinstance(self.visible_text, str):
+            raise ValueError("visible_text must be text")
+        if not isinstance(self.visible_urls, tuple) or not all(
+            isinstance(value, str) for value in self.visible_urls
+        ):
+            raise ValueError("visible_urls must be an immutable string tuple")
+        if not isinstance(self.attachments, tuple) or not all(
+            isinstance(value, CommunicationIngressAttachment) for value in self.attachments
+        ):
+            raise ValueError("attachments must be an immutable descriptor tuple")
+        if self.event_kind not in {
+            "text", "link_share", "attachment_share", "reply",
+            "reaction_add", "reaction_remove",
+        }:
+            raise ValueError("event_kind is invalid")
+        is_reaction = self.event_kind in {"reaction_add", "reaction_remove"}
+        if is_reaction != bool(self.reaction_target and self.reaction_kind):
+            raise ValueError("reaction events require target and kind")
+
+
 @dataclass
 class MessageEvent:
     """
@@ -1801,6 +1905,10 @@ class MessageEvent:
     # consume via ``event.metadata.get(...)`` and must not rely on any
     # particular key existing.
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Immutable transport evidence. BlueBubbles may merge several records into
+    # one reactive turn, but every original member remains present here.
+    communication_ingress: Tuple[CommunicationIngressEnvelope, ...] = ()
 
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
@@ -2173,6 +2281,7 @@ _RETRYABLE_ERROR_PATTERNS = (
 # reply), an ``EphemeralReply`` to opt the reply into auto-deletion, or
 # ``None`` when the response was already delivered (e.g. via streaming).
 MessageHandler = Callable[[MessageEvent], Awaitable[Optional[Union[str, "EphemeralReply"]]]]
+IngressHandler = Callable[[MessageEvent], Awaitable[Tuple[str, ...]]]
 
 
 def resolve_channel_prompt(
@@ -2352,6 +2461,7 @@ class BasePlatformAdapter(ABC):
         self.config = config
         self.platform = platform
         self._message_handler: Optional[MessageHandler] = None
+        self._ingress_handler: Optional[IngressHandler] = None
         # Optional hook (e.g. Telegram DM topic recovery) that rewrites
         # ``event.source.thread_id`` before session keying. Returns the
         # corrected thread_id or None to leave the source untouched.
@@ -2801,6 +2911,10 @@ class BasePlatformAdapter(ABC):
         """
         self._message_handler = handler
 
+    def set_ingress_handler(self, handler: IngressHandler) -> None:
+        """Set the bounded durable-ingress handler used before webhook ACK."""
+        self._ingress_handler = handler
+
     def set_topic_recovery_fn(
         self,
         fn: Optional[Callable[[Any], Optional[str]]],
@@ -3215,6 +3329,30 @@ class BasePlatformAdapter(ABC):
         Default is a no-op for platforms with one-shot typing indicators.
         """
         pass
+
+    async def _stop_typing_with_metadata(self, chat_id: str, metadata=None) -> None:
+        """Stop typing while preserving platform-specific routing metadata.
+
+        Most adapters key typing state by chat and retain the historical
+        ``stop_typing(chat_id)`` signature. Slack AI status is per thread and
+        workspace, however, so losing metadata can clear a sibling thread or
+        leave the current one active. Introspect at this shared chokepoint so
+        existing adapters remain source-compatible.
+        """
+        if metadata:
+            try:
+                params = inspect.signature(self.stop_typing).parameters
+                accepts_metadata = "metadata" in params or any(
+                    param.kind is inspect.Parameter.VAR_KEYWORD
+                    for param in params.values()
+                )
+            except (TypeError, ValueError):
+                accepts_metadata = False
+            if accepts_metadata:
+                stop_typing = getattr(self, "stop_typing")
+                await stop_typing(chat_id, metadata=metadata)
+                return
+        await self.stop_typing(chat_id)
 
     async def send_multiple_images(
         self,
@@ -3893,7 +4031,7 @@ class BasePlatformAdapter(ABC):
             # Cancelling _keep_typing alone won't clean that up.
             if hasattr(self, "stop_typing"):
                 try:
-                    await self.stop_typing(chat_id)
+                    await self._stop_typing_with_metadata(chat_id, metadata)
                 except Exception:
                     pass
             self._typing_paused.discard(chat_id)
@@ -3903,6 +4041,7 @@ class BasePlatformAdapter(ABC):
         chat_id: str,
         typing_task: asyncio.Task | None = None,
         *,
+        metadata=None,
         timeout: float = 0.5,
         stop_attempts: int = 2,
     ) -> None:
@@ -3922,7 +4061,7 @@ class BasePlatformAdapter(ABC):
             attempts = max(1, stop_attempts)
             for attempt in range(attempts):
                 try:
-                    await self.stop_typing(chat_id)
+                    await self._stop_typing_with_metadata(chat_id, metadata)
                 except Exception:
                     pass
                 if attempt < attempts - 1:
@@ -3942,14 +4081,14 @@ class BasePlatformAdapter(ABC):
         """Resume typing indicator for a chat after approval resolves."""
         self._typing_paused.discard(chat_id)
 
-    async def interrupt_session_activity(self, session_key: str, chat_id: str) -> None:
+    async def interrupt_session_activity(self, session_key: str, chat_id: str, metadata=None) -> None:
         """Signal the active session loop to stop and clear typing immediately."""
         if session_key:
             interrupt_event = self._active_sessions.get(session_key)
             if interrupt_event is not None:
                 interrupt_event.set()
         try:
-            await self.stop_typing(chat_id)
+            await self._stop_typing_with_metadata(chat_id, metadata)
         except Exception:
             pass
 
@@ -5034,6 +5173,7 @@ class BasePlatformAdapter(ABC):
             await self._stop_typing_refresh(
                 event.source.chat_id,
                 typing_task,
+                metadata=_thread_metadata,
             )
 
         try:
@@ -5532,6 +5672,7 @@ class BasePlatformAdapter(ABC):
             await self._stop_typing_refresh(
                 event.source.chat_id,
                 None,
+                metadata=_thread_metadata,
                 stop_attempts=1,
             )
             # Final drain/release boundary: force-flush any timer that missed
@@ -5700,6 +5841,7 @@ class BasePlatformAdapter(ABC):
         user_id_alt: Optional[str] = None,
         chat_id_alt: Optional[str] = None,
         is_bot: bool = False,
+        scope_id: Optional[str] = None,
         guild_id: Optional[str] = None,
         parent_chat_id: Optional[str] = None,
         message_id: Optional[str] = None,
@@ -5723,6 +5865,7 @@ class BasePlatformAdapter(ABC):
             user_id_alt=user_id_alt,
             chat_id_alt=chat_id_alt,
             is_bot=is_bot,
+            scope_id=str(scope_id) if scope_id else None,
             guild_id=str(guild_id) if guild_id else None,
             parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
             message_id=str(message_id) if message_id else None,

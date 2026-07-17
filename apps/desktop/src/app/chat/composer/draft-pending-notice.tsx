@@ -1,8 +1,13 @@
 import { Codicon } from '@/components/ui/codicon'
 import { useI18n } from '@/i18n'
 
+const FALLBACK =
+  'Draft only — press Send to queue it after the current run.'
+
 export function DraftPendingNotice() {
   const { t } = useI18n()
+  const notice =
+    (t.composer as { draftPendingNotice?: string }).draftPendingNotice ?? FALLBACK
 
   return (
     <div
@@ -10,7 +15,7 @@ export function DraftPendingNotice() {
       data-testid="composer-draft-pending-notice"
     >
       <Codicon className="text-[color-mix(in_srgb,var(--dt-composer-ring)_75%,var(--muted-foreground))]" name="edit" size="0.72rem" />
-      <span>{t.composer.draftPendingNotice}</span>
+      <span>{notice}</span>
     </div>
   )
 }

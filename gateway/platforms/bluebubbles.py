@@ -10,13 +10,15 @@ downloading from PR #4588 (YuhangLin).
 
 import asyncio
 from collections import OrderedDict
+import hashlib
 import json
 import logging
 import os
+import random
 import re
 import uuid
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import quote
 
 import httpx
@@ -24,6 +26,8 @@ import httpx
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
+    CommunicationIngressAttachment,
+    CommunicationIngressEnvelope,
     MessageEvent,
     MessageType,
     SendResult,
@@ -60,11 +64,11 @@ DEFAULT_MENTION_PATTERNS = [
 # Tapback reaction codes (BlueBubbles associatedMessageType values)
 _TAPBACK_ADDED = {
     2000: "love", 2001: "like", 2002: "dislike",
-    2003: "laugh", 2004: "emphasize", 2005: "question",
+    2003: "laugh", 2004: "emphasis", 2005: "question",
 }
 _TAPBACK_REMOVED = {
     3000: "love", 3001: "like", 3002: "dislike",
-    3003: "laugh", 3004: "emphasize", 3005: "question",
+    3003: "laugh", 3004: "emphasis", 3005: "question",
 }
 
 # Webhook event types that carry user messages
@@ -150,6 +154,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self.split_outbound_paragraphs = self._coerce_bool(
             extra.get("split_outbound_paragraphs", os.getenv("BLUEBUBBLES_SPLIT_OUTBOUND_PARAGRAPHS")),
             default=False,
+        )
+        self.bubble_delay_min_ms = max(0, int(extra.get("bubble_delay_min_ms", 0) or 0))
+        self.bubble_delay_max_ms = max(
+            self.bubble_delay_min_ms,
+            int(extra.get("bubble_delay_max_ms", self.bubble_delay_min_ms) or self.bubble_delay_min_ms),
+        )
+        self.bubble_typing_chars_per_second = max(
+            1.0, float(extra.get("bubble_typing_chars_per_second", 18.0) or 18.0)
         )
         self.webhook_register = self._coerce_bool(
             extra.get("webhook_register", os.getenv("BLUEBUBBLES_WEBHOOK_REGISTER", "true")),
@@ -577,6 +589,41 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             pass
         return None
 
+    async def resolve_authenticated_existing_dm(
+        self, chat_guid: str, expected_participant: object
+    ) -> tuple[str, str] | None:
+        from gateway.guest_access import normalize_identity
+
+        if isinstance(expected_participant, (set, frozenset, list, tuple)):
+            expected = {normalize_identity(item) for item in expected_participant}
+        else:
+            expected = {normalize_identity(expected_participant)}
+        expected.discard("")
+        if not chat_guid or not expected:
+            return None
+        payload = await self._api_post("/api/v1/chat/query", {"limit": 500, "offset": 0})
+        for chat in payload.get("data", []) or []:
+            guid = str(chat.get("guid") or chat.get("chatGuid") or "")
+            if guid != chat_guid:
+                continue
+            raw_participants = chat.get("participants") or chat.get("handles") or []
+            participants = {
+                normalize_identity(
+                    item.get("address") or item.get("handle") or item.get("id")
+                    if isinstance(item, Mapping) else item
+                )
+                for item in raw_participants
+            }
+            participants.discard("")
+            if len(participants) != 1 or not participants <= expected:
+                return None
+            participant = next(iter(participants))
+            fingerprint = hashlib.sha256(
+                f"{guid}\0{participant}".encode("utf-8")
+            ).hexdigest()
+            return guid, fingerprint
+        return None
+
     async def _create_chat_for_handle(
         self, address: str, message: str
     ) -> SendResult:
@@ -679,6 +726,16 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         last = SendResult(success=True)
         delivered_chunks = 0
         for chunk in chunks:
+            if delivered_chunks > 0 and self.bubble_delay_max_ms > 0:
+                # A burst should feel typed, not atomically dumped. The delay is
+                # bounded by profile config and scales gently with bubble length.
+                try:
+                    await self.send_typing(chat_id)
+                except Exception:
+                    pass
+                jitter = random.uniform(self.bubble_delay_min_ms, self.bubble_delay_max_ms) / 1000.0
+                typed = min(2.5, len(chunk) / self.bubble_typing_chars_per_second)
+                await asyncio.sleep(jitter + typed)
             guid = await self._resolve_chat_guid(chat_id)
             if not guid:
                 # If the target looks like an address, try creating a new chat
@@ -1056,19 +1113,25 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     # Webhook handling
     # ------------------------------------------------------------------
 
+    def _extract_payload_records(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Normalize every supported wrapper without truncating data lists."""
+        data = payload.get("data")
+        if isinstance(data, dict):
+            return [data]
+        if isinstance(data, list):
+            if not all(isinstance(item, dict) for item in data):
+                raise ValueError("data list members must be message records")
+            return data
+        if isinstance(payload.get("message"), dict):
+            return [payload["message"]]
+        return [payload] if isinstance(payload, dict) else []
+
     def _extract_payload_record(
         self, payload: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        data = payload.get("data")
-        if isinstance(data, dict):
-            return data
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    return item
-        if isinstance(payload.get("message"), dict):
-            return payload.get("message")
-        return payload if isinstance(payload, dict) else None
+        """Compatibility helper for callers that intentionally inspect one record."""
+        records = self._extract_payload_records(payload)
+        return records[0] if records else None
 
     @staticmethod
     def _value(*candidates: Any) -> Optional[str]:
@@ -1078,18 +1141,212 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         return None
 
     @staticmethod
-    def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    def _coerce_bool(
+        value: Any, *, default: bool = False, field: str = "value"
+    ) -> bool:
         if isinstance(value, bool):
             return value
         if value is None:
             return default
+        if isinstance(value, int) and value in {0, 1}:
+            return bool(value)
         if isinstance(value, str):
             normalized = value.strip().lower()
             if normalized in {"1", "true", "yes", "on"}:
                 return True
             if normalized in {"0", "false", "no", "off"}:
                 return False
-        return default
+        raise ValueError(f"{field} is not a boolean")
+
+    @staticmethod
+    def _value_or_raw(mapping: Mapping[str, Any], *names: str) -> Any:
+        for name in names:
+            if name in mapping and mapping[name] is not None:
+                return mapping[name]
+        return None
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+        return None
+
+    @classmethod
+    def _source_timestamp(
+        cls, record: Mapping[str, Any], *, received_at: float
+    ) -> tuple[float, str]:
+        for field in (
+            "dateCreated", "date_created", "createdAt", "created_at", "timestamp", "date"
+        ):
+            raw = record.get(field)
+            if raw is None or isinstance(raw, bool):
+                continue
+            try:
+                if isinstance(raw, str) and not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", raw.strip()):
+                    parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    return parsed.timestamp(), field
+                value = float(raw)
+                magnitude = abs(value)
+                if magnitude >= 1e18:
+                    value /= 1e9
+                elif magnitude >= 1e15:
+                    value /= 1e6
+                elif magnitude >= 1e12:
+                    value /= 1e3
+                if value >= 0:
+                    return value, field
+            except (TypeError, ValueError, OverflowError):
+                continue
+        return float(received_at), "received_at"
+
+    def _normalize_ingress_record(
+        self, record: Mapping[str, Any], *, received_at: float, record_index: int = 0
+    ) -> CommunicationIngressEnvelope:
+        """Freeze one BlueBubbles record as versioned transport-only facts."""
+        from gateway.contact_memory.imessage_communication_adapter import (
+            _media_kind,
+            _safe_mime,
+            _safe_uti,
+            parse_associated_guid,
+        )
+        from gateway.contact_memory.imessage_link_review import extract_urls
+
+        text = self._value(record.get("text"), record.get("message"), record.get("body")) or ""
+        is_from_me = self._coerce_bool(
+            self._value_or_raw(record, "isFromMe", "fromMe", "is_from_me"),
+            field="isFromMe",
+        )
+        chat_guid = self._value(record.get("chatGuid"), record.get("chat_guid"))
+        chat_identifier = self._value(
+            record.get("chatIdentifier"), record.get("chat_identifier"),
+            record.get("identifier"),
+        )
+        if not chat_guid:
+            chats = record.get("chats")
+            if isinstance(chats, list) and chats and isinstance(chats[0], dict):
+                chat_guid = self._value(chats[0].get("guid"), chats[0].get("chatGuid"))
+                chat_identifier = chat_identifier or self._value(
+                    chats[0].get("chatIdentifier"), chats[0].get("chat_identifier"),
+                    chats[0].get("identifier"),
+                )
+        sender = self._value(
+            record.get("handle", {}).get("address")
+            if isinstance(record.get("handle"), dict) else None,
+            record.get("sender"), record.get("from"), record.get("address"),
+            chat_identifier,
+        ) or "unknown"
+        is_group = self._coerce_bool(
+            self._value_or_raw(record, "isGroup", "is_group"), field="isGroup"
+        )
+        is_group = is_group or ";+;" in (chat_guid or "")
+        associated_type = self._coerce_int(self._value_or_raw(
+            record, "associatedMessageType", "associated_message_type"
+        ))
+        associated_raw = self._value(
+            record.get("associatedMessageGuid"), record.get("associated_message_guid")
+        )
+        if (
+            associated_type not in {None, 0}
+            and associated_type not in _TAPBACK_ADDED
+            and associated_type not in _TAPBACK_REMOVED
+        ):
+            raise ValueError("unsupported associated message type")
+        reaction_kind = None
+        event_kind = "text"
+        reaction_target = None
+        if associated_type in _TAPBACK_ADDED or associated_type in _TAPBACK_REMOVED:
+            reaction_kind = (_TAPBACK_ADDED.get(associated_type)
+                             or _TAPBACK_REMOVED.get(associated_type))
+            event_kind = "reaction_add" if associated_type in _TAPBACK_ADDED else "reaction_remove"
+            reaction_target = parse_associated_guid(associated_raw)
+            if not reaction_target:
+                raise ValueError("reaction target is malformed")
+        reply_raw_values = tuple(value for value in (
+            self._value(record.get("threadOriginatorGuid"), record.get("thread_originator_guid")),
+            self._value(record.get("replyToGuid"), record.get("reply_to_guid")),
+            associated_raw if associated_type in {None, 0} else None,
+        ) if value)
+        reply_targets = tuple(parse_associated_guid(value) for value in reply_raw_values)
+        if any(not target for target in reply_targets):
+            raise ValueError("reply target is malformed")
+        if len(set(reply_targets)) > 1:
+            raise ValueError("conflicting reply targets")
+        reply_target = reply_targets[0] if reply_targets else None
+
+        attachments: list[CommunicationIngressAttachment] = []
+        raw_attachments = record.get("attachments")
+        if isinstance(raw_attachments, list):
+            for index, raw in enumerate(raw_attachments):
+                if not isinstance(raw, Mapping):
+                    continue
+                source_attachment_id = self._value(
+                    raw.get("guid"), raw.get("id"), raw.get("attachmentGuid"),
+                    raw.get("attachment_guid"),
+                ) or f"missing:{index}"
+                mime = _safe_mime(self._value_or_raw(raw, "mimeType", "mime_type"))
+                uti = _safe_uti(self._value_or_raw(
+                    raw, "uti", "typeIdentifier", "type_identifier"
+                ))
+                size = self._coerce_int(self._value_or_raw(
+                    raw, "totalBytes", "total_bytes", "sizeBytes", "size_bytes", "size"
+                ))
+                if size is not None and not 0 <= size <= 10_000_000_000:
+                    size = None
+                attachments.append(CommunicationIngressAttachment(
+                    source_attachment_id=source_attachment_id,
+                    media_kind=_media_kind(mime, uti),
+                    mime_type=mime,
+                    uti=uti,
+                    size_bytes=size,
+                ))
+        visible_urls = tuple(extract_urls(text))
+        if event_kind not in {"reaction_add", "reaction_remove"}:
+            if reply_target:
+                event_kind = "reply"
+            elif attachments:
+                event_kind = "attachment_share"
+            elif visible_urls:
+                event_kind = "link_share"
+        occurred_at, timestamp_source = self._source_timestamp(
+            record, received_at=received_at
+        )
+        source_message_id = self._value(
+            record.get("guid"), record.get("messageGuid"), record.get("message_guid"),
+            str(record.get("id")) if record.get("id") is not None else None,
+        )
+        if not source_message_id:
+            fallback_record = json.dumps(
+                dict(record), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            source_message_id = "fallback:" + hashlib.sha256(
+                f"{record_index}\0{fallback_record}".encode()
+            ).hexdigest()
+        return CommunicationIngressEnvelope(
+            version=1,
+            source_message_id=source_message_id,
+            received_at=float(received_at),
+            occurred_at=occurred_at,
+            timestamp_source=timestamp_source,
+            chat_type="group" if is_group else "dm",
+            direction="outbound" if is_from_me else "inbound",
+            sender_identity=sender,
+            visible_text=text,
+            visible_urls=visible_urls,
+            attachments=tuple(attachments),
+            reply_target=reply_target,
+            reaction_target=reaction_target,
+            reaction_kind=reaction_kind,
+            event_kind=event_kind,
+        )
 
     @staticmethod
     def _load_mention_patterns(raw: Any) -> List[str]:
@@ -1164,6 +1421,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             if event.media_urls:
                 existing.media_urls.extend(event.media_urls)
                 existing.media_types.extend(event.media_types)
+            if event.communication_ingress:
+                existing.communication_ingress = (
+                    *existing.communication_ingress,
+                    *event.communication_ingress,
+                )
             if event.message_id:
                 existing.message_id = event.message_id
             if event.reply_to_message_id:
@@ -1195,7 +1457,12 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             if self._pending_text_batch_tasks.get(key) is current_task:
                 self._pending_text_batch_tasks.pop(key, None)
 
-    async def _handle_webhook(self, request):
+    async def _handle_webhook(
+        self,
+        request,
+        *,
+        _committed_ingress: tuple[CommunicationIngressEnvelope, ...] | None = None,
+    ):
         from aiohttp import web
 
         token = (
@@ -1232,32 +1499,128 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if event_type and event_type not in _MESSAGE_EVENTS:
             return web.Response(text="ok")
 
-        record = self._extract_payload_record(payload) or {}
-        is_from_me = bool(
-            record.get("isFromMe")
-            or record.get("fromMe")
-            or record.get("is_from_me")
+        received_at = datetime.now(timezone.utc).timestamp()
+        try:
+            records = self._extract_payload_records(payload)
+            if not records:
+                return web.json_response({"error": "missing message records"}, status=400)
+            if _committed_ingress is not None:
+                ingress = _committed_ingress
+            else:
+                ingress = tuple(
+                    self._normalize_ingress_record(
+                        record, received_at=received_at, record_index=index
+                    )
+                    for index, record in enumerate(records)
+                )
+        except ValueError as exc:
+            logger.warning("[bluebubbles] rejected malformed ingress: %s", exc)
+            return web.json_response({"error": "invalid message record"}, status=400)
+        owner_reaction_only = all(
+            item.direction == "outbound"
+            and item.event_kind in {"reaction_add", "reaction_remove"}
+            for item in ingress
         )
-        if is_from_me:
-            return web.Response(text="ok")
+        owner_outbound_only = all(item.direction == "outbound" for item in ingress)
+        if any(item.direction != "inbound" for item in ingress) and not owner_reaction_only:
+            if not owner_outbound_only:
+                return web.json_response({"error": "mixed message directions"}, status=400)
+        if len({(item.sender_identity, item.chat_type) for item in ingress}) != 1:
+            return web.json_response({"error": "mixed message principals"}, status=400)
+        record = dict(records[0])
+        text = "\n".join(
+            item.visible_text for item in ingress
+            if item.event_kind not in {"reaction_add", "reaction_remove"}
+            and item.visible_text
+        )
+        reaction_only = all(
+            item.event_kind in {"reaction_add", "reaction_remove"} for item in ingress
+        )
 
-        # Skip tapback reactions delivered as messages
-        assoc_type = record.get("associatedMessageType")
-        if isinstance(assoc_type, int) and assoc_type in {
-            **_TAPBACK_ADDED,
-            **_TAPBACK_REMOVED,
-        }:
-            return web.Response(text="ok")
-
-        text = (
-            self._value(
-                record.get("text"), record.get("message"), record.get("body")
+        # Persist authenticated direct ingress before attachment download,
+        # batching, or ordinary agent dispatch. The gateway callback performs
+        # owner/guest routing and returns only after SQLite commits.
+        if self._ingress_handler is not None and _committed_ingress is None:
+            pre_chat_guid = self._value(
+                record.get("chatGuid"), payload.get("chatGuid"),
+                record.get("chat_guid"), payload.get("chat_guid"), payload.get("guid"),
             )
-            or ""
-        )
+            if not pre_chat_guid:
+                pre_chats = record.get("chats") or []
+                if pre_chats and isinstance(pre_chats[0], dict):
+                    pre_chat_guid = pre_chats[0].get("guid") or pre_chats[0].get("chatGuid")
+            pre_chat_identifier = self._value(
+                record.get("chatIdentifier"), record.get("identifier"),
+                payload.get("chatIdentifier"), payload.get("identifier"),
+            )
+            pre_sender = ingress[0].sender_identity
+            if not (pre_chat_guid or pre_chat_identifier):
+                pre_chat_identifier = pre_sender
+            pre_is_group = ingress[0].chat_type == "group"
+            pre_session_chat_id = self._canonical_session_chat_id(
+                pre_chat_guid, pre_chat_identifier, pre_sender, is_group=pre_is_group
+            )
+            if not pre_session_chat_id:
+                return web.json_response({"error": "missing chat target"}, status=400)
+            pre_source = self.build_source(
+                chat_id=pre_session_chat_id,
+                chat_name=pre_chat_identifier or pre_sender,
+                chat_type="group" if pre_is_group else "dm",
+                user_id=pre_sender,
+                user_name=pre_sender,
+                chat_id_alt=pre_chat_identifier,
+            )
+            pre_event = MessageEvent(
+                text=text or ("(reaction)" if reaction_only else "(attachment)"),
+                source=pre_source,
+                raw_message=payload,
+                message_id=ingress[-1].source_message_id,
+                communication_ingress=ingress,
+            )
+            try:
+                await self._ingress_handler(pre_event)
+            except Exception:
+                logger.exception("[bluebubbles] durable ingress failed")
+                return web.json_response({"error": "ingress unavailable"}, status=503)
+            if reaction_only or owner_outbound_only:
+                return web.Response(text="ok")
+
+        # Owner-authored records are canonical evidence and reply targets, but
+        # never reactive agent input. Without a durable ingress handler there is
+        # nowhere safe to store them, so acknowledge without dispatching.
+        if owner_outbound_only:
+            return web.Response(text="ok")
 
         # --- Inbound attachment handling ---
-        attachments = record.get("attachments") or []
+        attachments = [
+            attachment
+            for source_record in records
+            for attachment in (
+                source_record.get("attachments")
+                if isinstance(source_record.get("attachments"), list) else []
+            )
+            if isinstance(attachment, dict)
+        ]
+        if (
+            attachments
+            and self._ingress_handler is not None
+            and _committed_ingress is None
+        ):
+            body = json.dumps(payload, separators=(",", ":")).encode()
+
+            class _CommittedRequest:
+                query = {"password": self.password}
+                headers: dict[str, str] = {}
+
+                async def read(self) -> bytes:
+                    return body
+
+            task = asyncio.ensure_future(self._handle_webhook(
+                _CommittedRequest(), _committed_ingress=ingress
+            ))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            return web.Response(text="ok")
         media_urls: List[str] = []
         media_types: List[str] = []
         msg_type = MessageType.TEXT
@@ -1288,8 +1651,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             if "image" in mime_prefixes:
                 msg_type = MessageType.PHOTO
 
-        if not text and media_urls:
+        if not text and any(item.attachments for item in ingress):
             text = "(attachment)"
+        if reaction_only:
+            text = "(reaction)"
         # --- End attachment handling ---
 
         chat_guid = self._value(
@@ -1328,7 +1693,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if not sender or not (chat_guid or chat_identifier) or not text:
             return web.json_response({"error": "missing message fields"}, status=400)
 
-        is_group = bool(record.get("isGroup")) or (";+;" in (chat_guid or ""))
+        is_group = ingress[0].chat_type == "group"
         session_chat_id = self._canonical_session_chat_id(
             chat_guid,
             chat_identifier,
@@ -1347,22 +1712,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             user_name=sender,
             chat_id_alt=chat_identifier,
         )
-        message_id = self._value(
-            record.get("guid"),
-            record.get("messageGuid"),
-            record.get("id"),
-        )
-        if message_id:
-            message_id = str(message_id)
-            if message_id in self._seen_message_guids:
-                self._seen_message_guids.move_to_end(message_id)
-                return web.Response(text="ok")
-            self._seen_message_guids[message_id] = None
-            while len(self._seen_message_guids) > max(1, self._seen_message_guid_limit):
-                self._seen_message_guids.popitem(last=False)
-        reply_to_message_id = self._value(
-            record.get("threadOriginatorGuid"),
-            record.get("associatedMessageGuid"),
+        # Durable contact-store source uniqueness is authoritative. The adapter
+        # must not claim a GUID before routed persistence succeeds.
+        message_id = ingress[-1].source_message_id
+        reply_to_message_id = next(
+            (item.reply_target for item in reversed(ingress) if item.reply_target), None
         )
         mentioned_text = None
         if is_group and self.group_require_mention:
@@ -1380,6 +1734,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                     message_id=message_id,
                     media_urls=media_urls,
                     media_types=media_types,
+                    communication_ingress=ingress,
                     channel_prompt=(
                         "Observed group context may be present; treat it as background only."
                     ),
@@ -1401,6 +1756,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to_message_id,
             media_urls=media_urls,
             media_types=media_types,
+            communication_ingress=ingress,
+            metadata={"_bluebubbles_reaction_only": reaction_only},
             channel_prompt=(
                 "Observed group context may be present; treat it as background only."
                 if is_group else None

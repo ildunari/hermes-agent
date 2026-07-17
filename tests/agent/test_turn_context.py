@@ -8,6 +8,7 @@ confirm the prologue produces the right ``TurnContext`` and applies the
 
 from __future__ import annotations
 
+import threading
 import types
 from unittest.mock import MagicMock, patch
 
@@ -44,6 +45,7 @@ class _FakeAgent:
         self.base_url = "https://openrouter.ai/api/v1"
         self.api_key = "sk-x"
         self.api_mode = "chat_completions"
+        self.codex_app_server_auto_compaction = "native"
         self.platform = "cli"
         self.quiet_mode = True
         self.max_iterations = 90
@@ -73,6 +75,9 @@ class _FakeAgent:
         self._invalid_tool_retries = -1
         self._vision_supported = None
         self._persist_calls = 0
+        self._session_messages = []
+        self._pending_cli_user_message = None
+        self._session_persist_lock = threading.RLock()
         # Records _cached_system_prompt at the moment _ensure_db_session()
         # is called (regression guard for #45499 turn-setup ordering).
         self._ensure_db_prompt_at_call = "<unset>"
@@ -209,6 +214,55 @@ def test_persist_user_message_becomes_original():
     assert ctx.messages[-1]["content"] == "api-prefixed"
 
 
+def test_pending_cli_message_carries_durable_marker_to_new_turn_dict():
+    """A close-persisted CLI input must not be written again by turn start."""
+    agent = _FakeAgent()
+    staged = {"role": "user", "content": "already durable", "_db_persisted": True}
+    agent._pending_cli_user_message = staged
+
+    ctx = _build(agent, user_message="already durable")
+
+    assert ctx.messages[-1] is staged
+    assert ctx.messages[-1]["content"] == "already durable"
+    assert ctx.messages[-1]["_db_persisted"] is True
+    assert agent._pending_cli_user_message is None
+
+
+def test_stale_pending_cli_message_does_not_replace_new_turn_input():
+    """A failed prior persistence handoff cannot substitute later user input."""
+    agent = _FakeAgent()
+    agent._pending_cli_user_message = {"role": "user", "content": "old prompt"}
+
+    stale = agent._pending_cli_user_message
+    ctx = _build(
+        agent,
+        user_message="new prompt",
+        conversation_history=[{"role": "assistant", "content": "old answer"}],
+    )
+
+    assert ctx.messages[-1]["content"] == "new prompt"
+    assert ctx.messages[-1] is not stale
+    assert agent._pending_cli_user_message is None
+
+
+def test_pending_cli_message_uses_clean_override_for_api_local_note():
+    """A noted API message reuses the clean staged dict and its DB marker."""
+    agent = _FakeAgent()
+    staged = {"role": "user", "content": "clean prompt", "_db_persisted": True}
+    agent._pending_cli_user_message = staged
+
+    ctx = _build(
+        agent,
+        user_message="[MODEL NOTE]\n\nclean prompt",
+        persist_user_message="clean prompt",
+    )
+
+    assert ctx.messages[-1] is staged
+    assert ctx.messages[-1]["content"] == "[MODEL NOTE]\n\nclean prompt"
+    assert ctx.messages[-1]["_db_persisted"] is True
+    assert agent._pending_cli_user_message is None
+
+
 def test_memory_nudge_fires_at_interval():
     agent = _FakeAgent()
     agent._memory_nudge_interval = 1
@@ -276,6 +330,32 @@ def test_preflight_compression_sets_explicit_compaction_flag_for_hook():
 
     invoke_hook.assert_called_once()
     assert invoke_hook.call_args.kwargs["compaction_applied"] is True
+
+
+@pytest.mark.parametrize("auto_mode", ["native", "off", "hermes"])
+def test_codex_preflight_preserves_real_provider_usage(auto_mode):
+    """A local transcript estimate must not replace Codex thread occupancy."""
+    agent = _FakeAgent()
+    agent.api_mode = "codex_app_server"
+    agent.codex_app_server_auto_compaction = auto_mode
+    agent.compression_enabled = True
+    agent.context_compressor = types.SimpleNamespace(
+        protect_first_n=0,
+        protect_last_n=0,
+        threshold_tokens=200_000,
+        context_length=272_000,
+        last_prompt_tokens=49_300,
+        last_real_prompt_tokens=49_300,
+        should_defer_preflight_to_real_usage=lambda _tokens: False,
+        should_compress=lambda _tokens: False,
+    )
+
+    with patch(
+        "agent.turn_context.estimate_request_tokens_rough", return_value=166_800
+    ):
+        _build(agent, conversation_history=[{"role": "assistant", "content": "prior"}])
+
+    assert agent.context_compressor.last_prompt_tokens == 49_300
 
 
 def test_run_conversation_consumes_turn_context_system_lane_without_second_pre_llm_hook():

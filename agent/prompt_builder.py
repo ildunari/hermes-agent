@@ -1686,16 +1686,15 @@ def build_skills_system_prompt(
 
         result = (
             "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill(action='view', name=name) and follow its instructions. "
-            "Err on the side of loading — it is always better to have context you don't need "
-            "than to miss critical steps, pitfalls, or established workflows. "
+            "Before substantive work, scan the skills below. Load a skill only when it is clearly and materially relevant "
+            "to the task, then load it once with skill(action='view', name=name) and follow its instructions. "
+            "Do not load skills speculatively or repeatedly; unnecessary loads add latency and context. "
             "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. Load the skill "
-            "even if you think you could handle the task with basic tools like web_search or terminal. "
+            "and proven workflows that outperform general-purpose approaches. When a skill is clearly relevant, load it "
+            "once, before substantive work, even if you could handle the task with basic tools like web_search or terminal. "
             "Skills also encode the user's preferred approach, conventions, and quality standards "
-            "for tasks like code review, planning, and testing — load them even for tasks you "
-            "already know how to do, because the skill defines how it should be done here.\n"
+            "for tasks like code review, planning, and testing. When such a skill is clearly relevant, "
+            "load it even if you already know the domain, because it defines how the task should be done here.\n"
             "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
             "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
             "skills, voice, gateway, plugins, or any feature — load the `hermes__hermes-agent` skill "
@@ -1710,7 +1709,7 @@ def build_skills_system_prompt(
             + "\n".join(index_lines) + "\n"
             "</available_skills>\n"
             "\n"
-            "Only proceed without loading a skill if genuinely none are relevant to the task."
+            "Proceed without loading a skill when none is clearly and materially relevant to the task."
             + hidden_note
         )
 

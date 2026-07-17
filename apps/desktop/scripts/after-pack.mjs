@@ -16,6 +16,12 @@ const HERMES_DEVELOPER_ID_SIGNING_IDENTITY = '3A22F53A48A189F4A8766CACE00192860C
 const HERMES_DEVELOPER_ID_KEYCHAIN_ITEM = 'Hermes Developer ID Signing Keychain'
 const HERMES_SIGNING_PASSWORD_SERVICE = 'Hermes Developer ID Signing Keychain Password'
 const HERMES_OP_SHIM = path.join(os.homedir(), '.local', 'bin', 'op')
+const HERMES_SIGNING_KEYCHAIN = path.join(
+  os.homedir(),
+  'Library',
+  'Keychains',
+  'hermes-developer-id-signing.keychain-db',
+)
 const SIGNING_COMMAND_TIMEOUT_MS = 20_000
 
 let didTryUnlockSigningKeychains = false
@@ -41,9 +47,7 @@ function unlockHermesSigningKeychains() {
   if (didTryUnlockSigningKeychains || process.platform !== 'darwin') return
   didTryUnlockSigningKeychains = true
 
-  const keychains = [
-    path.join(os.homedir(), 'Library', 'Keychains', 'hermes-developer-id-signing.keychain-db'),
-  ].filter(fs.existsSync)
+  const keychains = [HERMES_SIGNING_KEYCHAIN].filter(fs.existsSync)
   if (keychains.length === 0) {
     throw new Error('Hermes signing keychain is missing; refusing interactive codesign fallback')
   }
@@ -145,19 +149,22 @@ function localSignMacApp(context) {
 
   const desktopRoot = path.resolve(import.meta.dirname, '..')
   const entitlements = path.join(desktopRoot, 'electron', 'entitlements.mac.plist')
+  const inheritedEntitlements = path.join(desktopRoot, 'electron', 'entitlements.mac.inherit.plist')
+  const osxSign = path.resolve(desktopRoot, '..', '..', 'node_modules', '.bin', 'electron-osx-sign')
+  if (!fs.existsSync(osxSign)) {
+    throw new Error(`electron-osx-sign is missing: ${osxSign}`)
+  }
   execFileSync(
-    '/usr/bin/codesign',
+    osxSign,
     [
-      '--force',
-      '--deep',
-      '--timestamp=none',
-      '--options',
-      'runtime',
-      '--entitlements',
-      entitlements,
-      '--sign',
-      signingIdentity,
       appPath,
+      `--identity=${signingIdentity}`,
+      `--keychain=${HERMES_SIGNING_KEYCHAIN}`,
+      '--hardened-runtime',
+      `--entitlements=${entitlements}`,
+      `--entitlements-inherit=${inheritedEntitlements}`,
+      '--timestamp',
+      '--verbose',
     ],
     { stdio: 'inherit' },
   )

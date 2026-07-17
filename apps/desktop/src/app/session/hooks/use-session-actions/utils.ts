@@ -2,6 +2,7 @@ import { getSession } from '@/hermes'
 import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
+import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
 import {
@@ -15,7 +16,7 @@ import {
   setCurrentProvider,
   setCurrentReasoningEffort,
   setCurrentServiceTier,
-  setCurrentUsage,
+  setCurrentUsageSnapshot,
   setSessions,
   setYoloActive
 } from '@/store/session'
@@ -266,6 +267,10 @@ export function applyRuntimeInfo(info: SessionRuntimeInfo | undefined): SessionR
 
   reportBackendContract(info.desktop_contract)
 
+  if (info.approval_mode !== undefined) {
+    reconcileApprovalModeForProfile($activeGatewayProfile.get(), info.approval_mode)
+  }
+
   if (info.credential_warning) {
     requestDesktopOnboarding(info.credential_warning)
   }
@@ -319,7 +324,7 @@ export function applyRuntimeInfo(info: SessionRuntimeInfo | undefined): SessionR
   }
 
   if (info.usage) {
-    setCurrentUsage(current => ({ ...current, ...info.usage }))
+    setCurrentUsageSnapshot(info.usage)
   }
 
   return sessionState

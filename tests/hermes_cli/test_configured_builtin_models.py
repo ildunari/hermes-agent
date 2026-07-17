@@ -19,6 +19,7 @@ def _provider_row(configured_models, *, max_models=None):
             "hermes_cli.models.cached_provider_model_ids",
             return_value=["live-a", "shared"],
         ),
+        patch("hermes_cli.models._PROVIDER_MODELS", {"deepseek": []}),
         patch("hermes_cli.providers.HERMES_OVERLAYS", {}),
         patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}),
     ):
