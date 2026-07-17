@@ -2,6 +2,7 @@ import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $desktopBoot } from '@/store/boot'
+import { $activeGatewayProfile, $newChatProfile } from '@/store/profile'
 import { $gatewayState } from '@/store/session'
 
 import { useGatewayBoot } from './use-gateway-boot'
@@ -84,7 +85,7 @@ function fakeDesktop() {
   }
 
   return {
-    getConnection: vi.fn(async () => conn),
+    getConnection: vi.fn(async (profile?: string) => ({ ...conn, profile: profile ?? conn.profile })),
     getGatewayWsUrl: vi.fn(async () => conn.wsUrl),
     getBootProgress: vi.fn(async () => ({
       error: null,
@@ -125,6 +126,9 @@ beforeEach(() => {
   FakeWebSocket.instances = []
   ;(globalThis as { WebSocket: unknown }).WebSocket = FakeWebSocket
   ;(window as { hermesDesktop?: unknown }).hermesDesktop = fakeDesktop()
+  window.history.replaceState({}, '', '/')
+  $activeGatewayProfile.set('default')
+  $newChatProfile.set(null)
   $gatewayState.set('idle')
   $desktopBoot.set({
     error: null,
@@ -143,6 +147,7 @@ afterEach(() => {
   vi.useRealTimers()
   ;(globalThis as { WebSocket: unknown }).WebSocket = originalWebSocket
   delete (window as { hermesDesktop?: unknown }).hermesDesktop
+  window.history.replaceState({}, '', '/')
 })
 
 // Let pending microtasks (awaits) AND the queued 0ms socket open/error fire.
@@ -162,6 +167,23 @@ async function advanceBackoff() {
 }
 
 describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => {
+  it('boots a Cmd+Shift+N scratch window directly on the carried profile', async () => {
+    window.history.replaceState({}, '', '/?win=secondary&new=1&profile=coding#/')
+
+    const desktop = fakeDesktop()
+
+    Object.assign(window, { hermesDesktop: desktop })
+
+    render(<Harness />)
+    await flushAsync()
+
+    expect(desktop.getConnection).toHaveBeenCalledWith('coding')
+    expect(desktop.profile.get).not.toHaveBeenCalled()
+    expect($activeGatewayProfile.get()).toBe('coding')
+    expect($newChatProfile.get()).toBe('coding')
+    expect($gatewayState.get()).toBe('open')
+  })
+
   it('INITIAL boot against a dead VPS: getConnection hangs (waitForHermes) → app sits in the connecting combo, then fails', async () => {
     // The report's actual path: a fresh launch pointed at an unreachable VPS.
     // startHermes()'s remote branch awaits waitForHermes() for 45s before it

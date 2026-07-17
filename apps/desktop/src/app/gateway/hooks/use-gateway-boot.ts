@@ -28,7 +28,6 @@ import { notify, notifyError } from '@/store/notifications'
 import {
   $activeGatewayProfile,
   $newChatProfile,
-  ensureGatewayProfile,
   normalizeProfileKey,
   touchActiveGatewayBackend
 } from '@/store/profile'
@@ -91,6 +90,13 @@ export function useGatewayBoot({
   useEffect(() => {
     let cancelled = false
     const desktop = window.hermesDesktop
+    // A Cmd+Shift+N scratch window carries its opener's live profile in the
+    // pre-hash query string. Resolve it once before boot: the window must dial
+    // that backend as its primary connection, not boot the stored/default
+    // backend first and swap later (which can publish the default profile's
+    // selected transcript into what should be a blank draft).
+    const requestedWindowProfile = newSessionWindowProfile()
+    const initialProfile = requestedWindowProfile ? normalizeProfileKey(requestedWindowProfile) : null
 
     const publish = (next: HermesConnection | null) => {
       callbacksRef.current.onConnectionReady(next)
@@ -231,25 +237,21 @@ export function useGatewayBoot({
 
     // Adopt the profile the primary (window) backend booted as, so same-profile
     // resumes are no-op swaps and reconnects target the right backend.
-    // Best-effort: a missing preference means "default". Shared by boot + soft
-    // switch. A secondary new-session window can carry an explicit `profile`
-    // query param from its opener (⌘⇧N from a non-default profile); that wins
-    // over the stored preference so the fresh draft doesn't silently land on
-    // the primary backend's profile.
+    // Best-effort: a missing preference means "default". A Cmd+Shift+N window
+    // already connected directly to its requested profile above, so never read
+    // or briefly publish the Electron main's stored/default profile here.
     async function adoptPrimaryProfile() {
       try {
-        const pref = await desktop.profile?.get?.()
-        const profileKey = (pref?.profile ?? '').trim() || 'default'
+        const pref = initialProfile ? null : await desktop.profile?.get?.()
+        const profileKey = initialProfile ?? ((pref?.profile ?? '').trim() || 'default')
+
+        if (initialProfile) {
+          $newChatProfile.set(initialProfile)
+        }
+
         $activeGatewayProfile.set(profileKey)
         setPrimaryGateway(gateway, profileKey)
         void ensureGatewayForProfile(profileKey)
-
-        const requested = newSessionWindowProfile()
-
-        if (requested && normalizeProfileKey(requested) !== normalizeProfileKey(profileKey)) {
-          $newChatProfile.set(normalizeProfileKey(requested))
-          await ensureGatewayProfile(requested)
-        }
       } catch {
         $activeGatewayProfile.set('default')
       }
@@ -285,7 +287,7 @@ export function useGatewayBoot({
         gateway.close()
         closeSecondaryGateways()
 
-        const conn = await desktop.getConnection()
+        const conn = await desktop.getConnection(initialProfile ?? undefined)
 
         if (cancelled) {
           return
@@ -446,7 +448,7 @@ export function useGatewayBoot({
 
     async function boot() {
       try {
-        const conn = await desktop.getConnection()
+        const conn = await desktop.getConnection(initialProfile ?? undefined)
 
         if (cancelled) {
           return
