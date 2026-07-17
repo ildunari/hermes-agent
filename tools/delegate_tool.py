@@ -3384,8 +3384,8 @@ def _load_configured_model_catalogs() -> tuple[tuple[str, ...], dict[str, tuple[
     if isinstance(picker_cfg, dict):
         visible = picker_cfg.get("visible_models")
         if isinstance(visible, dict):
-            for provider_models in visible.values():
-                models.update(_declared_model_ids(provider_models))
+            for visible_declared in visible.values():
+                models.update(_declared_model_ids(visible_declared))
 
     return (
         tuple(sorted(models, key=str.lower)),
