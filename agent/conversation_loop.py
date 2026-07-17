@@ -73,6 +73,12 @@ from utils import base_url_host_matches, env_var_enabled
 
 logger = logging.getLogger(__name__)
 
+
+def _accumulate_output_rate(agent, *, output_tokens: int, api_duration: float) -> None:
+    """Accumulate successful API output/time without touching conversation data."""
+    agent.session_api_output_tokens = getattr(agent, "session_api_output_tokens", 0) + max(0, int(output_tokens or 0))
+    agent.session_api_wall_seconds = getattr(agent, "session_api_wall_seconds", 0.0) + max(0.0, float(api_duration or 0.0))
+
 # Stable prefix of the local interrupt status string emitted when a turn is
 # cancelled while waiting on the provider. Surfaces (ACP, TUI) match on this
 # to treat it as cancellation metadata rather than assistant prose.
@@ -2268,6 +2274,11 @@ def run_conversation(
                     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
                     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
                     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+                    _accumulate_output_rate(
+                        agent,
+                        output_tokens=canonical_usage.output_tokens,
+                        api_duration=api_duration,
+                    )
 
                     # Diagnose actual invalidation from provider usage deltas,
                     # not guessed causes. Observation only: this never mutates

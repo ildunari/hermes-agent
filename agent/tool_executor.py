@@ -55,6 +55,18 @@ from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context
 logger = logging.getLogger(__name__)
 
 
+def _record_tool_call_stats(agent, tool_name: str, *, is_error: bool) -> None:
+    """Record one executed tool outcome in session-scoped counters."""
+    stats = getattr(agent, "session_tool_stats", None)
+    if not isinstance(stats, dict):
+        stats = {}
+        agent.session_tool_stats = stats
+    row = stats.setdefault(str(tool_name or "unknown"), {"calls": 0, "errors": 0})
+    row["calls"] = int(row.get("calls", 0)) + 1
+    if is_error:
+        row["errors"] = int(row.get("errors", 0)) + 1
+
+
 def _budget_for_agent(agent) -> BudgetConfig:
     """Resolve a tool-result BudgetConfig scaled to the agent's context window.
 
@@ -1007,6 +1019,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             except Exception as cb_err:
                 logging.debug(f"Tool progress callback error: {cb_err}")
 
+        if i in started_indices and (r is None or not bool(r[5])):
+            _record_tool_call_stats(agent, name, is_error=r is None or bool(r[4]))
+
         # Print cute message per tool
         if agent._should_emit_quiet_tool_messages():
             cute_msg = _get_cute_tool_message_impl(name, args, tool_duration, result=function_result)
@@ -1708,6 +1723,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
         else:
             logger.info("tool %s completed (%.2fs, %d chars)", function_name, tool_duration, _result_len)
+
+        if not _execution_blocked:
+            _record_tool_call_stats(agent, function_name, is_error=_is_error_result)
 
         # Track file-mutation outcome for the turn-end verifier.  See
         # the concurrent path for the rationale; both paths must feed
