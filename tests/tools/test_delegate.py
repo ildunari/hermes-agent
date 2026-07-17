@@ -276,6 +276,117 @@ class TestDelegateTask(unittest.TestCase):
         resolve_creds.assert_not_called()
         build_child.assert_not_called()
 
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.config.load_config_readonly")
+    def test_explicit_model_must_match_explicit_provider_catalog(
+        self, load_full_config, load_cfg, resolve_creds, build_child
+    ):
+        load_full_config.return_value = {
+            "providers": {
+                "provider-a": {"models": {"provider-a-only-model": {}}},
+                "provider-b": {"models": {"provider-b-only-model": {}}},
+            }
+        }
+        load_cfg.return_value = {}
+
+        result = json.loads(delegate_task(
+            goal="inspect", model="provider-a-only-model", provider="provider-b",
+            parent_agent=_make_mock_parent(),
+        ))
+
+        self.assertIn("unknown model override 'provider-a-only-model'", result["error"])
+        self.assertIn("Did you mean: provider-b-only-model?", result["error"])
+        resolve_creds.assert_not_called()
+        build_child.assert_not_called()
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.config.load_config_readonly")
+    def test_explicit_model_matching_explicit_provider_catalog_is_accepted(
+        self, load_full_config, load_cfg, resolve_creds, build_child, run_child
+    ):
+        load_full_config.return_value = {
+            "providers": {
+                "provider-a": {"models": {"provider-a-only-model": {}}},
+                "provider-b": {"models": {"provider-b-only-model": {}}},
+            }
+        }
+        load_cfg.return_value = {}
+        resolve_creds.return_value = {
+            "model": "provider-a-only-model", "provider": "provider-a",
+            "base_url": None, "api_key": None, "api_mode": None,
+        }
+        build_child.return_value = MagicMock()
+        run_child.return_value = {"task_index": 0, "status": "completed", "summary": "ok"}
+
+        result = json.loads(delegate_task(
+            goal="inspect", model="provider-a-only-model", provider="provider-a",
+            parent_agent=_make_mock_parent(),
+        ))
+
+        self.assertEqual(result["results"][0]["status"], "completed")
+        self.assertEqual(build_child.call_args.kwargs["model"], "provider-a-only-model")
+
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.config.load_config_readonly")
+    def test_provider_without_declared_catalog_keeps_global_model_acceptance(
+        self, load_full_config, load_cfg, resolve_creds, build_child, run_child
+    ):
+        load_full_config.return_value = {
+            "providers": {
+                "provider-a": {"models": {"provider-a-only-model": {}}},
+                "provider-b": {"base_url": "https://provider-b.invalid/v1"},
+            }
+        }
+        load_cfg.return_value = {}
+        resolve_creds.return_value = {
+            "model": "provider-a-only-model", "provider": "provider-b",
+            "base_url": "https://provider-b.invalid/v1", "api_key": "test",
+            "api_mode": "chat_completions",
+        }
+        build_child.return_value = MagicMock()
+        run_child.return_value = {"task_index": 0, "status": "completed", "summary": "ok"}
+
+        result = json.loads(delegate_task(
+            goal="inspect", model="provider-a-only-model", provider="provider-b",
+            parent_agent=_make_mock_parent(),
+        ))
+
+        self.assertEqual(result["results"][0]["status"], "completed")
+        self.assertEqual(build_child.call_args.kwargs["override_provider"], "provider-b")
+
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.config.load_config_readonly")
+    def test_provider_prefixed_model_conflicting_with_explicit_provider_is_rejected(
+        self, load_full_config, load_cfg, resolve_creds, build_child
+    ):
+        load_full_config.return_value = {
+            "providers": {
+                "provider-a": {"models": {"provider-a-only-model": {}}},
+                "provider-b": {"models": {"provider-b-only-model": {}}},
+            }
+        }
+        load_cfg.return_value = {}
+
+        result = json.loads(delegate_task(
+            goal="inspect", model="@provider-a:provider-a-only-model",
+            provider="provider-b", parent_agent=_make_mock_parent(),
+        ))
+
+        self.assertIn("unknown model override", result["error"])
+        self.assertIn("provider-b-only-model", result["error"])
+        resolve_creds.assert_not_called()
+        build_child.assert_not_called()
+
     @patch("tools.delegate_tool._run_single_child")
     @patch("tools.delegate_tool._build_child_agent")
     @patch("tools.delegate_tool._resolve_delegation_credentials")

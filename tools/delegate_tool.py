@@ -2560,10 +2560,18 @@ def delegate_task(
     # back to a different runtime model. Config-owned delegation.model remains
     # intentionally exempt and keeps the existing inheritance behavior.
     configured_models = _load_configured_model_catalog()
+    configured_provider_models = _load_configured_provider_model_catalogs()
     for i, task in enumerate(task_list):
         explicit_model = task.get("model") or model
+        explicit_provider = task.get("provider") or provider
         if explicit_model:
-            model_error = _unknown_explicit_model_error(str(explicit_model), configured_models)
+            provider_models = configured_provider_models.get(
+                str(explicit_provider).strip().lower(), ()
+            ) if explicit_provider else ()
+            model_error = _unknown_explicit_model_error(
+                str(explicit_model), provider_models or configured_models,
+                explicit_provider=str(explicit_provider) if explicit_provider else None,
+            )
             if model_error:
                 return tool_error(f"Task {i} {model_error}")
 
@@ -3296,34 +3304,51 @@ def _model_ids_from_routes(raw) -> set[str]:
     return models
 
 
-def _load_configured_model_catalog() -> tuple[str, ...]:
-    """Load every model explicitly declared by the active Hermes config."""
+def _load_configured_model_catalogs() -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
+    """Load the global model catalog and provider-scoped declared catalogs."""
     try:
         from hermes_cli.config import load_config_readonly
 
         full = load_config_readonly()
     except Exception:
-        return ()
+        return (), {}
 
     models: set[str] = set()
+    provider_models: dict[str, set[str]] = {}
+
+    def _add_provider_models(provider, declared) -> None:
+        provider_slug = str(provider or "").strip().lower()
+        if not provider_slug:
+            return
+        catalog = provider_models.setdefault(provider_slug, set())
+        catalog.update(declared)
+
     model_cfg = full.get("model")
     if isinstance(model_cfg, dict):
         default_model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
         if default_model:
             models.add(default_model)
+        per_provider = model_cfg.get("models")
+        if isinstance(per_provider, dict):
+            for provider_slug, declared in per_provider.items():
+                declared_models = _declared_model_ids(declared)
+                models.update(declared_models)
+                _add_provider_models(provider_slug, declared_models)
     elif isinstance(model_cfg, str) and model_cfg.strip():
         models.add(model_cfg.strip())
 
     providers = full.get("providers")
     if isinstance(providers, dict):
-        for provider_cfg in providers.values():
+        for provider_slug, provider_cfg in providers.items():
             if isinstance(provider_cfg, dict):
                 default_model = str(
                     provider_cfg.get("default_model") or provider_cfg.get("model") or ""
                 ).strip()
                 if default_model:
                     models.add(default_model)
-                models.update(_declared_model_ids(provider_cfg.get("models")))
+                declared_models = _declared_model_ids(provider_cfg.get("models"))
+                models.update(declared_models)
+                _add_provider_models(provider_slug, declared_models)
 
     custom_providers = full.get("custom_providers")
     if isinstance(custom_providers, list):
@@ -3335,7 +3360,12 @@ def _load_configured_model_catalog() -> tuple[str, ...]:
             ).strip()
             if model_id:
                 models.add(model_id)
-            models.update(_declared_model_ids(provider_cfg.get("models")))
+            declared_models = _declared_model_ids(provider_cfg.get("models"))
+            models.update(declared_models)
+            name = str(provider_cfg.get("name") or "").strip()
+            if name:
+                _add_provider_models(f"custom:{name}", {model_id} if model_id else set())
+                _add_provider_models(f"custom:{name}", declared_models)
 
     models.update(_model_ids_from_routes(full.get("fallback_providers")))
     models.update(_model_ids_from_routes(full.get("fallback_model")))
@@ -3357,24 +3387,48 @@ def _load_configured_model_catalog() -> tuple[str, ...]:
             for provider_models in visible.values():
                 models.update(_declared_model_ids(provider_models))
 
-    return tuple(sorted(models, key=str.lower))
+    return (
+        tuple(sorted(models, key=str.lower)),
+        {
+            provider: tuple(sorted(declared, key=str.lower))
+            for provider, declared in provider_models.items()
+            if declared
+        },
+    )
 
 
-def _unknown_explicit_model_error(requested: str, configured_models: tuple[str, ...]) -> str | None:
+def _load_configured_model_catalog() -> tuple[str, ...]:
+    """Load every model explicitly declared by the active Hermes config."""
+    return _load_configured_model_catalogs()[0]
+
+
+def _load_configured_provider_model_catalogs() -> dict[str, tuple[str, ...]]:
+    """Load non-empty provider-scoped model catalogs from active config."""
+    return _load_configured_model_catalogs()[1]
+
+
+def _unknown_explicit_model_error(
+    requested: str,
+    configured_models: tuple[str, ...],
+    *,
+    explicit_provider: str | None = None,
+) -> str | None:
     """Return a loud error for an unknown explicit delegation model override."""
     requested = requested.strip()
     if not requested or not configured_models:
         return None
-    by_lower = {model.lower(): model for model in configured_models}
+    def _bare_model(model: str) -> str:
+        _provider, separator, bare = model.lower().lstrip("@").partition(":")
+        return bare.strip() if separator else model.lower()
+
+    by_lower = {_bare_model(model): model for model in configured_models}
     requested_lower = requested.lower()
-    if requested_lower in by_lower:
-        return None
-    # Hermes accepts provider-qualified routing strings in both
-    # ``provider:model`` and ``@provider:model`` forms. The catalog stores model
-    # ids, so validate the suffix case-insensitively rather than rejecting a
-    # valid declared model solely because its provider was made explicit.
-    _provider, separator, bare_model = requested_lower.lstrip("@").partition(":")
-    if separator and bare_model.strip() in by_lower:
+    requested_provider, separator, bare_model = requested_lower.lstrip("@").partition(":")
+    if separator and explicit_provider and requested_provider != explicit_provider.strip().lower():
+        requested_match = ""
+    else:
+        requested_match = bare_model.strip() if separator else requested_lower
+    if requested_match in by_lower:
         return None
     requested_tokens = {
         token for token in re.split(r"[^a-z0-9]+", requested_lower) if len(token) >= 4
