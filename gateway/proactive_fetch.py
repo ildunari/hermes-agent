@@ -392,6 +392,7 @@ def _iso_timestamp(value: object) -> float | None:
 
 def candidate_from_research(topic: str, materials: Sequence[ResearchMaterial]) -> Mapping[str, object] | None:
     """Conservatively select one normalized item; this is not a prose synthesizer."""
+    normalized_candidates: list[Mapping[str, object]] = []
     for material in materials:
         payload = material.payload
         candidates: list[Mapping[str, object]] = []
@@ -420,13 +421,18 @@ def candidate_from_research(topic: str, materials: Sequence[ResearchMaterial]) -
                 why = item.get("snippet") or item.get("why_relevant") or (
                     source_item.get("snippet") if source_item else None
                 ) or "newly published"
-                return {
+                normalized_candidates.append({
                     "topic": topic,
                     "concrete_item": str(title)[:220],
                     "why_now": str(why)[:160],
                     "source_url": str(url),
                     "freshness_ts": timestamp,
-                }
+                })
+    if normalized_candidates:
+        # Research providers may return a stale first-ranked result even when a
+        # fresher result is present later in the same response. Prefer the
+        # newest dated item; the gate still owns the final freshness decision.
+        return max(normalized_candidates, key=lambda item: _parse_timestamp(item["freshness_ts"]))
     return None
 
 

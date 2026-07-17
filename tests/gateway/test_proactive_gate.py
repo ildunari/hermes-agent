@@ -36,6 +36,7 @@ from gateway.proactive_fetch import (
     deliver_with_hard_gate,
     finalize_proactive_output,
     suppression_metrics,
+    candidate_from_research,
 )
 
 NOW = 1_800_000_000.0
@@ -83,6 +84,27 @@ class SpyTransport:
     def deliver(self, **kwargs):
         self.calls.append(kwargs)
         return {"ok": True}
+
+
+def test_candidate_from_research_prefers_newest_dated_result():
+    material = ResearchMaterial("web", {
+        "ranked_candidates": [
+            {
+                "title": "Old recycled result",
+                "url": "https://example.com/old",
+                "published_at": NOW - 365 * 86_400,
+            },
+            {
+                "title": "Fresh result",
+                "url": "https://example.com/fresh",
+                "published_at": NOW - 86_400,
+            },
+        ],
+    }, 2)
+    result = candidate_from_research("sports cars", [material])
+    assert result is not None
+    assert result["concrete_item"] == "Fresh result"
+    assert result["source_url"] == "https://example.com/fresh"
 
 
 def test_reused_candidate_skips_fetch_but_repeats_gate_and_freshness(tmp_path: Path):
