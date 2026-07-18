@@ -90,6 +90,30 @@ class TestShouldCompress:
         assert compressor.should_compress(prompt_tokens=50000) is False
 
 
+class TestCompressionAttemptTailBudget:
+    def test_manual_compress_scales_tail_from_current_usage(self):
+        compressor = ContextCompressor(
+            model="test/model",
+            threshold_percent=0.90,
+            summary_target_ratio=0.20,
+            quiet_mode=True,
+            config_context_length=500_000,
+        )
+
+        assert compressor.threshold_tokens == 450_000
+        assert compressor._tail_budget_for_compression(300_000, force=True) == 60_000
+
+    def test_automatic_at_threshold_keeps_threshold_sized_tail(self):
+        compressor = ContextCompressor(
+            model="test/model",
+            threshold_percent=0.90,
+            summary_target_ratio=0.20,
+            quiet_mode=True,
+            config_context_length=500_000,
+        )
+
+        assert compressor._tail_budget_for_compression(450_000, force=False) == 90_000
+
 
 class TestUpdateFromResponse:
     def test_updates_fields(self, compressor):

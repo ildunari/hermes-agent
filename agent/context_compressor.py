@@ -2965,6 +2965,34 @@ This compaction should PRIORITISE preserving all information related to the focu
 
         return max(cut_idx, head_end + 1)
 
+    def _tail_budget_for_compression(
+        self,
+        current_tokens: int | None,
+        *,
+        force: bool,
+    ) -> int:
+        """Return the protected-tail budget for this compression attempt.
+
+        Automatic compaction fires at the configured threshold and keeps the
+        historical ``threshold * target_ratio`` budget. A manual/forced
+        compaction can run well below that threshold; sizing its tail from the
+        threshold would protect too much of the current transcript and turn the
+        request into a no-op. Scale forced attempts from the smaller of current
+        usage and the threshold instead.
+        """
+        if not force:
+            return self.tail_token_budget
+        try:
+            observed_tokens = int(current_tokens) if current_tokens is not None else 0
+        except (TypeError, ValueError):
+            observed_tokens = 0
+        budget_base = (
+            min(observed_tokens, self.threshold_tokens)
+            if observed_tokens > 0
+            else self.threshold_tokens
+        )
+        return int(budget_base * self.summary_target_ratio)
+
     # ------------------------------------------------------------------
     # ContextEngine: manual /compress preflight
     # ------------------------------------------------------------------
@@ -3054,11 +3082,15 @@ This compaction should PRIORITISE preserving all information related to the focu
             return messages
 
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
+        attempt_tail_token_budget = self._tail_budget_for_compression(
+            current_tokens,
+            force=force,
+        )
 
         # Phase 1: Prune old tool results (cheap, no LLM call)
         messages, pruned_count = self._prune_old_tool_results(
             messages, protect_tail_count=self.protect_last_n,
-            protect_tail_tokens=self.tail_token_budget,
+            protect_tail_tokens=attempt_tail_token_budget,
         )
         if pruned_count and not self.quiet_mode:
             logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
@@ -3067,8 +3099,12 @@ This compaction should PRIORITISE preserving all information related to the focu
         compress_start = self._protect_head_size(messages)
         compress_start = self._align_boundary_forward(messages, compress_start)
 
-        # Use token-budget tail protection instead of fixed message count
-        compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
+        # Use token-budget tail protection instead of fixed message count.
+        compress_end = self._find_tail_cut_by_tokens(
+            messages,
+            compress_start,
+            token_budget=attempt_tail_token_budget,
+        )
 
         if compress_start >= compress_end:
             # No compressable window — the entire transcript fits within

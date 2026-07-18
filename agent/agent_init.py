@@ -1773,7 +1773,7 @@ def init_agent(
 
     # Select context engine: config-driven (like memory providers).
     # 1. Check config.yaml context.engine setting
-    # 2. Check plugins/context_engine/<name>/ directory (repo-shipped)
+    # 2. Check repo and ~/.hermes/plugins/context_engine/ directories
     # 3. Check general plugin system (user-installed plugins)
     # 4. Fall back to built-in ContextCompressor
     _selected_engine = None
@@ -1785,8 +1785,23 @@ def init_agent(
     except Exception:
         pass
 
+    # Keep behavioral settings in config.yaml while supporting standalone
+    # engines whose internal config contract is environment-variable based.
+    # Generic mapping: context.<engine>.foo_bar becomes ENGINE_FOO_BAR before
+    # the engine's register()/constructor runs. Calling this for "compressor"
+    # also clears values previously bridged during an in-process engine switch.
+    try:
+        from plugins.context_engine import bridge_context_engine_config_to_env
+        bridge_context_engine_config_to_env(_agent_cfg, _engine_name)
+    except Exception as _ce_bridge_err:
+        _ra().logger.warning(
+            "Could not bridge context.%s config to the engine environment: %s",
+            _engine_name,
+            _ce_bridge_err,
+        )
+
     if _engine_name != "compressor":
-        # Try loading from plugins/context_engine/<name>/
+        # Try loading from repo or user context-engine directories.
         try:
             from plugins.context_engine import load_context_engine
             _selected_engine = load_context_engine(_engine_name)
