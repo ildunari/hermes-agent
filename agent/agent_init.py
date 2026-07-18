@@ -1682,6 +1682,8 @@ def init_agent(
     if _config_context_length is not None:
         try:
             _config_context_length = int(_config_context_length)
+            if _config_context_length <= 0:
+                _config_context_length = None
         except (TypeError, ValueError):
             _ra().logger.warning(
                 "Invalid model.context_length in config.yaml: %r — "

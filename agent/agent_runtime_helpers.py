@@ -2075,12 +2075,24 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
         # context_length overrides are honored when switching to a
         # custom provider mid-session (closes #15779).
         _sm_custom_providers = None
+        _sm_cfg = None
         try:
-            from hermes_cli.config import load_config, get_compatible_custom_providers
-            _sm_cfg = load_config()
+            from hermes_cli.config import load_config_readonly, get_compatible_custom_providers
+            _sm_cfg = load_config_readonly()
             _sm_custom_providers = get_compatible_custom_providers(_sm_cfg)
         except Exception:
             _sm_custom_providers = None
+        try:
+            from hermes_cli.config import get_configured_model_context_length
+            agent._config_context_length = get_configured_model_context_length(
+                agent.model,
+                agent.base_url,
+                config=_sm_cfg,
+            )
+        except Exception:
+            agent._config_context_length = None
+        if _sm_custom_providers is not None:
+            agent._custom_providers = _sm_custom_providers
         # ``agent.api_key`` may be a callable (Azure Foundry Entra ID
         # token provider). ``get_model_context_length`` expects a
         # string for its live-probe paths; for Foundry the context

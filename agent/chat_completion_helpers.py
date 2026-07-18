@@ -1702,6 +1702,23 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # the fallback activation drops to 128K even when config says 204800.
         if hasattr(agent, 'context_compressor') and agent.context_compressor:
             from agent.model_metadata import get_model_context_length
+            _fb_custom_providers = getattr(agent, "_custom_providers", None)
+            try:
+                from hermes_cli.config import (
+                    get_compatible_custom_providers,
+                    get_configured_model_context_length,
+                    load_config_readonly,
+                )
+                _fb_cfg = load_config_readonly()
+                _fb_custom_providers = get_compatible_custom_providers(_fb_cfg)
+                agent._custom_providers = _fb_custom_providers
+                agent._config_context_length = get_configured_model_context_length(
+                    agent.model,
+                    agent.base_url,
+                    config=_fb_cfg,
+                )
+            except Exception:
+                agent._config_context_length = None
             # ``agent.api_key`` may be callable (Entra ID); the
             # context-length resolver expects a string for live
             # probes. Foundry typically resolves via config/static
@@ -1711,7 +1728,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 agent.model, base_url=agent.base_url,
                 api_key=_fb_ctx_api_key, provider=agent.provider,
                 config_context_length=getattr(agent, "_config_context_length", None),
-                custom_providers=getattr(agent, "_custom_providers", None),
+                custom_providers=_fb_custom_providers,
             )
             agent.context_compressor.update_model(
                 model=agent.model,

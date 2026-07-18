@@ -5299,6 +5299,49 @@ def get_custom_provider_context_length(
     return None
 
 
+def get_configured_model_context_length(
+    model: str,
+    base_url: str,
+    config: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
+    """Resolve a model-specific context cap declared anywhere in config.
+
+    Precedence is the active top-level ``model.context_length`` (only when the
+    requested model is that block's configured default), followed by the
+    matching per-model entry from either ``custom_providers`` or the v12+
+    ``providers.<name>.models`` shape. Non-positive values mean "unset".
+    """
+    if not model:
+        return None
+    if config is None:
+        try:
+            config = load_config_readonly()
+        except Exception:
+            return None
+    if not isinstance(config, dict):
+        return None
+
+    model_cfg = config.get("model")
+    if isinstance(model_cfg, dict):
+        configured_model = str(model_cfg.get("default") or "").strip()
+        if not configured_model or configured_model == model:
+            raw_ctx = model_cfg.get("context_length")
+            try:
+                if raw_ctx is None or isinstance(raw_ctx, bool):
+                    raise ValueError
+                parsed_ctx = int(raw_ctx)
+            except (TypeError, ValueError):
+                parsed_ctx = 0
+            if parsed_ctx > 0:
+                return parsed_ctx
+
+    return get_custom_provider_context_length(
+        model=model,
+        base_url=base_url,
+        config=config,
+    )
+
+
 def _coerce_config_version(value: Any) -> int:
     """Return a safe integer config version, treating invalid values as legacy."""
     if isinstance(value, bool):

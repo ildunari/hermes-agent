@@ -8,10 +8,77 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from hermes_cli.config import get_custom_provider_context_length
+from hermes_cli.config import (
+    get_configured_model_context_length,
+    get_custom_provider_context_length,
+)
 
 
 class TestGetCustomProviderContextLength:
+    def test_reads_v12_providers_block_shape(self):
+        """The live config uses providers.<name>.models, not custom_providers."""
+        config = {
+            "providers": {
+                "vibeproxy": {
+                    "base_url": "http://127.0.0.1:8485/v1",
+                    "models": {
+                        "claude-fable-5": {"context_length": 500_000},
+                    },
+                },
+            },
+        }
+
+        assert (
+            get_custom_provider_context_length(
+                "claude-fable-5",
+                "http://127.0.0.1:8485/v1",
+                config=config,
+            )
+            == 500_000
+        )
+
+    def test_zero_top_level_value_is_unset_and_provider_model_wins(self):
+        """Mirrors the gpt profile: model.context_length=0 plus a provider cap."""
+        config = {
+            "model": {
+                "default": "claude-fable-5",
+                "context_length": 0,
+            },
+            "providers": {
+                "vibeproxy": {
+                    "base_url": "http://127.0.0.1:8485/v1",
+                    "models": {
+                        "claude-fable-5": {"context_length": 500_000},
+                    },
+                },
+            },
+        }
+
+        assert get_configured_model_context_length(
+            "claude-fable-5",
+            "http://127.0.0.1:8485/v1",
+            config=config,
+        ) == 500_000
+
+    def test_top_level_value_only_applies_to_configured_default_model(self):
+        config = {
+            "model": {"default": "primary-model", "context_length": 200_000},
+            "providers": {
+                "vibeproxy": {
+                    "base_url": "http://127.0.0.1:8485/v1",
+                    "models": {
+                        "fallback-model": {"context_length": 500_000},
+                    },
+                },
+            },
+        }
+
+        assert get_configured_model_context_length(
+            "fallback-model",
+            "http://127.0.0.1:8485/v1",
+            config=config,
+        ) == 500_000
+
     def test_returns_override_for_matching_entry(self):
         custom = [
             {
@@ -182,6 +249,30 @@ class TestGetModelContextLengthHonorsOverride:
             for p in patches:
                 p.stop()
         assert ctx == 1_050_000
+
+    def test_providers_block_override_wins_over_builtin_model_default(self):
+        from agent.model_metadata import get_model_context_length
+        from hermes_cli.config import get_compatible_custom_providers
+
+        config = {
+            "providers": {
+                "vibeproxy": {
+                    "base_url": "http://127.0.0.1:8485/v1",
+                    "models": {
+                        "claude-fable-5": {"context_length": 500_000},
+                    },
+                },
+            },
+        }
+
+        ctx = get_model_context_length(
+            "claude-fable-5",
+            base_url="http://127.0.0.1:8485/v1",
+            provider="vibeproxy",
+            custom_providers=get_compatible_custom_providers(config),
+        )
+
+        assert ctx == 500_000
 
     def test_explicit_config_context_length_still_wins(self):
         """Top-level model.context_length (step 0) outranks custom_providers (step 0b).
