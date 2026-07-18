@@ -184,3 +184,17 @@ features:
         path: apps/desktop/src/lib/markdown-preprocess.ts
         needles: [LOOPBACK_URL_RE, normalizeVisibleProse]
         description: prevents local preview cleanup from erasing explicit fenced localhost endpoints
+
+  - id: skills.generated-view-alias-resolution
+    title: Resolve flattened generated-view skill aliases without changing canonical names
+    tests:
+      - tests/tools/test_skills_tool.py
+    checks:
+      - id: generated-view-skill-alias-resolver
+        path: tools/skills_tool.py
+        needles:
+          - Generated Hermes views flatten categorized paths
+          - separator_offsets
+          - categorized_alias
+          - '"name": resolved_name'
+        description: category__skill aliases resolve to categorized skills while frontmatter names remain canonical
