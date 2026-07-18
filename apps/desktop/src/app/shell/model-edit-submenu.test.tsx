@@ -34,6 +34,7 @@ function renderSubmenu(opts: {
   fastControl: FastControl
   provider?: string
   reasoning: boolean
+  reasoningAlwaysOn?: boolean
   reasoningEfforts?: string[]
   requestGateway: () => Promise<unknown>
 }) {
@@ -50,6 +51,7 @@ function renderSubmenu(opts: {
             onSelectModel={vi.fn()}
             provider={opts.provider ?? 'p1'}
             reasoning={opts.reasoning}
+            reasoningAlwaysOn={opts.reasoningAlwaysOn}
             reasoningEfforts={opts.reasoningEfforts}
             requestGateway={opts.requestGateway as never}
           />
@@ -76,6 +78,10 @@ describe('ModelEditSubmenu model-aware effort options', () => {
     expect(normalizeReasoningEffort('none', ['low', 'medium', 'high'])).toBe('none')
   })
 
+  it('maps thinking-off to the only effort for an always-on model', () => {
+    expect(normalizeReasoningEffort('none', ['max'], true)).toBe('max')
+  })
+
   it('shows the Codex-supported levels without duplicate minimal or ultra choices', () => {
     renderSubmenu({
       fastControl: { kind: 'none' },
@@ -91,6 +97,24 @@ describe('ModelEditSubmenu model-aware effort options', () => {
     expect(screen.getByText('Extra High')).toBeTruthy()
     expect(screen.getByText('Max')).toBeTruthy()
     expect(screen.queryByText('Ultra')).toBeNull()
+  })
+
+  it('shows K3 as always-on with only max selectable', () => {
+    const requestGateway = vi.fn().mockResolvedValue({})
+    renderSubmenu({
+      fastControl: { kind: 'none' },
+      provider: 'kimi-coding',
+      reasoning: true,
+      reasoningAlwaysOn: true,
+      reasoningEfforts: ['max'],
+      requestGateway
+    })
+
+    expect((screen.getByRole('switch') as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText('Max')).toBeTruthy()
+    expect(screen.queryByText('Medium')).toBeNull()
+    fireEvent.click(screen.getByRole('switch'))
+    expect(requestGateway).not.toHaveBeenCalled()
   })
 })
 

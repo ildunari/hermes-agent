@@ -259,6 +259,28 @@ def test_build_models_payload_attaches_codex_reasoning_efforts():
     ]
 
 
+def test_build_models_payload_constrains_kimi_k3_reasoning_to_max():
+    rows = [{
+        "slug": "kimi-coding",
+        "name": "Kimi / Moonshot",
+        "models": ["kimi-k3", "kimi-k2.6"],
+        "total_models": 2,
+        "is_current": False,
+        "is_user_defined": False,
+        "source": "built-in",
+    }]
+    ctx = _empty_ctx()
+
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx, capabilities=True)
+
+    kimi = next(row for row in payload["providers"] if row["slug"] == "kimi-coding")
+    assert kimi["capabilities"]["kimi-k3"]["reasoning_efforts"] == ["max"]
+    assert kimi["capabilities"]["kimi-k3"]["reasoning_always_on"] is True
+    assert "reasoning_efforts" not in kimi["capabilities"]["kimi-k2.6"]
+    assert "reasoning_always_on" not in kimi["capabilities"]["kimi-k2.6"]
+
+
 def test_build_models_payload_uses_cached_nous_tier_by_default():
     """Picker payloads should not force fresh Nous account checks.
 

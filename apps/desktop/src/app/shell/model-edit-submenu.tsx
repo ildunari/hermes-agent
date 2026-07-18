@@ -90,6 +90,8 @@ interface ModelEditSubmenuProps {
   provider: string
   /** Whether this model supports reasoning effort. */
   reasoning: boolean
+  /** Whether this model's reasoning cannot be disabled. */
+  reasoningAlwaysOn?: boolean
   /** Distinct efforts accepted by this model/provider route. */
   reasoningEfforts?: readonly string[]
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
@@ -103,6 +105,7 @@ export function ModelEditSubmenu({
   onSelectModel,
   provider,
   reasoning,
+  reasoningAlwaysOn = false,
   reasoningEfforts,
   requestGateway
 }: ModelEditSubmenuProps) {
@@ -111,9 +114,9 @@ export function ModelEditSubmenu({
   const activeSessionId = useStore($activeSessionId)
 
   const effortOptions = supportedEffortOptions(reasoningEfforts)
-  const normalizedEffort = normalizeReasoningEffort(effort, reasoningEfforts)
+  const normalizedEffort = normalizeReasoningEffort(effort, reasoningEfforts, reasoningAlwaysOn)
   const effortValue = normalizedEffort === 'none' ? '' : normalizedEffort
-  const thinkingOn = isThinkingEnabled(effort)
+  const thinkingOn = reasoningAlwaysOn || isThinkingEnabled(effort)
 
   // Editing always records the model's global preset; the active model also gets
   // it pushed onto the live session. Non-active edits stay preset-only — they do
@@ -204,6 +207,7 @@ export function ModelEditSubmenu({
               <Switch
                 checked={thinkingOn}
                 className="ml-auto"
+                disabled={reasoningAlwaysOn}
                 onCheckedChange={checked => void patchReasoning(checked ? effortValue || 'medium' : 'none')}
                 size="xs"
               />
@@ -256,12 +260,16 @@ function supportedEffortOptions(supported?: readonly string[]) {
   return EFFORT_OPTIONS.filter(option => allowed.has(option.value))
 }
 
-export function normalizeReasoningEffort(effort: string, supported?: readonly string[]): string {
+export function normalizeReasoningEffort(
+  effort: string,
+  supported?: readonly string[],
+  alwaysOn = false
+): string {
   const value = normalize(effort || 'medium')
 
   // Preserve explicit thinking-off for config/session writes. The submenu
   // converts it to an empty radio selection separately for presentation.
-  if (value === 'none') {
+  if (value === 'none' && !alwaysOn) {
     return 'none'
   }
 

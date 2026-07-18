@@ -151,6 +151,41 @@ class TestKimiProfileParity:
         assert "reasoning_effort" not in profile
         assert "reasoning_effort" not in legacy
 
+    def test_kimi_k3_maps_every_effort_to_max_without_thinking(self, transport):
+        profile = get_provider_profile("kimi-coding")
+
+        for reasoning_config in (
+            None,
+            {"enabled": False},
+            {"enabled": True, "effort": "low"},
+            {"enabled": True, "effort": "medium"},
+            {"enabled": True, "effort": "high"},
+            {"enabled": True, "effort": "max"},
+        ):
+            kwargs = transport.build_kwargs(
+                model="kimi-k3",
+                messages=_msgs(),
+                tools=None,
+                provider_profile=profile,
+                reasoning_config=reasoning_config,
+            )
+
+            assert kwargs["reasoning_effort"] == "max"
+            assert "thinking" not in kwargs.get("extra_body", {})
+
+    def test_kimi_k3_finalizer_overrides_invalid_caller_fields(self, transport):
+        kwargs = transport.build_kwargs(
+            model="moonshotai/kimi-k3",
+            messages=_msgs(),
+            tools=None,
+            provider_profile=get_provider_profile("kimi-coding"),
+            extra_body_additions={"thinking": {"type": "enabled"}, "keep": True},
+            request_overrides={"reasoning_effort": "low"},
+        )
+
+        assert kwargs["reasoning_effort"] == "max"
+        assert kwargs["extra_body"] == {"keep": True}
+
 
 class TestOpenRouterProfileParity:
     def test_provider_preferences(self, transport):

@@ -1895,6 +1895,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             from agent.portal_tags import nous_portal_tags as _portal_tags
             summary_extra_body["tags"] = _portal_tags()
 
+        provider_profile = None
         if agent.api_mode == "codex_responses":
             codex_kwargs = agent._build_api_kwargs(api_messages)
             codex_kwargs.pop("tools", None)
@@ -1965,6 +1966,13 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             if summary_extra_body:
                 summary_kwargs["extra_body"] = summary_extra_body
 
+            if provider_profile is not None:
+                summary_kwargs = provider_profile.finalize_api_kwargs(
+                    summary_kwargs,
+                    model=agent.model,
+                    params={"reasoning_config": agent.reasoning_config},
+                )
+
             if agent.api_mode == "anthropic_messages":
                 _tsum = agent._get_transport()
                 _ant_kw = _tsum.build_kwargs(model=agent.model, messages=api_messages, tools=None,
@@ -2017,6 +2025,13 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                     summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
                 if summary_extra_body:
                     summary_kwargs["extra_body"] = summary_extra_body
+
+                if provider_profile is not None:
+                    summary_kwargs = provider_profile.finalize_api_kwargs(
+                        summary_kwargs,
+                        model=agent.model,
+                        params={"reasoning_config": agent.reasoning_config},
+                    )
 
                 summary_response = agent._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
                 _retry_result = agent._get_transport().normalize_response(summary_response)

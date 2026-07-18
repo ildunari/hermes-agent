@@ -284,6 +284,8 @@ export interface ModelCapabilities {
    *  means an older backend or unknown catalog, so the UI keeps Hermes' full
    *  provider-neutral list for compatibility. */
   reasoning_efforts?: string[]
+  /** The provider always reasons and rejects attempts to disable thinking. */
+  reasoning_always_on?: boolean
 }
 
 export interface ModelOptionsResponse {

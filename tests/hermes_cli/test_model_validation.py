@@ -7,6 +7,7 @@ from hermes_cli.models import (
     copilot_model_api_mode,
     fetch_github_model_catalog,
     curated_models_for_provider,
+    detect_static_provider_for_model,
     fetch_api_models,
     fetch_lmstudio_models,
     github_model_reasoning_efforts,
@@ -145,6 +146,16 @@ class TestCuratedModelsForProvider:
     def test_unknown_provider_returns_empty(self):
         assert curated_models_for_provider("totally-unknown") == []
 
+    def test_kimi_k3_is_available_for_moonshot_keys_and_provider_alias(self):
+        assert any(model == "kimi-k3" for model, _ in curated_models_for_provider("moonshot"))
+        assert any(model == "kimi-k3" for model, _ in curated_models_for_provider("kimi-for-coding"))
+
+    def test_kimi_for_coding_model_id_is_not_replaced_by_k3(self):
+        assert detect_static_provider_for_model("kimi-for-coding", "openrouter") == (
+            "kimi-coding",
+            "kimi-for-coding",
+        )
+
 
 # -- normalize_provider ------------------------------------------------------
 
@@ -156,6 +167,7 @@ class TestNormalizeProvider:
     def test_known_aliases(self):
         assert normalize_provider("glm") == "zai"
         assert normalize_provider("kimi") == "kimi-coding"
+        assert normalize_provider("kimi-for-coding") == "kimi-coding"
         assert normalize_provider("moonshot") == "kimi-coding"
         assert normalize_provider("step") == "stepfun"
         assert normalize_provider("github-copilot") == "copilot"

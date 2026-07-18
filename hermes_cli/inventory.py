@@ -184,7 +184,7 @@ def build_models_payload(
       mirroring the ``hermes model`` CLI picker. Adds network calls
       (pricing fetch + Nous tier check); only set for interactive pickers.
     - ``capabilities``: add a per-row ``capabilities`` map
-      ``{model: {fast, reasoning, reasoning_efforts?}}`` so pickers can gate the model-options
+      ``{model: {fast, reasoning, reasoning_efforts?, reasoning_always_on?}}`` so pickers can gate the model-options
       controls (fast toggle / reasoning) to what each model actually
       supports, instead of offering knobs the backend would reject.
     - ``force_fresh_nous_tier``: bypass the short Nous free-tier cache when
@@ -339,11 +339,18 @@ def _apply_capabilities(rows: list[dict]) -> None:
                 except Exception:
                     reasoning = True
 
-            model_caps = {
+            model_caps: dict[str, object] = {
                 "fast": bool(model_supports_fast_mode(model)),
                 "reasoning": reasoning,
             }
-            if slug.lower() == "openai-codex":
+            slug_lower = slug.lower()
+            if slug_lower == "kimi-coding" and model.lower().rsplit("/", 1)[-1] == "kimi-k3":
+                # K3 always reasons and currently accepts only `max`. Exposing
+                # Hermes' generic low/medium/high choices would create invalid
+                # requests, so picker surfaces must constrain the control.
+                model_caps["reasoning_efforts"] = ["max"]
+                model_caps["reasoning_always_on"] = True
+            elif slug_lower == "openai-codex":
                 try:
                     from hermes_cli.codex_models import get_codex_model_reasoning_efforts
 

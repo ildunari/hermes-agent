@@ -4820,6 +4820,20 @@ class TestHandleMaxIterations:
         kwargs = agent.client.chat.completions.create.call_args.kwargs
         assert "reasoning" not in kwargs.get("extra_body", {})
 
+    def test_kimi_k3_summary_forces_max_without_thinking(self, agent):
+        agent.provider = "kimi-coding"
+        agent.model = "kimi-k3"
+        agent.reasoning_config = {"enabled": False}
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+
+        assert result == "Summary"
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        assert kwargs["reasoning_effort"] == "max"
+        assert "thinking" not in kwargs.get("extra_body", {})
+
     def test_summary_request_removes_orphan_tool_result(self, agent):
         """Regression: max-iterations summary request must NOT contain
         orphan tool results (tool_call_id with no matching assistant tool_call)."""

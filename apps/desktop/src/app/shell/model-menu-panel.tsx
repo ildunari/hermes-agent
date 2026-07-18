@@ -166,7 +166,9 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
     const preset = modelPresets[modelPresetKey(provider.slug, family.id)] ?? {}
     const rawNextEffort = preset.effort ?? (currentReasoningEffort || undefined)
 
-    const nextEffort = rawNextEffort ? normalizeReasoningEffort(rawNextEffort, caps?.reasoning_efforts) : undefined
+    const nextEffort = rawNextEffort
+      ? normalizeReasoningEffort(rawNextEffort, caps?.reasoning_efforts, caps?.reasoning_always_on)
+      : undefined
 
     // Variant-fast models (no speed param) express "fast" as a separate `-fast`
     // id, so honor the saved preset by selecting that sibling. Param-fast is
@@ -269,7 +271,11 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
                 const preset = modelPresets[modelPresetKey(group.provider.slug, family.id)] ?? {}
                 const effEffort = isCurrent ? currentReasoningEffort : (preset.effort ?? '')
                 const effFast = isCurrent ? currentFastMode : (preset.fast ?? false)
-                const normalizedEffort = normalizeReasoningEffort(effEffort, caps?.reasoning_efforts)
+                const normalizedEffort = normalizeReasoningEffort(
+                  effEffort,
+                  caps?.reasoning_efforts,
+                  caps?.reasoning_always_on
+                )
 
                 const effortLabel =
                   normalize(group.provider.slug) === 'openai-codex' && normalizedEffort === 'low'
@@ -332,6 +338,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
                       onSelectModel={nextModel => switchTo(nextModel, group.provider.slug)}
                       provider={group.provider.slug}
                       reasoning={caps?.reasoning ?? true}
+                      reasoningAlwaysOn={caps?.reasoning_always_on}
                       reasoningEfforts={caps?.reasoning_efforts}
                       requestGateway={requestGateway}
                     />

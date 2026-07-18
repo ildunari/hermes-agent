@@ -331,6 +331,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "minimaxai/minimax-m3",
     ],
     "kimi-coding": [
+        "kimi-k3",
         "kimi-k2.7-code",
         "kimi-k2.6",
         "kimi-k2.5",
@@ -352,6 +353,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "step-3.5-flash-2603",
     ],
     "moonshot": [
+        "kimi-k3",
         "kimi-k2.6",
         "kimi-k2.5",
         "kimi-k2-thinking",
@@ -1247,6 +1249,7 @@ _PROVIDER_ALIASES = {
     "gcp-vertex": "vertex",
     "vertexai": "vertex",
     "kimi": "kimi-coding",
+    "kimi-for-coding": "kimi-coding",
     "moonshot": "kimi-coding",
     "kimi-cn": "kimi-coding-cn",
     "moonshot-cn": "kimi-coding-cn",
@@ -2008,7 +2011,11 @@ def detect_static_provider_for_model(
     # Skip "custom" and "openrouter" — custom has no model catalog, and
     # openrouter requires an explicit model name to be useful.
     resolved_provider = _PROVIDER_ALIASES.get(name_lower, name_lower)
-    if resolved_provider not in {"custom", "openrouter"}:
+    # A provider alias can also be a real model ID (for example
+    # ``kimi-for-coding``). Preserve explicit model selections instead of
+    # silently replacing them with that provider's default model.
+    alias_is_model_id = _model_in_provider_catalog(name_lower, {resolved_provider})
+    if resolved_provider not in {"custom", "openrouter"} and not alias_is_model_id:
         default_models = _PROVIDER_MODELS.get(resolved_provider, [])
         if (
             resolved_provider in _PROVIDER_LABELS

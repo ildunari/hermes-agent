@@ -21,15 +21,21 @@ class KimiProfile(ProviderProfile):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Kimi reasoning controls.
 
-        Moonshot's wire shape treats ``extra_body.thinking`` (a binary toggle)
-        and a top-level ``reasoning_effort`` as mutually exclusive — sending
-        both is at best redundant and risks "cannot specify both 'thinking' and
-        'reasoning_effort'" (HTTP 400). This mirrors the kimi-k2 handling on the
-        opencode-go relay: send effort when one is requested, otherwise fall
-        back to ``extra_body.thinking`` — never both.
+        K3 always reasons, does not accept the K2 ``thinking`` object, and as of
+        July 2026 accepts only ``reasoning_effort="max"``. K2 models retain the
+        older xor contract: ``extra_body.thinking`` (a binary toggle) and a
+        top-level ``reasoning_effort`` are mutually exclusive.
         """
         extra_body = {}
         top_level = {}
+
+        model = str(context.get("model") or "").strip().lower().rsplit("/", 1)[-1]
+        if model == "kimi-k3":
+            # K3 reasoning cannot be disabled. Map every Hermes effort (and an
+            # unset effort) to the sole API-supported value instead of leaking
+            # low/medium/high or the K2-only ``thinking`` field onto the wire.
+            top_level["reasoning_effort"] = "max"
+            return extra_body, top_level
 
         if not reasoning_config or not isinstance(reasoning_config, dict):
             # No config → thinking enabled, let the server pick the depth.
@@ -52,6 +58,30 @@ class KimiProfile(ProviderProfile):
             extra_body["thinking"] = {"type": "enabled"}
 
         return extra_body, top_level
+
+    def finalize_api_kwargs(
+        self,
+        api_kwargs: dict[str, Any],
+        *,
+        model: str | None = None,
+        **context: Any,
+    ) -> dict[str, Any]:
+        """Reassert K3's wire contract after caller and config overrides."""
+        normalized_model = str(model or "").strip().lower().rsplit("/", 1)[-1]
+        if normalized_model != "kimi-k3":
+            return api_kwargs
+
+        finalized = dict(api_kwargs)
+        finalized["reasoning_effort"] = "max"
+        extra_body = finalized.get("extra_body")
+        if isinstance(extra_body, dict) and "thinking" in extra_body:
+            cleaned_extra_body = dict(extra_body)
+            cleaned_extra_body.pop("thinking", None)
+            if cleaned_extra_body:
+                finalized["extra_body"] = cleaned_extra_body
+            else:
+                finalized.pop("extra_body", None)
+        return finalized
 
 
 kimi = KimiProfile(
