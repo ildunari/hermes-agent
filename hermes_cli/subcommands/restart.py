@@ -40,21 +40,45 @@ def _notification_tty() -> str | None:
     return None
 
 
-def _wait_for_completion(marker: Path, *, scope: str, timeout: float) -> int:
+def _wait_for_completion(
+    marker: Path,
+    *,
+    scope: str,
+    timeout: float,
+    log_path: Path | None = None,
+    log_offset: int = 0,
+) -> int:
     deadline = time.monotonic() + max(0.0, timeout)
+
+    def print_progress() -> None:
+        nonlocal log_offset
+        if log_path is None:
+            return
+        try:
+            with log_path.open("r", encoding="utf-8", errors="replace") as log_fh:
+                log_fh.seek(log_offset)
+                chunk = log_fh.read()
+                log_offset = log_fh.tell()
+        except OSError:
+            return
+        for line in chunk.splitlines():
+            print(f"  {line}", flush=True)
+
     try:
         while not marker.is_file():
+            print_progress()
             if time.monotonic() >= deadline:
                 print(
                     f"Timed out waiting for restart status; the detached restart may still continue. "
                     f"Status: {marker}"
                 )
                 return 124
-            time.sleep(0.5)
+            time.sleep(0.25)
     except KeyboardInterrupt:
         print(f"\nStopped waiting; the detached restart continues. Status: {marker}")
         return 130
 
+    print_progress()
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
@@ -74,8 +98,7 @@ def _wait_for_completion(marker: Path, *, scope: str, timeout: float) -> int:
 
 
 def cmd_restart(args: argparse.Namespace) -> None:
-    """Queue a detached, drain-aware restart and optionally wait for completion."""
-    from hermes_cli.restart_surfaces import enqueue_detached_restart
+    from hermes_cli.restart_surfaces import LOG_PATH, enqueue_detached_restart
 
     if sys.platform != "darwin":
         raise SystemExit("hermes restart currently supports macOS launchd services only")
@@ -86,7 +109,12 @@ def cmd_restart(args: argparse.Namespace) -> None:
         return
 
     marker = _completion_marker()
-    notify_tty = None if args.wait else _notification_tty()
+    detach = getattr(args, "detach", False)
+    notify_tty = _notification_tty() if detach else None
+    try:
+        log_offset = LOG_PATH.stat().st_size
+    except OSError:
+        log_offset = 0
     print(enqueue_detached_restart(
         scope,
         delay=args.delay,
@@ -95,7 +123,8 @@ def cmd_restart(args: argparse.Namespace) -> None:
         safe_wait_timeout=args.safe_wait_timeout,
     ))
     print(f"Completion status: {marker}")
-    if args.wait:
+    if not detach:
+        print("Following restart progress (Ctrl-C stops watching; the restart continues):", flush=True)
         from hermes_cli.restart_surfaces import DEFAULT_SAFE_WAIT_TIMEOUT
 
         drain_timeout = args.safe_wait_timeout
@@ -107,7 +136,13 @@ def cmd_restart(args: argparse.Namespace) -> None:
             # at the final WebUI boundary, plus bounded sequential gateway
             # replacement and health checks.
             wait_timeout = (2.0 * drain_timeout) + 6180.0
-        exit_code = _wait_for_completion(marker, scope=scope, timeout=wait_timeout)
+        exit_code = _wait_for_completion(
+            marker,
+            scope=scope,
+            timeout=wait_timeout,
+            log_path=LOG_PATH,
+            log_offset=log_offset,
+        )
         if exit_code:
             raise SystemExit(exit_code)
 
@@ -132,7 +167,12 @@ def build_restart_parser(subparsers) -> None:
     parser.add_argument(
         "--wait",
         action="store_true",
-        help="Wait for the detached worker's completion status (Ctrl-C stops waiting only)",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="Queue the restart and return immediately instead of following progress",
     )
     parser.add_argument(
         "--delay",
@@ -150,6 +190,6 @@ def build_restart_parser(subparsers) -> None:
         "--wait-timeout",
         type=_finite_nonnegative,
         default=None,
-        help="Maximum seconds for --wait (default: derived from all drain/replacement budgets)",
+        help="Maximum seconds to follow progress (default: derived from all drain/replacement budgets)",
     )
     parser.set_defaults(func=cmd_restart)

@@ -102,14 +102,19 @@ def _is_mcp_tool_parallel_safe(tool_name: str) -> bool:
         return False
 
 
-def _should_parallelize_tool_batch(tool_calls) -> bool:
+def _should_parallelize_tool_batch(
+    tool_calls, *, execution_cwd: Optional[Path] = None
+) -> bool:
     """Return True when the entire batch forms one parallel-safe group."""
-    plan = _plan_tool_execution_groups(tool_calls)
+    plan = _plan_tool_execution_groups(tool_calls, execution_cwd=execution_cwd)
     return len(plan) == 1 and len(plan[0]) > 1
+
 
 def _parallel_safety_for_tool(
     tool_name: str,
     function_args: dict,
+    *,
+    execution_cwd: Optional[Path] = None,
 ) -> tuple[bool, Optional[Path]]:
     """Classify one effective invocation for ordered-group planning.
 
@@ -123,7 +128,9 @@ def _parallel_safety_for_tool(
     if tool_name == "process":
         return function_args.get("action") == "list", None
     if tool_name in _PATH_SCOPED_TOOLS:
-        scoped_path = _extract_parallel_scope_path(tool_name, function_args)
+        scoped_path = _extract_parallel_scope_path(
+            tool_name, function_args, execution_cwd=execution_cwd
+        )
         return scoped_path is not None, scoped_path
     if tool_name in _PARALLEL_SAFE_TOOLS:
         return True, None
@@ -132,6 +139,8 @@ def _parallel_safety_for_tool(
 
 def _plan_tool_execution_groups_for_specs(
     specs: Sequence[Tuple[str, dict]],
+    *,
+    execution_cwd: Optional[Path] = None,
 ) -> tuple[tuple[int, ...], ...]:
     """Plan ordered maximal contiguous groups from effective tool specs.
 
@@ -151,7 +160,9 @@ def _plan_tool_execution_groups_for_specs(
         reserved_paths = []
 
     for index, (tool_name, function_args) in enumerate(specs):
-        safe, scoped_path = _parallel_safety_for_tool(tool_name, function_args)
+        safe, scoped_path = _parallel_safety_for_tool(
+            tool_name, function_args, execution_cwd=execution_cwd
+        )
         if not safe:
             flush()
             groups.append((index,))
@@ -168,7 +179,9 @@ def _plan_tool_execution_groups_for_specs(
     return tuple(groups)
 
 
-def _plan_tool_execution_groups(tool_calls) -> tuple[tuple[int, ...], ...]:
+def _plan_tool_execution_groups(
+    tool_calls, *, execution_cwd: Optional[Path] = None
+) -> tuple[tuple[int, ...], ...]:
     """Plan ordered maximal safe groups for raw model tool calls.
 
     Malformed arguments are conservative singleton barriers. The executor
@@ -206,13 +219,19 @@ def _plan_tool_execution_groups(tool_calls) -> tuple[tuple[int, ...], ...]:
         ("__malformed_tool_call__", args) if index in malformed_indices else (name, args)
         for index, (name, args) in enumerate(specs)
     ]
-    return _plan_tool_execution_groups_for_specs(effective_specs)
+    return _plan_tool_execution_groups_for_specs(
+        effective_specs, execution_cwd=execution_cwd
+    )
 
 
-def _plan_tool_batch_segments(tool_calls) -> List[tuple]:
+def _plan_tool_batch_segments(
+    tool_calls, *, execution_cwd: Optional[Path] = None
+) -> List[tuple]:
     """Compatibility view of the grouped planner as ordered call segments."""
     segments: List[tuple] = []
-    for group in _plan_tool_execution_groups(tool_calls):
+    for group in _plan_tool_execution_groups(
+        tool_calls, execution_cwd=execution_cwd
+    ):
         kind = "parallel" if len(group) > 1 else "sequential"
         calls = [tool_calls[index] for index in group]
         if kind == "sequential" and segments and segments[-1][0] == "sequential":
@@ -222,8 +241,34 @@ def _plan_tool_batch_segments(tool_calls) -> List[tuple]:
     return segments
 
 
-def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Optional[Path]:
-    """Return the normalized file target for path-scoped tools."""
+def _canonical_path(raw_path: str, execution_cwd: Optional[Path] = None) -> Path:
+    """Return a canonical, OS-aware path for overlap detection.
+
+    Uses ``os.path.realpath`` to resolve symlinks on existing path components
+    and ``os.path.normcase`` for case-insensitive platforms (Windows).
+    Falls back to ``Path.cwd()`` when *execution_cwd* is not supplied.
+    """
+    expanded = Path(raw_path).expanduser()
+    base = execution_cwd if execution_cwd is not None else Path.cwd()
+    candidate = expanded if expanded.is_absolute() else base / expanded
+    # realpath resolves symlinks on path components that exist; for
+    # not-yet-created files it canonicalises as far as possible.
+    resolved = os.path.normcase(os.path.realpath(os.path.abspath(str(candidate))))
+    return Path(resolved)
+
+
+def _extract_parallel_scope_path(
+    tool_name: str,
+    function_args: dict,
+    execution_cwd: Optional[Path] = None,
+) -> Optional[Path]:
+    """Return the canonical file target for path-scoped tools.
+
+    *execution_cwd* should be the working directory that the tool will
+    actually use at runtime.  When omitted the process cwd is used,
+    which may differ from the tool execution environment on some
+    platforms (e.g. WSL, sandboxed sub-processes).
+    """
     if tool_name not in _PATH_SCOPED_TOOLS:
         return None
 
@@ -231,16 +276,16 @@ def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Optiona
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
 
-    expanded = Path(raw_path).expanduser()
-    if expanded.is_absolute():
-        return Path(os.path.abspath(str(expanded)))
-
-    # Avoid resolve(); the file may not exist yet.
-    return Path(os.path.abspath(str(Path.cwd() / expanded)))
+    return _canonical_path(raw_path, execution_cwd)
 
 
 def _paths_overlap(left: Path, right: Path) -> bool:
-    """Return True when two paths may refer to the same subtree."""
+    """Return True when two paths may refer to the same subtree.
+
+    Both *left* and *right* must already be canonical (as returned by
+    ``_extract_parallel_scope_path`` / ``_canonical_path``) so that
+    symlink aliases and case differences are already normalised.
+    """
     left_parts = left.parts
     right_parts = right.parts
     if not left_parts or not right_parts:
@@ -620,6 +665,7 @@ __all__ = [
     "_should_parallelize_tool_batch",
     "_plan_tool_execution_groups",
     "_plan_tool_execution_groups_for_specs",
+    "_canonical_path",
     "_extract_parallel_scope_path",
     "_paths_overlap",
     "_is_multimodal_tool_result",

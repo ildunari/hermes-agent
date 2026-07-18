@@ -499,10 +499,14 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             _context_cwd = agent._resolve_task_cwd()
         except Exception:
             _context_cwd = resolve_context_cwd() or os.getenv("TERMINAL_CWD") or None
+        # allow_install_tree_fallback: for cli/tui the launch dir IS the
+        # user's shell cwd, so an in-tree fallback is a deliberate choice.
+        # Other self-spawned surfaces must not inject the repo's AGENTS.md.
         context_files_prompt = _r.build_context_files_prompt(
             cwd=_context_cwd,
             skip_soul=_soul_loaded,
             context_length=_ctx_len,
+            allow_install_tree_fallback=agent.platform in ("cli", "tui"),
         )
         if context_files_prompt:
             context_parts.append(context_files_prompt)

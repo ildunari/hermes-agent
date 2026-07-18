@@ -15,6 +15,7 @@ def _args(**overrides):
     values = {
         "dry_run": False,
         "wait": False,
+        "detach": False,
         "delay": 1.0,
         "safe_wait_timeout": None,
         "wait_timeout": None,
@@ -32,7 +33,7 @@ def test_restart_parser_defaults_to_drain_aware_surface_scope():
 
     assert args.func is cmd_restart
     assert args.dry_run is False
-    assert args.wait is False
+    assert args.detach is False
 
 
 @pytest.mark.parametrize(
@@ -83,7 +84,7 @@ def test_restart_queues_detached_safe_scope_with_status_marker(monkeypatch, tmp_
     monkeypatch.setattr("hermes_cli.subcommands.restart._completion_marker", lambda: marker)
     monkeypatch.setattr("hermes_cli.subcommands.restart._notification_tty", lambda: None)
 
-    cmd_restart(_args(delay=2.5, safe_wait_timeout=90.0))
+    cmd_restart(_args(delay=2.5, safe_wait_timeout=90.0, detach=True))
 
     output = capsys.readouterr().out
     assert "queued" in output
@@ -114,13 +115,13 @@ def test_restart_requests_terminal_completion_notification(monkeypatch, tmp_path
         lambda: "/dev/ttys001",
     )
 
-    cmd_restart(_args())
+    cmd_restart(_args(detach=True))
 
     assert capsys.readouterr().out.startswith("queued\n")
     assert calls[0][1]["notify_tty"] == "/dev/ttys001"
 
 
-def test_restart_wait_does_not_duplicate_terminal_notification(monkeypatch, tmp_path):
+def test_restart_follow_does_not_duplicate_terminal_notification(monkeypatch, tmp_path):
     calls = []
     marker = tmp_path / "restart.json"
     marker.write_text(json.dumps({
@@ -141,7 +142,7 @@ def test_restart_wait_does_not_duplicate_terminal_notification(monkeypatch, tmp_
         lambda: "/dev/ttys001",
     )
 
-    cmd_restart(_args(wait=True))
+    cmd_restart(_args())
 
     assert calls[0][1]["notify_tty"] is None
 
@@ -161,7 +162,7 @@ def test_restart_wait_propagates_worker_failure(monkeypatch, tmp_path):
     monkeypatch.setattr("hermes_cli.subcommands.restart._completion_marker", lambda: marker)
 
     try:
-        cmd_restart(_args(wait=True))
+        cmd_restart(_args())
     except SystemExit as exc:
         assert exc.code == 1
     else:
@@ -172,6 +173,32 @@ def test_restart_wait_is_bounded_when_worker_never_writes_marker(tmp_path):
     marker = tmp_path / "missing.json"
 
     assert _wait_for_completion(marker, scope="gateways", timeout=0) == 124
+
+
+def test_restart_follow_streams_only_new_worker_log_lines(tmp_path, capsys):
+    marker = tmp_path / "restart.json"
+    log = tmp_path / "restart.log"
+    log.write_text("old restart\n[time] gateway restarting\n", encoding="utf-8")
+    marker.write_text(json.dumps({
+        "status": "complete",
+        "scope": "gateways",
+        "exit_code": 0,
+        "message": "restart finished",
+    }))
+
+    exit_code = _wait_for_completion(
+        marker,
+        scope="gateways",
+        timeout=1,
+        log_path=log,
+        log_offset=len("old restart\n"),
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "old restart" not in output
+    assert "  [time] gateway restarting" in output
+    assert output.rstrip().endswith("restart finished")
 
 
 def test_restart_rejects_non_macos_before_enqueue(monkeypatch):

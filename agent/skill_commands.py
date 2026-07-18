@@ -610,6 +610,59 @@ def build_skill_invocation_message(
     )
 
 
+def build_named_skill_invocation_message(
+    skill_name: str,
+    user_instruction: str = "",
+    task_id: str | None = None,
+    runtime_note: str = "",
+) -> Optional[str]:
+    """Build an invocation for an explicitly named skill.
+
+    Unlike :func:`build_skill_invocation_message`, this resolves through the
+    skill-view lookup rather than the auto-generated slash-command registry.
+    Core commands whose implementation is intentionally skill-backed (for
+    example ``update-smart``) collide with that registry by design and need
+    this explicit path.
+    """
+    try:
+        import json
+
+        from tools.skills_tool import skill as view_skill
+
+        payload = json.loads(
+            view_skill(action="view", name=skill_name, task_id=task_id)
+        )
+        if not payload.get("success") or not payload.get("skill_dir"):
+            return None
+        loaded = _load_skill_payload(payload["skill_dir"], task_id=task_id)
+    except Exception:
+        logger.debug("Explicit named-skill lookup failed for %s", skill_name, exc_info=True)
+        return None
+
+    if not loaded:
+        return None
+    loaded_skill, skill_dir, resolved_name = loaded
+    try:
+        from tools.skill_usage import bump_use
+
+        bump_use(resolved_name)
+    except Exception:
+        pass
+
+    activation_note = (
+        f'[IMPORTANT: The user has invoked the "{resolved_name}" skill, indicating they want '
+        "you to follow its instructions. The full skill content is loaded below.]"
+    )
+    return _build_skill_message(
+        loaded_skill,
+        skill_dir,
+        activation_note,
+        user_instruction=user_instruction,
+        runtime_note=runtime_note,
+        session_id=task_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Stacked slash-skill invocations — `/skill-a /skill-b do XYZ` loads every
 # leading skill (up to _MAX_STACKED_SKILLS), not just the first.

@@ -35,6 +35,7 @@ from gateway.config import HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import EphemeralReply, MessageEvent, MessageType
 from gateway.session import (
     AsyncSessionStore,
+    SessionEntry,
     SessionSource,
     build_session_key,
     is_shared_multi_user_session,
@@ -207,6 +208,7 @@ class GatewaySlashCommandsMixin:
         # picks up configured defaults instead of previous session switches.
         self._session_model_overrides.pop(session_key, None)
         self._set_session_reasoning_override(session_key, None)
+        self._set_session_personality_override(session_key, None)
         if hasattr(self, "_pending_model_notes"):
             self._pending_model_notes.pop(session_key, None)
 
@@ -329,13 +331,733 @@ class GatewaySlashCommandsMixin:
             return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
         return EphemeralReply(f"{header}{_tip_line}")
 
+    def _default_messaging_cwd(self) -> str:
+        """Return the gateway-wide default working directory for messaging."""
+        cwd = os.getenv("TERMINAL_CWD") or os.getenv("MESSAGING_CWD") or str(Path.home())
+        return os.path.abspath(os.path.expanduser(cwd))
+
+    def _session_cwd_for_entry(self, session_entry: Optional[SessionEntry]) -> str:
+        """Return the effective working directory for a session entry."""
+        if session_entry and getattr(session_entry, "cwd_override", None):
+            return str(session_entry.cwd_override)
+        return self._default_messaging_cwd()
+
+    def _resolve_requested_cwd(
+        self, raw_path: str, session_entry: Optional[SessionEntry]
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Resolve a requested cwd relative to the session, then the user home."""
+        token = str(raw_path or "").strip()
+        if not token:
+            return None, "Path is empty."
+        if (token.startswith('"') and token.endswith('"')) or (
+            token.startswith("'") and token.endswith("'")
+        ):
+            token = token[1:-1].strip()
+        if not token:
+            return None, "Path is empty."
+
+        base_dir = Path(self._session_cwd_for_entry(session_entry))
+        expanded = Path(os.path.expandvars(os.path.expanduser(token)))
+        if expanded.is_absolute():
+            candidate_paths = [expanded]
+        else:
+            candidate_paths = [base_dir / expanded]
+            explicit_relative = token.startswith(("./", "../")) or token in {".", ".."}
+            if not explicit_relative:
+                home_candidate = Path.home() / expanded
+                if home_candidate not in candidate_paths:
+                    candidate_paths.append(home_candidate)
+
+        missing_candidate: Optional[Path] = None
+        for candidate in candidate_paths:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            try:
+                from tools.terminal_tool import _validate_workdir
+
+                workdir_error = _validate_workdir(str(resolved))
+                if workdir_error:
+                    return None, workdir_error
+            except Exception:
+                pass
+            if not resolved.exists():
+                missing_candidate = missing_candidate or resolved
+                continue
+            if not resolved.is_dir():
+                return None, f"Not a directory: {resolved}"
+            return str(resolved), None
+
+        return None, f"Directory not found: {missing_candidate or candidate_paths[0]}"
+
+    async def _handle_cwd_command(self, event: MessageEvent) -> str:
+        """Handle /cwd [path|clear] — bind this chat/thread to a working directory."""
+        source = event.source
+        session_key = self._session_key_for_source(source)
+        session_entry = self.session_store.get_or_create_session(source)
+        current_cwd = self._session_cwd_for_entry(session_entry)
+        cwd_label = (
+            "session override"
+            if getattr(session_entry, "cwd_override", None)
+            else "gateway default"
+        )
+        arg = event.get_command_args().strip()
+        if not arg:
+            return (
+                f"Current working directory for this chat: {current_cwd}\n"
+                f"Source: {cwd_label}\n"
+                "Use /cwd <path> to switch projects, or /cwd clear to go back to the default."
+            )
+
+        if arg.lower() in {"clear", "default", "reset"}:
+            self.session_store.set_session_cwd(session_key, None)
+            reset_msg = await self._handle_reset_command(event)
+            return (
+                "Working directory cleared for this chat.\n"
+                f"Now using the gateway default: {self._default_messaging_cwd()}\n\n"
+                f"{reset_msg}"
+            )
+
+        resolved_cwd, error = self._resolve_requested_cwd(arg, session_entry)
+        if error:
+            return error
+        if not resolved_cwd:
+            return "Could not resolve that directory."
+        self.session_store.set_session_cwd(session_key, resolved_cwd)
+        reset_msg = await self._handle_reset_command(event)
+        return (
+            f"Working directory set for this chat: {resolved_cwd}\n"
+            "Project context will now be loaded from here for future messages in this thread.\n\n"
+            f"{reset_msg}"
+        )
+
+    def _format_thread_cwd(self, cwd: Optional[str]) -> str:
+        if not cwd:
+            return "default"
+        try:
+            home = str(Path.home())
+            resolved = str(Path(cwd).expanduser())
+            if resolved == home:
+                return "~"
+            if resolved.startswith(home + os.sep):
+                return "~" + resolved[len(home):]
+            return resolved
+        except Exception:
+            return str(cwd)
+
+    def _iter_visible_session_entries(self) -> list[SessionEntry]:
+        """Return a snapshot of known gateway session bindings for UX commands."""
+        store = getattr(self, "session_store", None)
+        if store is None:
+            return []
+        try:
+            ensure_loaded = getattr(store, "_ensure_loaded_locked", None)
+            lock = getattr(store, "_lock", None)
+            entries = getattr(store, "_entries", None)
+            if isinstance(entries, dict):
+                if lock is not None:
+                    with lock:
+                        if callable(ensure_loaded):
+                            ensure_loaded()
+                        return list(entries.values())
+                if callable(ensure_loaded):
+                    ensure_loaded()
+                return list(entries.values())
+        except Exception:
+            logger.debug("Failed to list gateway session entries", exc_info=True)
+        return []
+
+    async def _handle_threads_command(self, event: MessageEvent) -> str:
+        """Handle /threads — list known topic/session/cwd bindings."""
+        source = event.source
+        entries = [
+            entry
+            for entry in self._iter_visible_session_entries()
+            if getattr(entry, "platform", None) == source.platform
+            and getattr(getattr(entry, "origin", None), "chat_id", source.chat_id)
+            == source.chat_id
+        ]
+        if not entries:
+            return "No saved thread/session bindings yet. Use /thread bind <cwd> or /newthread <name>."
+        entries = sorted(
+            entries,
+            key=lambda entry: getattr(entry, "updated_at", None)
+            or getattr(entry, "created_at", None),
+            reverse=True,
+        )[:12]
+        lines = ["Known thread bindings:"]
+        for entry in entries:
+            origin = getattr(entry, "origin", None)
+            topic = (
+                getattr(origin, "chat_topic", None)
+                or getattr(entry, "display_name", None)
+                or "main"
+            )
+            thread_id = getattr(origin, "thread_id", None) or "main"
+            marker = (
+                "current"
+                if entry.session_key == self._session_key_for_source(source)
+                else ""
+            )
+            cwd = self._format_thread_cwd(getattr(entry, "cwd_override", None))
+            lines.append(f"- {topic} ({thread_id}): {cwd}{f' — {marker}' if marker else ''}")
+        return "\n".join(lines)
+
+    async def _handle_thread_command(self, event: MessageEvent) -> Optional[str]:
+        """Handle /thread subcommands for topic/session cwd UX."""
+        raw = event.get_command_args().strip()
+        if not raw:
+            return "Use /thread bind <cwd>, /thread new <cwd> [name], /thread rename <name>, /thread close, or /threads."
+        try:
+            parts = shlex.split(raw)
+        except ValueError as exc:
+            return f"Could not parse /thread args: {exc}"
+        if not parts:
+            return "Use /thread bind <cwd>, /thread new <cwd> [name], /thread rename <name>, /thread close, or /threads."
+        action = parts[0].lower().replace("_", "-")
+        rest = parts[1:]
+        if action in {"bind", "cwd"}:
+            if not rest:
+                return "Usage: /thread bind <cwd>"
+            return await self._handle_cwd_command(
+                MessageEvent(
+                    text="/cwd " + rest[0],
+                    source=event.source,
+                    message_id=event.message_id,
+                )
+            )
+        if action == "new":
+            if not rest:
+                return "Usage: /thread new <cwd> [name]"
+            session_entry = self.session_store.get_or_create_session(event.source)
+            resolved_cwd, error = self._resolve_requested_cwd(rest[0], session_entry)
+            if error:
+                return error
+            topic_name = (
+                " ".join(rest[1:]).strip()
+                if len(rest) > 1
+                else Path(resolved_cwd or rest[0]).name
+            ) or "Hermes"
+            if event.source.platform == Platform.TELEGRAM and event.source.chat_type == "dm":
+                return await self._create_named_newthread(
+                    MessageEvent(
+                        text="/newthread " + topic_name,
+                        source=event.source,
+                        message_id=event.message_id,
+                    ),
+                    topic_name,
+                    cwd_bind=resolved_cwd,
+                )
+            return "Creating Telegram topics is available only in Telegram DMs. Use /thread bind <cwd> here instead."
+        if action == "rename":
+            name = " ".join(rest).strip()
+            if not name:
+                return "Usage: /thread rename <name>"
+            entry = self.session_store.get_or_create_session(event.source)
+            warning = await self._set_newthread_session_title(
+                entry.session_id, event.source, name
+            )
+            adapter = self.adapters.get(Platform.TELEGRAM)
+            rename = getattr(adapter, "rename_topic", None) if adapter else None
+            if callable(rename) and event.source.thread_id:
+                try:
+                    await rename(
+                        chat_id=int(event.source.chat_id),
+                        thread_id=int(event.source.thread_id),
+                        name=name,
+                    )
+                    return f"Thread renamed: {name}"
+                except Exception as exc:
+                    logger.debug("Telegram topic rename failed", exc_info=True)
+                    return f"Hermes session renamed, but Telegram topic rename failed: {exc}"
+            if warning:
+                return f"Could not rename Hermes session: {warning}"
+            return f"Hermes session renamed: {name}\nTelegram topic rename is not available on this adapter yet."
+        if action in {"close", "unbind", "clear"}:
+            self.session_store.set_session_cwd(
+                self._session_key_for_source(event.source), None
+            )
+            return "Thread cwd binding cleared. The Telegram topic stays open; /new starts a fresh session if you want one."
+        return f"Unknown /thread action: {action}. Use bind, new, rename, close."
+
+    async def _handle_repo_command(self, event: MessageEvent) -> str:
+        """Handle /repo [name] — list likely repos or bind to a matching repo."""
+        roots = [
+            Path.home() / "LocalDev",
+            Path.home() / "LocalDev" / ".studio-only",
+            Path.home() / ".hermes",
+        ]
+        repos: list[Path] = []
+        for root in roots:
+            if not root.exists():
+                continue
+            try:
+                repos.extend(
+                    child.resolve()
+                    for child in root.iterdir()
+                    if child.is_dir()
+                    and ((child / ".git").exists() or root.name == ".studio-only")
+                )
+            except Exception:
+                continue
+        repos = sorted(set(repos), key=lambda path: path.name.lower())
+        arg = event.get_command_args().strip().lower()
+        if not arg:
+            if not repos:
+                return "No likely repos found under ~/LocalDev or ~/.hermes. Use /cwd <path>."
+            shown = repos[:20]
+            lines = ["Likely repos:"] + [
+                f"- {path.name}: {self._format_thread_cwd(str(path))}"
+                for path in shown
+            ]
+            if len(repos) > len(shown):
+                lines.append(
+                    f"...and {len(repos) - len(shown)} more. Use /repo <name> to bind this chat/thread."
+                )
+            else:
+                lines.append("Use /repo <name> to bind this chat/thread.")
+            return "\n".join(lines)
+        matches = [path for path in repos if arg in path.name.lower()]
+        if not matches:
+            return f"No repo matched {arg!r}. Use /repo to list candidates or /cwd <path>."
+        if len(matches) > 1:
+            return "Multiple repo matches:\n" + "\n".join(
+                f"- {path.name}: {self._format_thread_cwd(str(path))}"
+                for path in matches[:12]
+            )
+        return await self._handle_cwd_command(
+            MessageEvent(
+                text="/cwd " + str(matches[0]),
+                source=event.source,
+                message_id=event.message_id,
+            )
+        )
+
+    def _normalize_newthread_title(self, raw_title: str) -> str:
+        from hermes_state import SessionDB
+
+        sanitized = SessionDB.sanitize_title(raw_title)
+        if not sanitized:
+            raise ValueError("Topic name cannot be empty.")
+        if self._session_db:
+            try:
+                sanitized = self._session_db.get_next_title_in_lineage(sanitized)
+            except Exception:
+                logger.debug("Failed to uniquify /newthread title", exc_info=True)
+        return sanitized[:100].strip()
+
+    async def _set_newthread_session_title(
+        self, session_id: str, source: SessionSource, title: str
+    ) -> Optional[str]:
+        if not self._session_db or not session_id:
+            return None
+        try:
+            self._session_db.create_session(
+                session_id=session_id,
+                source=source.platform.value if source.platform else "telegram",
+                user_id=source.user_id,
+            )
+        except Exception:
+            pass
+        try:
+            if self._session_db.set_session_title(session_id, title):
+                return None
+            return "Hermes session title could not be persisted."
+        except ValueError as exc:
+            return str(exc)
+        except Exception as exc:
+            logger.debug("Failed to persist /newthread session title", exc_info=True)
+            return str(exc)
+
+    async def _create_named_newthread(
+        self,
+        event: MessageEvent,
+        topic_name: str,
+        cwd_bind: Optional[str] = None,
+    ) -> Optional[str]:
+        """Create the Telegram topic and fresh Hermes session for /newthread."""
+        source = event.source
+        adapter = self.adapters.get(Platform.TELEGRAM)
+        if adapter is None or not hasattr(adapter, "create_topic"):
+            return "Telegram topic creation is not available on this gateway right now."
+        try:
+            topic_name = self._normalize_newthread_title(topic_name)
+        except ValueError as exc:
+            return f"⚠️ {exc}"
+        try:
+            thread_id = await adapter.create_topic(
+                chat_id=int(source.chat_id), name=topic_name, persist=True
+            )
+        except Exception as exc:
+            logger.exception("Failed creating Telegram topic")
+            return f"Failed to create Telegram topic: {exc}"
+        if not thread_id:
+            last_error = str(
+                getattr(adapter, "last_topic_create_error", "")
+                or getattr(adapter, "_last_topic_create_error", "")
+                or ""
+            )
+            if "forum_create_forbidden" in last_error.lower():
+                return (
+                    "I couldn't create that Telegram topic because this bot is not allowed "
+                    "to create topics in private chats right now. Open @BotFather, select "
+                    "this bot, and enable the private-chat topic setting that allows users/bots "
+                    "to create topics; then try `/newthread` again."
+                )
+            return "I couldn't create that Telegram topic. If the name already exists, try a different one."
+
+        new_source = SessionSource(
+            platform=source.platform,
+            chat_id=source.chat_id,
+            chat_name=source.chat_name,
+            chat_type=source.chat_type,
+            user_id=source.user_id,
+            user_name=source.user_name,
+            thread_id=str(thread_id),
+            chat_topic=topic_name,
+            user_id_alt=source.user_id_alt,
+            chat_id_alt=source.chat_id_alt,
+        )
+        new_entry = self.session_store.get_or_create_session(new_source, force_new=True)
+        new_key = self._session_key_for_source(new_source)
+        self._session_model_overrides.pop(new_key, None)
+        if cwd_bind:
+            try:
+                self.session_store.set_session_cwd(new_key, cwd_bind)
+            except Exception:
+                logger.debug("Failed to bind cwd for new Telegram thread", exc_info=True)
+        try:
+            self._record_telegram_topic_binding(new_source, new_entry)
+        except Exception:
+            logger.debug("Failed to record Telegram topic binding for /newthread", exc_info=True)
+        title_warning = await self._set_newthread_session_title(
+            new_entry.session_id, new_source, topic_name
+        )
+        title_note = f"\n\n⚠️ {title_warning}" if title_warning else ""
+        welcome = (
+            "✨ New session started here.\n\n"
+            f"Topic: {topic_name}\n\n"
+            f"Created a fresh Hermes session: **{topic_name}**.{title_note}"
+        )
+        try:
+            await adapter.send(
+                source.chat_id,
+                welcome,
+                metadata={"thread_id": str(thread_id), "chat_type": source.chat_type},
+            )
+        except Exception:
+            logger.debug(
+                "Failed to send welcome message into new Telegram topic",
+                exc_info=True,
+            )
+        return None
+
+    async def _handle_pending_newthread_name(
+        self, event: MessageEvent, session_key: str
+    ) -> Optional[str | bool]:
+        pending = getattr(self, "_pending_newthread_prompts", {}).get(session_key)
+        if not pending:
+            return False
+        raw = (event.text or "").strip()
+        cmd = event.get_command()
+        if cmd in {"cancel", "deny", "stop"} or raw.lower() in {
+            "cancel",
+            "nevermind",
+            "never mind",
+        }:
+            self._pending_newthread_prompts.pop(session_key, None)
+            return "Cancelled new thread creation."
+        if cmd:
+            self._pending_newthread_prompts.pop(session_key, None)
+            return False
+        self._pending_newthread_prompts.pop(session_key, None)
+        return await self._create_named_newthread(event, raw)
+
+    async def _prompt_for_newthread_name(
+        self, event: MessageEvent, session_key: str
+    ) -> Optional[str]:
+        source = event.source
+        adapter = self.adapters.get(Platform.TELEGRAM)
+        if adapter is None:
+            return "Telegram topic creation is not available on this gateway right now."
+        prompt = (
+            "Name this new Hermes thread/session with a short label you would recognize later "
+            "(3–6 words, like `Lab Planning` or `Fix Login Timeout`). Reply with the title, "
+            "or send `/cancel`."
+        )
+        metadata = self._thread_metadata_for_source(
+            source, reply_to_message_id=event.message_id
+        )
+        if hasattr(adapter, "prompt_newthread_name"):
+            result = await adapter.prompt_newthread_name(
+                source.chat_id,
+                prompt,
+                metadata=metadata,
+                reply_to=event.message_id,
+            )
+        else:
+            result = await adapter.send(source.chat_id, prompt, metadata=metadata)
+        self._pending_newthread_prompts[session_key] = {
+            "chat_id": source.chat_id,
+            "thread_id": source.thread_id,
+            "prompt_message_id": str(getattr(result, "message_id", None) or ""),
+            "created_at": time.time(),
+        }
+        return None
+
+    async def _handle_newthread_command(self, event: MessageEvent) -> Optional[str]:
+        source = event.source
+        if source.platform != Platform.TELEGRAM:
+            return "This command currently works only on Telegram."
+        if (source.chat_type or "").lower() == "channel":
+            return "This command works in Telegram DMs or groups with topics enabled."
+        topic_name = event.get_command_args().strip()
+        if not topic_name:
+            return await self._prompt_for_newthread_name(
+                event, self._session_key_for_source(source)
+            )
+        return await self._create_named_newthread(event, topic_name)
+
+    def _resolve_session_personality_override(
+        self,
+        *,
+        source: Optional[SessionSource] = None,
+        session_key: Optional[str] = None,
+    ) -> Optional[dict]:
+        resolved_key = session_key
+        if not resolved_key and source is not None:
+            try:
+                resolved_key = self._session_key_for_source(source)
+            except Exception:
+                resolved_key = None
+        overrides = getattr(self, "_session_personality_overrides", {}) or {}
+        if resolved_key and resolved_key in overrides:
+            return overrides[resolved_key]
+        if resolved_key:
+            try:
+                cached = getattr(self, "_session_entry_cache", {}).get(resolved_key)
+                entry = cached if cached is not None else self.session_store.get_session(resolved_key)
+                persisted = getattr(entry, "personality_override", None) if entry else None
+                if persisted:
+                    persisted = dict(persisted)
+                    self._session_personality_overrides[resolved_key] = persisted
+                    return persisted
+            except Exception:
+                logger.debug(
+                    "Failed to hydrate persisted session personality override",
+                    exc_info=True,
+                )
+        return None
+
+    def _set_session_personality_override(
+        self, session_key: str, personality_override: Optional[dict]
+    ) -> None:
+        if not session_key:
+            return
+        if not hasattr(self, "_session_personality_overrides"):
+            self._session_personality_overrides = {}
+        if personality_override is None:
+            self._session_personality_overrides.pop(session_key, None)
+        else:
+            self._session_personality_overrides[session_key] = dict(personality_override)
+        try:
+            self.session_store.set_session_personality_override(
+                session_key, personality_override
+            )
+        except Exception:
+            logger.debug(
+                "Failed to persist session personality override", exc_info=True
+            )
+
+    async def _handle_personality_session_command(
+        self, event: MessageEvent
+    ) -> str:
+        """Handle /personality_session without changing profile config."""
+        from gateway.run import _load_gateway_config, _resolve_personality_prompt
+        from hermes_constants import display_hermes_home
+
+        args = event.get_command_args().strip().lower()
+        try:
+            config = _load_gateway_config()
+            personalities = cfg_get(
+                config, "agent", "personalities", default={}
+            )
+        except Exception:
+            personalities = {}
+        if not personalities:
+            return t(
+                "gateway.personality.none_configured", path=display_hermes_home()
+            )
+
+        source = event.source
+        session_entry = self.session_store.get_or_create_session(source)
+        session_key = session_entry.session_key
+        if hasattr(self, "_session_entry_cache"):
+            self._session_entry_cache[session_key] = session_entry
+        current = self._resolve_session_personality_override(
+            source=source, session_key=session_key
+        )
+        if not args:
+            current_name = current.get("name") if isinstance(current, dict) else "none"
+            lines = [
+                "🎭 **Session Personality**",
+                f"Current for this chat/thread session: `{current_name or 'none'}`",
+                "• `none` — clear the session personality overlay",
+            ]
+            for name, prompt in personalities.items():
+                if isinstance(prompt, dict):
+                    preview = prompt.get("description") or prompt.get(
+                        "system_prompt", ""
+                    )[:50]
+                else:
+                    preview = prompt[:50] + "..." if len(prompt) > 50 else prompt
+                lines.append(f"• `{name}` — {preview}")
+            lines.append("\nUsage: `/personality_session <name|none>`")
+            return "\n".join(lines)
+        if args in {"none", "default", "neutral", "reset", "clear"}:
+            self._set_session_personality_override(session_key, None)
+            cached_entry = getattr(self, "_session_entry_cache", {}).get(session_key)
+            if cached_entry is not None:
+                cached_entry.personality_override = None
+            self._evict_cached_agent(session_key)
+            return "🎭 Session personality cleared for this chat/thread. Profile config was not changed.\n_(takes effect on next message)_"
+        if args in personalities:
+            override = {
+                "name": args,
+                "prompt": _resolve_personality_prompt(personalities[args]),
+            }
+            self._set_session_personality_override(session_key, override)
+            cached_entry = getattr(self, "_session_entry_cache", {}).get(session_key)
+            if cached_entry is not None:
+                cached_entry.personality_override = dict(override)
+            self._evict_cached_agent(session_key)
+            return f"🎭 Session personality set to `{args}` for this chat/thread only. Profile config was not changed.\n_(takes effect on next message)_"
+        available = "`none`, " + ", ".join(f"`{name}`" for name in personalities)
+        return f"Unknown session personality: `{args}`\n\nAvailable: {available}"
+
+    async def _handle_tts_command(self, event: MessageEvent) -> Optional[str]:
+        """Handle /tts <text> — prefer the local Samantha voiceover skill."""
+        text = event.get_command_args().strip()
+        if not text:
+            return "Usage: /tts <prompt>"
+        try:
+            from agent.skill_commands import (
+                build_skill_invocation_message,
+                resolve_skill_command_key,
+            )
+
+            skill_key = resolve_skill_command_key("/moss-samantha-voiceover")
+            if skill_key:
+                event.text = build_skill_invocation_message(
+                    skill_key,
+                    text,
+                    runtime_note=(
+                        "Create a spoken-style audio version using Samantha and "
+                        "deliver the audio file back into the chat."
+                    ),
+                )
+                return None
+        except Exception:
+            pass
+        await self._send_voice_reply(event, text)
+        return "Sent voice message."
+
+    async def _handle_bgnotify_command(self, event: MessageEvent) -> str:
+        """Handle /bgnotify — configure background process chat notifications."""
+        from gateway.run import _hermes_home
+
+        arg = (event.get_command_args() or "").strip().lower()
+        if arg in {"", "status"}:
+            mode = self._load_background_notifications_mode()
+            return (
+                f"Background process chat notifications: `{mode}`.\n"
+                "Use `/bgnotify off|result|error|all`. Default is `off`."
+            )
+        aliases = {
+            "on": "result",
+            "true": "result",
+            "yes": "result",
+            "errors": "error",
+        }
+        mode = aliases.get(arg, arg)
+        if mode not in {"off", "result", "error", "all"}:
+            return "Usage: /bgnotify off|result|error|all|status"
+        try:
+            from utils import atomic_roundtrip_yaml_update
+
+            cfg_path = _hermes_home / "config.yaml"
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                atomic_roundtrip_yaml_update(
+                    cfg_path, "display.background_process_notifications", mode
+                )
+            except ModuleNotFoundError as exc:
+                # Minimal installations may omit ruamel.yaml. Keep the command
+                # functional via Hermes' standard atomic PyYAML writer.
+                if exc.name != "ruamel":
+                    raise
+                import yaml
+
+                config = {}
+                if cfg_path.exists():
+                    with open(cfg_path, encoding="utf-8") as handle:
+                        config = yaml.safe_load(handle) or {}
+                display = config.setdefault("display", {})
+                if not isinstance(display, dict):
+                    display = {}
+                    config["display"] = display
+                display["background_process_notifications"] = mode
+                atomic_config_write(cfg_path, config)
+            try:
+                os.chmod(cfg_path, 0o600)
+            except (OSError, NotImplementedError):
+                pass
+            os.environ["HERMES_BACKGROUND_NOTIFICATIONS"] = mode
+        except Exception as exc:
+            logger.warning("Failed to save background notification mode: %s", exc)
+            return f"Could not save background notification mode: {exc}"
+        return f"Background process chat notifications set to `{mode}`."
+
     async def _handle_profile_command(self, event: MessageEvent) -> str:
-        """Handle /profile — show active profile name and home directory."""
+        """Handle /profile — show the profile serving this source and its home.
+
+        On a multiplexed gateway the process-level active profile is always
+        the multiplexer's own (usually ``default``), so reporting it would
+        answer "default" in every chat regardless of which profile actually
+        serves the room/channel (``source.profile`` — stamped by the
+        ``/p/<profile>/`` URL prefix, a per-credential adapter, or a room→
+        profile map). When ``multiplex_profiles`` is on, report the stamped
+        profile and, like the scoped /reset banner (#59003), resolve the
+        displayed home under that profile's runtime scope. When multiplexing
+        is off (the default) the stamp is ignored — mirroring the gating in
+        ``_run_agent`` and ``_reset_notice_session_info`` — and the command
+        reports the active profile and default home, byte-identical to before.
+        """
         from hermes_constants import display_hermes_home
         from hermes_cli.profiles import get_active_profile_name
 
-        display = display_hermes_home()
-        profile_name = get_active_profile_name()
+        multiplexed = getattr(
+            getattr(self, "config", None), "multiplex_profiles", False
+        )
+        source = getattr(event, "source", None)
+
+        profile_name = ""
+        if multiplexed:
+            profile_name = (getattr(source, "profile", "") or "").strip()
+        profile_name = profile_name or get_active_profile_name()
+
+        if multiplexed:
+            try:
+                from gateway.run import _profile_runtime_scope
+
+                profile_home = self._resolve_profile_home_for_source(source)
+                with _profile_runtime_scope(profile_home):
+                    display = display_hermes_home()
+            except Exception:
+                display = display_hermes_home()
+        else:
+            display = display_hermes_home()
 
         lines = [
             t("gateway.profile.header", profile=profile_name),
@@ -1264,6 +1986,11 @@ class GatewaySlashCommandsMixin:
                 "chat_id": event.source.chat_id,
                 "chat_type": event.source.chat_type,
             }
+            # Multiplex gateways can serve the same platform through several
+            # bot/account identities. Persist the stamped profile so the new
+            # process cannot send the completion through the default adapter.
+            if getattr(event.source, "profile", None):
+                notify_data["profile"] = event.source.profile
             if event.source.thread_id:
                 notify_data["thread_id"] = event.source.thread_id
             if event.message_id:
@@ -1313,15 +2040,12 @@ class GatewaySlashCommandsMixin:
         # us.  The detached subprocess approach (setsid + bash) doesn't work
         # under systemd (KillMode=mixed kills the cgroup) or Docker (tini
         # exits when the gateway dies, taking the detached helper with it).
-        # systemd sets INVOCATION_ID; launchd sets XPC_SERVICE_NAME to the
-        # job label.  Without the launchd check, macOS /restart takes the
-        # detached path and exits 0, which KeepAlive.SuccessfulExit=false
-        # treats as a deliberate stop — the gateway stays dead until next
-        # login.  Interactive macOS shells inherit XPC_SERVICE_NAME=0, so
-        # "0" must count as not-under-launchd.
-        _under_service = bool(os.environ.get("INVOCATION_ID")) or os.environ.get(
-            "XPC_SERVICE_NAME", "0"
-        ) not in ("", "0")
+        # Native supervisor markers cover direct systemd/launchd starts. The
+        # explicit marker covers wrappers such as ``sudo env -i`` that strip
+        # those markers before execing the foreground gateway.
+        from gateway.restart import is_gateway_supervisor_process
+
+        _under_service = is_gateway_supervisor_process()
         _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
         if _under_service or _in_container:
             self.request_restart(detached=False, via_service=True)
@@ -1441,6 +2165,12 @@ class GatewaySlashCommandsMixin:
         from hermes_cli.providers import get_label
 
         raw_args = event.get_command_args().strip()
+        source = event.source
+        _command_profile_home = None
+        if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            _command_profile_home = getattr(
+                self, "_resolve_profile_home_for_source"
+            )(source)
 
         # Parse --provider, --global, --session, and --refresh flags
         (
@@ -1467,7 +2197,7 @@ class GatewaySlashCommandsMixin:
         current_api_key = ""
         user_provs = None
         custom_provs = None
-        config_path = _hermes_home / "config.yaml"
+        config_path = (_command_profile_home or _hermes_home) / "config.yaml"
         try:
             cfg = _load_gateway_config()
             if cfg:
@@ -1485,9 +2215,8 @@ class GatewaySlashCommandsMixin:
         except Exception:
             pass
 
-        # Check for session override
-        source = event.source
-        # Normalize the source the same way a normal message turn does
+        # Check for session override. Normalize the source the same way a normal
+        # message turn does
         # (Telegram DM topic recovery) before deriving the override key, so
         # the override is stored under the key the next message turn reads
         # (#30479).
@@ -1503,7 +2232,7 @@ class GatewaySlashCommandsMixin:
         # No args: show interactive picker (Telegram/Discord) or text list
         if not model_input and not explicit_provider:
             # Try interactive picker if the platform supports it
-            adapter = self.adapters.get(source.platform)
+            adapter = getattr(self, "_adapter_for_source")(source)
             has_picker = (
                 adapter is not None
                 and getattr(type(adapter), "send_model_picker", None) is not None
@@ -1536,8 +2265,9 @@ class GatewaySlashCommandsMixin:
                     _cur_provider = current_provider
                     _cur_base_url = current_base_url
                     _cur_api_key = current_api_key
+                    _picker_profile_home = _command_profile_home
 
-                    async def _on_model_selected(
+                    async def _on_model_selected_scoped(
                         _chat_id: str, model_id: str, provider_slug: str
                     ) -> str:
                         """Perform the model switch and return confirmation text."""
@@ -1688,9 +2418,24 @@ class GatewaySlashCommandsMixin:
                                     _persist_cfg["model"] = _persist_model_cfg
                                 _persist_model_cfg["default"] = result.new_model
                                 _persist_model_cfg["provider"] = result.target_provider
+                                # Named providers always resolve base_url/api_mode fresh,
+                                # so any leftover is cleared unconditionally below. Custom
+                                # providers have no registry entry to re-derive from, so
+                                # they need an explicit set-or-clear here — the previous
+                                # lone `if result.base_url:` left a stale base_url behind
+                                # when switching to a custom provider whose resolver
+                                # returned an empty base_url (#25107).
+                                _is_custom_target = str(result.target_provider or "").strip().lower() == "custom"
                                 if result.base_url:
                                     _persist_model_cfg["base_url"] = result.base_url
-                                if str(result.target_provider or "").strip().lower() != "custom":
+                                elif _is_custom_target:
+                                    _persist_model_cfg.pop("base_url", None)
+                                if _is_custom_target:
+                                    if result.api_mode:
+                                        _persist_model_cfg["api_mode"] = result.api_mode
+                                    else:
+                                        _persist_model_cfg.pop("api_mode", None)
+                                else:
                                     clear_model_endpoint_credentials(_persist_model_cfg, clear_base_url=True)
                                 from hermes_cli.config import save_config
                                 save_config(_persist_cfg)
@@ -1735,6 +2480,20 @@ class GatewaySlashCommandsMixin:
                         else:
                             lines.append(t("gateway.model.session_only_hint"))
                         return "\n".join(lines)
+
+                    async def _on_model_selected(
+                        _chat_id: str, model_id: str, provider_slug: str
+                    ) -> str:
+                        if _picker_profile_home is None:
+                            return await _on_model_selected_scoped(
+                                _chat_id, model_id, provider_slug
+                            )
+                        from gateway.run import _profile_runtime_scope
+
+                        with _profile_runtime_scope(_picker_profile_home):
+                            return await _on_model_selected_scoped(
+                                _chat_id, model_id, provider_slug
+                            )
 
                     metadata = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
                     result = await adapter.send_model_picker(
@@ -1939,9 +2698,19 @@ class GatewaySlashCommandsMixin:
                         cfg["model"] = model_cfg
                     model_cfg["default"] = result.new_model
                     model_cfg["provider"] = result.target_provider
+                    # See the picker handler above for why custom providers need an
+                    # explicit set-or-clear instead of the old lone truthy check (#25107).
+                    _is_custom_target = str(result.target_provider or "").strip().lower() == "custom"
                     if result.base_url:
                         model_cfg["base_url"] = result.base_url
-                    if str(result.target_provider or "").strip().lower() != "custom":
+                    elif _is_custom_target:
+                        model_cfg.pop("base_url", None)
+                    if _is_custom_target:
+                        if result.api_mode:
+                            model_cfg["api_mode"] = result.api_mode
+                        else:
+                            model_cfg.pop("api_mode", None)
+                    else:
                         clear_model_endpoint_credentials(model_cfg, clear_base_url=True)
                     from hermes_cli.config import save_config
                     save_config(cfg)
@@ -2657,7 +3426,154 @@ class GatewaySlashCommandsMixin:
         preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
         return t("gateway.background.started", preview=preview, task_id=task_id)
 
-    async def _handle_reasoning_command(self, event: MessageEvent) -> str:
+    def _save_gateway_config_key(self, key_path: str, value) -> bool:
+        """Save a dot-separated key to config.yaml (shared by /reasoning, /fast
+        and their interactive pickers)."""
+        import yaml
+        from gateway.run import _hermes_home
+        config_path = _hermes_home / "config.yaml"
+        try:
+            user_config = {}
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    user_config = yaml.safe_load(f) or {}
+            keys = key_path.split(".")
+            current = user_config
+            for k in keys[:-1]:
+                if k not in current or not isinstance(current[k], dict):
+                    current[k] = {}
+                current = current[k]
+            current[keys[-1]] = value
+            atomic_config_write(config_path, user_config)
+            return True
+        except Exception as e:
+            logger.error("Failed to save config key %s: %s", key_path, e)
+            return False
+
+    def _apply_reasoning_selection(
+        self,
+        session_key: str,
+        platform_key: str,
+        value: str,
+        persist_global: bool = False,
+    ) -> str:
+        """Apply a /reasoning argument (typed or picked) and return the reply.
+
+        Single application path shared by the typed `/reasoning <arg>` branch
+        and the interactive choice picker, so both surfaces stay in lockstep
+        with the canonical parser.
+        """
+        from hermes_constants import parse_reasoning_effort
+
+        value = (value or "").strip().lower()
+
+        # Display toggle (per-platform)
+        if value in {"show", "on"}:
+            self._show_reasoning = True
+            self._save_gateway_config_key(
+                f"display.platforms.{platform_key}.show_reasoning", True
+            )
+            return t("gateway.reasoning.display_set_on", platform=platform_key)
+        if value in {"hide", "off"}:
+            self._show_reasoning = False
+            self._save_gateway_config_key(
+                f"display.platforms.{platform_key}.show_reasoning", False
+            )
+            return t("gateway.reasoning.display_set_off", platform=platform_key)
+
+        if value == "reset":
+            if persist_global:
+                return t("gateway.reasoning.reset_global_unsupported")
+            self._set_session_reasoning_override(session_key, None)
+            self._reasoning_config = self._load_reasoning_config()
+            self._evict_cached_agent(session_key)
+            return t("gateway.reasoning.reset_done")
+
+        parsed = parse_reasoning_effort(value)
+        if parsed is None:
+            return t("gateway.reasoning.unknown_arg", arg=value)
+
+        self._reasoning_config = parsed
+        if persist_global:
+            if self._save_gateway_config_key("agent.reasoning_effort", value):
+                self._set_session_reasoning_override(session_key, None)
+                self._evict_cached_agent(session_key)
+                return t("gateway.reasoning.set_global", effort=value)
+            self._set_session_reasoning_override(session_key, parsed)
+            self._evict_cached_agent(session_key)
+            return t("gateway.reasoning.set_global_save_failed", effort=value)
+
+        self._set_session_reasoning_override(session_key, parsed)
+        self._evict_cached_agent(session_key)
+        return t("gateway.reasoning.set_session", effort=value)
+
+    def _reasoning_picker_choices(self, current_effort: str) -> list:
+        """Build the choice list for the interactive /reasoning picker."""
+        from hermes_constants import VALID_REASONING_EFFORTS
+
+        choices = [
+            {
+                "value": "none",
+                "label": t("gateway.reasoning.choice_none"),
+                "is_current": current_effort == "none",
+            }
+        ]
+        for level in VALID_REASONING_EFFORTS:
+            choices.append(
+                {
+                    "value": level,
+                    "label": level,
+                    "is_current": level == current_effort,
+                }
+            )
+        choices.extend(
+            [
+                {"value": "reset", "label": t("gateway.reasoning.choice_reset"), "is_current": False},
+                {"value": "show", "label": t("gateway.reasoning.choice_show"), "is_current": False},
+                {"value": "hide", "label": t("gateway.reasoning.choice_hide"), "is_current": False},
+            ]
+        )
+        return choices
+
+    async def _try_send_choice_picker(
+        self,
+        event: MessageEvent,
+        session_key: str,
+        title: str,
+        choices: list,
+        on_choice_selected,
+    ) -> bool:
+        """Send an interactive choice picker when the platform supports it.
+
+        Mirrors the `/model` picker gate: the capability is detected on the
+        adapter *type* (``send_choice_picker``), and a failed send falls back
+        to the text path (returns False) instead of erroring the command.
+        """
+        adapter = getattr(self, "_adapter_for_source")(event.source)
+        has_picker = (
+            adapter is not None
+            and getattr(type(adapter), "send_choice_picker", None) is not None
+        )
+        if not has_picker:
+            return False
+        try:
+            metadata = self._thread_metadata_for_source(
+                event.source, self._reply_anchor_for_event(event)
+            )
+            result = await adapter.send_choice_picker(
+                chat_id=event.source.chat_id,
+                title=title,
+                choices=choices,
+                session_key=session_key,
+                on_choice_selected=on_choice_selected,
+                metadata=metadata,
+            )
+            return bool(getattr(result, "success", False))
+        except Exception as e:
+            logger.warning("send_choice_picker failed, falling back to text: %s", e)
+            return False
+
+    async def _handle_reasoning_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /reasoning command — manage reasoning effort and display toggle.
 
         Usage:
@@ -2668,12 +3584,10 @@ class GatewaySlashCommandsMixin:
             /reasoning show|on               Show model reasoning in responses
             /reasoning hide|off              Hide model reasoning from responses
         """
-        from gateway.run import _hermes_home, _platform_config_key
-        import yaml
+        from gateway.run import _platform_config_key
 
         raw_args = event.get_command_args().strip()
         args, persist_global = self._parse_reasoning_command_args(raw_args)
-        config_path = _hermes_home / "config.yaml"
         # Normalize the source (Telegram DM topic recovery) before deriving
         # the override key so storage matches the key the next message turn
         # reads — same fix as /model (#30479).
@@ -2691,35 +3605,18 @@ class GatewaySlashCommandsMixin:
             model=_session_model,
         )
 
-        def _save_config_key(key_path: str, value):
-            """Save a dot-separated key to config.yaml."""
-            try:
-                user_config = {}
-                if config_path.exists():
-                    with open(config_path, encoding="utf-8") as f:
-                        user_config = yaml.safe_load(f) or {}
-                keys = key_path.split(".")
-                current = user_config
-                for k in keys[:-1]:
-                    if k not in current or not isinstance(current[k], dict):
-                        current[k] = {}
-                    current = current[k]
-                current[keys[-1]] = value
-                atomic_config_write(config_path, user_config)
-                return True
-            except Exception as e:
-                logger.error("Failed to save config key %s: %s", key_path, e)
-                return False
-
         if not raw_args:
             # Show current state
             rc = self._reasoning_config
             if rc is None:
                 level = t("gateway.reasoning.level_default")
+                current_effort = "medium"
             elif rc.get("enabled") is False:
                 level = t("gateway.reasoning.level_disabled")
+                current_effort = "none"
             else:
                 level = rc.get("effort", "medium")
+                current_effort = level
             display_state = (
                 t("gateway.reasoning.display_on")
                 if self._show_reasoning
@@ -2731,6 +3628,31 @@ class GatewaySlashCommandsMixin:
                 if has_session_override
                 else t("gateway.reasoning.scope_global")
             )
+
+            # Interactive picker on platforms that support it (parity with the
+            # /model picker). Falls through to the text status card otherwise.
+            _picker_platform_key = _platform_config_key(event.source.platform)
+
+            async def _on_reasoning_choice(_chat_id: str, value: str) -> str:
+                return self._apply_reasoning_selection(
+                    session_key, _picker_platform_key, value
+                )
+
+            picker_sent = await self._try_send_choice_picker(
+                event,
+                session_key,
+                title=t(
+                    "gateway.reasoning.picker_title",
+                    level=level,
+                    scope=scope,
+                    display=display_state,
+                ),
+                choices=self._reasoning_picker_choices(current_effort),
+                on_choice_selected=_on_reasoning_choice,
+            )
+            if picker_sent:
+                return None  # Picker sent — adapter handles the response
+
             return t(
                 "gateway.reasoning.status",
                 level=level,
@@ -2738,50 +3660,11 @@ class GatewaySlashCommandsMixin:
                 display=display_state,
             )
 
-        # Display toggle (per-platform)
+        # Typed argument path — same applier the picker uses.
         platform_key = _platform_config_key(event.source.platform)
-        if args in {"show", "on"}:
-            self._show_reasoning = True
-            _save_config_key(f"display.platforms.{platform_key}.show_reasoning", True)
-            return t("gateway.reasoning.display_set_on", platform=platform_key)
-
-        if args in {"hide", "off"}:
-            self._show_reasoning = False
-            _save_config_key(f"display.platforms.{platform_key}.show_reasoning", False)
-            return t("gateway.reasoning.display_set_off", platform=platform_key)
-
-        # Effort level change
-        effort = args.strip()
-        if effort == "reset":
-            if persist_global:
-                return t("gateway.reasoning.reset_global_unsupported")
-            self._set_session_reasoning_override(session_key, None)
-            self._reasoning_config = self._load_reasoning_config()
-            self._evict_cached_agent(session_key)
-            return t("gateway.reasoning.reset_done")
-        if effort == "none":
-            parsed = {"enabled": False}
-        elif effort in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
-            parsed = {"enabled": True, "effort": effort}
-        else:
-            return t(
-                "gateway.reasoning.unknown_arg",
-                arg=effort or raw_args.lower(),
-            )
-
-        self._reasoning_config = parsed
-        if persist_global:
-            if _save_config_key("agent.reasoning_effort", effort):
-                self._set_session_reasoning_override(session_key, None)
-                self._evict_cached_agent(session_key)
-                return t("gateway.reasoning.set_global", effort=effort)
-            self._set_session_reasoning_override(session_key, parsed)
-            self._evict_cached_agent(session_key)
-            return t("gateway.reasoning.set_global_save_failed", effort=effort)
-
-        self._set_session_reasoning_override(session_key, parsed)
-        self._evict_cached_agent(session_key)
-        return t("gateway.reasoning.set_session", effort=effort)
+        return self._apply_reasoning_selection(
+            session_key, platform_key, args, persist_global=persist_global
+        )
 
     async def _handle_memory_command(self, event: MessageEvent) -> str:
         """Handle /memory — review pending memory writes + toggle the approval gate.
@@ -2887,14 +3770,12 @@ class GatewaySlashCommandsMixin:
                      f"~/.hermes/pending/skills/{pending_id}.json)")
         return out
 
-    async def _handle_fast_command(self, event: MessageEvent) -> str:
+    async def _handle_fast_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /fast — mirror the CLI Priority Processing toggle in gateway chats."""
-        from gateway.run import _hermes_home, _load_gateway_config, _resolve_gateway_model
-        import yaml
+        from gateway.run import _load_gateway_config, _resolve_gateway_model
         from hermes_cli.models import model_supports_fast_mode
 
         args = event.get_command_args().strip().lower()
-        config_path = _hermes_home / "config.yaml"
         self._service_tier = self._load_service_tier()
 
         user_config = _load_gateway_config()
@@ -2902,44 +3783,56 @@ class GatewaySlashCommandsMixin:
         if not model_supports_fast_mode(model):
             return t("gateway.fast.not_supported")
 
-        def _save_config_key(key_path: str, value):
-            """Save a dot-separated key to config.yaml."""
-            try:
-                user_config = {}
-                if config_path.exists():
-                    with open(config_path, encoding="utf-8") as f:
-                        user_config = yaml.safe_load(f) or {}
-                keys = key_path.split(".")
-                current = user_config
-                for k in keys[:-1]:
-                    if k not in current or not isinstance(current[k], dict):
-                        current[k] = {}
-                    current = current[k]
-                current[keys[-1]] = value
-                atomic_config_write(config_path, user_config)
-                return True
-            except Exception as e:
-                logger.error("Failed to save config key %s: %s", key_path, e)
-                return False
+        def _apply_fast_selection(value: str) -> str:
+            """Apply a /fast argument (typed or picked) and return the reply."""
+            if value in {"fast", "on"}:
+                self._service_tier = "priority"
+                saved_value = "fast"
+                label = t("gateway.fast.label_fast")
+            elif value in {"normal", "off"}:
+                self._service_tier = None
+                saved_value = "normal"
+                label = t("gateway.fast.label_normal")
+            else:
+                return t("gateway.fast.unknown_arg", arg=value)
+            if self._save_gateway_config_key("agent.service_tier", saved_value):
+                return t("gateway.fast.saved", label=label)
+            return t("gateway.fast.session_only", label=label)
 
         if not args or args == "status":
-            status = t("gateway.fast.status_fast") if self._service_tier == "priority" else t("gateway.fast.status_normal")
+            is_fast = self._service_tier == "priority"
+            status = t("gateway.fast.status_fast") if is_fast else t("gateway.fast.status_normal")
+
+            # Interactive picker on platforms that support it.
+            session_key = self._session_key_for_source(event.source)
+
+            async def _on_fast_choice(_chat_id: str, value: str) -> str:
+                return _apply_fast_selection(value)
+
+            picker_sent = await self._try_send_choice_picker(
+                event,
+                session_key,
+                title=t("gateway.fast.picker_title", mode=status),
+                choices=[
+                    {
+                        "value": "fast",
+                        "label": t("gateway.fast.choice_fast"),
+                        "is_current": is_fast,
+                    },
+                    {
+                        "value": "normal",
+                        "label": t("gateway.fast.choice_normal"),
+                        "is_current": not is_fast,
+                    },
+                ],
+                on_choice_selected=_on_fast_choice,
+            )
+            if picker_sent:
+                return None  # Picker sent — adapter handles the response
+
             return t("gateway.fast.status", mode=status)
 
-        if args in {"fast", "on"}:
-            self._service_tier = "priority"
-            saved_value = "fast"
-            label = t("gateway.fast.label_fast")
-        elif args in {"normal", "off"}:
-            self._service_tier = None
-            saved_value = "normal"
-            label = t("gateway.fast.label_normal")
-        else:
-            return t("gateway.fast.unknown_arg", arg=args)
-
-        if _save_config_key("agent.service_tier", saved_value):
-            return t("gateway.fast.saved", label=label)
-        return t("gateway.fast.session_only", label=label)
+        return _apply_fast_selection(args)
 
     async def _handle_yolo_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /yolo — toggle dangerous command approval bypass for this session only."""
@@ -3347,6 +4240,7 @@ class GatewaySlashCommandsMixin:
                     compressed,
                     approx_tokens,
                     new_tokens,
+                    compression_state=compressor,
                 )
                 # Detect summary-generation failure so we can surface a
                 # visible warning to the user even on the manual /compress
@@ -3357,6 +4251,11 @@ class GatewaySlashCommandsMixin:
                 # passed above so any active cooldown is bypassed.
                 _summary_aborted = bool(getattr(compressor, "_last_compress_aborted", False))
                 _summary_err = getattr(compressor, "_last_summary_error", None)
+                # Force-redact provider exception text at this UI boundary
+                # even when global redaction is disabled.
+                if _summary_err:
+                    from agent.redact import redact_sensitive_text
+                    _summary_err = redact_sensitive_text(_summary_err, force=True)
                 # Separately: did the user's CONFIGURED aux model fail
                 # and we recovered via main?  Surface that as an info
                 # note so they can fix their config.
@@ -3940,15 +4839,15 @@ class GatewaySlashCommandsMixin:
             lines.append(f"Manage on portal: {state.portal_url}")
         return "\n".join(lines)
 
-    async def _handle_credits_command(self, event: MessageEvent) -> str:
-        """Handle /credits -- show Nous credit balance and the top-up handoff.
+    async def _handle_topup_command(self, event: MessageEvent) -> str:
+        """Handle /topup -- show the Nous balance and hand off to the portal.
 
-        Renders the balance block + identity line + a tappable top-up URL that
-        opens the portal billing page with the modal open. The terminal does NOT
-        confirm, poll, or track payment (billing phase 2a) — checkout happens in
-        the browser and the next /credits shows the new balance. The tappable URL
-        is the affordance: it works on every platform (button-capable or plain
-        text like SMS/email). Fetched off the event loop; fail-open.
+        Renders the balance block + identity line + a tappable portal URL that
+        opens the billing page. Terminal billing is managed on the portal: the
+        terminal does NOT charge, confirm, or track payment here — everything
+        happens in the browser and the next /topup shows the new balance. The
+        tappable URL is the affordance and works on every platform (button-capable
+        or plain text like SMS/email). Fetched off the event loop; fail-open.
         """
         from agent.account_usage import build_credits_view
 
@@ -3960,7 +4859,7 @@ class GatewaySlashCommandsMixin:
         if view is None or not view.logged_in:
             return t("gateway.credits.not_logged_in")
 
-        lines: list[str] = ["💳 **Nous credits**"]
+        lines: list[str] = ["💳 **Nous balance**"]
         for line in view.balance_lines:
             if line.lstrip().startswith("📈"):
                 continue  # drop the helper's header; we print our own
@@ -3970,9 +4869,13 @@ class GatewaySlashCommandsMixin:
             lines.append(view.identity_line)
         if view.topup_url:
             lines.append("")
-            lines.append(f"Top up: {view.topup_url}")
-            lines.append("Complete your top-up in the browser — credits will appear in /credits shortly.")
+            lines.append(f"Manage billing on the portal: {view.topup_url}")
+            lines.append("Top up and manage billing in the browser — your balance updates here after.")
         return "\n".join(lines)
+
+    async def _handle_credits_command(self, event: MessageEvent) -> str:
+        """Backward-compatible handler for the former /credits command."""
+        return await self._handle_topup_command(event)
 
     def _context_breakdown_lines(self, agent, source) -> list[str]:
         """Render the per-category context breakdown for /usage.

@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react'
 
 import { getCronJobs, getProfileSessionsSnapshot, listAllProfileSessions, type SessionInfo } from '@/hermes'
+import { sameCronSignature } from '@/lib/session-signatures'
 import {
   isMessagingSource,
   LOCAL_SESSION_SOURCE_IDS,
@@ -14,9 +15,7 @@ import {
   $messagingSessions,
   $selectedStoredSessionId,
   $sessions,
-  $workingSessionIds,
   CRON_SECTION_LIMIT,
-  getRecentlySettledSessionIds,
   mergeSessionPage,
   MESSAGING_SECTION_LIMIT,
   setCronSessions,
@@ -28,8 +27,7 @@ import {
   setSessionsLoading,
   setSessionsTotal
 } from '@/store/session'
-
-import { sameCronSignature } from '../../desktop-controller-utils'
+import { $workingSessionIds, getRecentlySettledSessionIds } from '@/store/session-states'
 
 // The recents list is local-only: cron rows and messaging platform rows have
 // independent sidebar sections. The coalesced snapshot preserves those slices
@@ -145,6 +143,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       // recents view so a sparse active profile cannot be windowed out by the
       // global recency page; cron and messaging remain all-profile sections.
       const sessionProfile = profileScope === ALL_PROFILES ? 'all' : profileScope
+
       const snapshot = await getProfileSessionsSnapshot(
         limit,
         CRON_SECTION_LIMIT,

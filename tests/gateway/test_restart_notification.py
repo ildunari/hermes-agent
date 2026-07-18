@@ -103,6 +103,11 @@ async def test_restart_command_uses_detached_without_systemd(tmp_path, monkeypat
     """Without systemd, /restart uses the detached subprocess approach."""
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     monkeypatch.delenv("INVOCATION_ID", raising=False)
+    # The test suite itself may run under launchd on macOS. Isolate the unit
+    # contract from the parent process's real supervisor markers.
+    monkeypatch.setattr(
+        "gateway.restart.is_gateway_supervisor_process", lambda: False
+    )
 
     runner, _adapter = make_restart_runner()
     runner.request_restart = MagicMock(return_value=True)
@@ -142,6 +147,45 @@ async def test_restart_command_preserves_thread_id(tmp_path, monkeypatch):
     assert data["chat_type"] == "dm"
     assert data["thread_id"] == "777"
     assert data["message_id"] == "m2"
+
+
+@pytest.mark.asyncio
+async def test_restart_notification_preserves_multiplex_profile_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    runner, primary_adapter = make_restart_runner()
+    guest_adapter = type(primary_adapter)()
+    runner._profile_adapters = {"guest": {Platform.TELEGRAM: guest_adapter}}
+    runner.request_restart = MagicMock(return_value=True)
+
+    event = MessageEvent(
+        text="/restart",
+        message_type=MessageType.TEXT,
+        source=make_restart_source(chat_id="guest-chat", profile="guest"),
+        message_id="guest-message",
+    )
+    await runner._handle_restart_command(event)
+
+    marker = json.loads((tmp_path / ".restart_notify.json").read_text())
+    assert marker["profile"] == "guest"
+
+    delivered = await runner._send_restart_notification()
+    assert delivered == ("telegram", "guest-chat", None)
+    assert primary_adapter.sent_calls == []
+    assert len(guest_adapter.sent_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_restart_notification_fails_closed_for_missing_multiplex_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner, primary_adapter = make_restart_runner()
+    (tmp_path / ".restart_notify.json").write_text(
+        json.dumps({"platform": "telegram", "chat_id": "guest-chat", "profile": "guest"})
+    )
+
+    assert await runner._send_restart_notification() is None
+    assert primary_adapter.sent_calls == []
+    assert not (tmp_path / ".restart_notify.json").exists()
 
 
 @pytest.mark.asyncio

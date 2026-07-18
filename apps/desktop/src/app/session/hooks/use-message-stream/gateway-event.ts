@@ -26,6 +26,7 @@ import { followActiveSessionCwd } from '@/store/projects'
 import { clearAllPrompts, setApprovalRequest, setSecretRequest, setSudoRequest } from '@/store/prompts'
 import {
   $currentCwd,
+  sessionMatchesStoredId,
   setCurrentBranch,
   setCurrentCwd,
   setCurrentFastMode,
@@ -217,17 +218,30 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
 
         if (sessionId && hasStatePatch) {
-          updateSessionState(sessionId, state => ({
-            ...state,
-            ...statePatch,
-            branch: statePatch.branch ?? state.branch,
-            cwd: statePatch.cwd ?? state.cwd
-          }))
+          updateSessionState(
+            sessionId,
+            state => ({
+              ...state,
+              ...statePatch,
+              branch: statePatch.branch ?? state.branch,
+              cwd: statePatch.cwd ?? state.cwd
+            }),
+            payload?.stored_session_id || undefined
+          )
         }
 
-        if (apply) {
-          if (runningChanged && sessionId) {
-            updateSessionState(sessionId, state => {
+        // The running→busy transition must reach EVERY session, not just the
+        // active one. The `apply` gate above correctly scopes view-only side
+        // effects (setCurrentModel, setCurrentCwd, etc.) to the focused chat,
+        // but the per-session busy state is what drives the sidebar working
+        // indicator — a background session's turn start/finish must update
+        // its dot without the user opening it. updateSessionState only
+        // mutates the per-runtime cache entry, and syncSessionStateToView
+        // guards the view publish to the active session, so this is safe.
+        if (runningChanged && sessionId) {
+          updateSessionState(
+            sessionId,
+            state => {
               const busy = Boolean(payload!.running)
 
               if (state.busy === busy && (busy || !state.awaitingResponse)) {
@@ -235,6 +249,15 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
               }
 
               if (busy) {
+                // Don't re-arm busy from a stale session.info if the user
+                // just clicked Stop (interrupted=true). The backend's
+                // cooperative interrupt may not have propagated yet, so
+                // running is still true in the heartbeat. The turn's
+                // finally block will emit running=false to clear busy.
+                if (state.interrupted) {
+                  return state
+                }
+
                 return {
                   ...state,
                   busy,
@@ -254,8 +277,9 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
                 streamId: null,
                 turnStartedAt: null
               }
-            })
-          }
+            },
+            payload?.stored_session_id || undefined
+          )
         }
 
         if (payload?.usage && (!explicitSid || isActiveEvent)) {
@@ -292,14 +316,27 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           triggerHaptic('streamStart')
         }
 
-        updateSessionState(sessionId, state => ({
-          ...state,
-          busy: true,
-          awaitingResponse: true,
-          sawAssistantPayload: false,
-          interrupted: false,
-          turnStartedAt: Date.now()
-        }))
+        updateSessionState(sessionId, state => {
+          // If the user clicked Stop (cancelRun set interrupted=true), don't
+          // let a stale message.start from a chained turn (goal follow-up,
+          // completion drain) or an in-flight LLM response re-arm busy.
+          // The interrupt is user intent — the backend's cooperative cancel
+          // may not have propagated yet, so its events are stale. The turn's
+          // finally block will emit session.info with running=false to clear
+          // busy for real once the agent loop actually exits.
+          if (state.interrupted) {
+            return state
+          }
+
+          return {
+            ...state,
+            busy: true,
+            awaitingResponse: true,
+            sawAssistantPayload: false,
+            interrupted: false,
+            turnStartedAt: Date.now()
+          }
+        })
 
         if (isActiveEvent) {
           setTurnStartedAt(Date.now())
@@ -400,8 +437,18 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           }
         }
 
-        if (payload?.usage && isActiveEvent) {
-          setCurrentUsageSnapshot(payload.usage)
+        if (payload?.usage) {
+          // Per-session twin FIRST (the statusbar reads it for focused tiles);
+          // the primary-only global mirrors the ACTIVE session — ungated it
+          // let a background tile's turn overwrite the primary's count.
+          updateSessionState(sessionId, state => ({
+            ...state,
+            usage: { calls: 0, input: 0, output: 0, total: 0, ...state.usage, ...payload.usage }
+          }))
+
+          if (isActiveEvent) {
+            setCurrentUsageSnapshot(payload.usage)
+          }
         }
       } else if (event.type === 'session.title') {
         // Live auto-title push (titler runs async, after the turn's refresh).
@@ -409,9 +456,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         const nextTitle = typeof payload?.title === 'string' ? payload.title.trim() : ''
 
         if (storedId && nextTitle) {
-          setSessions(prev =>
-            prev.map(s => (s.id === storedId || s._lineage_root_id === storedId ? { ...s, title: nextTitle } : s))
-          )
+          setSessions(prev => prev.map(s => (sessionMatchesStoredId(s, storedId) ? { ...s, title: nextTitle } : s)))
         }
       } else if (event.type === 'tool.start' || event.type === 'tool.progress' || event.type === 'tool.generating') {
         if (!sessionId) {

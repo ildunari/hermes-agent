@@ -37,6 +37,7 @@ def make_restart_source(
     chat_id: str = "123456",
     chat_type: str = "dm",
     thread_id: str | None = None,
+    profile: str | None = None,
 ) -> SessionSource:
     return SessionSource(
         platform=Platform.TELEGRAM,
@@ -44,6 +45,7 @@ def make_restart_source(
         chat_type=chat_type,
         user_id="u1",
         thread_id=thread_id,
+        profile=profile,
     )
 
 
@@ -72,6 +74,7 @@ def make_restart_runner(
     runner._restart_via_service = False
     runner._detached_restart_helper_started = False
     runner._restart_command_source = None
+    runner._profile_adapters = {}
     runner._restart_drain_timeout = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     runner._stop_task = None
     runner._busy_input_mode = "interrupt"
