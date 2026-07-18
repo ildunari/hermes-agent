@@ -413,6 +413,7 @@ class VoiceReceiver:
         self._vc = voice_client
         self._allowed_user_ids = allowed_user_ids or set()
         self._running = False
+        self._paused = False
 
         # Decryption
         self._secret_key: Optional[bytes] = None
@@ -482,9 +483,11 @@ class VoiceReceiver:
         logger.info("VoiceReceiver stopped")
 
     def pause(self):
+        self._paused = True
         self._mode = "blocked"
 
     def resume(self):
+        self._paused = False
         self._mode = "capture"
         self._monitor_generation = 0
         self._reset_barge_candidates()
@@ -3377,7 +3380,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 task.cancel()
             self._voice_text_channels.pop(guild_id, None)
             self._voice_sources.pop(guild_id, None)
-            if state := self._voice_turn_states.pop(guild_id, None):
+            if state := getattr(self, "_voice_turn_states", {}).pop(guild_id, None):
                 if task := state.get("watchdog_task"):
                     task.cancel()
 
@@ -4671,6 +4674,10 @@ class DiscordAdapter(BasePlatformAdapter):
         @tree.command(name="update", description="Update Hermes Agent to the latest version")
         async def slash_update(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/update", "Update initiated~")
+
+        @tree.command(name="restart", description="Restart the Hermes gateway safely")
+        async def slash_restart(interaction: discord.Interaction):
+            await self._run_simple_slash(interaction, "/restart", "Restart requested~")
 
         @tree.command(name="restart-gateways", description="Queue a detached restart of Hermes gateways")
         async def slash_restart_gateways(interaction: discord.Interaction):

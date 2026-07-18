@@ -5454,7 +5454,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         """Called by agent when thinking starts/stops. Updates TUI spinner."""
         if not text:
             self._flush_reasoning_preview(force=True)
-        if self.tool_progress_mode == "compact":
+        if getattr(self, "tool_progress_mode", "all") == "compact":
             if text and self.reasoning_style == "status":
                 self._ensure_compact_thinking_row()
                 self._set_compact_spinner_text()
@@ -12353,6 +12353,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             return response
             
         except Exception as e:
+            logging.exception("CLI chat turn failed")
             print(f"Error: {e}")
             return None
         finally:

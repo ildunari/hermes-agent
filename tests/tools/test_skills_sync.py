@@ -20,6 +20,11 @@ from tools.skills_sync import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_hermes_home(tmp_path, monkeypatch):
+    monkeypatch.setattr("tools.skills_sync.HERMES_HOME", tmp_path / "hermes-home")
+
+
 class TestReadWriteManifest:
     def test_read_missing_manifest(self, tmp_path):
         with patch(

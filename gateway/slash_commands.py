@@ -103,8 +103,11 @@ class GatewaySlashCommandsMixin:
         adapter = self.adapters.get(platform) if getattr(self, "adapters", None) else None
         return getattr(adapter, "typed_command_prefix", "/") if adapter is not None else "/"
 
-    async def _handle_reset_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
-        """Handle /new or /reset command."""
+    async def _handle_reset_command(
+        self,
+        event: MessageEvent,
+        preserve_session_config: bool = False,
+    ) -> Union[str, EphemeralReply]:
         source = event.source
         
         # Get existing session key
@@ -202,13 +205,17 @@ class GatewaySlashCommandsMixin:
             pass
 
         # Reset the session
-        new_entry = await self.async_session_store.reset_session(session_key)
+        new_entry = await self.async_session_store.reset_session(
+            session_key,
+            preserve_session_config=preserve_session_config,
+        )
 
         # Clear any session-scoped model/reasoning overrides so the next agent
         # picks up configured defaults instead of previous session switches.
-        self._session_model_overrides.pop(session_key, None)
-        self._set_session_reasoning_override(session_key, None)
-        self._set_session_personality_override(session_key, None)
+        if not preserve_session_config:
+            self._session_model_overrides.pop(session_key, None)
+            self._set_session_reasoning_override(session_key, None)
+            self._set_session_personality_override(session_key, None)
         if hasattr(self, "_pending_model_notes"):
             self._pending_model_notes.pop(session_key, None)
 
@@ -270,6 +277,10 @@ class GatewaySlashCommandsMixin:
             # No existing session, just create one
             new_entry = await self.async_session_store.get_or_create_session(source, force_new=True)
             header = await asyncio.to_thread(self._telegram_topic_new_header, source) or t("gateway.reset.header_new")
+        if preserve_session_config and not await asyncio.to_thread(
+            self._telegram_topic_new_header, source
+        ):
+            header = "Fresh session started. Current model/config preserved."
 
         # Set session title if provided with /new <title>
         _title_arg = event.get_command_args().strip()
@@ -342,6 +353,64 @@ class GatewaySlashCommandsMixin:
             return str(session_entry.cwd_override)
         return self._default_messaging_cwd()
 
+    def _bind_task_cwd(self, task_id: Optional[str], cwd: Optional[str]) -> None:
+        if not task_id:
+            return
+        try:
+            from tools.terminal_tool import (
+                clear_task_env_overrides,
+                register_task_env_overrides,
+            )
+
+            if cwd:
+                register_task_env_overrides(task_id, {"cwd": cwd})
+            else:
+                clear_task_env_overrides(task_id)
+        except Exception:
+            logger.debug("Failed to bind cwd override for task %s", task_id, exc_info=True)
+
+    def _clear_task_cwd(self, task_id: Optional[str]) -> None:
+        if not task_id:
+            return
+        try:
+            from tools.terminal_tool import clear_task_env_overrides
+
+            clear_task_env_overrides(task_id)
+        except Exception:
+            logger.debug("Failed to clear cwd override for task %s", task_id, exc_info=True)
+
+    @staticmethod
+    def _resolve_gateway_tool_progress_mode(display_cfg: dict, platform_key: str) -> str:
+        raw = None
+        if isinstance(display_cfg, dict):
+            platforms = display_cfg.get("platforms") or {}
+            platform_cfg = (
+                platforms.get(platform_key) if isinstance(platforms, dict) else None
+            )
+            if isinstance(platform_cfg, dict):
+                raw = platform_cfg.get("tool_progress")
+            if raw is None:
+                overrides = display_cfg.get("tool_progress_overrides") or {}
+                if isinstance(overrides, dict):
+                    raw = overrides.get(platform_key)
+            if raw is None:
+                raw = display_cfg.get("tool_progress")
+        if raw is None:
+            raw = os.getenv("HERMES_TOOL_PROGRESS_MODE")
+        if raw is None:
+            from gateway.display_config import resolve_display_setting
+
+            raw = resolve_display_setting(
+                {"display": display_cfg or {}},
+                platform_key,
+                "tool_progress",
+                "all",
+            )
+        if raw is False:
+            raw = "off"
+        value = str(raw or "all").strip().lower()
+        return value if value in {"off", "new", "all", "compact", "verbose", "log"} else "all"
+
     def _resolve_requested_cwd(
         self, raw_path: str, session_entry: Optional[SessionEntry]
     ) -> tuple[Optional[str], Optional[str]]:
@@ -395,7 +464,7 @@ class GatewaySlashCommandsMixin:
         """Handle /cwd [path|clear] — bind this chat/thread to a working directory."""
         source = event.source
         session_key = self._session_key_for_source(source)
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = await self.async_session_store.get_or_create_session(source)
         current_cwd = self._session_cwd_for_entry(session_entry)
         cwd_label = (
             "session override"
@@ -411,7 +480,7 @@ class GatewaySlashCommandsMixin:
             )
 
         if arg.lower() in {"clear", "default", "reset"}:
-            self.session_store.set_session_cwd(session_key, None)
+            await self.async_session_store.set_session_cwd(session_key, None)
             reset_msg = await self._handle_reset_command(event)
             return (
                 "Working directory cleared for this chat.\n"
@@ -424,7 +493,7 @@ class GatewaySlashCommandsMixin:
             return error
         if not resolved_cwd:
             return "Could not resolve that directory."
-        self.session_store.set_session_cwd(session_key, resolved_cwd)
+        await self.async_session_store.set_session_cwd(session_key, resolved_cwd)
         reset_msg = await self._handle_reset_command(event)
         return (
             f"Working directory set for this chat: {resolved_cwd}\n"
@@ -530,7 +599,7 @@ class GatewaySlashCommandsMixin:
         if action == "new":
             if not rest:
                 return "Usage: /thread new <cwd> [name]"
-            session_entry = self.session_store.get_or_create_session(event.source)
+            session_entry = await self.async_session_store.get_or_create_session(event.source)
             resolved_cwd, error = self._resolve_requested_cwd(rest[0], session_entry)
             if error:
                 return error
@@ -554,7 +623,7 @@ class GatewaySlashCommandsMixin:
             name = " ".join(rest).strip()
             if not name:
                 return "Usage: /thread rename <name>"
-            entry = self.session_store.get_or_create_session(event.source)
+            entry = await self.async_session_store.get_or_create_session(event.source)
             warning = await self._set_newthread_session_title(
                 entry.session_id, event.source, name
             )
@@ -575,7 +644,7 @@ class GatewaySlashCommandsMixin:
                 return f"Could not rename Hermes session: {warning}"
             return f"Hermes session renamed: {name}\nTelegram topic rename is not available on this adapter yet."
         if action in {"close", "unbind", "clear"}:
-            self.session_store.set_session_cwd(
+            await self.async_session_store.set_session_cwd(
                 self._session_key_for_source(event.source), None
             )
             return "Thread cwd binding cleared. The Telegram topic stays open; /new starts a fresh session if you want one."
@@ -634,7 +703,7 @@ class GatewaySlashCommandsMixin:
             )
         )
 
-    def _normalize_newthread_title(self, raw_title: str) -> str:
+    async def _normalize_newthread_title(self, raw_title: str) -> str:
         from hermes_state import SessionDB
 
         sanitized = SessionDB.sanitize_title(raw_title)
@@ -642,7 +711,7 @@ class GatewaySlashCommandsMixin:
             raise ValueError("Topic name cannot be empty.")
         if self._session_db:
             try:
-                sanitized = self._session_db.get_next_title_in_lineage(sanitized)
+                sanitized = await self._session_db.get_next_title_in_lineage(sanitized)
             except Exception:
                 logger.debug("Failed to uniquify /newthread title", exc_info=True)
         return sanitized[:100].strip()
@@ -653,7 +722,7 @@ class GatewaySlashCommandsMixin:
         if not self._session_db or not session_id:
             return None
         try:
-            self._session_db.create_session(
+            await self._session_db.create_session(
                 session_id=session_id,
                 source=source.platform.value if source.platform else "telegram",
                 user_id=source.user_id,
@@ -661,7 +730,7 @@ class GatewaySlashCommandsMixin:
         except Exception:
             pass
         try:
-            if self._session_db.set_session_title(session_id, title):
+            if await self._session_db.set_session_title(session_id, title):
                 return None
             return "Hermes session title could not be persisted."
         except ValueError as exc:
@@ -682,7 +751,7 @@ class GatewaySlashCommandsMixin:
         if adapter is None or not hasattr(adapter, "create_topic"):
             return "Telegram topic creation is not available on this gateway right now."
         try:
-            topic_name = self._normalize_newthread_title(topic_name)
+            topic_name = await self._normalize_newthread_title(topic_name)
         except ValueError as exc:
             return f"⚠️ {exc}"
         try:
@@ -719,16 +788,20 @@ class GatewaySlashCommandsMixin:
             user_id_alt=source.user_id_alt,
             chat_id_alt=source.chat_id_alt,
         )
-        new_entry = self.session_store.get_or_create_session(new_source, force_new=True)
+        new_entry = await self.async_session_store.get_or_create_session(
+            new_source, force_new=True
+        )
         new_key = self._session_key_for_source(new_source)
         self._session_model_overrides.pop(new_key, None)
         if cwd_bind:
             try:
-                self.session_store.set_session_cwd(new_key, cwd_bind)
+                await self.async_session_store.set_session_cwd(new_key, cwd_bind)
             except Exception:
                 logger.debug("Failed to bind cwd for new Telegram thread", exc_info=True)
         try:
-            self._record_telegram_topic_binding(new_source, new_entry)
+            await asyncio.to_thread(
+                self._record_telegram_topic_binding, new_source, new_entry
+            )
         except Exception:
             logger.debug("Failed to record Telegram topic binding for /newthread", exc_info=True)
         title_warning = await self._set_newthread_session_title(
@@ -891,7 +964,7 @@ class GatewaySlashCommandsMixin:
             )
 
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
         if hasattr(self, "_session_entry_cache"):
             self._session_entry_cache[session_key] = session_entry
@@ -2142,6 +2215,89 @@ class GatewaySlashCommandsMixin:
             "\n".join(lines),
             getattr(getattr(event, "source", None), "platform", None),
         )
+
+    @staticmethod
+    def _normalize_model_topic_label(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.strip().casefold().split())
+
+    def _configured_model_topic_aliases(self) -> dict[str, str]:
+        from gateway.run import _load_gateway_config
+
+        try:
+            cfg = _load_gateway_config() or {}
+        except Exception:
+            return {}
+        aliases: Any = None
+        telegram_cfg = cfg.get("telegram") if isinstance(cfg, dict) else None
+        if isinstance(telegram_cfg, dict):
+            aliases = telegram_cfg.get("model_topic_aliases")
+            if aliases is None and isinstance(telegram_cfg.get("extra"), dict):
+                aliases = telegram_cfg["extra"].get("model_topic_aliases")
+        if aliases is None and isinstance(cfg, dict):
+            platforms = cfg.get("platforms")
+            platform_cfg = platforms.get("telegram") if isinstance(platforms, dict) else None
+            if isinstance(platform_cfg, dict) and isinstance(platform_cfg.get("extra"), dict):
+                aliases = platform_cfg["extra"].get("model_topic_aliases")
+
+        def target_from_entry(entry: Any) -> str:
+            if isinstance(entry, str):
+                return entry.strip()
+            if not isinstance(entry, dict):
+                return ""
+            target = str(entry.get("target") or entry.get("alias") or "").strip()
+            if target:
+                return target
+            model = str(entry.get("model") or "").strip()
+            provider = str(entry.get("provider") or "").strip()
+            if not model:
+                return ""
+            return f"{model} --provider {provider}" if provider else model
+
+        result: dict[str, str] = {}
+        if isinstance(aliases, dict):
+            for label, entry in aliases.items():
+                normalized = self._normalize_model_topic_label(str(label))
+                target = target_from_entry(entry)
+                if normalized and target:
+                    result[normalized] = target
+        elif isinstance(aliases, list):
+            for entry in aliases:
+                if not isinstance(entry, dict):
+                    continue
+                target = target_from_entry(entry)
+                names = entry.get("names", [entry.get("name") or entry.get("label")])
+                if isinstance(names, str):
+                    names = [names]
+                if not target or not isinstance(names, list):
+                    continue
+                for label in names:
+                    normalized = self._normalize_model_topic_label(label)
+                    if normalized:
+                        result[normalized] = target
+        return result
+
+    async def _maybe_handle_model_topic_alias(self, event: MessageEvent) -> Optional[str]:
+        source = getattr(event, "source", None)
+        if not source or getattr(source, "platform", None) != Platform.TELEGRAM:
+            return None
+        if getattr(event, "message_type", MessageType.TEXT) != MessageType.TEXT:
+            return None
+        text = (getattr(event, "text", None) or "").strip()
+        if not text or text.startswith("/") or "\n" in text:
+            return None
+        target = self._configured_model_topic_aliases().get(
+            self._normalize_model_topic_label(text)
+        )
+        if not target:
+            return None
+        original_text = event.text
+        try:
+            event.text = f"/model {target}"
+            return await self._handle_model_command(event)
+        finally:
+            event.text = original_text
 
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /model command — switch model.
@@ -3879,18 +4035,21 @@ class GatewaySlashCommandsMixin:
             return t("gateway.verbose.not_enabled")
 
         # --- cycle mode (per-platform) ----------------------------------------
-        cycle = ["off", "new", "all", "verbose", "log"]
+        cycle = ["off", "all", "compact", "verbose"]
         descriptions = {
             "off": t("gateway.verbose.mode_off"),
             "new": t("gateway.verbose.mode_new"),
             "all": t("gateway.verbose.mode_all"),
+            "compact": t("gateway.verbose.mode_compact"),
             "verbose": t("gateway.verbose.mode_verbose"),
             "log": t("gateway.verbose.mode_log"),
         }
 
         # Read current effective mode for this platform via the resolver
-        from gateway.display_config import resolve_display_setting
-        current = resolve_display_setting(user_config, platform_key, "tool_progress", "all")
+        current = self._resolve_gateway_tool_progress_mode(
+            user_config.get("display") or {},
+            platform_key,
+        )
         if current not in cycle:
             current = "all"
         idx = (cycle.index(current) + 1) % len(cycle)

@@ -135,17 +135,20 @@ class TestGatewayQuickCommands:
     """Test quick command dispatch in GatewayRunner._handle_message."""
 
     def _make_event(self, command, args=""):
-        event = MagicMock()
-        event.get_command.return_value = command
-        event.get_command_args.return_value = args
-        event.text = f"/{command} {args}".strip()
-        event.source = MagicMock()
-        event.source.user_id = "test_user"
-        event.source.user_name = "Test User"
-        event.source.platform.value = "telegram"
-        event.source.chat_type = "dm"
-        event.source.chat_id = "123"
-        return event
+        from gateway.config import Platform
+        from gateway.platforms.base import MessageEvent
+        from gateway.session import SessionSource
+
+        return MessageEvent(
+            text=f"/{command} {args}".strip(),
+            source=SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id="123",
+                user_id="test_user",
+                user_name="Test User",
+                chat_type="dm",
+            ),
+        )
 
     @pytest.mark.asyncio
     async def test_exec_command_returns_output(self):
@@ -154,6 +157,7 @@ class TestGatewayQuickCommands:
         runner.config = {"quick_commands": {"limits": {"type": "exec", "command": "echo ok"}}}
         runner._running_agents = {}
         runner._pending_messages = {}
+        runner._draining = False
         runner._is_user_authorized = MagicMock(return_value=True)
 
         event = self._make_event("limits")
@@ -169,6 +173,7 @@ class TestGatewayQuickCommands:
         runner.config = {"quick_commands": {"leak": {"type": "exec", "command": "env"}}}
         runner._running_agents = {}
         runner._pending_messages = {}
+        runner._draining = False
         runner._is_user_authorized = MagicMock(return_value=True)
 
         event = self._make_event("leak")
@@ -191,6 +196,7 @@ class TestGatewayQuickCommands:
         runner.config = {"quick_commands": {"token": {"type": "exec", "command": "echo sk-ant-api03-supersecretkey1234567890"}}}
         runner._running_agents = {}
         runner._pending_messages = {}
+        runner._draining = False
         runner._is_user_authorized = MagicMock(return_value=True)
 
         event = self._make_event("token")
@@ -206,6 +212,7 @@ class TestGatewayQuickCommands:
         runner.config = {"quick_commands": {"bad": {"type": "prompt", "command": "echo hi"}}}
         runner._running_agents = {}
         runner._pending_messages = {}
+        runner._draining = False
         runner._is_user_authorized = MagicMock(return_value=True)
 
         event = self._make_event("bad")
@@ -221,6 +228,7 @@ class TestGatewayQuickCommands:
         runner.config = {"quick_commands": {"slow": {"type": "exec", "command": "sleep 100"}}}
         runner._running_agents = {}
         runner._pending_messages = {}
+        runner._draining = False
         runner._is_user_authorized = MagicMock(return_value=True)
 
         event = self._make_event("slow")
@@ -240,6 +248,7 @@ class TestGatewayQuickCommands:
         )
         runner._running_agents = {}
         runner._pending_messages = {}
+        runner._draining = False
         runner._is_user_authorized = MagicMock(return_value=True)
 
         event = self._make_event("limits")

@@ -122,6 +122,11 @@ def test_compact_chat_resets_state_for_direct_callers():
         _interrupt_requested=False,
         _summarize_api_error=lambda exc: str(exc),
     )
+    def _skip_final_panel():
+        cli._stream_started = True
+        cli._stream_box_opened = True
+
+    cli._reset_stream_state = _skip_final_panel
 
     cli._on_tool_progress("tool.started", "terminal", "git status", {"command": "git status"})
     assert cli._compact_progress_counts

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import random
@@ -2658,12 +2659,13 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
 
 def load_pool(provider: str) -> CredentialPool:
     provider = (provider or "").strip().lower()
-    if provider == "openai-codex":
-        raw_entries, store_path = read_credential_pool_with_source(provider)
-    else:
-        raw_value = read_credential_pool(provider)
-        raw_entries = raw_value if isinstance(raw_value, list) else []
-        store_path = auth_mod._auth_file_path()
+    raw_entries, source_path = read_credential_pool_with_source(provider)
+    active_path = auth_mod._auth_file_path()
+    try:
+        inherited = source_path.resolve(strict=False) != active_path.resolve(strict=False)
+    except OSError:
+        inherited = source_path != active_path
+    store_path = source_path if provider == "openai-codex" else active_path
     disk_ids = {
         entry.get("id")
         for entry in raw_entries
@@ -2688,9 +2690,8 @@ def load_pool(provider: str) -> CredentialPool:
         # A profile may be reading this provider from the global-root fallback.
         # Keep that fallback read-only: only the store that owns these rows may
         # rewrite them. Loading the default/root profile will heal global rows.
-        active_pool = _load_auth_store().get("credential_pool")
-        active_entries = active_pool.get(provider) if isinstance(active_pool, dict) else None
-        raw_needs_auth_normalization = bool(active_entries)
+        if inherited:
+            raw_needs_auth_normalization = False
 
     if provider.startswith(CUSTOM_POOL_PREFIX):
         # Custom endpoint pool — seed from custom_providers config and model config
@@ -2699,11 +2700,17 @@ def load_pool(provider: str) -> CredentialPool:
         changed |= _prune_stale_seeded_entries(entries, custom_sources)
     else:
         if provider == "openai-codex":
-            singleton_changed, singleton_sources = _seed_from_singletons(
-                provider,
-                entries,
-                auth_store_path=store_path,
-            )
+            if "auth_store_path" in inspect.signature(_seed_from_singletons).parameters:
+                singleton_changed, singleton_sources = _seed_from_singletons(
+                    provider,
+                    entries,
+                    auth_store_path=store_path,
+                )
+            else:
+                singleton_changed, singleton_sources = _seed_from_singletons(
+                    provider,
+                    entries,
+                )
         else:
             # Preserve the legacy two-argument call contract for third-party
             # wrappers and tests; only Codex needs source-store selection.
@@ -2729,7 +2736,7 @@ def load_pool(provider: str) -> CredentialPool:
         )
         changed |= _normalize_pool_priorities(provider, entries)
 
-    if changed:
+    if changed and not inherited:
         new_ids = {entry.id for entry in entries}
         write_credential_pool(
             provider,

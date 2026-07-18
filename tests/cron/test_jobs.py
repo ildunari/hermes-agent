@@ -1955,6 +1955,11 @@ class TestLateEnvRepointScopesStore:
     def test_late_env_repoint_scopes_store(self, tmp_path, monkeypatch):
         import cron.jobs as jobs
 
+        monkeypatch.delenv("HERMES_CRON_HOME", raising=False)
+        monkeypatch.setattr(jobs, "HERMES_DIR", jobs._IMPORT_STORE.cron_dir.parent)
+        monkeypatch.setattr(jobs, "CRON_DIR", jobs._IMPORT_STORE.cron_dir)
+        monkeypatch.setattr(jobs, "JOBS_FILE", jobs._IMPORT_STORE.jobs_file)
+        monkeypatch.setattr(jobs, "OUTPUT_DIR", jobs._IMPORT_STORE.output_dir)
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         store = jobs._current_cron_store()
         expected = tmp_path.resolve() / "cron"

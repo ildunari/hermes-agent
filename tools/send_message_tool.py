@@ -1805,6 +1805,14 @@ async def _send_signal(extra, chat_id, message, media_files=None):
         return _error(f"Signal send failed: {e}")
 
 
+async def _send_email(extra, chat_id, message):
+    from types import SimpleNamespace
+    from plugins.platforms.email.adapter import _standalone_send
+
+    config = SimpleNamespace(token=None, api_key=None, extra=extra or {})
+    return await _standalone_send(config, chat_id, message)
+
+
 # _send_email moved to plugins/platforms/email/adapter.py::_standalone_send;
 # _send_sms moved to plugins/platforms/sms/adapter.py::_standalone_send. Both
 # wired via standalone_sender_fn, reached through _registry_standalone_send. #41112.

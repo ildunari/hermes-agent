@@ -2017,6 +2017,10 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
 
     old_model = agent.model
     old_provider = agent.provider
+    was_fallback_activated = bool(getattr(agent, "_fallback_activated", False))
+    saved_primary_provider = str(
+        (getattr(agent, "_primary_runtime", {}) or {}).get("provider") or ""
+    ).strip().lower()
 
     # ── Snapshot all fields the swap+rebuild can mutate ──
     # If the rebuild raises (bad API key, network error, build_anthropic_client
@@ -2361,9 +2365,19 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
     new_norm = (new_provider or "").strip().lower()
     fallback_chain = list(getattr(agent, "_fallback_chain", []) or [])
     if old_norm and new_norm and old_norm != new_norm:
+        # Switching back from a turn-scoped fallback to the saved primary is
+        # not a rejection of that fallback provider. Keep it configured for
+        # future transient failures; only deliberate primary changes prune the
+        # provider the user just left.
+        returning_to_saved_primary = (
+            was_fallback_activated and saved_primary_provider == new_norm
+        )
+        rejected_providers = {new_norm}
+        if not returning_to_saved_primary:
+            rejected_providers.add(old_norm)
         fallback_chain = [
             entry for entry in fallback_chain
-            if (entry.get("provider") or "").strip().lower() not in {old_norm, new_norm}
+            if (entry.get("provider") or "").strip().lower() not in rejected_providers
         ]
     agent._fallback_chain = fallback_chain
     agent._fallback_model = fallback_chain[0] if fallback_chain else None

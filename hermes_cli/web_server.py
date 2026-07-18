@@ -1399,6 +1399,7 @@ _FS_READDIR_HIDDEN = {
     "target",
     "venv",
 }
+_FS_LIST_MAX_ENTRIES = 2_000
 
 # Filenames that must never be listed, read, or downloaded through the
 # managed-files API.  These typically contain credentials (API keys, tokens)
@@ -2242,17 +2243,24 @@ async def fs_list(path: str):
     target = _fs_path(path)
     try:
         entries = []
+        truncated = False
         with os.scandir(target) as scan:
             for entry in scan:
                 if entry.name in _FS_READDIR_HIDDEN:
                     continue
+                if len(entries) >= _FS_LIST_MAX_ENTRIES:
+                    truncated = True
+                    break
                 entries.append({
                     "name": entry.name,
                     "path": str(target / entry.name),
                     "isDirectory": entry.is_dir(follow_symlinks=False),
                 })
         entries.sort(key=lambda item: (not item["isDirectory"], item["name"].lower(), item["name"]))
-        return {"entries": entries}
+        result = {"entries": entries}
+        if truncated:
+            result["truncated"] = True
+        return result
     except FileNotFoundError:
         return {"entries": [], "error": "ENOENT"}
     except NotADirectoryError:

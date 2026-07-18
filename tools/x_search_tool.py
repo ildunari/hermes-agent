@@ -44,9 +44,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 
@@ -102,7 +104,7 @@ def _get_x_search_retries() -> int:
 # Credential resolution
 # ---------------------------------------------------------------------------
 
-def _resolve_xai_bearer() -> Tuple[str, str, str]:
+def _resolve_xai_bearer(force_refresh: bool = False) -> Tuple[str, str, str]:
     """Return ``(api_key, base_url, source)``.
 
     ``source`` is one of ``"xai-oauth"`` or ``"xai"`` so callers (and tests)
@@ -112,7 +114,10 @@ def _resolve_xai_bearer() -> Tuple[str, str, str]:
     check exists so a credential that expires between registration and
     invocation produces a clean tool error instead of a 401.
     """
-    creds = resolve_xai_http_credentials()
+    try:
+        creds = resolve_xai_http_credentials(force_refresh=force_refresh)
+    except TypeError:
+        creds = resolve_xai_http_credentials()
     api_key = str(creds.get("api_key") or "").strip()
     if not api_key:
         raise RuntimeError(
@@ -344,7 +349,13 @@ def x_search_tool(
                 break
             except requests.HTTPError as e:
                 status_code = getattr(getattr(e, "response", None), "status_code", None)
-                if status_code is None or status_code < 500 or attempt >= max_retries:
+                if status_code == 401 and source == "xai-oauth" and attempt == 0:
+                    api_key, base_url, source = _resolve_xai_bearer(force_refresh=True)
+                    continue
+                if (
+                    status_code != 429
+                    and (status_code is None or status_code < 500)
+                ) or attempt >= max_retries:
                     raise
                 logger.warning(
                     "x_search upstream failure on attempt %s/%s: %s",
@@ -452,6 +463,139 @@ def x_search_tool(
         )
 
 
+_GROK_URL_RE = re.compile(r"https?://[^\s)>'\"]+")
+_GROK_X_HOSTS = {"x.com", "twitter.com", "mobile.twitter.com"}
+
+
+def _grok_source(source: str, query: str, url: str) -> str:
+    requested = (source or "auto").strip().lower()
+    if requested in {"x", "web"}:
+        return requested
+    if requested != "auto":
+        raise ValueError("source must be one of auto, x, web")
+    candidates = [url, *_GROK_URL_RE.findall(query)]
+    for candidate in candidates:
+        if candidate and (urlparse(candidate).hostname or "").lower() in _GROK_X_HOSTS:
+            return "x"
+    return "web"
+
+
+def grok_research_tool(
+    *,
+    action: str = "run",
+    source: str = "auto",
+    intent: str = "auto",
+    query: str = "",
+    url: str = "",
+    options: Optional[Dict[str, Any]] = None,
+) -> str:
+    if (action or "run").strip().lower() == "help":
+        return json.dumps(
+            {
+                "success": True,
+                "sources": {"x": "x_search", "web": "web_search"},
+                "routing": [
+                    "Use x_twitter/xurl for exact tweet JSON, media URLs, or author IDs."
+                ],
+            }
+        )
+    normalized_intent = (intent or "auto").strip().lower()
+    opts = options or {}
+    supported = {
+        "allowed_x_handles",
+        "excluded_x_handles",
+        "from_date",
+        "to_date",
+        "allowed_domains",
+        "excluded_domains",
+        "enable_image_understanding",
+        "enable_video_understanding",
+    }
+    unknown = sorted(set(opts) - supported)
+    if unknown:
+        return tool_error(
+            f"unsupported options: {', '.join(unknown)}; call action=help for supported keys"
+        )
+    try:
+        resolved = _grok_source(source, query, url)
+        if resolved == "web" and opts.get("enable_video_understanding"):
+            return tool_error(
+                "enable_video_understanding is only supported for source=x"
+            )
+        if resolved == "x":
+            tool_def: Dict[str, Any] = {"type": "x_search"}
+            for key in (
+                "allowed_x_handles",
+                "excluded_x_handles",
+                "from_date",
+                "to_date",
+                "enable_image_understanding",
+                "enable_video_understanding",
+            ):
+                if opts.get(key):
+                    tool_def[key] = opts[key]
+            model = _get_x_search_model()
+        else:
+            tool_def = {"type": "web_search"}
+            allowed = opts.get("allowed_domains")
+            excluded = opts.get("excluded_domains")
+            if allowed and excluded:
+                return tool_error(
+                    "allowed_domains and excluded_domains cannot be used together"
+                )
+            if allowed:
+                tool_def["filters"] = {"allowed_domains": allowed}
+            elif excluded:
+                tool_def["filters"] = {"excluded_domains": excluded}
+            if opts.get("enable_image_understanding"):
+                tool_def["enable_image_understanding"] = True
+            model = "grok-4.3"
+        target = " ".join(part for part in (query.strip(), url.strip()) if part)
+        prompt = (
+            f"{target}\n\nTask: {normalized_intent}."
+            if normalized_intent != "auto"
+            else target
+        )
+        api_key, base_url, credential_source = _resolve_xai_bearer()
+        response = requests.post(
+            f"{base_url}/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": hermes_xai_user_agent(),
+            },
+            json={
+                "model": model,
+                "input": [{"role": "user", "content": prompt}],
+                "tools": [tool_def],
+                "store": False,
+            },
+            timeout=_get_x_search_timeout_seconds(),
+        )
+        response.raise_for_status()
+        data = response.json()
+        return json.dumps(
+            {
+                "success": True,
+                "source": resolved,
+                "server_tool": tool_def["type"],
+                "intent": normalized_intent,
+                "model": model,
+                "answer": _extract_response_text(data),
+                "citations": list(data.get("citations") or []),
+                "credential_source": credential_source,
+                "exact_x_fetch_hint": (
+                    "Use x_twitter/xurl for exact tweet JSON and media URLs."
+                    if resolved == "x"
+                    else None
+                ),
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return tool_error(str(exc))
+
+
 X_SEARCH_SCHEMA = {
     "name": "x_search",
     "description": (
@@ -520,6 +664,46 @@ registry.register(
     handler=_handle_x_search,
     check_fn=check_x_search_requirements,
     requires_env=["XAI_API_KEY"],
+    emoji="🐦",
+    max_result_size_chars=100_000,
+)
+
+
+GROK_RESEARCH_SCHEMA = {
+    "name": "grok_research",
+    "description": "Route compact Grok research to X Search or Web Search.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["run", "help"]},
+            "source": {"type": "string", "enum": ["auto", "x", "web"]},
+            "intent": {"type": "string"},
+            "query": {"type": "string"},
+            "url": {"type": "string"},
+            "options": {"type": "object"},
+        },
+    },
+}
+
+
+def _handle_grok_research(args, **kw):
+    return grok_research_tool(
+        action=args.get("action", "run"),
+        source=args.get("source", "auto"),
+        intent=args.get("intent", "auto"),
+        query=args.get("query", ""),
+        url=args.get("url", ""),
+        options=args.get("options"),
+    )
+
+
+registry.register(
+    name="grok_research",
+    toolset="x_search",
+    schema=GROK_RESEARCH_SCHEMA,
+    handler=_handle_grok_research,
+    check_fn=check_x_search_requirements,
+    requires_env=[],
     emoji="🐦",
     max_result_size_chars=100_000,
 )

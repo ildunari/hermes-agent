@@ -470,12 +470,12 @@ class TestCodexBuildKwargs:
 
         headers = kw["extra_headers"]
         cache_scope = headers["session_id"]
-        assert cache_scope == headers["x-client-request-id"]
         assert cache_scope.startswith("pck_")
         assert len(cache_scope) <= 64
         assert cache_scope != long_session_id
         assert kw["prompt_cache_key"].startswith("pck_")
         assert len(kw["prompt_cache_key"]) <= 64
+        assert headers["x-client-request-id"] == kw["prompt_cache_key"]
 
     @pytest.mark.parametrize("length", [64, 65])
     def test_codex_cache_scope_boundary(self, transport, length):
@@ -491,7 +491,7 @@ class TestCodexBuildKwargs:
 
         assert scope["x-test"] == "1"
         assert len(scope["session_id"]) <= 64
-        assert scope["x-client-request-id"] == scope["session_id"]
+        assert scope["x-client-request-id"].startswith("pck_")
         if length == 64:
             assert scope["session_id"] == session_id
         else:

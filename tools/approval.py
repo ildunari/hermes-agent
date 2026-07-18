@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 # instantly bypass all approval checks — a prompt-injection escalation path.
 _YOLO_MODE_FROZEN: bool = is_truthy_value(os.getenv("HERMES_YOLO_MODE", ""))
 
+
+def _process_yolo_enabled() -> bool:
+    return _YOLO_MODE_FROZEN
+
 # Per-thread/per-task gateway session identity.
 # Gateway runs agent turns concurrently in executor threads, so reading a
 # process-global env var for session identity is racy. Keep env fallback for
@@ -2689,7 +2693,7 @@ def _run_approval_gate(
     # --yolo bypasses all approval prompts (session- or process-scoped).
     # Hardline blocks are handled by the caller BEFORE this gate, so yolo
     # here only skips the recoverable approval layer.
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled():
+    if _process_yolo_enabled() or is_current_session_yolo_enabled():
         return {"approved": True, "message": None}
 
     session_key = get_current_session_key()
@@ -2909,7 +2913,7 @@ def check_dangerous_command(command: str, env_type: str,
 
     # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
     # CLI --yolo remains process-scoped via the env var for local use.
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled():
+    if _process_yolo_enabled() or is_current_session_yolo_enabled():
         return {"approved": True, "message": None}
 
     if _command_matches_permanent_allowlist(command):
@@ -3221,7 +3225,7 @@ def check_all_command_guards(command: str, env_type: str,
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+    if _process_yolo_enabled() or is_current_session_yolo_enabled() or approval_mode == "off":
         return {"approved": True, "message": None}
 
     if _command_matches_permanent_allowlist(command):
@@ -3649,7 +3653,7 @@ def check_execute_code_guard(code: str, env_type: str,
 
     # --yolo or approvals.mode=off: bypass (session- or process-scoped).
     approval_mode = _get_approval_mode()
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+    if _process_yolo_enabled() or is_current_session_yolo_enabled() or approval_mode == "off":
         return {"approved": True, "message": None}
 
     is_gateway = _is_gateway_approval_context()

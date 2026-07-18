@@ -2910,12 +2910,14 @@ def _resolve_runtime_agent_kwargs(config: dict | None = None) -> dict:
     target_model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip() or None
 
     try:
-        runtime = resolve_runtime_provider(
-            requested=requested_provider,
-            explicit_api_key=explicit_api_key,
-            explicit_base_url=explicit_base_url,
-            target_model=target_model,
-        )
+        resolve_kwargs = {
+            "requested": requested_provider,
+            "explicit_api_key": explicit_api_key,
+            "explicit_base_url": explicit_base_url,
+        }
+        if "target_model" in inspect.signature(resolve_runtime_provider).parameters:
+            resolve_kwargs["target_model"] = target_model
+        runtime = resolve_runtime_provider(**resolve_kwargs)
     except AuthError as auth_exc:
         # Distinguish a transient rate-limit/quota cap (credentials are fine,
         # re-auth cannot help) from a genuine auth failure (expired/revoked
@@ -5073,13 +5075,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             override_model = override.get("model", model)
             override_runtime = {
                 "provider": override.get("provider"),
-                "api_key": override.get("api_key"),
+                "api_key": override.get("api_key") or "",
                 "base_url": override.get("base_url"),
                 "api_mode": override.get("api_mode"),
                 "max_tokens": override.get("max_tokens"),
                 "credential_pool": override.get("credential_pool"),
             }
-            if override_runtime.get("api_key"):
+            if override_runtime.get("api_key") or override_runtime.get("base_url"):
                 if override_runtime.get("credential_pool") is None:
                     override_runtime["credential_pool"] = _credential_pool_for_provider(
                         override.get("provider")
@@ -10081,7 +10083,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # A to_thread research call cannot be safely cancelled: its worker
             # would keep running and could commit after shutdown returned. Wake
             # the watcher and await any in-flight canonical write to completion.
-            await self._stop_contact_link_research_watcher()
+            stop_contact_watcher = getattr(
+                self, "_stop_contact_link_research_watcher", None
+            )
+            if callable(stop_contact_watcher):
+                await stop_contact_watcher()
 
             stop_watchdog = getattr(self, "_stop_systemd_watchdog", None)
             if callable(stop_watchdog):
@@ -11705,12 +11711,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return denial
 
         if getattr(event, "observed_only", False):
-            session_entry = self.session_store.get_or_create_session(source)
+            session_entry = await self.async_session_store.get_or_create_session(source)
             sender = source.user_name or source.user_id or "group member"
             observed_text = (event.text or "").strip()
             if event.media_urls:
                 observed_text = f"{observed_text}\nAttachments: " + ", ".join(event.media_urls)
-            self.session_store.append_to_transcript(
+            await self.async_session_store.append_to_transcript(
                 session_entry.session_id,
                 {
                     "role": "user",
@@ -12823,6 +12829,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "voice":
             return await self._handle_voice_command(event)
 
+        model_topic_result = await self._maybe_handle_model_topic_alias(event)
+        if model_topic_result is not None:
+            return model_topic_result
+
         if self._draining:
             return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
 
@@ -13120,13 +13130,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _agent_kwargs["trusted_contact_scope"] = trusted_contact_scope
             if proactive_arrival is not None:
                 _agent_kwargs["proactive_arrival"] = proactive_arrival
-            if canonical_event_ids:
-                _agent_kwargs["canonical_event_ids"] = canonical_event_ids
             _agent_result = await self._handle_message_with_agent(
                 event,
                 source,
                 _quick_key,
                 _run_generation,
+                canonical_event_ids=canonical_event_ids,
                 **_agent_kwargs,
             )
             # Goal continuation: after the agent returns a final response
@@ -15418,12 +15427,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         inside this method, so contextvars behave correctly in the worker
         thread.
         """
+        override = None
+        try:
+            session_key = self._session_key_for_source(source)
+            self._rehydrate_session_model_override(session_key)
+            override = self._session_model_overrides.get(session_key)
+        except Exception:
+            override = None
         if getattr(getattr(self, "config", None), "multiplex_profiles", False):
             with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
-                return self._format_session_info()
-        return self._format_session_info()
+                return self._format_session_info(override)
+        return self._format_session_info(override)
 
-    def _format_session_info(self) -> str:
+    def _format_session_info(self, model_override: Optional[dict] = None) -> str:
         """Resolve current model config and return a formatted info block.
 
         Surfaces model, provider, context length, and endpoint so gateway
@@ -15432,7 +15448,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         from agent.model_metadata import get_model_context_length, DEFAULT_FALLBACK_CONTEXT
 
-        model = _resolve_gateway_model()
+        model = (
+            str(model_override.get("model"))
+            if isinstance(model_override, dict) and model_override.get("model")
+            else _resolve_gateway_model()
+        )
         config_context_length = None
         provider = None
         base_url = None
@@ -15460,6 +15480,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     custom_provs = data.get("custom_providers")
         except Exception:
             pass
+        if isinstance(model_override, dict):
+            provider = model_override.get("provider") or provider
+            base_url = model_override.get("base_url") or base_url
+            api_key = model_override.get("api_key") or api_key
+
+        if isinstance(model_override, dict):
+            config_context_length = None
 
         # Also check custom_providers for context_length when top-level model.context_length is not set
         if config_context_length is None and data:
@@ -17578,6 +17605,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             chat_type=chat_type,
             adapter=adapter,
         ):
+            metadata["chat_type"] = "dm"
             metadata["telegram_dm_topic_reply_fallback"] = True
             # Telegram DM topic lanes need direct_messages_topic_id in metadata
             # so synthetic/queued messages (goal continuations, status notices)
@@ -19239,12 +19267,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "Failed to read persisted session model override", exc_info=True
             )
             return
-        if not persisted:
+        if not isinstance(persisted, dict):
+            try:
+                entry = getattr(self, "_session_entry_cache", {}).get(session_key)
+                if entry is None:
+                    entry = store.get_session(session_key)
+                persisted = getattr(entry, "model_override", None)
+            except Exception:
+                persisted = None
+        if not isinstance(persisted, dict) or not persisted:
             return
         override: Dict[str, Any] = {
             "model": persisted.get("model"),
             "provider": persisted.get("provider"),
             "base_url": persisted.get("base_url"),
+            "api_mode": persisted.get("api_mode"),
         }
         provider = persisted.get("provider")
         if provider:
@@ -19255,7 +19292,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             try:
                 runtime = _resolve_runtime_agent_kwargs_for_provider(provider)
                 override["api_key"] = runtime.get("api_key")
-                override["api_mode"] = runtime.get("api_mode")
+                override["api_mode"] = runtime.get("api_mode") or override.get("api_mode")
                 override["credential_pool"] = runtime.get("credential_pool")
                 if not override.get("base_url"):
                     override["base_url"] = runtime.get("base_url")
@@ -20451,6 +20488,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 raise RuntimeError(f"Guest profile config not found or empty: {routed_profile or 'guest'}")
             user_config = _load_gateway_config()
         guest_session = _is_guest_source(source)
+        session_entry = None
+        try:
+            if session_key and hasattr(self.session_store, "get_session"):
+                candidate = self.session_store.get_session(session_key)
+                if (
+                    getattr(candidate, "session_id", None)
+                    and isinstance(getattr(candidate, "session_key", None), str)
+                ):
+                    session_entry = candidate
+            if session_entry is None:
+                session_entry = self.session_store.get_or_create_session(source)
+        except Exception:
+            session_entry = None
+        if session_entry is not None:
+            session_id = getattr(session_entry, "session_id", None) or session_id
+            session_key = session_key or getattr(session_entry, "session_key", None)
+            if session_key:
+                if not hasattr(self, "_session_entry_cache"):
+                    self._session_entry_cache = {}
+                self._session_entry_cache[session_key] = session_entry
+            self._bind_task_cwd(
+                session_id,
+                self._session_cwd_for_entry(session_entry),
+            )
 
         # ---- Proxy mode: delegate owner sessions only. Guest policy and profile
         # isolation are local security boundaries and must not be bypassed.
@@ -20940,6 +21001,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             else {"thread_id": _progress_thread_id}
         ) if _progress_thread_id else None
         _progress_metadata = _non_conversational_metadata(_progress_metadata, platform=source.platform)
+        _progress_delivery_metadata = dict(_progress_metadata or {})
+        if source.platform == Platform.TELEGRAM:
+            _progress_delivery_metadata["disable_rich_messages"] = "true"
+        _progress_delivery_metadata = _progress_delivery_metadata or None
         _progress_reply_to = (
             event_message_id
             if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
@@ -21067,7 +21132,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if getattr(adapter, "REQUIRES_EDIT_FINALIZE", False):
                     kwargs["finalize"] = True
                 if _edit_accepts_metadata:
-                    kwargs["metadata"] = _progress_metadata
+                    kwargs["metadata"] = _progress_delivery_metadata
                 return await adapter.edit_message(**kwargs)
 
             def _progress_text(lines: list) -> str:
@@ -21101,7 +21166,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     chat_id=source.chat_id,
                     content=text,
                     reply_to=_progress_reply_to,
-                    metadata=_progress_metadata,
+                    metadata=_progress_delivery_metadata,
                 )
                 _track_progress_result(result)
                 return result
@@ -21252,7 +21317,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 chat_id=source.chat_id,
                                 content=msg,
                                 reply_to=_progress_reply_to,
-                                metadata=_progress_metadata,
+                                metadata=_progress_delivery_metadata,
                             )
                             if (
                                 _cleanup_progress
@@ -21268,7 +21333,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 chat_id=source.chat_id,
                                 content=full_text,
                                 reply_to=_progress_reply_to,
-                                metadata=_progress_metadata,
+                                metadata=_progress_delivery_metadata,
                             )
                         else:
                             # Editing unsupported: send just this line
@@ -21276,7 +21341,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 chat_id=source.chat_id,
                                 content=msg,
                                 reply_to=_progress_reply_to,
-                                metadata=_progress_metadata,
+                                metadata=_progress_delivery_metadata,
                             )
                         if result.success and result.message_id:
                             progress_msg_id = result.message_id
@@ -22567,6 +22632,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _conversation_kwargs["moa_config"] = moa_config
                 if _persist_user_timestamp_override is not None:
                     _conversation_kwargs["persist_user_timestamp"] = _persist_user_timestamp_override
+                try:
+                    _run_params = inspect.signature(agent.run_conversation).parameters
+                except (TypeError, ValueError):
+                    _run_params = {}
+                if _run_params and not any(
+                    param.kind == inspect.Parameter.VAR_KEYWORD
+                    for param in _run_params.values()
+                ):
+                    _conversation_kwargs = {
+                        key: value
+                        for key, value in _conversation_kwargs.items()
+                        if key in _run_params
+                    }
                 from agent.request_scoped_tools import bind_request_scoped_tools
                 with bind_request_scoped_tools(agent, _lane_b_tools) as _tool_binding:
                     if guest_session:

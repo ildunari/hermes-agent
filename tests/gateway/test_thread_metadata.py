@@ -23,6 +23,8 @@ def test_thread_metadata_includes_chat_type_for_telegram_dm_topics():
     assert runner._thread_metadata_for_source(source) == {
         "thread_id": "9925",
         "chat_type": "dm",
+        "telegram_dm_topic_reply_fallback": True,
+        "direct_messages_topic_id": "9925",
     }
 
 

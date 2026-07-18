@@ -4524,6 +4524,7 @@ class SlackAdapter(BasePlatformAdapter):
 
             subcommand_map = slack_subcommand_map()
             subcommand_map["compact"] = "/compress"
+            subcommand_map["usage"] = "/usage"
             # Guard against whitespace-only text where ``text`` is truthy but
             # ``text.split()`` returns ``[]`` (e.g. user sends ``/hermes   ``).
             parts = text.split() if text else []

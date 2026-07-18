@@ -89,6 +89,7 @@ def _agent(provider="openai-codex", model="gpt-5.5"):
     agent.quiet_mode = True
 
     agent._create_openai_client = lambda *_args, **_kwargs: object()
+    agent._apply_client_headers_for_base_url = lambda *_args, **_kwargs: None
     agent._anthropic_prompt_cache_policy = lambda **_kwargs: (False, False)
     agent._ensure_lmstudio_runtime_loaded = lambda: None
     agent._is_azure_openai_url = lambda *_args, **_kwargs: False
@@ -162,12 +163,14 @@ def test_switching_to_new_primary_prunes_rejected_old_primary(monkeypatch):
     assert [entry["provider"] for entry in agent._fallback_chain] == ["deepseek"]
 
 
-def test_restore_primary_skips_mismatched_stale_pool():
+def test_restore_primary_skips_mismatched_stale_pool(monkeypatch):
     from agent import agent_runtime_helpers as arh
 
+    monkeypatch.setattr("agent.credential_pool.load_pool", lambda _provider: None)
     agent = _agent(provider="vibeproxy", model="claude-opus-4-8")
     agent._fallback_activated = True
-    agent._credential_pool = _Pool("deepseek")
+    stale_pool = _Pool("deepseek")
+    agent._credential_pool = stale_pool
     agent._primary_runtime.update(
         {
             "provider": "vibeproxy",
@@ -180,5 +183,6 @@ def test_restore_primary_skips_mismatched_stale_pool():
     assert arh.restore_primary_runtime(agent) is True
     assert agent.provider == "vibeproxy"
     assert agent.model == "claude-opus-4-8"
-    assert agent._credential_pool.selected is False
+    assert stale_pool.selected is False
+    assert agent._credential_pool is None
     assert not getattr(agent, "swapped", False)

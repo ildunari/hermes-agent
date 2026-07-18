@@ -1183,6 +1183,12 @@ class TelegramAdapter(BasePlatformAdapter):
         while preserving ``message_thread_id`` so the message still lands in
         the correct topic.
         """
+        if cls._metadata_has_explicit_direct_topic_only(metadata):
+            direct_topic_id = cls._metadata_direct_messages_topic_id(metadata)
+            return {
+                "message_thread_id": None,
+                "direct_messages_topic_id": int(direct_topic_id),
+            }
         return {"message_thread_id": cls._message_thread_id_for_send(thread_id)}
 
     @classmethod
@@ -9596,7 +9602,7 @@ class TelegramAdapter(BasePlatformAdapter):
         topic_id = getattr(topic, "topic_id", None) if topic is not None else None
         if topic_id is None:
             topic_id = getattr(message, "direct_messages_topic_id", None)
-        return str(topic_id) if topic_id is not None else None
+        return str(topic_id) if isinstance(topic_id, (int, str)) else None
 
     def _get_dm_topic_info(self, chat_id: str, thread_id: Optional[str]) -> Optional[Dict[str, Any]]:
         """Look up DM topic config by chat_id and thread_id.

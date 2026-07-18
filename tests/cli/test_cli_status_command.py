@@ -52,8 +52,12 @@ def test_statusbar_still_toggles_visibility():
 def test_status_prefix_prefers_status_command_over_statusbar_toggle():
     cli_obj = _make_cli()
 
-    with patch.object(cli_obj, "_show_session_status") as mock_status:
-        assert cli_obj.process_command("/sta") is True
+    with (
+        patch.object(cli_obj, "_show_session_status") as mock_status,
+        patch("cli._ensure_skill_commands", return_value={}),
+        patch("cli.get_skill_bundles", return_value={}),
+    ):
+        assert cli_obj.process_command("/statu") is True
 
     mock_status.assert_called_once_with()
     assert cli_obj._status_bar_visible is True

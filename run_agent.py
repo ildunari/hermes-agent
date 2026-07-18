@@ -5841,7 +5841,7 @@ class AIAgent:
         to the configured model identity so endpoint/machine addresses never
         become product behavior.
         """
-        model = (self.model or "").strip().lower()
+        model = (getattr(self, "model", "") or "").strip().lower()
         return "qwopus" in model
 
     def _normalize_textual_tool_name(self, raw_name: Any) -> Optional[str]:

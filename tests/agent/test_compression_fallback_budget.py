@@ -88,7 +88,7 @@ def test_fallback_candidate_call_uses_entry_timeout():
             task="compression", messages=[{"role": "user", "content": "hi"}],
             temperature=None, max_tokens=None, tools=None,
             effective_timeout=30.0,  # the primary's burned budget
-            effective_extra_body={}, reasoning_config=None,
+            fallback_extra_body={}, reasoning_config=None,
         )
     assert resp is not None
     assert seen.get("timeout") == 240.0
@@ -114,7 +114,7 @@ def test_fallback_candidate_without_entry_timeout_keeps_task_timeout():
             task="compression", messages=[{"role": "user", "content": "hi"}],
             temperature=None, max_tokens=None, tools=None,
             effective_timeout=300.0,
-            effective_extra_body={}, reasoning_config=None,
+            fallback_extra_body={}, reasoning_config=None,
         )
     assert seen.get("timeout") == 300.0
 

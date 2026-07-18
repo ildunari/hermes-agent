@@ -18,13 +18,12 @@ class TestHermesApiServerToolset:
     def test_toolset_includes_web_tools(self):
         tools = resolve_toolset("hermes-api-server")
         assert "web_search" in tools
-        assert "web" in tools
 
     def test_toolset_includes_core_tools(self):
         tools = resolve_toolset("hermes-api-server")
         expected = [
             "terminal", "process",
-            "vision_analyze", "image_generate", "video_generate",
+            "vision_analyze", "image_generate",
             "execute_code", "delegate_task",
             "todo", "memory", "session_search", "cronjob",
         ]

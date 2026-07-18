@@ -329,7 +329,7 @@ gateway:
     set_to:                "✏️ Session title set: **{title}**"
     not_found:             "Session not found in database."
     current_with_title:    "📌 Session: `{session_id}`\nTitle: **{title}**"
-    current_no_title:      "📌 Session: `{session_id}`\nNo title set. Usage: `/title My Session Name`"
+    current_no_title:      "📌 Session: `{session_id}`\nNo title set. Use `/title` followed by a short label you would recognize later, for example `/title Fix Login Timeout`."
 
   topic:
     not_telegram_dm:         "The /topic command is only available in Telegram private chats."
@@ -395,6 +395,7 @@ gateway:
     mode_off:              "⚙️ Tool progress: **OFF** — no tool activity shown."
     mode_new:              "⚙️ Tool progress: **NEW** — shown when tool changes (preview length: `display.tool_preview_length`, default 40)."
     mode_all:              "⚙️ Tool progress: **ALL** — every tool call shown (preview length: `display.tool_preview_length`, default 40)."
+    mode_compact:          "⚙️ Tool progress: **COMPACT** — grouped tool activity with repeat counts."
     mode_verbose:          "⚙️ Tool progress: **VERBOSE** — every tool call with full arguments."
     mode_log:              "⚙️ Tool progress: **LOG** — silent in chat; tool calls written to ~/.hermes/logs/tool_calls.log."
     saved_suffix:          "_(saved for **{platform}** — takes effect on next message)_"
