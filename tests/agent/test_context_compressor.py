@@ -114,6 +114,17 @@ class TestCompressionAttemptTailBudget:
 
         assert compressor._tail_budget_for_compression(450_000, force=False) == 90_000
 
+    def test_manual_compress_has_floor_for_tiny_positive_usage(self):
+        compressor = ContextCompressor(
+            model="test/model",
+            threshold_percent=0.90,
+            summary_target_ratio=0.20,
+            quiet_mode=True,
+            config_context_length=500_000,
+        )
+
+        assert compressor._tail_budget_for_compression(1, force=True) == 1_000
+
 
 class TestUpdateFromResponse:
     def test_updates_fields(self, compressor):

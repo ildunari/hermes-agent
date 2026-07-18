@@ -2991,7 +2991,9 @@ This compaction should PRIORITISE preserving all information related to the focu
             if observed_tokens > 0
             else self.threshold_tokens
         )
-        return int(budget_base * self.summary_target_ratio)
+        # Tiny but positive usage samples (for example a stale value of 1)
+        # must not collapse the manual-compression tail budget to zero.
+        return max(1_000, int(budget_base * self.summary_target_ratio))
 
     # ------------------------------------------------------------------
     # ContextEngine: manual /compress preflight

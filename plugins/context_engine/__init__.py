@@ -27,6 +27,8 @@ import hashlib
 import logging
 import os
 import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -34,6 +36,34 @@ logger = logging.getLogger(__name__)
 
 _CONTEXT_ENGINE_PLUGINS_DIR = Path(__file__).parent
 _BRIDGED_CONTEXT_ENGINE_ENV: dict[str, tuple[bool, str | None, str]] = {}
+_CONTEXT_ENGINE_CONSTRUCTION_LOCK = threading.RLock()
+
+
+class ContextEngineLoadError(RuntimeError):
+    """A matching context-engine package was found but could not be loaded."""
+
+
+@contextmanager
+def context_engine_construction_scope(
+    config: dict,
+    engine_name: str,
+    *,
+    hermes_home: str | None = None,
+):
+    """Atomically bridge profile config and construct one standalone engine."""
+    with _CONTEXT_ENGINE_CONSTRUCTION_LOCK:
+        previous_home = os.environ.get("HERMES_HOME")
+        try:
+            if hermes_home:
+                os.environ["HERMES_HOME"] = str(hermes_home)
+            bridge_context_engine_config_to_env(config, engine_name)
+            yield
+        finally:
+            if hermes_home:
+                if previous_home is None:
+                    os.environ.pop("HERMES_HOME", None)
+                else:
+                    os.environ["HERMES_HOME"] = previous_home
 
 
 def _user_context_engine_plugins_dir() -> Path:
@@ -168,6 +198,7 @@ def load_context_engine(name: str) -> Optional["ContextEngine"]:
     requested = str(name or "").strip()
     if not requested:
         return None
+    load_failures: list[tuple[Path, BaseException]] = []
 
     # Fast path for the historical directory-name contract, with repo engines
     # taking precedence over a same-named user package.
@@ -181,7 +212,7 @@ def load_context_engine(name: str) -> Optional["ContextEngine"]:
                 if engine and str(getattr(engine, "name", "") or requested) == requested:
                     return engine
             except Exception as exc:
-                logger.debug("Failed direct context-engine load from %s: %s", engine_dir, exc)
+                load_failures.append((engine_dir, exc))
 
     # Standalone repositories may use a package/repo name different from the
     # registered engine name. Scan user packages and match ContextEngine.name.
@@ -192,7 +223,21 @@ def load_context_engine(name: str) -> Optional["ContextEngine"]:
             if engine and str(getattr(engine, "name", "")) == requested:
                 return engine
         except Exception as exc:
-            logger.debug("Failed user context-engine load from %s: %s", engine_dir, exc)
+            load_failures.append((engine_dir, exc))
+
+    if load_failures:
+        engine_dir, exc = load_failures[0]
+        logger.warning(
+            "Context engine '%s' failed to load from %s: %s: %s",
+            requested,
+            engine_dir,
+            type(exc).__name__,
+            exc,
+        )
+        raise ContextEngineLoadError(
+            f"context engine {requested!r} failed to load from {engine_dir}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
     logger.debug(
         "Context engine '%s' not found in %s or %s",
@@ -282,9 +327,10 @@ def _load_engine_from_dir(
         try:
             spec.loader.exec_module(mod)
         except Exception as e:
-            logger.debug("Failed to exec_module %s: %s", module_name, e)
             sys.modules.pop(module_name, None)
-            return None
+            raise ContextEngineLoadError(
+                f"failed to import {module_name}: {type(e).__name__}: {e}"
+            ) from e
 
     # Try register(ctx) pattern first (how plugins are written)
     if hasattr(mod, "register"):
@@ -294,7 +340,9 @@ def _load_engine_from_dir(
             if collector.engine:
                 return collector.engine
         except Exception as e:
-            logger.debug("register() failed for %s: %s", name, e)
+            raise ContextEngineLoadError(
+                f"register() failed for {name}: {type(e).__name__}: {e}"
+            ) from e
 
     # Fallback: find a ContextEngine subclass and instantiate it
     from agent.context_engine import ContextEngine
@@ -304,8 +352,11 @@ def _load_engine_from_dir(
                 and attr is not ContextEngine):
             try:
                 return attr()
-            except Exception:
-                pass
+            except Exception as e:
+                raise ContextEngineLoadError(
+                    f"constructing {attr.__name__} from {name} failed: "
+                    f"{type(e).__name__}: {e}"
+                ) from e
 
     return None
 

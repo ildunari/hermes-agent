@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from plugins import context_engine as context_engines
 
@@ -102,3 +106,52 @@ def test_context_engine_config_bridge_restores_external_env_on_rollback(monkeypa
         "compressor",
     )
     assert os.environ["LCM_CONTEXT_THRESHOLD"] == "0.7"
+
+
+def test_engine_construction_scope_serializes_profile_env(monkeypatch):
+    monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    observed: dict[str, str] = {}
+
+    def construct(name: str, value: float, entered: threading.Event, wait=False):
+        cfg = {"context": {"lcm": {"context_threshold": value}}}
+        with context_engines.context_engine_construction_scope(cfg, "lcm"):
+            observed[name] = os.environ["LCM_CONTEXT_THRESHOLD"]
+            entered.set()
+            if wait:
+                assert release_first.wait(timeout=2)
+
+    first = threading.Thread(
+        target=construct, args=("first", 0.31, first_entered, True)
+    )
+    second = threading.Thread(
+        target=construct, args=("second", 0.62, second_entered)
+    )
+    first.start()
+    assert first_entered.wait(timeout=2)
+    second.start()
+    time.sleep(0.05)
+    assert not second_entered.is_set()
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert observed == {"first": "0.31", "second": "0.62"}
+
+
+def test_loader_surfaces_import_failure_cause(tmp_path, monkeypatch, caplog):
+    user_root = tmp_path / "context_engine"
+    package = user_root / "broken"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "raise ModuleNotFoundError('missing_lcm_dependency')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(context_engines, "_user_context_engine_plugins_dir", lambda: user_root)
+
+    with pytest.raises(context_engines.ContextEngineLoadError, match="missing_lcm_dependency"):
+        context_engines.load_context_engine("broken")
+
+    assert "missing_lcm_dependency" in caplog.text

@@ -6,6 +6,7 @@ context_length, causing the CLI status bar to show 'ctx --'.
 
 from unittest.mock import MagicMock, patch
 
+from agent.context_compressor import ContextCompressor
 from agent.context_engine import ContextEngine
 
 
@@ -139,6 +140,78 @@ def test_plugin_engine_update_model_args():
     assert "model" in kw
     assert "provider" in kw
     assert "api_mode" in kw
+
+
+def test_plugin_engine_update_model_failure_closes_and_falls_back():
+    engine = _StubEngine()
+    engine.update_model = MagicMock(side_effect=RuntimeError("bad model binding"))
+    engine.close = MagicMock()
+    cfg = {"context": {"engine": "stub"}, "agent": {}}
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("plugins.context_engine.load_context_engine", return_value=engine),
+        patch("agent.model_metadata.get_model_context_length", return_value=131_072),
+        patch("agent.context_compressor.get_model_context_length", return_value=131_072),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    engine.close.assert_called_once()
+    assert isinstance(agent.context_compressor, ContextCompressor)
+    assert getattr(agent, "_compression_threshold_autoraised", None) is None
+
+
+def test_guest_context_engine_override_ignores_host_lcm_config(tmp_path, monkeypatch):
+    """A guest agent in a gpt-like process must use guest compressor config."""
+    host_home = tmp_path / "profiles" / "gpt"
+    guest_home = tmp_path / "profiles" / "guest"
+    host_home.mkdir(parents=True)
+    guest_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(host_home))
+    host_cfg = {"context": {"engine": "lcm"}, "agent": {}}
+    guest_cfg = {
+        "context": {"engine": "compressor"},
+        "compression": {"threshold": 0.50},
+        "agent": {},
+    }
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=host_cfg),
+        patch("plugins.context_engine.load_context_engine") as load_engine,
+        patch("agent.context_compressor.get_model_context_length", return_value=131_072),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            user_id_alt="guest:steve",
+            context_engine_config=guest_cfg,
+            context_engine_home=str(guest_home),
+        )
+
+    load_engine.assert_not_called()
+    assert isinstance(agent.context_compressor, ContextCompressor)
+    agent.context_compressor.last_prompt_tokens = agent.context_compressor.threshold_tokens
+    assert agent.context_compressor.should_compress() is True
+    assert not (host_home / "lcm.db").exists()
 
 
 def _codex_agent_kwargs():

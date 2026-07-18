@@ -20790,6 +20790,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             if agent is None:
                 # Config changed or first message — create fresh agent
+                _context_engine_home = (
+                    str(self._resolve_profile_home_for_source(source))
+                    if guest_session
+                    else None
+                )
                 agent = AIAgent(
                     model=turn_route["model"],
                     **turn_route["runtime"],
@@ -20804,6 +20809,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # memory here rather than risk reading the owner's store.
                     skip_memory=guest_session,
                     skip_context_files=guest_session,
+                    # Guests can be routed inside the owner's process when
+                    # multiplex_profiles=False. Bind context-engine selection,
+                    # config, and storage to the routed profile explicitly.
+                    context_engine_config=user_config if guest_session else None,
+                    context_engine_home=_context_engine_home,
                     prefill_messages=self._prefill_messages or None,
                     reasoning_config=reasoning_config,
                     service_tier=self._service_tier,

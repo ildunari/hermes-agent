@@ -323,6 +323,8 @@ def init_agent(
     checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
+    context_engine_config: Optional[Dict[str, Any]] = None,
+    context_engine_home: Optional[str] = None,
 ):
     """
     Initialize the AI Agent.
@@ -1350,7 +1352,13 @@ def init_agent(
     # the owner/gateway profile, otherwise built-in Kosta memories leak and
     # mem0 initializes under the wrong namespace.
     try:
-        if str(user_id_alt or "").startswith("guest:"):
+        if context_engine_config is not None:
+            _agent_cfg = (
+                context_engine_config
+                if isinstance(context_engine_config, dict)
+                else {}
+            )
+        elif str(user_id_alt or "").startswith("guest:"):
             from pathlib import Path as _Path
             import yaml as _yaml
             _guest_cfg_path = _Path.home() / ".hermes" / "profiles" / "guest" / "config.yaml"
@@ -1778,6 +1786,7 @@ def init_agent(
     # 4. Fall back to built-in ContextCompressor
     _selected_engine = None
     _copy_failed = False
+    _load_failed = False
     _engine_name = "compressor"  # default
     try:
         _ctx_cfg = _agent_cfg.get("context", {}) if isinstance(_agent_cfg, dict) else {}
@@ -1785,28 +1794,44 @@ def init_agent(
     except Exception:
         pass
 
-    # Keep behavioral settings in config.yaml while supporting standalone
-    # engines whose internal config contract is environment-variable based.
-    # Generic mapping: context.<engine>.foo_bar becomes ENGINE_FOO_BAR before
-    # the engine's register()/constructor runs. Calling this for "compressor"
-    # also clears values previously bridged during an in-process engine switch.
-    try:
-        from plugins.context_engine import bridge_context_engine_config_to_env
-        bridge_context_engine_config_to_env(_agent_cfg, _engine_name)
-    except Exception as _ce_bridge_err:
-        _ra().logger.warning(
-            "Could not bridge context.%s config to the engine environment: %s",
-            _engine_name,
-            _ce_bridge_err,
-        )
-
-    if _engine_name != "compressor":
-        # Try loading from repo or user context-engine directories.
+    if _engine_name == "compressor":
+        # Clear any standalone-engine values left by an earlier in-process
+        # construction. Use the same lock as plugin construction so this reset
+        # cannot race an engine reading its bridged environment.
         try:
-            from plugins.context_engine import load_context_engine
-            _selected_engine = load_context_engine(_engine_name)
+            from plugins.context_engine import context_engine_construction_scope
+            with context_engine_construction_scope(_agent_cfg, _engine_name):
+                pass
+        except Exception as _ce_bridge_err:
+            _ra().logger.warning(
+                "Could not reset context-engine environment for compressor: %s",
+                _ce_bridge_err,
+            )
+    else:
+        # Keep behavioral settings in config.yaml while supporting standalone
+        # engines whose constructors read environment variables. The bridge and
+        # construction run under one module lock so concurrent profile agents
+        # cannot observe each other's temporary values. A routed profile home
+        # is also applied inside that lock so storage resolves to that profile.
+        try:
+            from plugins.context_engine import (
+                context_engine_construction_scope,
+                load_context_engine,
+            )
+            with context_engine_construction_scope(
+                _agent_cfg,
+                _engine_name,
+                hermes_home=context_engine_home,
+            ):
+                _selected_engine = load_context_engine(_engine_name)
         except Exception as _ce_load_err:
-            _ra().logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
+            _load_failed = True
+            _ra().logger.warning(
+                "Context engine '%s' standalone load failed (%s: %s); trying remaining fallbacks",
+                _engine_name,
+                type(_ce_load_err).__name__,
+                _ce_load_err,
+            )
 
         # Try general plugin system as fallback
         if _selected_engine is None:
@@ -1838,7 +1863,7 @@ def init_agent(
                     )
                     _selected_engine = None
 
-        if _selected_engine is None and not _copy_failed:
+        if _selected_engine is None and not _copy_failed and not _load_failed:
             _ra().logger.warning(
                 "Context engine '%s' not found — falling back to built-in compressor",
                 _engine_name,
@@ -1846,7 +1871,6 @@ def init_agent(
     # else: config says "compressor" — use built-in, don't auto-activate plugins
 
     if _selected_engine is not None:
-        agent.context_compressor = _selected_engine
         # External engines own compaction policy: the host compression
         # threshold (including the Codex gpt-5.x autoraise above) only
         # configures the built-in ContextCompressor and never reaches the
@@ -1862,17 +1886,67 @@ def init_agent(
             provider=agent.provider,
             custom_providers=_custom_providers,
         )
-        agent.context_compressor.update_model(
-            model=agent.model,
-            context_length=_plugin_ctx_len,
-            base_url=agent.base_url,
-            api_key=getattr(agent, "api_key", ""),
-            provider=agent.provider,
-            api_mode=agent.api_mode,
-        )
-        if not agent.quiet_mode:
-            _ra().logger.info("Using context engine: %s", _selected_engine.name)
-    else:
+        try:
+            _selected_engine.update_model(
+                model=agent.model,
+                context_length=_plugin_ctx_len,
+                base_url=agent.base_url,
+                api_key=getattr(agent, "api_key", ""),
+                provider=agent.provider,
+                api_mode=agent.api_mode,
+            )
+        except Exception as _ce_update_err:
+            _ra().logger.warning(
+                "Context engine '%s' failed during update_model (%s: %s) — closing it and falling back to built-in compressor",
+                _engine_name,
+                type(_ce_update_err).__name__,
+                _ce_update_err,
+            )
+            _close_engine = getattr(_selected_engine, "close", None)
+            if not callable(_close_engine):
+                _close_engine = getattr(_selected_engine, "_close_storage", None)
+            if callable(_close_engine):
+                try:
+                    _close_engine()
+                except Exception:
+                    _ra().logger.debug(
+                        "Context engine '%s' cleanup after update_model failure also failed",
+                        _engine_name,
+                        exc_info=True,
+                    )
+            _selected_engine = None
+            # The host threshold is active again once fallback selects the
+            # built-in compressor. Recompute model-specific policy that was
+            # intentionally suppressed while the plugin was considered active.
+            try:
+                from agent.auxiliary_client import (
+                    _compression_threshold_for_model as _fallback_cthresh_fn,
+                    _is_codex_gpt54_or_gpt55 as _fallback_is_codex_fn,
+                    _is_codex_spark as _fallback_is_spark_fn,
+                )
+                _model_cthresh = _fallback_cthresh_fn(
+                    agent.model,
+                    agent.provider,
+                    allow_codex_gpt55_autoraise=_codex_gpt55_autoraise,
+                )
+                compression_threshold, agent._compression_threshold_autoraised = (
+                    _resolve_compression_threshold(
+                        float(_compression_cfg.get("threshold", 0.50)),
+                        _model_cthresh,
+                        model=agent.model,
+                        is_codex_autoraise=(
+                            _fallback_is_codex_fn(agent.model, agent.provider)
+                            or _fallback_is_spark_fn(agent.model, agent.provider)
+                        ),
+                    )
+                )
+            except Exception:
+                pass
+        else:
+            agent.context_compressor = _selected_engine
+            if not agent.quiet_mode:
+                _ra().logger.info("Using context engine: %s", _selected_engine.name)
+    if _selected_engine is None:
         agent.context_compressor = ContextCompressor(
             model=agent.model,
             threshold_percent=compression_threshold,
