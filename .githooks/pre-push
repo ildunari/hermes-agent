@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel)
+PY="$ROOT/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+
+INPUT=$(mktemp)
+trap 'rm -f "$INPUT"' EXIT
+cat >"$INPUT"
+
+if "$PY" "$ROOT/scripts/carry_gate.py" --root "$ROOT" pushed --stdin "$INPUT"; then
+    exit 0
+fi
+
+"$PY" "$ROOT/scripts/carry.py" --root "$ROOT" consume-override --scope pre-push

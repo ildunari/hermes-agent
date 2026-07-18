@@ -1,0 +1,815 @@
+version: 1
+exemptions:
+- path_glob: agent/action_stall.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/agent_init.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/agent_runtime_helpers.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/anthropic_adapter.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/auxiliary_client.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/chat_completion_helpers.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/codex_runtime.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/codex_subtask/__init__.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/codex_subtask/client.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/codex_subtask/registry.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/codex_subtask/supervisor.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/context_breakdown.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/conversation_loop.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/credential_pool.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/display.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/file_safety.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/gemini_native_adapter.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/image_normalization.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/image_routing.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/iteration_budget.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/memory_manager.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/memory_provider.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/memory_recall_policy.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/moa_loop.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/prompt_builder.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/prompt_caching.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/request_scoped_tools.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/shell_hooks.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/skill_commands.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/subscription_view.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/system_prompt.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/title_generator.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/tool_dispatch_helpers.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/tool_executor.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/transports/chat_completions.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/transports/codex.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/transports/codex_app_server.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/transports/codex_app_server_session.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/turn_context.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: agent/usage_pricing.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/electron/autoplay-policy.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/electron/bootstrap-platform.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/electron/bootstrap-platform.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/electron/hardening.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/electron/preload.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/electron/runtime-paths.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/electron/runtime-paths.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/electron/session-windows.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/electron/session-windows.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/scripts/run-electron-builder.mjs
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/chat/composer/draft-pending-notice.test.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/chat/composer/draft-pending-notice.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/chat/composer/enter-submit-dom-race.test.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/chat/composer/hooks/use-composer-queue.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/chat/composer/index.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/chat/hooks/use-composer-actions.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/chat/hooks/use-composer-actions.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/gateway/hooks/use-gateway-boot.test.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/gateway/hooks/use-gateway-boot.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/hooks/use-keybinds.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/right-sidebar/files/ipc.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/right-sidebar/files/use-project-tree.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/routes.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-background-queue-drain.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-hermes-config.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-message-stream/gateway-event.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-message-stream/usage-session-scope.test.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-prompt-actions/submit.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-session-actions.test.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-session-actions/index.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-session-actions/utils.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-session-actions/utils.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/session/hooks/use-session-list-actions.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/settings/appearance-settings.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/settings/local-enhancements-section.test.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/settings/model-settings.test.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/settings/model-settings.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/shell/context-usage-panel.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/shell/model-edit-submenu.test.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/shell/model-edit-submenu.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/shell/model-menu-panel.test.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/app/shell/model-menu-panel.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/components/assistant-ui/markdown-text.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/components/model-picker.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/components/model-visibility-dialog.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/components/ui/segmented-control.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/global.d.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/hermes-profile-scope.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/hermes.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/hermes.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/i18n/catalog.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/i18n/en.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/i18n/ja.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/i18n/types.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/i18n/zh-hant.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/i18n/zh.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/context-usage.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/context-usage.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/desktop-fs.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/desktop-fs.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/desktop-slash-commands.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/desktop-slash-commands.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/media.remote.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/media.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/model-display-name.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/model-display-name.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/model-status-label.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/model-status-label.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/session-source.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/lib/voice-playback.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/store/chat-width.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/store/composer-queue.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/store/composer-queue.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/store/gateway-switch.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/store/gateway-switch.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/store/model-presets.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/store/model-presets.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/store/session.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/store/table-layout.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/store/windows.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/themes/presets.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: apps/desktop/src/types/hermes.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/authz_mixin.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/claude_sessions.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/config.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/__init__.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/admin.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/broker.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/embeddinggemma_worker.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/embeddings.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/extractor.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/gating.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/imessage_bootstrap.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/imessage_communication_adapter.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/imessage_link_review.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/import_contacts.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/interest_maintenance.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/lane_b.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/link_research.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/link_research_worker.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/live_ingress.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/phase_e_enrichment.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/phase_e_link_enrichment.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/phase_e_taxonomy.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/private_link_queue.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/qwen3_extractor_worker.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/qwen3_reranker_worker.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/registry.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/rerankers.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/reviewed_backfill.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/runtime.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/schema.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/security.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/contact_memory/store.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/conversation_texture.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/conversation_texture_v2.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/cron_delivery_profile.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/display_config.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/email_auth.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/platforms/api_server.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/platforms/base.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/platforms/bluebubbles.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/platforms/email.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/platforms/telegram.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/proactive_checkin.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/proactive_fetch.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/proactive_scheduler.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/proactive_status.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/proactive_transport.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/rich_cards/__init__.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/rich_cards/artifacts.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/rich_cards/markdown_tables.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/rich_cards/qa.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/rich_cards/renderer.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/rich_cards/schema.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/rich_cards/validate.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/session.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/slash_access.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/slash_commands.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/status.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/stream_consumer.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: gateway/usage_render.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/auth.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/codex_models.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/codex_runtime_plugin_migration.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/commands.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/config.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/dashboard_auth/public_paths.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/fallback_config.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/gateway.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/inventory.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/main.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/moa_config.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/model_display.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/model_picker_policy.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/model_setup_flows.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/model_switch.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/models.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/plugins.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/profiles.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/runtime_provider.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/stack.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/subcommands/dashboard.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: hermes_cli/subcommands/restart.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: plugins/context_engine/__init__.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: plugins/model-providers/custom/__init__.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: plugins/model-providers/kimi-coding/__init__.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: plugins/model-providers/zai/__init__.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: plugins/platforms/discord/rich_ui.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: plugins/platforms/email/adapter.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: plugins/platforms/matrix/adapter.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: plugins/platforms/slack/adapter.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: plugins/platforms/telegram/adapter.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: plugins/web/firecrawl/provider.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: run_agent.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/apply_reviewed_link_interests.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/benchmark_contact_memory_extractor.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/bootstrap_proactive_imessage.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/check_local_carry_contract.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/contact_memory/benchmark_embeddinggemma.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/contact_memory/benchmark_model2vec.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/contact_memory/benchmark_qwen3_reranker.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/contact_memory/install_embeddinggemma.sh
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/contact_memory/install_model2vec.sh
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/contact_memory/install_qwen3_reranker.sh
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/contact_memory_interest_maintenance.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/import_reviewed_artifact_interests.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/install_contact_memory_maintenance_cron.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/install_proactive_profile_config.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/install_proactive_rollout_cron.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/local_carry_manifest.yaml
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/mac_studio_hermes_smoke.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/manage_guest_cron_launchd.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/proactive_operator_smoke.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/proactive_status.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/review_canonical_communication_backfill.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/review_imessage_communication_signals.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/review_imessage_link_signals.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/rich_cards/render-card.mjs
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/run_update_smart_client_validation.sh
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/session_hygiene.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/templates/proactive-rollout.yaml
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: scripts/tool_workload_audit.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/approval.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/codex_subtask_tool.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/delegate_tool.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/file_operations.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/file_tools.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/guest_workspace_tools.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/image_generation_tool.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/registry.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/session_search_tool.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/skills_sync.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/terminal_tool.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/tool_search.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/tools_tool.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/tts_text_formatter.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/tts_tool.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/vision_tools.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/voice_mode.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/web_fast_extract.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/web_tools.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: tools/x_search_tool.py
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: web/src/components/ModelPickerDialog.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: web/src/components/ProfileSwitcher.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: web/src/lib/api.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: web/src/lib/internal-agent-input.test.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: web/src/lib/pty-mobile-input.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
+- path_glob: web/src/pages/SessionsPage.tsx
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'

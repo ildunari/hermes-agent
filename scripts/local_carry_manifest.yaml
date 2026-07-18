@@ -1,4 +1,20 @@
+schema_version: 2
 version: 1
+upstream_ref: origin/main
+legacy_provisional_until: 2026-10-01
+exemptions_file: scripts/local_carry_exemptions.yaml
+managed_roots:
+  - agent
+  - apps/desktop
+  - cli.py
+  - gateway
+  - hermes_cli
+  - hermes_state.py
+  - plugins
+  - run_agent.py
+  - scripts
+  - tools
+  - web
 
 checks:
   - id: dashboard-host-allowlist
@@ -79,6 +95,63 @@ checks:
     description: shareable rerere setup helper
 
 features:
+  - id: update.futureproof-system
+    title: Recoverable, resource-bounded slim update system
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - scripts/hermes_checkpoint.py
+      - scripts/carry.py
+      - scripts/carry_gate.py
+      - scripts/hermes_update_service.py
+      - scripts/local_carry_manifest.yaml
+      - scripts/setup_update_service.py
+      - scripts/setup_futureproof_hooks.sh
+      - scripts/thinning.py
+      - scripts/thinning_baseline.json
+      - scripts/verify_deployed_turn.py
+      - scripts/local_carry_exemptions.yaml
+      - scripts/run_tests.sh
+      - scripts/run_update_smart_client_validation.sh
+    collision_paths:
+      - scripts/run_tests.sh
+      - scripts/run_update_smart_client_validation.sh
+    consumer:
+      command:
+        - python3
+        - scripts/hermes_update_service.py
+        - --help
+    runtime_probe:
+      command:
+        - python3
+        - scripts/setup_update_service.py
+        - check
+    tests:
+      - tests/scripts/test_hermes_checkpoint.py
+      - tests/scripts/test_carry_v2.py
+      - tests/scripts/test_hermes_update_service.py
+    checks:
+      - id: futureproof-safe-checkpoint
+        path: scripts/hermes_checkpoint.py
+        needles: [refs/hermes/checkpoints, GIT_INDEX_FILE, PARTIAL, restore]
+        description: checkpoint refs preserve WIP without advancing the live branch
+      - id: futureproof-carry-registry
+        path: scripts/carry.py
+        needles: [changed-since, managed_roots, runtime_probe, consume-override]
+        description: deterministic ownership and connected-behavior gate
+      - id: futureproof-exact-tree-gate
+        path: scripts/carry_gate.py
+        needles: [worktree, --cached, local_sha, remote_sha]
+        description: hooks validate the exact staged and pushed trees
+      - id: futureproof-update-service
+        path: scripts/hermes_update_service.py
+        needles: [PREPARED, COMPLETED, start_new_session, FD_LIMIT, nonce_valid]
+        description: detached update supervision and receipted deployment
+      - id: futureproof-collision-ratchet
+        path: scripts/thinning.py
+        needles: [weighted_score, upstream_churn, Thinning ratchet]
+        description: forward-only collision density ratchet
+
   - id: webui.session-defaults
     title: WebUI session visibility, labels, and uncapped pins
     tests:
@@ -123,6 +196,13 @@ features:
 
   - id: desktop.chat-layout
     title: Responsive chat width modes
+    owner_paths:
+      - apps/desktop/src/store/chat-width.ts
+      - apps/desktop/src/main.tsx
+    dependent_paths:
+      - apps/desktop/src/app/settings/appearance-settings.tsx
+    collision_paths:
+      - apps/desktop/src/app/settings/appearance-settings.tsx
     tests:
       - apps/desktop/src/store/chat-width.test.ts
     checks:
@@ -141,6 +221,13 @@ features:
 
   - id: desktop.markdown-table-layout
     title: Fit and horizontally scrollable Markdown tables
+    owner_paths:
+      - apps/desktop/src/store/table-layout.ts
+      - apps/desktop/src/styles.css
+    dependent_paths:
+      - apps/desktop/src/app/settings/appearance-settings.tsx
+    collision_paths:
+      - apps/desktop/src/app/settings/appearance-settings.tsx
     tests:
       - apps/desktop/src/store/table-layout.test.ts
     checks:
@@ -159,6 +246,13 @@ features:
 
   - id: desktop.local-enhancements-settings
     title: Local enhancements settings section
+    owner_paths:
+      - apps/desktop/src/app/settings/local-enhancements-section.tsx
+      - apps/desktop/src/i18n/local-carry.ts
+    dependent_paths:
+      - apps/desktop/src/app/settings/appearance-settings.tsx
+    collision_paths:
+      - apps/desktop/src/app/settings/appearance-settings.tsx
     tests:
       - apps/desktop/src/app/settings/local-enhancements-section.test.tsx
     checks:

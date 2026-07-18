@@ -1,11 +1,14 @@
 #!/opt/homebrew/bin/bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+ROOT="${HERMES_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
+TEST_RUNNER="${HERMES_TEST_RUNNER:-$ROOT/scripts/run_tests.sh}"
 if [[ -x "$ROOT/.venv/bin/python" ]]; then
   PY="$ROOT/.venv/bin/python"
 elif [[ -x "$ROOT/venv/bin/python3" ]]; then
   PY="$ROOT/venv/bin/python3"
+elif [[ -x "$HOME/.hermes/hermes-agent/.venv/bin/python" ]]; then
+  PY="$HOME/.hermes/hermes-agent/.venv/bin/python"
 else
   echo "No checkout-local Python environment found under $ROOT" >&2
   exit 1
@@ -17,7 +20,7 @@ cd "$ROOT"
 exec > >(tee "$LOGDIR/validation.log") 2>&1
 
 echo "[1/8] carry contract"
-"$PY" scripts/check_local_carry_contract.py
+"$PY" scripts/carry.py validate
 
 echo "[2/8] forced bytecode refresh and dashboard import contract"
 "$PY" -m compileall -q -f agent gateway hermes_cli tools
@@ -53,7 +56,7 @@ if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' run_agent.py gateway/run.py gatewa
 fi
 
 echo "[4/8] session store and profile lineage tests"
-"$PY" -m pytest -q \
+"$TEST_RUNNER" -j 2 \
   tests/gateway/test_session_store_lock_io.py \
   tests/gateway/test_async_session_store.py \
   tests/gateway/test_session.py \
@@ -62,19 +65,19 @@ echo "[4/8] session store and profile lineage tests"
   tests/tools/test_delegate.py \
   tests/tools/test_session_search.py \
   tests/agent/test_shell_hooks.py \
-  tests/agent/test_session_hygiene_canonical_hook.py
+  tests/agent/test_session_hygiene_canonical_hook.py -q
 
 echo "[5/8] model picker/inventory tests"
-"$PY" -m pytest -q \
+"$TEST_RUNNER" -j 2 \
   tests/hermes_cli/test_inventory.py \
   tests/hermes_cli/test_model_switch_custom_providers.py \
   tests/hermes_cli/test_model_picker_policy.py \
-  tests/test_model_picker_visibility_policy.py
+  tests/test_model_picker_visibility_policy.py -q
 
 echo "[6/8] web extraction tests"
-"$PY" -m pytest -q \
+"$TEST_RUNNER" -j 2 \
   tests/tools/test_web_tools_config.py \
-  tests/tools/test_web_tools_dict_urls.py
+  tests/tools/test_web_tools_dict_urls.py -q
 
 echo "[7/8] Desktop typecheck and focused UI/platform tests"
 cd "$ROOT/apps/desktop"
