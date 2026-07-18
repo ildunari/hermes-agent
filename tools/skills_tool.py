@@ -1261,6 +1261,34 @@ def skill_view(
                 ):
                     _record(None, found_md)
 
+        # Generated Hermes views flatten categorized paths as
+        # ``category__skill`` directory names.  That projection is an
+        # implementation detail, but models can still encounter and reuse the
+        # flattened identifier from another profile's prompt or skill body.
+        # Preserve literal matches above; only interpret flattened forms as
+        # categorized aliases when normal resolution found nothing. Check every
+        # separator so names containing ``__`` cannot silently choose the wrong
+        # category boundary; normal collision handling rejects ambiguous aliases.
+        if not candidates and "__" in name and "/" not in name and ":" not in name:
+            separator_offsets = [
+                offset for offset in range(len(name) - 1)
+                if name.startswith("__", offset)
+            ]
+            for offset in separator_offsets:
+                category = name[:offset]
+                bare_name = name[offset + 2:]
+                categorized_alias = f"{category}/{bare_name}"
+                if not category or not bare_name or _skill_lookup_path_error(categorized_alias):
+                    continue
+                for search_dir in all_dirs:
+                    alias_path = search_dir / categorized_alias
+                    if (
+                        not _is_skill_support_path(alias_path)
+                        and alias_path.is_dir()
+                        and (alias_path / "SKILL.md").exists()
+                    ):
+                        _record(alias_path, alias_path / "SKILL.md")
+
         if len(candidates) > 1:
             paths = [str(smd) for _, smd in candidates]
             logging.getLogger(__name__).warning(
@@ -1453,7 +1481,7 @@ def skill_view(
                 return json.dumps(
                     {
                         "success": True,
-                        "name": name,
+                        "name": resolved_name,
                         "file": file_path,
                         "content": f"[Binary file: {target_file.name}, size: {target_file.stat().st_size} bytes]",
                         "is_binary": True,
@@ -1475,7 +1503,7 @@ def skill_view(
             return json.dumps(
                 {
                     "success": True,
-                    "name": name,
+                    "name": resolved_name,
                     "file": file_path,
                     "content": content,
                     "file_type": target_file.suffix,

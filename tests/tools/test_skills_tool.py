@@ -449,6 +449,55 @@ class TestSkillView:
         assert result["success"] is True
         assert "Step 1" in result["content"]
 
+    def test_view_categorized_skill_by_generated_view_alias(self, tmp_path):
+        _make_skill(tmp_path, "secret-source-operations", category="hermes")
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            raw = skill_view("hermes__secret-source-operations")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["name"] == "secret-source-operations"
+
+    def test_generated_view_alias_does_not_override_literal_directory(self, tmp_path):
+        _make_skill(tmp_path, "hermes__literal-skill")
+        _make_skill(tmp_path, "literal-skill", category="hermes")
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            raw = skill_view("hermes__literal-skill")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["skill_dir"] == str(tmp_path / "hermes__literal-skill")
+
+    def test_generated_view_alias_rejects_ambiguous_separator(self, tmp_path):
+        _make_skill(tmp_path, "beta__gamma", category="alpha")
+        _make_skill(tmp_path, "gamma", category="alpha__beta")
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            raw = skill_view("alpha__beta__gamma")
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "Ambiguous skill name" in result["error"]
+        assert len(result["matches"]) == 2
+
+    def test_generated_view_alias_file_response_uses_frontmatter_name(self, tmp_path):
+        skill_dir = _make_skill(tmp_path, "secret-source-operations", category="hermes")
+        references = skill_dir / "references"
+        references.mkdir()
+        (references / "guide.md").write_text("guide\n", encoding="utf-8")
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            raw = skill_view(
+                "hermes__secret-source-operations",
+                file_path="references/guide.md",
+            )
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["name"] == "secret-source-operations"
+
     def test_skill_view_applies_template_vars(self, tmp_path):
         with (
             patch("tools.skills_tool.SKILLS_DIR", tmp_path),
