@@ -148,8 +148,10 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
 ]
 
 // Two modes via the `compact` height variant (styles.css):
-//   tall    → each section is shrink-0, capped, its own scroller; Sessions is flex-1.
+//   tall    → bounded groups are capped with their own scroller; Sessions is flex-1.
 //   compact → COMPACT_FLAT drops the caps so the whole stack scrolls as one.
+// Pinned sessions intentionally stay uncapped in both modes and participate in
+// the outer stack scroller, so pinning never hides rows behind a nested viewport.
 // Sections stay shrink-0 so none can be squeezed below its content and bleed onto
 // the next — the flexbox `min-height: auto` overlap trap that caused the bug.
 const COMPACT_FLAT = 'compact:max-h-none compact:overflow-visible'
@@ -1156,7 +1158,7 @@ export function ChatSidebar({
             {!trimmedQuery && (
               <SidebarSessionsSection
                 activeSessionId={activeSidebarSessionId}
-                contentClassName={cn('flex max-h-44 flex-col gap-px rounded-lg pb-2 pt-1', GROUP_BODY)}
+                contentClassName="flex flex-col gap-px rounded-lg pb-2 pt-1"
                 dndSensors={dndSensors}
                 emptyState={<SidebarPinnedEmptyState />}
                 label={s.pinned}

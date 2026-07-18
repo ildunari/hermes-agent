@@ -27,6 +27,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { useI18n } from "@/i18n";
 import { api, type SessionInfo } from "@/lib/api";
+import { isInternalAgentInput } from "@/lib/internal-agent-input";
 import { cn, timeAgo } from "@/lib/utils";
 
 const SESSION_LIMIT = 30;
@@ -51,7 +52,7 @@ function rowLabel(session: SessionInfo, untitled: string): string {
   const title = session.title?.trim();
   if (title && title !== "Untitled") return title;
   const preview = session.preview?.trim();
-  if (preview) return preview;
+  if (preview && !isInternalAgentInput(preview)) return preview;
   return untitled;
 }
 

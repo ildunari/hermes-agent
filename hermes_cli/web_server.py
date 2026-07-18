@@ -4386,7 +4386,12 @@ def get_profiles_sessions_snapshot(
 
 
 @app.get("/api/sessions/search")
-async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] = None):
+async def search_sessions(
+    q: str = "",
+    limit: int = 20,
+    profile: Optional[str] = None,
+    exclude_sources: str = None,
+):
     """Search sessions by ID plus full-text message content using FTS5.
 
     Direct session-id matches are surfaced first, then FTS message-content
@@ -4403,6 +4408,17 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
         db = _open_session_db_for_profile(profile)
         try:
             safe_limit = max(1, min(int(limit or 20), 100))
+            excluded_sources = {
+                item.strip().lower()
+                for item in (exclude_sources or "").split(",")
+                if item.strip()
+            }
+
+            def source_hidden(source: object) -> bool:
+                return bool(
+                    excluded_sources
+                    and str(source or "").strip().lower() in excluded_sources
+                )
 
             # Walk parent_session_id to the compression root, memoized so a
             # chain of compression segments only costs one walk. We deliberately
@@ -4481,7 +4497,7 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
             seen: dict = {}
 
             def add_lineage_result(raw_sid: str, payload: dict) -> None:
-                if not raw_sid:
+                if not raw_sid or source_hidden(payload.get("source")):
                     return
                 root = compression_root(raw_sid)
                 if root in seen or len(seen) >= safe_limit:

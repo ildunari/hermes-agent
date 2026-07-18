@@ -19,6 +19,31 @@ function readBasePath(): string {
 export const HERMES_BASE_PATH = readBasePath();
 const BASE = HERMES_BASE_PATH;
 
+export const WEBUI_HIDDEN_MESSAGING_SESSION_SOURCES = [
+  "telegram",
+  "discord",
+  "slack",
+  "mattermost",
+  "matrix",
+  "signal",
+  "whatsapp",
+  "bluebubbles",
+  "homeassistant",
+  "email",
+  "sms",
+  "webhook",
+  "weixin",
+  "wecom",
+  "qqbot",
+  "yuanbao",
+  "dingtalk",
+  "feishu",
+] as const;
+
+const WEBUI_HIDDEN_SESSION_SOURCES_QUERY = encodeURIComponent(
+  WEBUI_HIDDEN_MESSAGING_SESSION_SOURCES.join(","),
+);
+
 import type { DashboardTheme } from "@/themes/types";
 
 // Ephemeral session token for protected endpoints.
@@ -347,7 +372,7 @@ export const api = {
   ) =>
     fetchJSON<PaginatedSessions>(
       appendProfileParam(
-        `/api/sessions?limit=${limit}&offset=${offset}&order=${order}`,
+        `/api/sessions?limit=${limit}&offset=${offset}&order=${order}&exclude_sources=${WEBUI_HIDDEN_SESSION_SOURCES_QUERY}`,
         profile,
       ),
     ),
@@ -779,7 +804,10 @@ export const api = {
   // Session search (FTS5)
   searchSessions: (q: string, profile = getManagementProfile()) =>
     fetchJSON<SessionSearchResponse>(
-      appendProfileParam(`/api/sessions/search?q=${encodeURIComponent(q)}`, profile),
+      appendProfileParam(
+        `/api/sessions/search?q=${encodeURIComponent(q)}&exclude_sources=${WEBUI_HIDDEN_SESSION_SOURCES_QUERY}`,
+        profile,
+      ),
     ),
 
   // OAuth provider management

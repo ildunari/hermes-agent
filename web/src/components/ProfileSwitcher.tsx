@@ -6,6 +6,7 @@ import {
 } from "@nous-research/ui/ui/components/select";
 import { useProfileScope } from "@/contexts/useProfileScope";
 import { useI18n } from "@/i18n";
+import { formatProfileLabel } from "@/lib/profile-label";
 import { cn } from "@/lib/utils";
 
 /**
@@ -23,7 +24,7 @@ export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
     () =>
       (t.app.currentProfileOption ?? "this dashboard ({name})").replace(
         "{name}",
-        currentProfile || "default",
+        formatProfileLabel(currentProfile || "default"),
       ),
     [currentProfile, t.app.currentProfileOption],
   );
@@ -70,7 +71,7 @@ export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
           .filter((name) => name !== currentProfile)
           .map((name) => (
             <SelectOption key={name} value={name}>
-              {name}
+              {formatProfileLabel(name)}
             </SelectOption>
           ))}
       </Select>

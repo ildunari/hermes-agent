@@ -88,3 +88,29 @@ def test_desktop_session_search_merges_id_matches_before_content_matches(monkeyp
             },
         ]
     }
+
+
+def test_desktop_session_search_excludes_hidden_sources(monkeypatch):
+    monkeypatch.setattr("hermes_state.SessionDB", _FakeSessionDB)
+
+    response = asyncio.run(
+        web_server.search_sessions(
+            q="20260603",
+            limit=5,
+            exclude_sources="telegram,desktop",
+        )
+    )
+
+    assert response == {
+        "results": [
+            {
+                "session_id": "20260603_090200_exact",
+                "lineage_root": "20260603_090200_exact",
+                "snippet": "ID match preview",
+                "role": None,
+                "source": "cli",
+                "model": "claude",
+                "session_started": 100,
+            }
+        ]
+    }

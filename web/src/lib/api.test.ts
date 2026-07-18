@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "./api";
+import { api, WEBUI_HIDDEN_MESSAGING_SESSION_SOURCES } from "./api";
 
 const SESSION_HEADER = "X-Hermes-Session-Token";
 
@@ -45,6 +45,25 @@ describe("api.getModelOptions", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/model/options?profile=default&refresh=1&include_unconfigured=1",
       expect.objectContaining({ credentials: "include" }),
+    );
+  });
+});
+
+describe("WebUI session visibility", () => {
+  it("excludes messaging transcripts from recents and search", async () => {
+    vi.stubGlobal("window", {});
+    const fetchMock = jsonFetchMock({ sessions: [], total: 0 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.getSessions(20, 0, "default", "recent");
+    await api.searchSessions("needle", "default");
+
+    const hidden = encodeURIComponent(WEBUI_HIDDEN_MESSAGING_SESSION_SOURCES.join(","));
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      `/api/sessions?limit=20&offset=0&order=recent&exclude_sources=${hidden}&profile=default`,
+    );
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      `/api/sessions/search?q=needle&exclude_sources=${hidden}&profile=default`,
     );
   });
 });
