@@ -264,7 +264,7 @@ TOOLS_SCHEMA = {
             },
             "name": {
                 "type": "string",
-                "description": "Tool or wrapper name for describe/help, e.g. fs, web, browser_navigate.",
+                "description": "Tool or wrapper name for describe/help, e.g. read_file, web, browser_navigate.",
             },
             "category": {
                 "type": "string",
