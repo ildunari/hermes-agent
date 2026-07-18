@@ -5,10 +5,6 @@ checks:
     path: hermes_cli/web_server.py
     needles: [register_instance, allowed_hosts, _configured_dashboard_allowed_hosts]
     description: dashboard callback and host allowlist
-  - id: internal-agent-input
-    path: web/src/lib/internal-agent-input.ts
-    needles: []
-    description: internal agent input helper
   - id: provider-usage-component
     path: web/src/components/ProviderUsagePanel.tsx
     needles: []
@@ -83,6 +79,48 @@ checks:
     description: shareable rerere setup helper
 
 features:
+  - id: webui.session-defaults
+    title: WebUI session visibility, labels, and uncapped pins
+    tests:
+      - web/src/lib/api.test.ts
+      - web/src/lib/internal-agent-input.test.ts
+      - web/src/components/ProfileSwitcher.test.ts
+      - tests/hermes_cli/test_web_server_session_search.py
+    checks:
+      - id: desktop-uncapped-pinned-sessions
+        path: apps/desktop/src/app/chat/sidebar/index.tsx
+        needles: ['contentClassName="flex flex-col gap-px rounded-lg pb-2 pt-1"']
+        forbidden_needles: ['flex max-h-44 flex-col gap-px rounded-lg pb-2 pt-1']
+        description: pinned sessions use the outer sidebar scroll without a three-row cap
+      - id: webui-hidden-session-sources
+        path: web/src/lib/api.ts
+        needles:
+          - WEBUI_HIDDEN_MESSAGING_SESSION_SOURCES
+          - WEBUI_HIDDEN_SESSION_SOURCES_QUERY
+          - '/api/sessions?limit=${limit}&offset=${offset}&order=${order}&exclude_sources=${WEBUI_HIDDEN_SESSION_SOURCES_QUERY}'
+          - '/api/sessions/search?q=${encodeURIComponent(q)}&exclude_sources=${WEBUI_HIDDEN_SESSION_SOURCES_QUERY}'
+        description: browser recents and search exclude messaging transcripts
+      - id: webui-search-source-filter
+        path: hermes_cli/web_server.py
+        needles: ['@app.get("/api/sessions/search")', 'excluded_sources = {', 'source_hidden(payload.get("source"))']
+        description: session search enforces source exclusions in the backend
+      - id: webui-internal-agent-input
+        path: web/src/lib/internal-agent-input.ts
+        needles: [isBackgroundProcessAgentInput, isAsyncDelegationAgentInput, isInternalAgentInput]
+        description: synthetic process and delegation prompts are not used as session titles
+      - id: webui-internal-agent-input-consumer
+        path: web/src/components/ChatSessionList.tsx
+        needles: ['import { isInternalAgentInput }', 'preview && !isInternalAgentInput(preview)']
+        description: session labels actually apply synthetic-title suppression
+      - id: webui-profile-label-helper
+        path: web/src/lib/profile-label.ts
+        needles: [formatProfileLabel, '.split("-")']
+        description: profile IDs retain stable values while labels are title-cased
+      - id: webui-profile-label-mount
+        path: web/src/components/ProfileSwitcher.tsx
+        needles: [formatProfileLabel]
+        description: profile switcher renders labels through the formatting helper
+
   - id: desktop.chat-layout
     title: Responsive chat width modes
     tests:

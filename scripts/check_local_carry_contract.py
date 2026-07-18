@@ -17,6 +17,7 @@ class Check:
     id: str
     path: str
     needles: tuple[str, ...]
+    forbidden_needles: tuple[str, ...]
     description: str
 
 
@@ -57,6 +58,10 @@ def _check(value: Any, label: str) -> Check:
         id=_string(item.get("id"), f"{label}.id"),
         path=_string(item.get("path"), f"{label}.path"),
         needles=_strings(item.get("needles"), f"{label}.needles"),
+        forbidden_needles=_strings(
+            item.get("forbidden_needles", []),
+            f"{label}.forbidden_needles",
+        ),
         description=_string(item.get("description"), f"{label}.description"),
     )
 
@@ -128,6 +133,12 @@ def main() -> int:
         for needle in check.needles:
             if needle.lower() not in text.lower():
                 failures.append(f"MISSING SYMBOL: {check.path}: {needle!r} [{check.id}] ({check.description})")
+        for needle in check.forbidden_needles:
+            if needle.lower() in text.lower():
+                failures.append(
+                    f"FORBIDDEN SYMBOL: {check.path}: {needle!r} "
+                    f"[{check.id}] ({check.description})"
+                )
 
     for feature_id, tests in feature_tests.items():
         for test in tests:
