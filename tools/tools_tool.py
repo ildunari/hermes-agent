@@ -27,17 +27,8 @@ _TOOL_HELP = {
         "examples": [
             {"action": "list"},
             {"action": "list", "category": "browser"},
-            {"action": "describe", "name": "fs"},
+            {"action": "describe", "name": "read_file"},
             {"action": "config"},
-        ],
-    },
-    "fs": {
-        "summary": "File reads, writes, patches, and searches through one compact wrapper.",
-        "fallbacks": "No shell fallback is automatic. Use terminal only when the file tool explicitly cannot express the operation.",
-        "examples": [
-            {"action": "read", "path": "README.md", "offset": 1, "limit": 80},
-            {"action": "search", "pattern": "TODO", "path": "."},
-            {"action": "patch", "mode": "replace", "path": "app.py", "old_string": "old", "new_string": "new"},
         ],
     },
     "web": {
@@ -70,8 +61,8 @@ _CATEGORIES = {
     },
     "file": {
         "description": "File read/write/patch/search operations.",
-        "default_tools": ["fs"],
-        "advanced_tools": ["read_file", "write_file", "patch", "search_files"],
+        "default_tools": ["read_file", "write_file", "patch", "search_files"],
+        "advanced_tools": [],
     },
     "web": {
         "description": "Web search, extraction, page QA, summaries, structured extraction, and curl.md fallback.",

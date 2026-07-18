@@ -17,31 +17,31 @@ def _tool_names(tool_defs):
     return {tool["function"]["name"] for tool in tool_defs}
 
 
-def test_fs_wrapper_visible_and_legacy_file_tools_hidden_by_default():
+def test_dedicated_file_tools_visible_and_fs_wrapper_retired():
     enabled = sorted(_get_platform_tools({"platform_toolsets": {"telegram": ["no_mcp", "file"]}}, "telegram"))
     names = _tool_names(get_tool_definitions(enabled_toolsets=enabled, quiet_mode=True))
 
-    assert "fs" in names
-    assert {"read_file", "write_file", "patch", "search_files"}.isdisjoint(names)
+    assert {"read_file", "write_file", "patch", "search_files"} <= names
+    assert "fs" not in names
 
 
-def test_fs_wrapper_dispatches_read_write_patch_search(tmp_path):
+def test_dedicated_file_tools_dispatch_read_write_patch_search(tmp_path):
     target_dir = tmp_path
     if str(target_dir).startswith("/private/var/") or str(target_dir).startswith("/var/"):
         target_dir = Path.cwd() / ".pytest-fs-wrapper"
         target_dir.mkdir(exist_ok=True)
     target = target_dir / "sample.txt"
 
-    write_result = json.loads(handle_function_call("fs", {"action": "write", "path": str(target), "content": "alpha\nbeta\n"}))
+    write_result = json.loads(handle_function_call("write_file", {"path": str(target), "content": "alpha\nbeta\n"}))
     assert write_result["bytes_written"] == len("alpha\nbeta\n")
 
-    read_result = json.loads(handle_function_call("fs", {"action": "read", "path": str(target), "limit": 5}))
+    read_result = json.loads(handle_function_call("read_file", {"path": str(target), "limit": 5}))
     assert "1|alpha" in read_result["content"]
 
-    patch_result = json.loads(handle_function_call("fs", {"action": "patch", "mode": "replace", "path": str(target), "old_string": "beta", "new_string": "gamma"}))
+    patch_result = json.loads(handle_function_call("patch", {"mode": "replace", "path": str(target), "old_string": "beta", "new_string": "gamma"}))
     assert patch_result["success"] is True
 
-    search_result = json.loads(handle_function_call("fs", {"action": "search", "pattern": "gamma", "path": str(target_dir)}))
+    search_result = json.loads(handle_function_call("search_files", {"pattern": "gamma", "path": str(target_dir)}))
     assert search_result["total_count"] >= 1
     if target_dir.name == ".pytest-fs-wrapper":
         shutil.rmtree(target_dir, ignore_errors=True)
@@ -120,9 +120,9 @@ def test_tools_meta_lists_and_describes_without_secret_values():
     assert "browser" in listed["categories"]
     assert any(item["name"] == "browser_cdp" for item in listed["categories"]["browser"]["advanced_tools"])
 
-    described = json.loads(handle_function_call("tools", {"action": "describe", "name": "fs"}))
-    assert described["name"] == "fs"
-    assert described["parameters"]["action"]["enum"] == ["read", "write", "patch", "search"]
+    described = json.loads(handle_function_call("tools", {"action": "describe", "name": "read_file"}))
+    assert described["name"] == "read_file"
+    assert "path" in described["parameters"]
 
     config = json.loads(handle_function_call("tools", {"action": "config", "platform": "telegram"}))
     assert config["platform"] == "telegram"
