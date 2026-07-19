@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import subprocess
+import sys
 import json
 from pathlib import Path
 
@@ -9,6 +11,11 @@ import yaml
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "carry.py"
 GATE = Path(__file__).resolve().parents[2] / "scripts" / "carry_gate.py"
+GATE_SPEC = importlib.util.spec_from_file_location("carry_gate", GATE)
+assert GATE_SPEC and GATE_SPEC.loader
+CARRY_GATE = importlib.util.module_from_spec(GATE_SPEC)
+sys.modules[GATE_SPEC.name] = CARRY_GATE
+GATE_SPEC.loader.exec_module(CARRY_GATE)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -155,3 +162,18 @@ def test_desktop_carry_tests_use_the_hardened_ui_script() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
     assert '["npm", "run", "test:ui", "--", "--run", *desktop_tests]' in source
+
+
+def test_exact_tree_links_existing_dependency_trees(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    target = tmp_path / "target"
+    for relative in CARRY_GATE.DEPENDENCY_TREES:
+        (root / relative).mkdir(parents=True)
+    target.mkdir()
+
+    CARRY_GATE.link_dependency_trees(root, target)
+
+    for relative in CARRY_GATE.DEPENDENCY_TREES:
+        linked = target / relative
+        assert linked.is_symlink()
+        assert linked.resolve() == (root / relative).resolve()

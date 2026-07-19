@@ -12,6 +12,11 @@ from pathlib import Path
 
 DESCRIPTION = "Run carry gates against the exact staged or pushed Git tree."
 ZERO_SHA = "0" * 40
+DEPENDENCY_TREES = (
+    Path("node_modules"),
+    Path("web/node_modules"),
+    Path("apps/desktop/node_modules"),
+)
 
 
 def run(
@@ -48,7 +53,18 @@ def isolated_tree(
         ref, sha = line.split()
         run(target, "git", "update-ref", ref, sha)
     run(target, "git", "checkout", "--detach", commit)
+    link_dependency_trees(root, target)
     return target, holder
+
+
+def link_dependency_trees(root: Path, target: Path) -> None:
+    for relative in DEPENDENCY_TREES:
+        source = root / relative
+        destination = target / relative
+        if not source.is_dir() or destination.exists() or destination.is_symlink():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.symlink_to(source, target_is_directory=True)
 
 
 def cleanup(holder: tempfile.TemporaryDirectory[str]) -> None:
