@@ -1,7 +1,8 @@
 from pathlib import Path
+import sqlite3
 from gateway.contact_memory.schema import Interest, InterestState, InterestValence
 from gateway.contact_memory.store import ContactMemoryStore
-from gateway.proactive_scheduler import ProactiveConfig, ProactiveScheduler
+from gateway.proactive_scheduler import ContactRoute, ProactiveConfig, ProactiveScheduler
 from gateway.proactive_status import health_snapshot, probe_model_readiness
 
 
@@ -72,6 +73,7 @@ def test_real_ingress_drift_and_extraction_health_fail_closed(tmp_path: Path):
 def test_status_reads_real_contact_store_and_matching_digest_paths(tmp_path: Path):
     raw=config(); cfg=ProactiveConfig.from_mapping(raw)
     scheduler=ProactiveScheduler(state_db_path=tmp_path/'state.db',profile_home=tmp_path,profile_name='poke',config=cfg)
+    scheduler.register_contact(ContactRoute('kosta-owner','poke'))
     scheduler.record_health('watcher',{'adapter_ready':True,'participant_registry_ready':True,'extraction':{},'model_probe':{'ready':True,'checked_at':5000}},now=5000)
     record_probes(scheduler,5000)
     scheduler.record_health('planning_attempt',{'state':'completed'},now=5000)
@@ -89,6 +91,75 @@ def test_status_reads_real_contact_store_and_matching_digest_paths(tmp_path: Pat
     assert status['contacts']==1 and status['interest_count']==1
     assert status['eligible_interests']==1 and status['digest_count']==1
     assert 'digest_missing' not in status['reasons']
+
+
+def test_status_ignores_unowned_shadow_contact_for_digest_health(tmp_path: Path):
+    raw=config(); cfg=ProactiveConfig.from_mapping(raw)
+    scheduler=ProactiveScheduler(state_db_path=tmp_path/'state.db',profile_home=tmp_path,
+                                 profile_name='poke',config=cfg)
+    scheduler.register_contact(ContactRoute('kosta-owner','poke'))
+    guest_home=tmp_path/'guest'
+    guest_scheduler=ProactiveScheduler(
+        state_db_path=guest_home/'state.db',profile_home=guest_home,
+        profile_name='guest',config=cfg,
+        ownership_registry_path=tmp_path/'proactive-contact-ownership.db',
+    )
+    guest_scheduler.register_contact(ContactRoute('stephen-lucier','guest',principal='guest'))
+    scheduler.record_health('watcher',{
+        'adapter_ready':True,'participant_registry_ready':True,'extraction':{},
+        'model_probe':{'ready':True,'checked_at':5000},
+    },now=5000)
+    record_probes(scheduler,5000)
+    scheduler.record_health('planning_attempt',{'state':'completed'},now=5000)
+
+    def add_interest(contact_id: str, interest_id: str):
+        store=ContactMemoryStore(tmp_path/'contact-memory',contact_id)
+        store.put_interest(Interest(
+            interest_id=interest_id,topic='release notes',parent_id=None,raw_score=4,
+            last_evidence_at=5000,evidence_count=3,valence=InterestValence.POSITIVE,
+            half_life_days=90,state=InterestState.ACTIVE,ts_alpha=2,ts_beta=1,
+            created_at=4900,updated_at=5000,retired_at=None,
+        ))
+        return store
+
+    owner=add_interest('kosta-owner','owner-interest')
+    add_interest('stephen-lucier','shadow-interest')
+    digest=tmp_path/'contact-memory'/'digests'/f'{owner.contact_namespace}.md'
+    digest.parent.mkdir(parents=True); digest.write_text('owner digest')
+
+    status=health_snapshot(profile_home=tmp_path,profile='poke',config=raw,now=5001,
+                           adapter_ready=True,cron_fresh=True)
+    assert status['contacts']==2 and status['interest_count']==2
+    assert status['eligible_interests']==1 and status['digest_count']==1
+    assert 'digest_missing' not in status['reasons']
+
+
+def test_status_falls_back_to_all_contacts_when_ownership_registry_is_partial(tmp_path: Path):
+    raw=config()
+    store=ContactMemoryStore(tmp_path/'contact-memory','kosta-owner')
+    store.put_interest(Interest(
+        interest_id='missing-digest',topic='release notes',parent_id=None,raw_score=4,
+        last_evidence_at=5000,evidence_count=3,valence=InterestValence.POSITIVE,
+        half_life_days=90,state=InterestState.ACTIVE,ts_alpha=2,ts_beta=1,
+        created_at=4900,updated_at=5000,retired_at=None,
+    ))
+    registry=sqlite3.connect(tmp_path/'proactive-contact-ownership.db')
+    registry.execute(
+        "CREATE TABLE proactive_contact_owner("
+        "contact_hash TEXT PRIMARY KEY, profile_name TEXT NOT NULL, "
+        "state_db TEXT NOT NULL, updated_at REAL NOT NULL)"
+    )
+    registry.execute(
+        "INSERT INTO proactive_contact_owner VALUES(?,?,?,?)",
+        (store.contact_namespace,'guest','guest/state.db',5000),
+    )
+    registry.commit(); registry.close()
+
+    status=health_snapshot(profile_home=tmp_path,profile='poke',config=raw,now=5001,
+                           adapter_ready=True,cron_fresh=True)
+    assert 'ownership_registry_unreadable' in status['reasons']
+    assert status['eligible_interests']==1
+    assert 'digest_missing' in status['reasons']
 
 
 def test_model_probe_uses_strict_minimal_request_without_private_history():

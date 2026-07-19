@@ -287,13 +287,22 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
             result["reasons"].append("state_db_unreadable")
     elif cfg.enabled:
         result["reasons"].append("state_db_missing")
+    owned_contact_hashes: set[str] | None = None
     ownership_db = (root.parent.parent / "proactive-contact-ownership.db"
                     if root.parent.name == "profiles"
                     else root / "proactive-contact-ownership.db")
     if ownership_db.is_file():
+        ownership: sqlite3.Connection | None = None
         try:
             ownership = sqlite3.connect(f"file:{ownership_db.as_posix()}?mode=ro", uri=True)
             ownership.row_factory = sqlite3.Row
+            discovered_owned_contact_hashes = {
+                str(row["contact_hash"])
+                for row in ownership.execute(
+                    "SELECT contact_hash FROM proactive_contact_owner WHERE profile_name=?",
+                    (profile,),
+                )
+            }
             circuit = ownership.execute("SELECT state,reason FROM proactive_global_circuit WHERE singleton=1").fetchone()
             result["global_circuit"] = str(circuit["state"]) if circuit else "closed"
             if circuit and circuit["state"] == "open":
@@ -302,9 +311,13 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
             result["ownership_conflict"] = bool(conflicts)
             if conflicts:
                 result["reasons"].append("ownership_conflict")
-            ownership.close()
+            owned_contact_hashes = discovered_owned_contact_hashes
         except sqlite3.Error:
+            owned_contact_hashes = None
             result["reasons"].append("ownership_registry_unreadable")
+        finally:
+            if ownership is not None:
+                ownership.close()
     elif cfg.enabled:
         result["reasons"].append("ownership_registry_missing")
     memory_root = root / "contact-memory"
@@ -329,13 +342,15 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
                 elapsed = max(0.0, timestamp - float(row[1]))
                 score = float(row[0]) * math.pow(0.5, elapsed / (float(row[2]) * 86400.0))
                 eligible += int(score >= 2.0)
-            result["eligible_interests"] += eligible
-            digest = digest_dir / f"{contact_db.stem}.md"
-            if digest.is_file():
-                result["digest_count"] += 1
-                digest_ages.append(max(0.0, timestamp - digest.stat().st_mtime))
-            elif eligible:
-                missing_eligible_digest = True
+            is_owned = owned_contact_hashes is None or contact_db.stem in owned_contact_hashes
+            if is_owned:
+                result["eligible_interests"] += eligible
+                digest = digest_dir / f"{contact_db.stem}.md"
+                if digest.is_file():
+                    result["digest_count"] += 1
+                    digest_ages.append(max(0.0, timestamp - digest.stat().st_mtime))
+                elif eligible:
+                    missing_eligible_digest = True
             memory.close()
         except sqlite3.Error:
             result["reasons"].append("contact_memory_unreadable")
