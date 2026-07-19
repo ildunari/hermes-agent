@@ -35,14 +35,14 @@ set -euo pipefail
 
 # ── Locate repo root ────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${HERMES_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 # ── Locate python ───────────────────────────────────────────────────────────
 # Probe local venvs first; fall back to the Nix devShell's editable venv
 # (HERMES_PYTHON is exported by the devShell hook and ships [dev] extras:
 # pytest, pytest-asyncio, pytest-timeout, ruff, ty).
 VENV=""
-for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
+for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/.venv" "$HOME/.hermes/hermes-agent/venv"; do
   if [ -f "$candidate/bin/activate" ]; then
     VENV="$candidate"
     break

@@ -1,0 +1,30 @@
+#!/bin/bash
+# Post-merge hook: restore narrow machine-local helpers after git pull / update.
+# Repo-code customizations are preserved canonically on local/studio-slim.
+
+set -u
+
+PATCH_DIR="$HOME/.hermes/patches"
+
+if [ ! -d "$PATCH_DIR" ]; then
+    exit 0
+fi
+
+echo "→ Checking for machine-local helper restores..."
+
+applied=0
+
+if [ -f "$PATCH_DIR/parakeet_mlx_stt.py.new" ]; then
+    target="$HOME/.hermes/scripts/parakeet_mlx_stt.py"
+    if [ ! -f "$target" ]; then
+        mkdir -p "$(dirname "$target")"
+        cp "$PATCH_DIR/parakeet_mlx_stt.py.new" "$target"
+        chmod +x "$target" || true
+        echo "  ✓ Restored new file: ~/.hermes/scripts/parakeet_mlx_stt.py"
+        applied=$((applied + 1))
+    fi
+fi
+
+if [ $applied -gt 0 ]; then
+    echo "→ Helper restores: $applied applied"
+fi
