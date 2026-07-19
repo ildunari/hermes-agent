@@ -164,16 +164,32 @@ def test_desktop_carry_tests_use_the_hardened_ui_script() -> None:
     assert '["npm", "run", "test:ui", "--", "--run", *desktop_tests]' in source
 
 
-def test_exact_tree_links_existing_dependency_trees(tmp_path: Path) -> None:
+def test_exact_tree_links_dependencies_but_retargets_workspace_packages(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "root"
     target = tmp_path / "target"
     for relative in CARRY_GATE.DEPENDENCY_TREES:
         (root / relative).mkdir(parents=True)
+    (root / "apps" / "shared").mkdir(parents=True)
+    (root / "node_modules" / "external").mkdir()
+    scope = root / "node_modules" / "@hermes"
+    scope.mkdir()
+    (scope / "shared").symlink_to("../../apps/shared", target_is_directory=True)
     target.mkdir()
 
     CARRY_GATE.link_dependency_trees(root, target)
 
     for relative in CARRY_GATE.DEPENDENCY_TREES:
         linked = target / relative
-        assert linked.is_symlink()
-        assert linked.resolve() == (root / relative).resolve()
+        assert linked.is_dir()
+        assert not linked.is_symlink()
+    assert (target / "node_modules" / "external").resolve() == (
+        root / "node_modules" / "external"
+    ).resolve()
+    assert (target / "node_modules" / "@hermes" / "shared").resolve() == (
+        target / "apps" / "shared"
+    ).resolve()
+    assert not (target / "node_modules" / "@hermes" / "shared").resolve().is_relative_to(
+        root
+    )

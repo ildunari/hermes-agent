@@ -63,8 +63,36 @@ def link_dependency_trees(root: Path, target: Path) -> None:
         destination = target / relative
         if not source.is_dir() or destination.exists() or destination.is_symlink():
             continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.symlink_to(source, target_is_directory=True)
+        destination.mkdir(parents=True)
+        for entry in source.iterdir():
+            mirrored = destination / entry.name
+            if entry.name.startswith("@") and entry.is_dir() and not entry.is_symlink():
+                mirrored.mkdir()
+                for package in entry.iterdir():
+                    link_dependency_entry(root, target, package, mirrored / package.name)
+                continue
+            link_dependency_entry(root, target, entry, mirrored)
+
+
+def link_dependency_entry(
+    root: Path,
+    target: Path,
+    source: Path,
+    destination: Path,
+) -> None:
+    if source.is_symlink():
+        resolved = source.resolve()
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            destination.symlink_to(source, target_is_directory=resolved.is_dir())
+        else:
+            destination.symlink_to(
+                target / relative,
+                target_is_directory=resolved.is_dir(),
+            )
+        return
+    destination.symlink_to(source, target_is_directory=source.is_dir())
 
 
 def cleanup(holder: tempfile.TemporaryDirectory[str]) -> None:
