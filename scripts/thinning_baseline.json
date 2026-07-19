@@ -1,7 +1,7 @@
 {
   "branch": "local/studio-slim",
-  "head": "0c12353a85791e9f2ac41b93534356067b3c0b60",
-  "hotspot_count": 316,
+  "head": "92ca9e6dee5cb7e938ccad6b9c3e16c7097ca1ad",
+  "hotspot_count": 317,
   "hotspots": [
     {
       "local_changed_lines": 2620,
@@ -2056,6 +2056,13 @@
     },
     {
       "local_changed_lines": 4,
+      "path": "scripts/run_tests.sh",
+      "prior_conflicts": 0,
+      "score": 4,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 4,
       "path": "tests/agent/test_compression_fallback_budget.py",
       "prior_conflicts": 0,
       "score": 4,
@@ -2220,5 +2227,5 @@
   "upstream": "origin/main",
   "upstream_sha": "614dc194ea7d853d39f9e84582ec62156f41a475",
   "version": 1,
-  "weighted_score": 55997
+  "weighted_score": 56001
 }
