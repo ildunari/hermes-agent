@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -107,6 +108,59 @@ def _proactive_config(mode="observe"):
             {"profile":"poke","contact_id":"kosta-owner","principal":"owner"},
             {"profile":"guest","contact_id":"stephen-lucier","principal":"guest"},
         ],"alarm_sink":{"configured":True,"type":"hermes_cron","target":"telegram:operator"}}}}
+
+
+@pytest.mark.asyncio
+async def test_proactive_inbound_uses_profile_contact_timezone_when_not_repeated_in_proactive(tmp_path):
+    from gateway.proactive_scheduler import ProactiveStateStore
+
+    home = tmp_path / "profiles" / "poke"
+    raw = _proactive_config()
+    raw["agent"]["contact_memory"] = {"timezone": "America/New_York"}
+    source = SimpleNamespace(
+        chat_type="dm", platform=SimpleNamespace(value="bluebubbles"),
+        chat_id="dm", user_id="owner",
+    )
+    scope = TrustedContactScope("owner", "kosta-owner")
+    sequence = await _record_proactive_arrival(
+        config_raw=raw, trusted_scope=scope, profile_home=home, source=source,
+        source_id="timezone", received_at=100,
+    )
+    await _record_proactive_inbound(
+        config_raw=raw, trusted_scope=scope, profile_home=home, profile="poke",
+        source=source, session_id="session", source_id="timezone", text="hello",
+        received_at=100, arrival_sequence=sequence,
+    )
+
+    contact = ProactiveStateStore(home / "state.db").contacts()[0]
+    assert contact.timezone_name == "America/New_York"
+
+
+@pytest.mark.asyncio
+async def test_proactive_inbound_ignores_malformed_optional_timezone_sections(tmp_path):
+    from gateway.proactive_scheduler import ProactiveStateStore
+
+    home = tmp_path / "profiles" / "poke"
+    raw: Any = _proactive_config()
+    raw["agent"]["contact_memory"] = "malformed"
+    raw["agent"]["conversation_texture"] = ["malformed"]
+    source = SimpleNamespace(
+        chat_type="dm", platform=SimpleNamespace(value="bluebubbles"),
+        chat_id="dm", user_id="owner",
+    )
+    scope = TrustedContactScope("owner", "kosta-owner")
+    sequence = await _record_proactive_arrival(
+        config_raw=raw, trusted_scope=scope, profile_home=home, source=source,
+        source_id="malformed-timezone", received_at=100,
+    )
+    result = await _record_proactive_inbound(
+        config_raw=raw, trusted_scope=scope, profile_home=home, profile="poke",
+        source=source, session_id="session", source_id="malformed-timezone", text="hello",
+        received_at=100, arrival_sequence=sequence,
+    )
+
+    assert result is not None and result["inserted"] is True
+    assert ProactiveStateStore(home / "state.db").contacts()[0].timezone_name == "UTC"
 
 
 @pytest.mark.asyncio

@@ -2237,12 +2237,19 @@ async def _record_proactive_inbound(
 
         cfg = ProactiveConfig.from_mapping(config_raw)
         scope_meta = metadata.get("_hermes_contact_scope", {}) if isinstance(metadata, dict) else {}
+        agent_raw = config_raw.get("agent", {}) or {}
+        contact_memory_value = agent_raw.get("contact_memory", {})
+        contact_memory_raw = contact_memory_value if isinstance(contact_memory_value, Mapping) else {}
+        texture_value = agent_raw.get("conversation_texture", {})
+        texture_raw = texture_value if isinstance(texture_value, Mapping) else {}
         timezone_name = str(
             (metadata.get("_hermes_contact_timezone") if isinstance(metadata, dict) else None)
             or (scope_meta.get("timezone") if isinstance(scope_meta, dict) else None)
             or raw.get("timezone")
-            or (config_raw.get("agent", {}) or {}).get("timezone")
+            or agent_raw.get("timezone")
             or config_raw.get("timezone")
+            or contact_memory_raw.get("timezone")
+            or texture_raw.get("timezone")
             or cfg.timezone
         )
         root = Path(profile_home).resolve()
