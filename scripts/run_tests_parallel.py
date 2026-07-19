@@ -812,7 +812,9 @@ def main() -> int:
             print(f"error: --slice must be I/N (e.g. 1/4), got: {slice_raw!r}", file=sys.stderr)
             sys.exit(2)
 
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = Path(
+        os.environ.get("HERMES_REPO_ROOT", Path(__file__).resolve().parent.parent)
+    ).resolve()
 
     # --files: explicit file list from the CI generate job — skip discovery.
     if args.files:

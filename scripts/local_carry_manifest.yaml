@@ -112,9 +112,11 @@ features:
       - scripts/verify_deployed_turn.py
       - scripts/local_carry_exemptions.yaml
       - scripts/run_tests.sh
+      - scripts/run_tests_parallel.py
       - scripts/run_update_smart_client_validation.sh
     collision_paths:
       - scripts/run_tests.sh
+      - scripts/run_tests_parallel.py
       - scripts/run_update_smart_client_validation.sh
     consumer:
       command:
