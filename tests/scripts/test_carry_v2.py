@@ -149,3 +149,9 @@ def test_staged_gate_uses_index_bytes_not_working_tree(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "missing needle" in result.stderr
+
+
+def test_desktop_carry_tests_use_the_hardened_ui_script() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert '["npm", "run", "test:ui", "--", "--run", *desktop_tests]' in source

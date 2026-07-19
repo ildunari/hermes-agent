@@ -43,7 +43,7 @@
     "lint:fix": "eslint src/ electron/ --fix",
     "fmt": "prettier --write 'src/**/*.{ts,tsx}' 'electron/**/*.ts' 'vite.config.ts'",
     "fix": "npm run lint:fix && npm run fmt",
-    "test:ui": "vitest run --project ui",
+    "test:ui": "cross-env NODE_OPTIONS=--no-experimental-webstorage vitest run --project ui",
     "test:desktop:platforms": "vitest run --project electron --exclude electron/runtime-paths.test.ts --exclude electron/autoplay-policy.test.ts && tsx --test electron/runtime-paths.test.ts electron/autoplay-policy.test.ts",
     "test": "vitest run --exclude electron/runtime-paths.test.ts --exclude electron/autoplay-policy.test.ts && tsx --test electron/runtime-paths.test.ts electron/autoplay-policy.test.ts",
     "preview": "node scripts/assert-root-install.mjs && vite preview --host 127.0.0.1 --port 4174",

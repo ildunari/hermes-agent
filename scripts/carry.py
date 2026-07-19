@@ -467,7 +467,7 @@ def run_feature_tests(
         commands.append(
             (
                 registry.root / "apps" / "desktop",
-                ["npm", "exec", "--", "vitest", "run", *desktop_tests],
+                ["npm", "run", "test:ui", "--", "--run", *desktop_tests],
             )
         )
     output: list[str] = []
