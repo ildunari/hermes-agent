@@ -1001,7 +1001,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 worker_command(
                     root,
                     run_id,
-                    ["git", "commit", "--no-edit"],
+                    ["git", "-c", "core.hooksPath=/dev/null", "commit", "--no-edit"],
                     worktree,
                     "merge-commit",
                     300,

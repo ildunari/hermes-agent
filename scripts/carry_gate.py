@@ -42,6 +42,7 @@ def isolated_tree(
         "for-each-ref",
         "--format=%(refname) %(objectname)",
         "refs/heads",
+        "refs/remotes",
     ).stdout.decode().splitlines()
     for line in local_refs:
         ref, sha = line.split()
