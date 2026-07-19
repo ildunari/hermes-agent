@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 DESCRIPTION = "Measure and ratchet upstream collision cost for local/studio-slim."
+GENERATED_STATE_PATHS = {"scripts/thinning_baseline.json"}
 
 
 def git(root: Path, *args: str, check: bool = True) -> str:
@@ -65,7 +66,8 @@ def compute(root: Path, upstream: str) -> dict[str, object]:
     upstream_files = set(git(root, "ls-tree", "-r", "--name-only", upstream).splitlines())
     conflicts = conflict_counts(root)
     hotspots: list[dict[str, object]] = []
-    for path in sorted(set(changed).intersection(upstream_files)):
+    measured_paths = set(changed).intersection(upstream_files) - GENERATED_STATE_PATHS
+    for path in sorted(measured_paths):
         local_lines = changed_lines(root, merge_base, path)
         churn = upstream_churn(root, merge_base, upstream, path)
         prior_conflicts = conflicts.get(path, 0)

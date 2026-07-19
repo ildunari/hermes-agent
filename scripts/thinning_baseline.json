@@ -1,6 +1,6 @@
 {
   "branch": "local/studio-slim",
-  "head": "70145471b965acc9935c2cf18f21100d0268c85c",
+  "head": "f4f277611408e1db8488f21c655f69182dbdfc1c",
   "hotspot_count": 319,
   "hotspots": [
     {
@@ -9,6 +9,13 @@
       "prior_conflicts": 0,
       "score": 2662,
       "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 1096,
+      "path": "tests/run_agent/test_run_agent.py",
+      "prior_conflicts": 0,
+      "score": 2192,
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 722,
@@ -23,13 +30,6 @@
       "prior_conflicts": 0,
       "score": 1212,
       "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 1096,
-      "path": "tests/run_agent/test_run_agent.py",
-      "prior_conflicts": 0,
-      "score": 1096,
-      "upstream_commits": 0
     },
     {
       "local_changed_lines": 1076,
@@ -51,6 +51,13 @@
       "prior_conflicts": 0,
       "score": 1031,
       "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 485,
+      "path": "run_agent.py",
+      "prior_conflicts": 0,
+      "score": 970,
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 913,
@@ -135,13 +142,6 @@
       "prior_conflicts": 0,
       "score": 486,
       "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 485,
-      "path": "run_agent.py",
-      "prior_conflicts": 0,
-      "score": 485,
-      "upstream_commits": 0
     },
     {
       "local_changed_lines": 468,
@@ -345,6 +345,13 @@
       "prior_conflicts": 0,
       "score": 212,
       "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 104,
+      "path": "agent/chat_completion_helpers.py",
+      "prior_conflicts": 0,
+      "score": 208,
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 207,
@@ -596,13 +603,6 @@
       "path": "tests/tools/test_skills_tool.py",
       "prior_conflicts": 0,
       "score": 105,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 104,
-      "path": "agent/chat_completion_helpers.py",
-      "prior_conflicts": 0,
-      "score": 104,
       "upstream_commits": 0
     },
     {
@@ -2239,7 +2239,7 @@
   ],
   "merge_base": "66ed9d63fea96fe2cdfdc63524378f74288e1e6e",
   "upstream": "origin/main",
-  "upstream_sha": "19bf16c4da6cf9a5156b42ce7b828811f81de0cb",
+  "upstream_sha": "e53f87fe6925f9b0575f16b814d8994dfd455128",
   "version": 1,
-  "weighted_score": 38991
+  "weighted_score": 40676
 }
