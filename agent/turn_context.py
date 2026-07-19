@@ -768,6 +768,9 @@ def build_turn_context(
     # message; newer ``system_context`` is layered onto the API system prompt.
     plugin_user_context = ""
     plugin_system_context = ""
+    per_turn_user_context = str(
+        getattr(agent, "per_turn_user_context", "") or ""
+    )
     try:
         from hermes_cli.plugins import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
@@ -1007,5 +1010,5 @@ def build_turn_context(
         plugin_user_context=plugin_user_context,
         plugin_system_context=plugin_system_context,
         ext_prefetch_cache=ext_prefetch_cache,
-        per_turn_user_context=str(getattr(agent, "per_turn_user_context", "") or ""),
+        per_turn_user_context=per_turn_user_context,
     )

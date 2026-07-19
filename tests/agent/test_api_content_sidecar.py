@@ -303,6 +303,16 @@ class TestPrologueStamping:
         assert "api_content" not in ctx.messages[ctx.current_turn_user_idx]
         assert agent.api_content_at_persist is None
 
+    def test_stamps_api_content_from_host_per_turn_context(self):
+        agent = _FakeAgent()
+        agent.per_turn_user_context = "HOST-CTX"
+        with patch("hermes_cli.plugins.invoke_hook", return_value=[]):
+            ctx = _build(agent)
+        msg = ctx.messages[ctx.current_turn_user_idx]
+        assert ctx.per_turn_user_context == "HOST-CTX"
+        assert msg["api_content"] == "hello\n\nHOST-CTX"
+        assert agent.api_content_at_persist == "hello\n\nHOST-CTX"
+
     def test_no_stamp_for_codex_app_server(self):
         """codex_app_server turns bypass the api_messages build, so the
         injected bytes are never sent — stamping would persist a lie."""
