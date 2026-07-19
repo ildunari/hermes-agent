@@ -973,7 +973,17 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     allow_failure=True,
                 )
             conflicts = git(worktree, "diff", "--name-only", "--diff-filter=U").splitlines()
-            if merge_rc and not conflicts:
+            merge_in_progress = bool(
+                git(
+                    worktree,
+                    "rev-parse",
+                    "-q",
+                    "--verify",
+                    "MERGE_HEAD",
+                    check=False,
+                )
+            )
+            if merge_rc and not conflicts and not merge_in_progress:
                 raise RuntimeError("merge failed without resolvable file conflicts")
             resolver = shutil.which("hermes")
             if resolver and conflicts:
