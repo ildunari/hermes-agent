@@ -169,6 +169,25 @@ def test_child_process_cannot_exceed_fd_limit(tmp_path: Path) -> None:
         )
 
 
+def test_scoped_child_fd_limit_can_be_raised_for_desktop_signing(
+    tmp_path: Path,
+) -> None:
+    result = SERVICE.owned_command(
+        [
+            sys.executable,
+            "-c",
+            "handles=[open('/dev/null') for _ in range(300)]",
+        ],
+        tmp_path,
+        tmp_path / "child-fd-raised.log",
+        30,
+        None,
+        SERVICE.FD_LIMIT,
+        child_fd_limit=512,
+    )
+    assert result == 0
+
+
 def test_abort_terminates_owned_child(tmp_path: Path) -> None:
     abort = tmp_path / "abort.request"
     abort.touch()

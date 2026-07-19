@@ -46,6 +46,7 @@ PHASES = (
 MAX_PAYLOAD = 4096
 REQUEST_TTL = 60
 FD_LIMIT = 256
+DESKTOP_BUILD_FD_LIMIT = 2048
 DESCENDANT_LIMIT = 64
 WORKER_LIMIT = 2
 REQUIRED_PORTS = (8642, 8787, 9119, 9120)
@@ -362,6 +363,7 @@ def owned_command(
     env: dict[str, str] | None = None,
     abort_path: Path | None = None,
     allow_failure: bool = False,
+    child_fd_limit: int = FD_LIMIT,
 ) -> int:
     log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with log.open("ab", buffering=0) as output:
@@ -376,7 +378,7 @@ def owned_command(
             start_new_session=True,
             preexec_fn=lambda: resource.setrlimit(
                 resource.RLIMIT_NOFILE,
-                (FD_LIMIT, FD_LIMIT),
+                (child_fd_limit, child_fd_limit),
             ),
         )
         deadline = time.monotonic() + timeout
@@ -735,6 +737,7 @@ def worker_command(
     env: dict[str, str] | None = None,
     allow_failure: bool = False,
     honor_abort: bool = True,
+    child_fd_limit: int = FD_LIMIT,
 ) -> int:
     ledger = read_json(ledger_path(root, run_id))
     origin_pid = ledger.get("origin_pid")
@@ -750,6 +753,7 @@ def worker_command(
         env,
         run_dir(root, run_id) / "abort.request" if honor_abort else None,
         allow_failure,
+        child_fd_limit,
     )
 
 
@@ -1133,6 +1137,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     worktree / "apps" / "desktop",
                     "desktop-build",
                     7200,
+                    child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
                 )
                 apps = sorted(
                     (worktree / "apps" / "desktop" / "release").glob(
