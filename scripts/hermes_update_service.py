@@ -772,6 +772,20 @@ def worktree_for(root: Path, run_id: str) -> Path:
     return root / "worktrees" / run_id
 
 
+def link_checkout_dependencies(repo: Path, worktree: Path) -> None:
+    for relative in (
+        Path("node_modules"),
+        Path("web/node_modules"),
+        Path("apps/desktop/node_modules"),
+    ):
+        source = repo / relative
+        target = worktree / relative
+        if not source.is_dir() or target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(source, target_is_directory=True)
+
+
 def desktop_identity(app: Path) -> dict[str, str]:
     verify = subprocess.run(
         ["codesign", "--verify", "--deep", "--strict", str(app)],
@@ -923,6 +937,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     str(worktree),
                     ref,
                 )
+            link_checkout_dependencies(repo, worktree)
             transition(
                 root,
                 run_id,
@@ -1054,6 +1069,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 str(worktree),
                 ref,
             )
+        link_checkout_dependencies(repo, worktree)
         changed = git(worktree, "diff", "--name-only", f"{base}...{result_commit}").splitlines()
         if phase_before(ledger, "VERIFIED"):
             ensure_not_aborted(root, run_id)
@@ -1071,6 +1087,8 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     "--changed-since",
                     base,
                     "--skip-runtime-probes",
+                    "--json",
+                    str(run_dir(root, run_id) / "evidence" / "carry-verify.json"),
                 ],
                 worktree,
                 "carry-verify",
@@ -1464,6 +1482,8 @@ def deploy(
                 "verify",
                 "--changed-since",
                 base,
+                "--json",
+                str(run_dir(root, run_id) / "evidence" / "deployed-carry-verify.json"),
             ],
             repo,
             "deployed-carry-verify",

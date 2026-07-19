@@ -410,6 +410,84 @@ def run_probe(registry: Registry, feature: Feature) -> tuple[bool, str]:
     return result.returncode == 0, result.stderr.strip() or result.stdout.strip()
 
 
+def run_feature_tests(
+    registry: Registry,
+    feature: Feature,
+) -> subprocess.CompletedProcess[str]:
+    python_tests = [path for path in feature.tests if Path(path).suffix == ".py"]
+    web_tests = [
+        str(Path(path).relative_to("web"))
+        for path in feature.tests
+        if path.startswith("web/") and Path(path).suffix in {".ts", ".tsx"}
+    ]
+    desktop_tests = [
+        str(Path(path).relative_to("apps/desktop"))
+        for path in feature.tests
+        if path.startswith("apps/desktop/")
+        and Path(path).suffix in {".ts", ".tsx"}
+    ]
+    recognized = len(python_tests) + len(web_tests) + len(desktop_tests)
+    if recognized != len(feature.tests):
+        unsupported = sorted(
+            set(feature.tests)
+            - {
+                *python_tests,
+                *(f"web/{path}" for path in web_tests),
+                *(f"apps/desktop/{path}" for path in desktop_tests),
+            }
+        )
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=2,
+            stdout="",
+            stderr=f"unsupported carry test paths: {', '.join(unsupported)}",
+        )
+    commands: list[tuple[Path, list[str]]] = []
+    if python_tests:
+        commands.append(
+            (
+                registry.root,
+                [
+                    str(registry.root / "scripts" / "run_tests.sh"),
+                    "-j",
+                    "1",
+                    *python_tests,
+                    "-q",
+                ],
+            )
+        )
+    if web_tests:
+        commands.append(
+            (
+                registry.root / "web",
+                ["npm", "exec", "--", "vitest", "run", *web_tests],
+            )
+        )
+    if desktop_tests:
+        commands.append(
+            (
+                registry.root / "apps" / "desktop",
+                ["npm", "exec", "--", "vitest", "run", *desktop_tests],
+            )
+        )
+    output: list[str] = []
+    returncode = 0
+    executed: list[str] = []
+    for cwd, args in commands:
+        result = command(cwd, *args, check=False)
+        executed.extend(args)
+        output.extend((result.stdout, result.stderr))
+        if result.returncode:
+            returncode = result.returncode
+            break
+    return subprocess.CompletedProcess(
+        args=executed,
+        returncode=returncode,
+        stdout="".join(output),
+        stderr="",
+    )
+
+
 def verify(args: argparse.Namespace) -> int:
     registry = load(args)
     failures = validate_checks(registry)
@@ -430,14 +508,7 @@ def verify(args: argparse.Namespace) -> int:
             "status": "PROVISIONAL" if provisional and not consumer_ok else ("PASS" if consumer_ok else "FAIL"),
             "output": consumer_output[-1000:],
         }
-        test_command = [
-            str(registry.root / "scripts" / "run_tests.sh"),
-            "-j",
-            "1",
-            *feature.tests,
-            "-q",
-        ]
-        test_result = command(registry.root, *test_command, check=False)
+        test_result = run_feature_tests(registry, feature)
         record["tests"] = {
             "status": "PASS" if test_result.returncode == 0 else "FAIL",
             "returncode": test_result.returncode,
