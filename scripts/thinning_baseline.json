@@ -1,6 +1,6 @@
 {
   "branch": "local/studio-slim",
-  "head": "1c746129d1245ec6c45af071e9f1566f5158f53f",
+  "head": "b3a24697ba7358fce2b7b67007b575e8165225cf",
   "hotspot_count": 319,
   "hotspots": [
     {
@@ -158,6 +158,13 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 163,
+      "path": "tui_gateway/server.py",
+      "prior_conflicts": 0,
+      "score": 489,
+      "upstream_commits": 2
+    },
+    {
       "local_changed_lines": 243,
       "path": "tests/test_hermes_state.py",
       "prior_conflicts": 0,
@@ -240,13 +247,6 @@
       "prior_conflicts": 0,
       "score": 334,
       "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 163,
-      "path": "tui_gateway/server.py",
-      "prior_conflicts": 0,
-      "score": 326,
-      "upstream_commits": 1
     },
     {
       "local_changed_lines": 316,
@@ -2239,7 +2239,7 @@
   ],
   "merge_base": "66ed9d63fea96fe2cdfdc63524378f74288e1e6e",
   "upstream": "origin/main",
-  "upstream_sha": "c7035ef2520a56b62049df3f7a43bf4d19a5c201",
+  "upstream_sha": "f099b469def3e1ae6a4dce8a83b0979459bb4f75",
   "version": 1,
-  "weighted_score": 49527
+  "weighted_score": 49690
 }

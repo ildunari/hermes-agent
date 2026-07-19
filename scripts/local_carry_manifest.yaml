@@ -133,6 +133,7 @@ features:
       - tests/scripts/test_hermes_checkpoint.py
       - tests/scripts/test_carry_v2.py
       - tests/scripts/test_hermes_update_service.py
+      - tests/scripts/test_setup_update_service.py
     checks:
       - id: futureproof-safe-checkpoint
         path: scripts/hermes_checkpoint.py
@@ -150,6 +151,10 @@ features:
         path: scripts/hermes_update_service.py
         needles: [PREPARED, COMPLETED, start_new_session, FD_LIMIT, nonce_valid]
         description: detached update supervision and receipted deployment
+      - id: futureproof-notarization
+        path: scripts/setup_update_service.py
+        needles: [APPLE_NOTARY_PROFILE, my-notary-profile]
+        description: updater builds use the validated local notarytool profile
       - id: futureproof-collision-ratchet
         path: scripts/thinning.py
         needles: [weighted_score, upstream_churn, Thinning ratchet]

@@ -60,6 +60,10 @@ MacBook prerequisites stage before Studio activation. The live Studio checkout
 advances only by `--ff-only`. One signed build and one detached restart are
 allowed per controlled deployment attempt.
 
+The Studio update service injects `APPLE_NOTARY_PROFILE=my-notary-profile`
+into Desktop builds. Setup therefore requires that profile to validate locally;
+the build fails instead of silently shipping an unstapled replacement.
+
 ## Recovery
 
 An interrupted run is reconciled from its pinned run bundle and receipts.

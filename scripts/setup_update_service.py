@@ -17,6 +17,7 @@ from pathlib import Path
 
 DESCRIPTION = "Install or verify the user-private Hermes update launch service."
 LABEL = "com.ildunari.hermes-update-service"
+NOTARY_PROFILE = "my-notary-profile"
 
 
 def digest(path: Path) -> str:
@@ -56,6 +57,9 @@ def plist_payload(python: str, service: Path, repo: Path, state: Path) -> dict[s
         "RunAtLoad": True,
         "KeepAlive": True,
         "ProcessType": "Background",
+        "EnvironmentVariables": {
+            "APPLE_NOTARY_PROFILE": NOTARY_PROFILE,
+        },
         "StandardOutPath": str(logs / "service.stdout.log"),
         "StandardErrorPath": str(logs / "service.stderr.log"),
         "ThrottleInterval": 5,
