@@ -48,11 +48,6 @@ _REQUIRED_FIELDS = frozenset({"topic", "concrete_item", "why_now", "source_url",
 _ALLOWED_FIELDS = _REQUIRED_FIELDS | {"optional_image_url"}
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WORD_RE = re.compile(r"[a-z0-9]+", re.I)
-_EVENT_RE = re.compile(
-    r"\b(?:released?|launched?|published?|announced?|unveiled?|dropped?|premiered?|"
-    r"opened?|won|signed?|updated?|trailer|album|single|spec(?:ification)?s?|report|study)\b",
-    re.I,
-)
 _GENERIC_RE = re.compile(r"^(?:news|update|interesting news|something cool|new stuff|good vibes?)$", re.I)
 _INSTRUCTION_RE = re.compile(
     r"\b(?:ignore|disregard|override|forget)\b.{0,40}\b(?:instruction|prompt|system|previous)\b|"
@@ -390,9 +385,19 @@ def _iso_timestamp(value: object) -> float | None:
     return parsed.timestamp()
 
 
+def _topic_overlap_score(topic: str, candidate_text: str) -> tuple[float, int]:
+    topic_words = {word for word in _normalized_words(topic) if len(word) > 2}
+    if not topic_words:
+        return (0.0, 0)
+    candidate_words = set(_normalized_words(candidate_text))
+    overlap = len(topic_words & candidate_words)
+    return (overlap / len(topic_words), overlap)
+
+
 def candidate_from_research(topic: str, materials: Sequence[ResearchMaterial]) -> Mapping[str, object] | None:
     """Conservatively select one normalized item; this is not a prose synthesizer."""
-    normalized_candidates: list[Mapping[str, object]] = []
+    normalized_candidates: list[tuple[tuple[float, int, float, int], Mapping[str, object]]] = []
+    source_order = 0
     for material in materials:
         payload = material.payload
         candidates: list[Mapping[str, object]] = []
@@ -421,18 +426,23 @@ def candidate_from_research(topic: str, materials: Sequence[ResearchMaterial]) -
                 why = item.get("snippet") or item.get("why_relevant") or (
                     source_item.get("snippet") if source_item else None
                 ) or "newly published"
-                normalized_candidates.append({
+                relevance = _topic_overlap_score(topic, f"{title} {why}")
+                candidate = {
                     "topic": topic,
                     "concrete_item": str(title)[:220],
                     "why_now": str(why)[:160],
                     "source_url": str(url),
                     "freshness_ts": timestamp,
-                })
+                }
+                normalized_candidates.append((
+                    (relevance[0], relevance[1], timestamp, -source_order), candidate
+                ))
+                source_order += 1
     if normalized_candidates:
-        # Research providers may return a stale first-ranked result even when a
-        # fresher result is present later in the same response. Prefer the
-        # newest dated item; the gate still owns the final freshness decision.
-        return max(normalized_candidates, key=lambda item: _parse_timestamp(item["freshness_ts"]))
+        # A newer result that merely repeats one generic query word must not
+        # displace a slightly older result that actually matches the compound
+        # interest. Among equally relevant results, freshness wins.
+        return max(normalized_candidates, key=lambda row: row[0])[1]
     return None
 
 
@@ -628,12 +638,16 @@ def _is_concrete(candidate: ProactiveCandidate) -> bool:
     words = _normalized_words(candidate.concrete_item)
     if len(words) < 3 or _GENERIC_RE.match(candidate.concrete_item):
         return False
-    context = candidate.concrete_item + " " + candidate.why_now
+    named_tokens = list(re.finditer(r"\b[A-Z][A-Za-z0-9.+-]*\b", candidate.concrete_item))
     has_specific_shape = bool(
-        re.search(r"\b[A-Z][A-Za-z0-9.+-]*(?:\s+[A-Z0-9][A-Za-z0-9.+-]*)+", candidate.concrete_item)
-        or re.search(r"\b\d{2,4}\b", candidate.concrete_item)
+        re.search(r"\b\d{2,4}\b", candidate.concrete_item)
+        or any(match.start() > 0 for match in named_tokens)
     )
-    return bool(_EVENT_RE.search(context) and has_specific_shape)
+    # Freshness is enforced separately against the source timestamp, and the
+    # model remains the final phone-buzz veto. Requiring a tiny event-verb
+    # vocabulary here rejected current workshops, guides, sales, and other
+    # specific items even when their source and topic match were strong.
+    return has_specific_shape
 
 
 class ProactiveGate:

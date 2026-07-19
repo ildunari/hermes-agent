@@ -86,16 +86,16 @@ class SpyTransport:
         return {"ok": True}
 
 
-def test_candidate_from_research_prefers_newest_dated_result():
+def test_candidate_from_research_prefers_newest_equally_relevant_result():
     material = ResearchMaterial("web", {
         "ranked_candidates": [
             {
-                "title": "Old recycled result",
+                "title": "Old sports cars report",
                 "url": "https://example.com/old",
                 "published_at": NOW - 365 * 86_400,
             },
             {
-                "title": "Fresh result",
+                "title": "Fresh sports cars report",
                 "url": "https://example.com/fresh",
                 "published_at": NOW - 86_400,
             },
@@ -103,8 +103,46 @@ def test_candidate_from_research_prefers_newest_dated_result():
     }, 2)
     result = candidate_from_research("sports cars", [material])
     assert result is not None
-    assert result["concrete_item"] == "Fresh result"
+    assert result["concrete_item"] == "Fresh sports cars report"
     assert result["source_url"] == "https://example.com/fresh"
+
+
+def test_candidate_from_research_prefers_topic_relevance_over_one_day_freshness():
+    material = ResearchMaterial("last30days", {
+        "ranked_candidates": [
+            {
+                "title": "Protester calls out Amazon CTO over AI use",
+                "url": "https://example.com/unrelated",
+                "published_at": NOW - 86_400,
+            },
+            {
+                "title": "Amazon scheme to inflate prices uncovered",
+                "url": "https://example.com/prices",
+                "published_at": NOW - 2 * 86_400,
+            },
+        ],
+    }, 2)
+    result = candidate_from_research("amazon prices", [material])
+    assert result is not None
+    assert result["concrete_item"] == "Amazon scheme to inflate prices uncovered"
+    assert result["source_url"] == "https://example.com/prices"
+
+
+def test_concrete_gate_accepts_fresh_specific_item_without_magic_event_verb(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    item = interest(store, topic="gift wrapping design")
+    workshop = candidate(
+        topic=item.topic,
+        concrete_item=(
+            "Wrapping a gift with love, the Korean way — learn bojagi for free in LA"
+        ),
+        why_now="A newly published LAist guide links the current free class.",
+        source_url="https://example.com/bojagi",
+    )
+    result = ProactiveGate(allow).evaluate(
+        send_id="bojagi", candidate=workshop, interest=item, store=store, now=NOW,
+    )
+    assert result.allowed
 
 
 def test_reused_candidate_skips_fetch_but_repeats_gate_and_freshness(tmp_path: Path):
