@@ -271,15 +271,6 @@ def children(pid: int) -> set[int]:
     return found
 
 
-def test_processes() -> set[int]:
-    result = subprocess.run(
-        ["pgrep", "-f", "pytest|run_tests_parallel.py"],
-        text=True,
-        capture_output=True,
-    )
-    return {int(value) for value in result.stdout.split() if value.isdigit()}
-
-
 def parent_pid(pid: int) -> int | None:
     result = subprocess.run(
         ["ps", "-o", "ppid=", "-p", str(pid)],
@@ -372,7 +363,6 @@ def owned_command(
     allow_failure: bool = False,
 ) -> int:
     log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    foreign_baseline = test_processes()
     with log.open("ab", buffering=0) as output:
         child = subprocess.Popen(
             command_args,
@@ -404,11 +394,6 @@ def owned_command(
                 raise TimeoutError(f"command timed out after {timeout}s")
             try:
                 enforce_budget(os.getpid(), origin_pid, origin_fd_limit)
-                unexpected = test_processes() - foreign_baseline - children(os.getpid())
-                if unexpected:
-                    raise RuntimeError(
-                        f"foreign test processes appeared during update: {sorted(unexpected)}"
-                    )
             except Exception:
                 os.killpg(child.pid, signal.SIGTERM)
                 time.sleep(1)
@@ -927,7 +912,16 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 git(repo, "update-ref", ref, base)
             worktree.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             if not worktree.exists():
-                git(repo, "worktree", "add", "--detach", str(worktree), ref)
+                git(
+                    repo,
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(worktree),
+                    ref,
+                )
             transition(
                 root,
                 run_id,
@@ -949,7 +943,14 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 merge_rc = worker_command(
                     root,
                     run_id,
-                    ["git", "merge", "--no-edit", upstream],
+                    [
+                        "git",
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "merge",
+                        "--no-edit",
+                        upstream,
+                    ],
                     worktree,
                     "merge",
                     1800,
@@ -1043,7 +1044,16 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
         result_commit = str(ledger["result_commit"])
         if not worktree.exists():
             worktree.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            git(repo, "worktree", "add", "--detach", str(worktree), ref)
+            git(
+                repo,
+                "-c",
+                "core.hooksPath=/dev/null",
+                "worktree",
+                "add",
+                "--detach",
+                str(worktree),
+                ref,
+            )
         changed = git(worktree, "diff", "--name-only", f"{base}...{result_commit}").splitlines()
         if phase_before(ledger, "VERIFIED"):
             ensure_not_aborted(root, run_id)
@@ -1254,7 +1264,14 @@ def deploy(
         worker_command(
             root,
             run_id,
-            ["git", "merge", "--ff-only", result_commit],
+            [
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "merge",
+                "--ff-only",
+                result_commit,
+            ],
             repo,
             "studio-activate",
             300,
