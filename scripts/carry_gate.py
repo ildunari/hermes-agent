@@ -36,6 +36,16 @@ def isolated_tree(
     holder = tempfile.TemporaryDirectory(prefix="hermes-carry-gate-")
     target = Path(holder.name) / "tree"
     run(root, "git", "clone", "--shared", "--no-checkout", str(root), str(target))
+    local_refs = run(
+        root,
+        "git",
+        "for-each-ref",
+        "--format=%(refname) %(objectname)",
+        "refs/heads",
+    ).stdout.decode().splitlines()
+    for line in local_refs:
+        ref, sha = line.split()
+        run(target, "git", "update-ref", ref, sha)
     run(target, "git", "checkout", "--detach", commit)
     return target, holder
 
