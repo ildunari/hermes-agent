@@ -100,6 +100,7 @@ features:
     owner: kosta
     class: keep-core
     owner_paths:
+      - apps/desktop/vitest.config.ts
       - scripts/hermes_checkpoint.py
       - scripts/carry.py
       - scripts/carry_gate.py

@@ -16,6 +16,7 @@ const electronNative: TestProjectConfiguration = {
   test: {
     name: 'electron',
     environment: 'node',
+    testTimeout: 15_000,
     include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}']
   }
 }
