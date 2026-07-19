@@ -1,7 +1,7 @@
 {
   "branch": "local/studio-slim",
-  "head": "92ca9e6dee5cb7e938ccad6b9c3e16c7097ca1ad",
-  "hotspot_count": 317,
+  "head": "fd7f1ad393b88bf6cf490d0e0023f8d81584f5dc",
+  "hotspot_count": 318,
   "hotspots": [
     {
       "local_changed_lines": 2620,
@@ -1986,6 +1986,13 @@
     },
     {
       "local_changed_lines": 5,
+      "path": "scripts/run_tests.sh",
+      "prior_conflicts": 0,
+      "score": 5,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 5,
       "path": "tests/cron/test_jobs.py",
       "prior_conflicts": 0,
       "score": 5,
@@ -2056,7 +2063,7 @@
     },
     {
       "local_changed_lines": 4,
-      "path": "scripts/run_tests.sh",
+      "path": "scripts/run_tests_parallel.py",
       "prior_conflicts": 0,
       "score": 4,
       "upstream_commits": 0
@@ -2227,5 +2234,5 @@
   "upstream": "origin/main",
   "upstream_sha": "614dc194ea7d853d39f9e84582ec62156f41a475",
   "version": 1,
-  "weighted_score": 56001
+  "weighted_score": 56006
 }
