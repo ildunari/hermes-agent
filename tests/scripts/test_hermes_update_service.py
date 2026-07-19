@@ -188,6 +188,13 @@ def test_scoped_child_fd_limit_can_be_raised_for_desktop_signing(
     assert result == 0
 
 
+def test_service_staging_push_bypasses_duplicate_interactive_hooks() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert '"core.hooksPath=/dev/null"' in source
+    assert '"push-run-ref"' in source
+
+
 def test_abort_terminates_owned_child(tmp_path: Path) -> None:
     abort = tmp_path / "abort.request"
     abort.touch()

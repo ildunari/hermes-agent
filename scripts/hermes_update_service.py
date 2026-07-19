@@ -1247,7 +1247,14 @@ def deploy(
         worker_command(
             root,
             run_id,
-            ["git", "push", "ildunari", f"{ref}:{remote_ref}"],
+            [
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "push",
+                "ildunari",
+                f"{ref}:{remote_ref}",
+            ],
             repo,
             "push-run-ref",
             300,
