@@ -1,6 +1,6 @@
 {
   "branch": "local/studio-slim",
-  "head": "61da3f683da882e5a19872db6cc3aee22c87e909",
+  "head": "70145471b965acc9935c2cf18f21100d0268c85c",
   "hotspot_count": 319,
   "hotspots": [
     {
@@ -1825,6 +1825,13 @@
     },
     {
       "local_changed_lines": 8,
+      "path": "apps/desktop/package.json",
+      "prior_conflicts": 0,
+      "score": 8,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 8,
       "path": "apps/desktop/src/app/hooks/use-keybinds.ts",
       "prior_conflicts": 0,
       "score": 8,
@@ -1903,13 +1910,6 @@
     {
       "local_changed_lines": 6,
       "path": "apps/desktop/electron/bootstrap-platform.ts",
-      "prior_conflicts": 0,
-      "score": 6,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 6,
-      "path": "apps/desktop/package.json",
       "prior_conflicts": 0,
       "score": 6,
       "upstream_commits": 0
@@ -2241,5 +2241,5 @@
   "upstream": "origin/main",
   "upstream_sha": "19bf16c4da6cf9a5156b42ce7b828811f81de0cb",
   "version": 1,
-  "weighted_score": 38989
+  "weighted_score": 38991
 }
