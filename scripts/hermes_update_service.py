@@ -963,18 +963,47 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 prompt = (
                     "Resolve only the listed Git merge conflicts in the supplied worktree. "
                     "Preserve upstream behavior and registered local carry. Do not run tests, "
-                    "spawn subagents, background work, commit, push, or restart anything. "
+                    "spawn subagents, background work, stage, commit, push, or restart anything. "
                     f"Worktree: {worktree}. Conflicts: {', '.join(conflicts)}. "
-                    "Stage every resolved file and stop."
+                    "Remove all conflict markers from those files and stop."
                 )
                 worker_command(
                     root,
                     run_id,
-                    [resolver, "--profile", "coding", "--safe-mode", "-z", prompt],
+                    [
+                        resolver,
+                        "--profile",
+                        "coding",
+                        "--safe-mode",
+                        "-t",
+                        "file",
+                        "-z",
+                        prompt,
+                    ],
                     worktree,
                     "conflict-worker",
                     3600,
                 )
+                marked = [
+                    path
+                    for path in conflicts
+                    if any(
+                        marker in (worktree / path).read_text(
+                            encoding="utf-8",
+                            errors="replace",
+                        )
+                        for marker in ("<<<<<<<", "=======", ">>>>>>>")
+                    )
+                ]
+                if not marked:
+                    worker_command(
+                        root,
+                        run_id,
+                        ["git", "add", "--", *conflicts],
+                        worktree,
+                        "conflict-stage",
+                        120,
+                    )
             remaining = git(
                 worktree,
                 "diff",
