@@ -232,6 +232,13 @@ def test_desktop_identity_match_is_exact() -> None:
     assert not SERVICE.identity_matches(dict(expected, CDHash="different"), expected)
 
 
+def test_conflict_marker_detection_ignores_separator_text() -> None:
+    assert SERVICE.CONFLICT_MARKER_RE.search("<<<<<<< HEAD\nvalue\n=======\n")
+    assert not SERVICE.CONFLICT_MARKER_RE.search(
+        'expect(label).toBe("=======")\nconst banner = "x<<<<<<< y"\n'
+    )
+
+
 def test_interrupted_desktop_swap_preserves_prior(tmp_path: Path) -> None:
     installed = tmp_path / "Hermes.app"
     prior = tmp_path / "prior.app"

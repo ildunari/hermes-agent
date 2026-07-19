@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 DESCRIPTION = "Detached, resource-bounded Hermes slim update service."
 RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$")
+CONFLICT_MARKER_RE = re.compile(r"^(?:<<<<<<< |=======|>>>>>>> )", re.MULTILINE)
 TERMINAL = {"COMPLETED", "FAILED", "ABORTED", "NEEDS_RESOLUTION"}
 PHASES = (
     "CREATED",
@@ -988,12 +989,11 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 marked = [
                     path
                     for path in conflicts
-                    if any(
-                        marker in (worktree / path).read_text(
+                    if CONFLICT_MARKER_RE.search(
+                        (worktree / path).read_text(
                             encoding="utf-8",
                             errors="replace",
                         )
-                        for marker in ("<<<<<<<", "=======", ">>>>>>>")
                     )
                 ]
                 if not marked:
