@@ -20491,14 +20491,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         session_entry = None
         try:
             if session_key and hasattr(self.session_store, "get_session"):
-                candidate = self.session_store.get_session(session_key)
+                candidate = await self.async_session_store.get_session(session_key)
                 if (
                     getattr(candidate, "session_id", None)
                     and isinstance(getattr(candidate, "session_key", None), str)
                 ):
                     session_entry = candidate
             if session_entry is None:
-                session_entry = self.session_store.get_or_create_session(source)
+                session_entry = await self.async_session_store.get_or_create_session(
+                    source
+                )
         except Exception:
             session_entry = None
         if session_entry is not None:
