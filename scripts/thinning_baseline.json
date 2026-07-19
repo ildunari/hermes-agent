@@ -1,13 +1,13 @@
 {
   "branch": "local/studio-slim",
-  "head": "fd7f1ad393b88bf6cf490d0e0023f8d81584f5dc",
+  "head": "8ea198b5b72e54c18acaa80d69ae4380474548ab",
   "hotspot_count": 318,
   "hotspots": [
     {
-      "local_changed_lines": 2620,
+      "local_changed_lines": 2672,
       "path": "gateway/run.py",
       "prior_conflicts": 0,
-      "score": 7860,
+      "score": 8016,
       "upstream_commits": 2
     },
     {
@@ -2234,5 +2234,5 @@
   "upstream": "origin/main",
   "upstream_sha": "614dc194ea7d853d39f9e84582ec62156f41a475",
   "version": 1,
-  "weighted_score": 56006
+  "weighted_score": 56162
 }
