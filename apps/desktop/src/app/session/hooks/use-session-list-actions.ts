@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react'
 
-import { getCronJobs, getProfileSessionsSnapshot, listAllProfileSessions, type SessionInfo } from '@/hermes'
+import { getCronJobs, listAllProfileSessions, listSidebarSessions, type SessionInfo } from '@/hermes'
 import { sameCronSignature } from '@/lib/session-signatures'
 import {
   isMessagingSource,
@@ -146,20 +146,20 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
     try {
       const limit = $sessionsLimit.get()
 
-      // One bounded backend snapshot opens every profile DB once, then returns
+      // One bounded backend request opens every profile DB once, then returns
       // the independent recents, cron, and messaging slices. Keep the scoped
       // recents view so a sparse active profile cannot be windowed out by the
       // global recency page; cron and messaging remain all-profile sections.
       const sessionProfile = profileScope === ALL_PROFILES ? 'all' : profileScope
 
-      const snapshot = await getProfileSessionsSnapshot(
-        limit,
-        CRON_SECTION_LIMIT,
-        MESSAGING_SECTION_LIMIT,
-        sessionProfile,
-        SIDEBAR_EXCLUDED_SOURCES,
-        MESSAGING_EXCLUDED_SOURCES
-      )
+      const snapshot = await listSidebarSessions({
+        recentsProfile: sessionProfile,
+        recentsLimit: limit,
+        recentsExclude: SIDEBAR_EXCLUDED_SOURCES,
+        cronLimit: CRON_SECTION_LIMIT,
+        messagingLimit: MESSAGING_SECTION_LIMIT,
+        messagingExclude: MESSAGING_EXCLUDED_SOURCES
+      })
 
       if (refreshSessionsRequestRef.current === requestId) {
         const { recents, cron, messaging } = snapshot
@@ -195,6 +195,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
       }
     }
 
+    // Cron *jobs* are a distinct API (getCronJobs), not a session slice.
     void refreshCronJobs()
   }, [profileScope, refreshCronJobs])
 
