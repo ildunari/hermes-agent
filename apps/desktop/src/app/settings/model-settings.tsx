@@ -28,7 +28,7 @@ import { AlertTriangle, Cpu, Loader2 } from '@/lib/icons'
 import { displayModelName } from '@/lib/model-display-name'
 import { cn } from '@/lib/utils'
 import { notifyError } from '@/store/notifications'
-import { startManualLocalEndpoint, startManualProviderOAuth } from '@/store/onboarding'
+import { startManualLocalEndpoint, startManualOnboarding, startManualProviderOAuth } from '@/store/onboarding'
 
 import { invalidateHermesConfig, setHermesConfigCache, useHermesConfigRecord } from '../hooks/use-config-record'
 import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
@@ -221,7 +221,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
   // A's models/providers into profile B (or fire onMainModelChanged for A).
   const profileEpoch = useRef(0)
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async ({ replaceSelection = false }: { replaceSelection?: boolean } = {}) => {
     const epoch = profileEpoch.current
     setLoading(true)
     setError('')
@@ -240,8 +240,15 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
 
       setMainModel({ model: modelInfo.model, provider: modelInfo.provider })
       setProviders(modelOptions.providers || [])
-      setSelectedProvider(prev => prev || modelInfo.provider)
-      setSelectedModel(prev => prev || modelInfo.model)
+
+      if (replaceSelection) {
+        setSelectedProvider(modelInfo.provider)
+        setSelectedModel(modelInfo.model)
+      } else {
+        setSelectedProvider(prev => prev || modelInfo.provider)
+        setSelectedModel(prev => prev || modelInfo.model)
+      }
+
       setAuxiliary(auxiliaryModels)
       setMoa(moaModels)
 
@@ -271,10 +278,27 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
   // new profile (bumping the epoch first so any in-flight A request is discarded).
   useOnProfileSwitch(() => {
     profileEpoch.current += 1
-    void refresh()
+    // The panel stays mounted across profile switches, so clear the previous
+    // profile's draft selection before loading the new profile's source of
+    // truth. Ordinary same-profile refreshes still preserve in-progress edits.
+    setSelectedProvider('')
+    setSelectedModel('')
+    setApiKeyDraft('')
+    void refresh({ replaceSelection: true })
   })
 
   const providerOptions = providers.length ? providers : NO_PROVIDERS
+
+  // Radix renders a blank trigger when the controlled value has no matching
+  // item. Keep a missing saved provider visible in the main selector while
+  // leaving it out of the real inventory used for readiness/setup metadata.
+  const mainProviderOptions = useMemo(
+    () =>
+      selectedProvider && !providers.some(provider => provider.slug === selectedProvider)
+        ? [{ name: selectedProvider, slug: selectedProvider, models: [] }, ...providers]
+        : providerOptions,
+    [providerOptions, providers, selectedProvider]
+  )
 
   // MoA reference/aggregator slots must never be the moa virtual provider —
   // that would create a recursive MoA tree (the backend rejects it on save).
@@ -518,7 +542,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
         notifyError(err, m.defaultsFailed)
       }
     },
-    [config, m.defaultsFailed]
+    [config, m.defaultsFailed, setConfig]
   )
 
   // Paste an API key for the selected `api_key` provider, persist it, then
@@ -575,7 +599,8 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
   // local-endpoint form (URL + optional API key) instead of being dead-ended
   // on the OAuth picker (the original "booted back to the first screen" loop).
   const startProviderSetup = useCallback(() => {
-    const slug = selectedProviderRow?.slug
+    const rowSlug = selectedProviderRow?.slug.trim() ?? ''
+    const slug = rowSlug || selectedProvider.trim()
 
     if (!slug) {
       return
@@ -585,10 +610,14 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
 
     if (lower === 'custom' || lower === 'local' || lower.startsWith('custom:')) {
       startManualLocalEndpoint()
+    } else if (rowSlug) {
+      startManualProviderOAuth(rowSlug)
     } else {
-      startManualProviderOAuth(slug)
+      // An absent row has no trustworthy auth metadata. Open the generic
+      // provider picker instead of deep-linking an unknown or stale slug.
+      startManualOnboarding()
     }
-  }, [selectedProviderRow])
+  }, [selectedProvider, selectedProviderRow])
 
   const applyMainModel = useCallback(async () => {
     if (!selectedProvider || !selectedModel) {
@@ -714,7 +743,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
               <SelectValue placeholder={m.provider} />
             </SelectTrigger>
             <SelectContent>
-              {providerOptions.map(provider => (
+              {mainProviderOptions.map(provider => (
                 <SelectItem key={provider.slug || 'none'} value={provider.slug || 'none'}>
                   {provider.name}
                 </SelectItem>
@@ -776,7 +805,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
             </>
           )}
         </div>
-        {needsSetup && !setupIsApiKey && (
+        {needsSetup && !setupIsApiKey && selectedProviderRow && (
           <p className="mt-2 text-xs text-muted-foreground">
             {selectedProviderRow?.auth_type === 'api_key'
               ? `${selectedProviderRow?.name} needs an API key — set it up to choose a model.`

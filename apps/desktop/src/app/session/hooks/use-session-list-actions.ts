@@ -133,7 +133,15 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
   const refreshSessions = useCallback(async () => {
     const requestId = refreshSessionsRequestRef.current + 1
     refreshSessionsRequestRef.current = requestId
-    setSessionsLoading(true)
+    // The loading flag exists to drive the initial skeletons (they only render
+    // while the list is empty). Turn-complete / reconnect refreshes over a
+    // populated list used to flip it true→false anyway, churning every
+    // $sessionsLoading subscriber twice per turn for no visible change.
+    const showLoading = $sessions.get().length === 0
+
+    if (showLoading) {
+      setSessionsLoading(true)
+    }
 
     try {
       const limit = $sessionsLimit.get()
@@ -155,9 +163,24 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
 
       if (refreshSessionsRequestRef.current === requestId) {
         const { recents, cron, messaging } = snapshot
-        setSessions(prev => mergeSessionPage(prev, recents.sessions, sessionsToKeep()))
+        // Signature-gate the swap (same pattern as cron/messaging): a refresh
+        // that returns content-identical rows must keep the previous array
+        // identity, or every sidebar memo keyed on $sessions recomputes and the
+        // whole list re-renders once per turn/broadcast for nothing.
+        setSessions(prev => {
+          const next = mergeSessionPage(prev, recents.sessions, sessionsToKeep())
+
+          return sameCronSignature(prev, next) ? prev : next
+        })
         setSessionsTotal(typeof recents.total === 'number' ? recents.total : recents.sessions.length)
-        setSessionProfileTotals(recents.profile_totals ?? {})
+        setSessionProfileTotals(prev => {
+          const next = recents.profile_totals ?? {}
+          const prevKeys = Object.keys(prev)
+
+          return prevKeys.length === Object.keys(next).length && prevKeys.every(key => prev[key] === next[key])
+            ? prev
+            : next
+        })
         setCronSessions(prev => (sameCronSignature(prev, cron.sessions) ? prev : cron.sessions))
 
         // Drop any non-messaging custom source that the broad SQL exclusion did
@@ -167,7 +190,7 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
         setMessagingTruncated(messaging.sessions.length >= MESSAGING_SECTION_LIMIT)
       }
     } finally {
-      if (refreshSessionsRequestRef.current === requestId) {
+      if (showLoading && refreshSessionsRequestRef.current === requestId) {
         setSessionsLoading(false)
       }
     }

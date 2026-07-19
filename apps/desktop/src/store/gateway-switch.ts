@@ -1,6 +1,6 @@
 import { atom } from 'nanostores'
 
-import { queryClient } from '@/lib/query-client'
+import { invalidateProfileScopedQueries } from '@/lib/query-client'
 import { resetSessionsLimit } from '@/store/layout'
 import {
   $unreadFinishedSessionIds,
@@ -59,5 +59,7 @@ export function wipeSessionListsForGatewaySwitch(): void {
   setCurrentUsageSnapshot()
   setFreshDraftReady(true)
 
-  void queryClient.invalidateQueries()
+  // Narrowed: account/marketplace/onboarding caches are global, not gateway-
+  // scoped, so a mode swap must not refetch them.
+  invalidateProfileScopedQueries()
 }
