@@ -76,7 +76,11 @@ def install(args: argparse.Namespace) -> int:
     version_dir = state / "versions" / version
     version_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     installed = version_dir / source.name
-    shutil.copy2(source, installed)
+    if installed.is_file():
+        if digest(installed) != version:
+            raise RuntimeError("existing update-service version is immutable but mismatched")
+    else:
+        shutil.copy2(source, installed)
     os.chmod(installed, 0o500)
     metadata = state / "active-version.json"
     metadata.write_text(
