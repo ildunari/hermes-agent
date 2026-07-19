@@ -49,6 +49,18 @@ _ALLOWED_FIELDS = _REQUIRED_FIELDS | {"optional_image_url"}
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _WORD_RE = re.compile(r"[a-z0-9]+", re.I)
 _GENERIC_RE = re.compile(r"^(?:news|update|interesting news|something cool|new stuff|good vibes?)$", re.I)
+_CONCRETE_ITEM_RE = re.compile(
+    r"\b(?:"
+    r"workshops?|classes?|courses?|guides?|tutorials?|sales?|deals?|discounts?|"
+    r"prices?|pricing|launch(?:ed|es|ing)?|releas(?:e|ed|es|ing)|announc(?:e|ed|es|ing|ement)|"
+    r"reports?|stud(?:y|ies)|papers?|research|features?|products?|collections?|"
+    r"exhibitions?|festivals?|concerts?|screenings?|shows?|conferences?|webinars?|"
+    r"events?|meetups?|openings?|restaurants?|recipes?|books?|films?|movies?|games?|"
+    r"tools?|services?|apps?|software|hardware|polic(?:y|ies)|programs?|grants?|awards?|"
+    r"interviews?|podcasts?|episodes?"
+    r")\b",
+    re.I,
+)
 _INSTRUCTION_RE = re.compile(
     r"\b(?:ignore|disregard|override|forget)\b.{0,40}\b(?:instruction|prompt|system|previous)\b|"
     r"\b(?:system|assistant|developer)\s*(?:message|prompt)\b|"
@@ -638,15 +650,20 @@ def _is_concrete(candidate: ProactiveCandidate) -> bool:
     words = _normalized_words(candidate.concrete_item)
     if len(words) < 3 or _GENERIC_RE.match(candidate.concrete_item):
         return False
-    named_tokens = list(re.finditer(r"\b[A-Z][A-Za-z0-9.+-]*\b", candidate.concrete_item))
+    candidate_context = f"{candidate.concrete_item} {candidate.why_now}"
     has_specific_shape = bool(
-        re.search(r"\b\d{2,4}\b", candidate.concrete_item)
-        or any(match.start() > 0 for match in named_tokens)
+        re.search(r"\b\d{2,4}\b", candidate_context)
+        or re.search(
+            r"\b(?:[A-Za-z]+[0-9][A-Za-z0-9-]*|[0-9]+[A-Za-z][A-Za-z0-9-]*)\b",
+            candidate_context,
+        )
+        or re.search(r"\b[A-Z]{2,6}\b", candidate_context)
+        or _CONCRETE_ITEM_RE.search(candidate_context)
     )
     # Freshness is enforced separately against the source timestamp, and the
-    # model remains the final phone-buzz veto. Requiring a tiny event-verb
-    # vocabulary here rejected current workshops, guides, sales, and other
-    # specific items even when their source and topic match were strong.
+    # model remains the final semantic relevance and phone-buzz veto. This broad
+    # item/event vocabulary avoids the former tiny event-verb allowlist without
+    # treating ordinary title capitalization as proof that a headline is concrete.
     return has_specific_shape
 
 

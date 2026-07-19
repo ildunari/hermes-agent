@@ -145,6 +145,32 @@ def test_concrete_gate_accepts_fresh_specific_item_without_magic_event_verb(tmp_
     assert result.allowed
 
 
+@pytest.mark.parametrize(
+    "headline",
+    [
+        "Five Amazing Things You Should Know",
+        "Here Is Some Interesting News",
+        "A Wonderful Day in Town",
+        "Something New and Interesting",
+    ],
+)
+def test_concrete_gate_rejects_generic_title_case_headlines(tmp_path: Path, headline: str):
+    store = ContactMemoryStore(tmp_path, "contact")
+    item = interest(store)
+    result = ProactiveGate(allow).evaluate(
+        send_id="generic-title",
+        candidate=candidate(
+            concrete_item=headline,
+            why_now="newly published and currently available",
+        ),
+        interest=item,
+        store=store,
+        now=NOW,
+    )
+    assert not result.allowed
+    assert result.reason == "not_concrete"
+
+
 def test_reused_candidate_skips_fetch_but_repeats_gate_and_freshness(tmp_path: Path):
     store = ContactMemoryStore(tmp_path, "contact")
     item = interest(store)
