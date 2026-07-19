@@ -146,22 +146,25 @@ def test_concrete_gate_accepts_fresh_specific_item_without_magic_event_verb(tmp_
 
 
 @pytest.mark.parametrize(
-    "headline",
+    ("headline", "why_now"),
     [
-        "Five Amazing Things You Should Know",
-        "Here Is Some Interesting News",
-        "A Wonderful Day in Town",
-        "Something New and Interesting",
+        ("Five Amazing Things You Should Know", "A new study shows this is interesting."),
+        ("Here Is Some Interesting News", "NASA published this today."),
+        ("A Wonderful Day in Town", "A newly published report is now available."),
+        ("Something New and Interesting", "A feature released this morning."),
+        ("Top 10 Amazing Things You Should Know", "newly published and currently available"),
     ],
 )
-def test_concrete_gate_rejects_generic_title_case_headlines(tmp_path: Path, headline: str):
+def test_concrete_gate_rejects_generic_title_case_headlines(
+    tmp_path: Path, headline: str, why_now: str
+):
     store = ContactMemoryStore(tmp_path, "contact")
     item = interest(store)
     result = ProactiveGate(allow).evaluate(
         send_id="generic-title",
         candidate=candidate(
             concrete_item=headline,
-            why_now="newly published and currently available",
+            why_now=why_now,
         ),
         interest=item,
         store=store,

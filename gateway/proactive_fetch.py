@@ -650,9 +650,12 @@ def _is_concrete(candidate: ProactiveCandidate) -> bool:
     words = _normalized_words(candidate.concrete_item)
     if len(words) < 3 or _GENERIC_RE.match(candidate.concrete_item):
         return False
-    candidate_context = f"{candidate.concrete_item} {candidate.why_now}"
+    # The item itself must carry specificity. A generic headline cannot borrow
+    # concreteness from a snippet that happens to mention a study, acronym, or
+    # other broad marker.
+    candidate_context = candidate.concrete_item
     has_specific_shape = bool(
-        re.search(r"\b\d{2,4}\b", candidate_context)
+        re.search(r"\b(?:19|20)\d{2}\b", candidate_context)
         or re.search(
             r"\b(?:[A-Za-z]+[0-9][A-Za-z0-9-]*|[0-9]+[A-Za-z][A-Za-z0-9-]*)\b",
             candidate_context,
