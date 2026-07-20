@@ -3378,6 +3378,11 @@ def run_job(
             # no explicit provider is requested.
             runtime_kwargs = {
                 "requested": job.get("provider") or _cron_cfg.get("provider"),
+                # Derive provider-specific api_mode from the model this job
+                # will actually run (per-job pin > env > config default), not
+                # the stale persisted default — mirrors the fallback path
+                # below, which already passes its fb_model.
+                "target_model": model,
             }
             credential_label = (
                 job.get("credential_label")

@@ -1,7 +1,9 @@
 import { cleanup, render, screen } from '@testing-library/react'
+import { atom } from 'nanostores'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import type { ChatBarState } from '@/app/chat/composer/types'
+import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import type { ClientSessionState } from '@/app/types'
 import { $activeSessionId, $currentModel, setCurrentModel, setCurrentModelSource } from '@/store/session'
 import { $sessionStates } from '@/store/session-states'
@@ -31,7 +33,7 @@ describe('ModelPill pinned-override badge', () => {
     setCurrentModelSource('manual')
     $activeSessionId.set(null)
 
-    render(<ModelPill disabled={false} model={modelState()} />)
+    render(<ModelPill disabled={false} model={modelState({ model: 'deepseek/deepseek-v4-flash' })} />)
 
     expect(screen.getByTestId('model-pinned-dot')).toBeTruthy()
   })
@@ -62,12 +64,20 @@ describe('ModelPill pinned-override badge', () => {
     $activeSessionId.set(null)
 
     // Fallback (no live menu) path.
-    const { unmount } = render(<ModelPill disabled={false} model={modelState()} />)
+    const { unmount } = render(
+      <ModelPill disabled={false} model={modelState({ model: 'deepseek/deepseek-v4-flash' })} />
+    )
+
     expect(screen.getByTestId('model-pinned-dot')).toBeTruthy()
     unmount()
 
     // Live-menu (dropdown) path.
-    render(<ModelPill disabled={false} model={modelState({ modelMenuContent: <div /> })} />)
+    render(
+      <ModelPill
+        disabled={false}
+        model={modelState({ model: 'deepseek/deepseek-v4-flash', modelMenuContent: <div /> })}
+      />
+    )
     expect(screen.getByTestId('model-pinned-dot')).toBeTruthy()
     expect($currentModel.get()).toBe('deepseek/deepseek-v4-flash')
   })
@@ -86,7 +96,7 @@ describe('ModelPill runtime routing', () => {
     setCurrentModel('primary-model')
     $activeSessionId.set('live-1')
     $sessionStates.set({ 'live-1': { runtimeRouting: routing('fallback_activated') } as ClientSessionState })
-    render(<ModelPill disabled={false} model={modelState()} />)
+    render(<ModelPill disabled={false} model={modelState({ model: 'primary-model', provider: 'openai' })} />)
     expect(screen.getByRole('button').textContent).toContain('Primary Model')
     expect(screen.getByRole('button').textContent).toContain('· Running ·')
     expect(screen.getByRole('button').textContent).toContain('Backup Model')
@@ -97,7 +107,7 @@ describe('ModelPill runtime routing', () => {
     setCurrentModel('primary-model')
     $activeSessionId.set('live-1')
     $sessionStates.set({ 'live-1': { runtimeRouting: routing('finished') } as ClientSessionState })
-    render(<ModelPill disabled={false} model={modelState()} />)
+    render(<ModelPill disabled={false} model={modelState({ model: 'primary-model', provider: 'openai' })} />)
     expect(screen.getByRole('button').textContent).toContain('Last response ·')
     expect(screen.getByRole('button').textContent).toContain('Backup Model')
   })
@@ -106,7 +116,7 @@ describe('ModelPill runtime routing', () => {
     setCurrentModel('primary-model')
     $activeSessionId.set('live-1')
     $sessionStates.set({ 'live-1': { runtimeRouting: routing('finished') } as ClientSessionState })
-    render(<ModelPill compact disabled={false} model={modelState()} />)
+    render(<ModelPill compact disabled={false} model={modelState({ model: 'primary-model', provider: 'openai' })} />)
 
     expect(screen.getByTestId('model-fallback-indicator')).toBeTruthy()
     const button = screen.getByRole('button')
@@ -122,12 +132,47 @@ describe('ModelPill runtime routing', () => {
     providerFallback.selected = { model: 'shared-model', provider: 'openai' }
     providerFallback.runtime = { model: 'shared-model', provider: 'anthropic' }
     $sessionStates.set({ 'live-1': { runtimeRouting: providerFallback } as ClientSessionState })
-    render(<ModelPill disabled={false} model={modelState()} />)
+    render(<ModelPill disabled={false} model={modelState({ model: 'shared-model', provider: 'openai' })} />)
 
     const button = screen.getByRole('button')
     expect(button.textContent).toContain('Shared Model')
     expect(button.textContent).toContain('· Running · Anthropic: Shared Model')
     expect(button.getAttribute('aria-label')).toContain('anthropic: shared-model')
     expect(button.getAttribute('aria-label')).toContain('openai: shared-model')
+  })
+})
+
+describe('ModelPill per-surface model label', () => {
+  it('shows the chat-bar model even when the primary global differs', () => {
+    setCurrentModel('primary/model')
+    $activeSessionId.set('primary-runtime')
+
+    const tileView: SessionView = {
+      kind: 'tile',
+      $awaitingResponse: atom(false),
+      $busy: atom(false),
+      $cwd: atom(''),
+      $fast: atom(false),
+      $lastVisibleIsUser: atom(false),
+      $messages: atom([]),
+      $messagesEmpty: atom(true),
+      $model: atom('tile/claude-sonnet'),
+      $provider: atom('anthropic'),
+      $reasoningEffort: atom('high'),
+      $runtimeId: atom('tile-runtime'),
+      $storedId: atom('stored-tile')
+    }
+
+    render(
+      <SessionViewProvider value={tileView}>
+        <ModelPill
+          disabled={false}
+          model={modelState({ model: 'tile/claude-sonnet', provider: 'anthropic', modelMenuContent: <div /> })}
+        />
+      </SessionViewProvider>
+    )
+
+    expect(screen.getByText('Sonnet · High')).toBeTruthy()
+    expect(screen.queryByText(/primary/i)).toBeNull()
   })
 })

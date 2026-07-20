@@ -5373,10 +5373,6 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_update(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/update", "Update initiated~")
 
-        @tree.command(name="restart", description="Restart the Hermes gateway safely")
-        async def slash_restart(interaction: discord.Interaction):
-            await self._run_simple_slash(interaction, "/restart", "Restart requested~")
-
         @tree.command(name="restart-gateways", description="Queue a detached restart of Hermes gateways")
         async def slash_restart_gateways(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/restart-gateways", "Gateway restart queued~")

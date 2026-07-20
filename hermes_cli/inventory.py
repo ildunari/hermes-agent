@@ -60,6 +60,7 @@ class ConfigContext:
     hidden_models: dict[str, tuple[str, ...]] | None = None
     provider_labels: dict[str, str] | None = None
     model_labels: dict[str, dict[str, str]] | None = None
+    excluded_providers: list | None = None
 
     def with_overrides(
         self,
@@ -129,6 +130,7 @@ def load_picker_context() -> ConfigContext:
         hidden_models = {}
         provider_labels = {}
         model_labels = {}
+    excluded = cfg.get("model_catalog", {}).get("excluded_providers") or []
     return ConfigContext(
         current_provider=current_provider,
         current_model=current_model,
@@ -141,6 +143,7 @@ def load_picker_context() -> ConfigContext:
         hidden_models=hidden_models,
         provider_labels=provider_labels,
         model_labels=model_labels,
+        excluded_providers=excluded if isinstance(excluded, list) else [],
     )
 
 
@@ -218,6 +221,7 @@ def build_models_payload(
         refresh=refresh,
         probe_custom_providers=probe_custom_providers,
         probe_current_custom_provider=probe_current_custom_provider,
+        excluded_providers=ctx.excluded_providers or [],
     )
 
     moa_row = _moa_provider_row(ctx.current_provider)

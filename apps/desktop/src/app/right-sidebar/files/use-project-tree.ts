@@ -3,9 +3,9 @@ import { atom } from 'nanostores'
 import { useCallback, useEffect, useMemo } from 'react'
 
 import { $connection } from '@/store/session'
-import { $workspaceChangeTick } from '@/store/workspace-events'
+import { $workspaceChangeTick, consumeWorkspaceChange } from '@/store/workspace-events'
 
-import { clearProjectDirCache, readProjectDir } from './ipc'
+import { clearProjectDirCache, type ProjectTreeEntry, readProjectDir } from './ipc'
 
 export interface TreeNode {
   /** Absolute filesystem path. Doubles as react-arborist node id. */
@@ -46,6 +46,33 @@ function patchNode(nodes: TreeNode[] | undefined | null, id: string, patch: (n: 
 
     return n
   })
+}
+
+function findNode(nodes: TreeNode[], id: string): null | TreeNode {
+  for (const node of nodes) {
+    if (node.id === id) {
+      return node
+    }
+
+    if (node.children?.length) {
+      const hit = findNode(node.children, id)
+
+      if (hit) {
+        return hit
+      }
+    }
+  }
+
+  return null
+}
+
+// Merge a freshly-read dir's entries into its existing children: keep surviving
+// nodes (subtrees intact), add new, drop deleted. Non-recursive — a grandchild
+// dir only re-reads when it's itself in the change set.
+function mergeChildren(existing: TreeNode[], entries: ProjectTreeEntry[]): TreeNode[] {
+  const byId = new Map(existing.filter(node => !node.placeholder).map(node => [node.id, node]))
+
+  return entries.map(entry => byId.get(entry.path) ?? makeNode(entry.path, entry.name, entry.isDirectory))
 }
 
 function placeholderChild(parentId: string): TreeNode {
@@ -112,9 +139,7 @@ let lastConnectionKey = ''
 // reappears after a checkout, a remote that wasn't ready), keep retrying on a
 // slow cadence so the tree self-heals instead of staying "UNREADABLE" forever.
 const ROOT_ERROR_RETRY_MS = 3_000
-const REVALIDATE_DEBOUNCE_MS = 500
 const MAX_REVALIDATE_DIRS = 50
-let revalidateTimer: number | null = null
 
 function setProjectTree(updater: (current: ProjectTreeState) => ProjectTreeState) {
   $projectTree.set(updater($projectTree.get()))
@@ -223,12 +248,13 @@ export function resetProjectTreeState() {
   clearProjectDirCache()
 }
 
-// Non-destructive refresh: re-read every currently-loaded directory and merge
-// entries (add new files/folders, drop deleted ones) while preserving expansion
-// and already-loaded subtrees. Unlike `loadRoot({force})` this never collapses
-// the tree, so it's safe to run live as the agent edits — and because node ids
-// (absolute paths) stay stable across merges, rows can animate in/out.
-async function revalidateTree(cwd: string): Promise<void> {
+// Non-destructive live refresh as the agent edits: preserves expansion + loaded
+// subtrees (stable absolute-path ids let rows animate in/out), never collapses.
+// Targeted by default — re-reads only the changed dirs in `change`; the root and
+// untouched folders never touch the filesystem or re-render. Falls back to
+// re-reading every loaded dir only when the mutation is opaque (a terminal
+// command / a path we couldn't resolve) — see store/workspace-events.
+async function revalidateTree(cwd: string, change: { dirs: string[]; full: boolean }): Promise<void> {
   const state = $projectTree.get()
 
   if (!cwd || state.cwd !== cwd || !state.loaded) {
@@ -236,9 +262,49 @@ async function revalidateTree(cwd: string): Promise<void> {
   }
 
   const rootPath = state.resolvedCwd || cwd
-  clearProjectDirCache()
   let visitedDirs = 0
 
+  if (!change.full && change.dirs.length) {
+    // Only re-read changed dirs that are actually loaded (root, or an expanded
+    // folder); a change inside a collapsed/absent dir isn't visible → skip.
+    const targets = change.dirs.filter(dir => dir === rootPath || findNode(state.data, dir)?.children)
+
+    if (!targets.length) {
+      return
+    }
+
+    targets.forEach(dir => clearProjectDirCache(dir))
+    const reads = await Promise.all(targets.map(async dir => ({ dir, ...(await readProjectDir(dir, rootPath)) })))
+
+    setProjectTree(latest => {
+      if (latest.cwd !== cwd || !latest.loaded) {
+        return latest
+      }
+
+      let data = latest.data
+
+      for (const { dir, entries, error } of reads) {
+        if (error) {
+          continue // keep last-known children on a transient read error
+        }
+
+        data =
+          dir === rootPath
+            ? mergeChildren(data, entries)
+            : patchNode(data, dir, node =>
+                node.children ? { ...node, children: mergeChildren(node.children, entries) } : node
+              )
+      }
+
+      return data === latest.data ? latest : { ...latest, data }
+    })
+
+    return
+  }
+
+  // Opaque fallback: reconcile every loaded dir. Siblings read concurrently
+  // (Promise.all keeps order); loaded subfolders recurse.
+  clearProjectDirCache()
   const reconcile = async (dirPath: string, existing: TreeNode[]): Promise<TreeNode[]> => {
     visitedDirs += 1
     if (visitedDirs > MAX_REVALIDATE_DIRS) {
@@ -248,42 +314,27 @@ async function revalidateTree(cwd: string): Promise<void> {
     const { entries, error } = await readProjectDir(dirPath, rootPath)
 
     if (error) {
-      return existing // keep the last-known children on a transient read error
+      return existing
     }
 
     const byId = new Map(existing.filter(node => !node.placeholder).map(node => [node.id, node]))
-    const merged: TreeNode[] = []
 
-    for (const entry of entries) {
-      const prev = byId.get(entry.path)
+    return Promise.all(
+      entries.map(async entry => {
+        const prev = byId.get(entry.path)
 
-      if (prev?.isDirectory && prev.children) {
-        // Loaded folder: recurse so deep edits surface without a re-expand.
-        merged.push({ ...prev, children: await reconcile(prev.id, prev.children) })
-      } else if (prev) {
-        merged.push(prev)
-      } else {
-        merged.push(makeNode(entry.path, entry.name, entry.isDirectory))
-      }
-    }
+        if (prev?.isDirectory && prev.children) {
+          return { ...prev, children: await reconcile(prev.id, prev.children) }
+        }
 
-    return merged
+        return prev ?? makeNode(entry.path, entry.name, entry.isDirectory)
+      })
+    )
   }
 
   const nextData = await reconcile(rootPath, state.data)
 
   setProjectTree(latest => (latest.cwd === cwd && latest.loaded ? { ...latest, data: nextData } : latest))
-}
-
-function scheduleRevalidateTree(cwd: string) {
-  if (revalidateTimer !== null) {
-    window.clearTimeout(revalidateTimer)
-  }
-
-  revalidateTimer = window.setTimeout(() => {
-    revalidateTimer = null
-    void revalidateTree(cwd)
-  }, REVALIDATE_DEBOUNCE_MS)
 }
 
 /**
@@ -380,7 +431,7 @@ export function useProjectTree(cwd: string): UseProjectTreeResult {
   // very first render: tick 0 is the initial value, not a real change).
   useEffect(() => {
     if (workspaceTick > 0) {
-      scheduleRevalidateTree(cwd)
+      void revalidateTree(cwd, consumeWorkspaceChange())
     }
   }, [workspaceTick, cwd])
 
