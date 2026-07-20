@@ -367,6 +367,16 @@ def build_turn_context(
     # Bind the skill write-origin ContextVar for this thread.
     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
 
+    # Remember only a genuinely settled prior route. ``started`` below replaces
+    # the live snapshot, but an unsuccessful turn must not become a false Last
+    # response or erase the last successful summary.
+    _prior_routing = getattr(agent, "_runtime_routing", None)
+    agent._runtime_routing_prior_settled = (
+        _prior_routing
+        if isinstance(_prior_routing, dict) and _prior_routing.get("state") == "finished"
+        else None
+    )
+
     # Restore the primary runtime if the previous turn activated fallback.
     restored_primary = agent._restore_primary_runtime()
     from agent.runtime_routing import emit_runtime_route

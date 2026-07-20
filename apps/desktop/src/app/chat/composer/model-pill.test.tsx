@@ -102,6 +102,19 @@ describe('ModelPill runtime routing', () => {
     expect(screen.getByRole('button').textContent).toContain('Backup Model')
   })
 
+  it('keeps fallback visible in compact mode with full accessible detail', () => {
+    setCurrentModel('primary-model')
+    $activeSessionId.set('live-1')
+    $sessionStates.set({ 'live-1': { runtimeRouting: routing('finished') } as ClientSessionState })
+    render(<ModelPill compact disabled={false} model={modelState()} />)
+
+    expect(screen.getByTestId('model-fallback-indicator')).toBeTruthy()
+    const button = screen.getByRole('button')
+    expect(button.getAttribute('aria-label')).toContain('Last response')
+    expect(button.getAttribute('aria-label')).toContain('anthropic: backup-model')
+    expect(button.getAttribute('aria-label')).toContain('openai: primary-model')
+  })
+
   it('shows provider-only fallback and exposes routing in the non-dropdown accessible name', () => {
     setCurrentModel('shared-model')
     $activeSessionId.set('live-1')

@@ -69,7 +69,16 @@ export function ModelPill({
   // flash a literal "No model", show a quiet loader (inherits the pill text
   // color at half opacity) until a model lands.
   const label = compact ? (
-    <ChevronDown className="size-3.5 shrink-0 opacity-70" />
+    <>
+      <ChevronDown className="size-3.5 shrink-0 opacity-70" />
+      {routedFallback && (
+        <span
+          aria-hidden="true"
+          className="size-1.5 shrink-0 rounded-full bg-amber-400"
+          data-testid="model-fallback-indicator"
+        />
+      )}
+    </>
   ) : (
     <>
       {currentModel.trim() ? (
@@ -101,7 +110,7 @@ export function ModelPill({
   // padding, sized to match the other composer icon buttons.
   const pillClass = compact
     ? cn(
-        'size-(--composer-control-size) shrink-0 justify-center gap-0 rounded-md p-0',
+        'size-(--composer-control-size) shrink-0 justify-center gap-0.5 rounded-md p-0',
         'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
       )
     : PILL

@@ -164,6 +164,38 @@ describe('runtime.route validation', () => {
 
     expect(sessionStates.get(ACTIVE_SID)?.runtimeRouting).toBe(knownRouting)
   })
+
+  it('clears live routing when the turn errors', async () => {
+    await mountStream()
+    const liveRouting = {
+      schema_version: 1 as const,
+      state: 'fallback_activated' as const,
+      selected: { model: 'primary', provider: 'openai' },
+      runtime: { model: 'backup', provider: 'anthropic' },
+      fallback: { active: true, reason: 'rate_limit', chain_index: 0 }
+    }
+    sessionStates.set(ACTIVE_SID, { ...createClientSessionState(), runtimeRouting: liveRouting })
+
+    act(() => handleEvent!({ payload: { message: 'boom' }, session_id: ACTIVE_SID, type: 'error' }))
+
+    expect(sessionStates.get(ACTIVE_SID)?.runtimeRouting).toBeUndefined()
+  })
+
+  it('preserves a prior settled route when an error handler sees it', async () => {
+    await mountStream()
+    const settledRouting = {
+      schema_version: 1 as const,
+      state: 'finished' as const,
+      selected: { model: 'primary', provider: 'openai' },
+      runtime: { model: 'backup', provider: 'anthropic' },
+      fallback: { active: true, reason: 'rate_limit', chain_index: 0 }
+    }
+    sessionStates.set(ACTIVE_SID, { ...createClientSessionState(), runtimeRouting: settledRouting })
+
+    act(() => handleEvent!({ payload: { message: 'boom' }, session_id: ACTIVE_SID, type: 'error' }))
+
+    expect(sessionStates.get(ACTIVE_SID)?.runtimeRouting).toBe(settledRouting)
+  })
 })
 
 describe('message.complete sidebar refresh coalescing', () => {

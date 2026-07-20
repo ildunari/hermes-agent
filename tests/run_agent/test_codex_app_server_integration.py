@@ -86,6 +86,39 @@ class TestRunConversationCodexPath:
         assert result["codex_thread_id"] == "thread-stub-1"
         assert result["codex_turn_id"] == "turn-stub-1"
 
+    def test_interrupted_turn_does_not_emit_finished_or_replace_prior_settled_route(self, monkeypatch):
+        prior = {
+            "schema_version": 1,
+            "state": "finished",
+            "selected": {"model": "primary", "provider": "openai"},
+            "runtime": {"model": "backup", "provider": "anthropic"},
+            "fallback": {"active": True, "reason": "rate_limit", "chain_index": 0},
+        }
+
+        def interrupted_turn(self, user_input: str, **kwargs):
+            return TurnResult(
+                final_text="partial",
+                projected_messages=[{"role": "assistant", "content": "partial"}],
+                tool_iterations=0,
+                interrupted=True,
+                error=None,
+                turn_id="turn-interrupted",
+                thread_id="thread-interrupted",
+            )
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", interrupted_turn)
+        monkeypatch.setattr(CodexAppServerSession, "ensure_started", lambda self: "thread-interrupted")
+        events = []
+        agent = _make_codex_agent(event_callback=lambda name, payload: events.append((name, payload)))
+        setattr(agent, "_runtime_routing", prior)
+
+        result = agent.run_conversation("stop this")
+
+        assert result["completed"] is False
+        assert result["runtime_routing"] is prior
+        assert getattr(agent, "_runtime_routing") is prior
+        assert [payload["state"] for name, payload in events if name == "runtime:route"] == ["started"]
+
     def test_codex_app_server_token_usage_updates_session_accounting(self, monkeypatch):
         def fake_run_turn(self, user_input: str, **kwargs):
             return TurnResult(

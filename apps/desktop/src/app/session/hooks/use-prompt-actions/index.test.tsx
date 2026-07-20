@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { textPart } from '@/lib/chat-messages'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
 import { $busy, $connection, $messages, $sessions, $turnStartedAt, setSessions } from '@/store/session'
-import type { SessionInfo } from '@/types/hermes'
+import type { RuntimeRouting, SessionInfo } from '@/types/hermes'
 
 import type { SubmitTextOptions } from './utils'
 
@@ -79,6 +79,7 @@ function Harness({
   requestGateway,
   resumeStoredSession,
   seedMessages,
+  seedRuntimeRouting,
   selectedStoredSessionIdRef: selectedStoredSessionIdRefProp,
   storedSessionId,
   activeSessionId,
@@ -101,6 +102,7 @@ function Harness({
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   resumeStoredSession?: (storedSessionId: string) => Promise<void> | void
   seedMessages?: unknown[]
+  seedRuntimeRouting?: RuntimeRouting
   selectedStoredSessionIdRef?: MutableRefObject<string | null>
   storedSessionId?: null | string
   activeSessionId?: null | string
@@ -122,7 +124,8 @@ function Harness({
     messages: seedMessages ?? [],
     busy: false,
     awaitingResponse: false,
-    interrupted: true
+    interrupted: true,
+    runtimeRouting: seedRuntimeRouting
   } as never)
 
   const actions = usePromptActions({
@@ -1315,6 +1318,31 @@ describe('usePromptActions sleep/wake session recovery', () => {
       interrupted: true,
       turnStartedAt: null
     })
+  })
+
+  it('clears live runtime routing when stopping a turn', async () => {
+    const states: Record<string, unknown>[] = []
+    const liveRouting: RuntimeRouting = {
+      schema_version: 1,
+      state: 'fallback_activated',
+      selected: { model: 'primary', provider: 'openai' },
+      runtime: { model: 'backup', provider: 'anthropic' },
+      fallback: { active: true, reason: 'rate_limit', chain_index: 0 }
+    }
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={state => states.push(state)}
+        refreshSessions={async () => undefined}
+        requestGateway={vi.fn(async () => ({}) as never)}
+        seedRuntimeRouting={liveRouting}
+      />
+    )
+
+    await handle!.cancelRun()
+
+    expect(states.at(-1)).toHaveProperty('runtimeRouting', undefined)
   })
 
   it('surfaces the original error (no resume) when the failure is not "session not found"', async () => {

@@ -465,9 +465,20 @@ def finalize_turn(
             last_reasoning = msg["reasoning"]
             break
 
-    # Build result with interrupt info if applicable
-    from agent.runtime_routing import emit_runtime_route
-    runtime_routing = emit_runtime_route(agent, "finished")
+    # ``finished`` means a response actually completed. On an unsuccessful turn
+    # restore the prior settled summary, or clear transient live routing.
+    if completed and not interrupted:
+        from agent.runtime_routing import emit_runtime_route
+
+        runtime_routing = emit_runtime_route(agent, "finished")
+    else:
+        prior_routing = getattr(agent, "_runtime_routing_prior_settled", None)
+        runtime_routing = (
+            prior_routing
+            if isinstance(prior_routing, dict) and prior_routing.get("state") == "finished"
+            else None
+        )
+        agent._runtime_routing = runtime_routing
 
     result = {
         "final_response": final_response,

@@ -543,7 +543,10 @@ export function useMessageStream({
           awaitingResponse: false,
           busy: false,
           needsInput: false,
-          turnStartedAt: null
+          turnStartedAt: null,
+          // Errors do not produce a Last response. Keep prior settled truth if
+          // it remains, but clear a live started/fallback route.
+          runtimeRouting: state.runtimeRouting?.state === 'finished' ? state.runtimeRouting : undefined
         }
       })
     },

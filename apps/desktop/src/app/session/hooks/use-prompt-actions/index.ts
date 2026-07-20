@@ -553,7 +553,10 @@ export function usePromptActions({
         pendingBranchGroup: null,
         needsInput: false,
         interrupted: true,
-        turnStartedAt: null
+        turnStartedAt: null,
+        // Never leave a transient started/fallback route looking Running after
+        // cancellation. A still-present finished route is older settled truth.
+        runtimeRouting: state.runtimeRouting?.state === 'finished' ? state.runtimeRouting : undefined
       }
     })
 

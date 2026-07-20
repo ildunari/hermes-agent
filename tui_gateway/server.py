@@ -3177,6 +3177,9 @@ def _snapshot_agent_model_runtime(agent) -> dict:
         "base_url": getattr(agent, "base_url", ""),
         "api_mode": getattr(agent, "api_mode", ""),
         "primary_runtime": copy.deepcopy(getattr(agent, "_primary_runtime", None)),
+        "selected_runtime_identity": copy.deepcopy(
+            getattr(agent, "_selected_runtime_identity", None)
+        ),
     }
 
 
@@ -3185,23 +3188,28 @@ def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
     if not snapshot or agent is None:
         return
     primary = snapshot.get("primary_runtime")
-    if primary and hasattr(agent, "_restore_primary_runtime"):
-        try:
-            agent._primary_runtime = copy.deepcopy(primary)
-            agent._fallback_activated = True
-            agent._rate_limited_until = 0
-            if agent._restore_primary_runtime():
-                return
-        except Exception:
-            logger.debug("TUI one-turn model restore via primary runtime failed", exc_info=True)
-    if hasattr(agent, "switch_model"):
-        agent.switch_model(
-            new_model=snapshot.get("model", ""),
-            new_provider=snapshot.get("provider", ""),
-            api_key=snapshot.get("api_key", ""),
-            base_url=snapshot.get("base_url", ""),
-            api_mode=snapshot.get("api_mode", ""),
-        )
+    try:
+        if primary and hasattr(agent, "_restore_primary_runtime"):
+            try:
+                agent._primary_runtime = copy.deepcopy(primary)
+                agent._fallback_activated = True
+                agent._rate_limited_until = 0
+                if agent._restore_primary_runtime():
+                    return
+            except Exception:
+                logger.debug("TUI one-turn model restore via primary runtime failed", exc_info=True)
+        if hasattr(agent, "switch_model"):
+            agent.switch_model(
+                new_model=snapshot.get("model", ""),
+                new_provider=snapshot.get("provider", ""),
+                api_key=snapshot.get("api_key", ""),
+                base_url=snapshot.get("base_url", ""),
+                api_mode=snapshot.get("api_mode", ""),
+            )
+    finally:
+        selected = snapshot.get("selected_runtime_identity")
+        if isinstance(selected, dict):
+            agent._selected_runtime_identity = copy.deepcopy(selected)
 
 
 def _apply_model_switch(
@@ -3816,12 +3824,16 @@ def _session_info(agent, session: dict | None = None) -> dict:
     routing = (session or {}).get("runtime_routing") or mirror.get("runtime_routing")
     if not isinstance(routing, dict) and agent is not None:
         routing = getattr(agent, "_runtime_routing", None)
-    selected_route = routing.get("selected", {}) if isinstance(routing, dict) else {}
+    # Top-level identity belongs to the current/restored agent selection, never
+    # to a historical route (notably a completed /model --once response).
+    selected_identity = getattr(agent, "_selected_runtime_identity", None) if agent is not None else None
+    if not isinstance(selected_identity, dict):
+        selected_identity = {}
     info: dict = {
         # Keep model/provider as selected intent while runtime_routing carries
         # the backend that is actually executing.
-        "model": selected_route.get("model", mirror.get("model", getattr(agent, "model", ""))),
-        "provider": selected_route.get("provider", mirror.get("provider", getattr(agent, "provider", ""))),
+        "model": selected_identity.get("model", mirror.get("model", getattr(agent, "model", ""))),
+        "provider": selected_identity.get("provider", mirror.get("provider", getattr(agent, "provider", ""))),
         "reasoning_effort": reasoning_effort,
         "service_tier": service_tier,
         "fast": service_tier == "priority",
@@ -10126,6 +10138,18 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             except (TypeError, ValueError):
                 pass
             result = agent.run_conversation(run_message, **run_kwargs)
+            # The event callback stored a live ``started``/fallback route in the
+            # session. Reconcile it with the result so an unsuccessful turn can
+            # clear that live state or restore the prior successful summary.
+            result_routing = result.get("runtime_routing") if isinstance(result, dict) else None
+            mirror = dict(_metadata_mirror(session))
+            if isinstance(result_routing, dict):
+                session["runtime_routing"] = dict(result_routing)
+                mirror["runtime_routing"] = dict(result_routing)
+            else:
+                session.pop("runtime_routing", None)
+                mirror.pop("runtime_routing", None)
+            session["_metadata_mirror"] = mirror
             if "moa_one_shot_restore" in session:
                 _restore = session.pop("moa_one_shot_restore", None)
                 # Restore the model the user was on before the /moa one-shot.
@@ -10416,7 +10440,16 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         finally:
             if one_turn_restore:
                 try:
+                    settled_one_turn_routing = getattr(agent, "_runtime_routing", None)
                     _restore_agent_model_runtime(agent, one_turn_restore)
+                    # Restore selected ownership while retaining the successful
+                    # one-shot route as historical Last response truth.
+                    if (
+                        isinstance(settled_one_turn_routing, dict)
+                        and settled_one_turn_routing.get("state") == "finished"
+                    ):
+                        agent._runtime_routing = settled_one_turn_routing
+                        session["runtime_routing"] = dict(settled_one_turn_routing)
                     _restart_slash_worker(sid, session)
                     _persist_live_session_runtime(session)
                     _persist_live_session_system_prompt(session)

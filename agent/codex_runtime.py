@@ -830,15 +830,26 @@ def run_codex_app_server_turn(
         except Exception:
             logger.debug("background review spawn raised", exc_info=True)
 
-    from agent.runtime_routing import emit_runtime_route
-    runtime_routing = emit_runtime_route(agent, "finished")
+    successful = not turn.interrupted and turn.error is None
+    if successful:
+        from agent.runtime_routing import emit_runtime_route
+
+        runtime_routing = emit_runtime_route(agent, "finished")
+    else:
+        prior_routing = getattr(agent, "_runtime_routing_prior_settled", None)
+        runtime_routing = (
+            prior_routing
+            if isinstance(prior_routing, dict) and prior_routing.get("state") == "finished"
+            else None
+        )
+        agent._runtime_routing = runtime_routing
 
     return {
         "final_response": turn.final_text,
         "runtime_routing": runtime_routing,
         "messages": messages,
         "api_calls": api_calls,
-        "completed": not turn.interrupted and turn.error is None,
+        "completed": successful,
         "partial": turn.interrupted or turn.error is not None,
         "error": turn.error,
         # The codex app-server runtime IS an early-return path that bypasses
