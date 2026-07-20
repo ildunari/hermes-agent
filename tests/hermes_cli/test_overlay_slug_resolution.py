@@ -10,6 +10,7 @@ Covers: #5223, #6492
 import os
 from unittest.mock import patch
 
+import pytest
 
 from hermes_cli.model_switch import list_authenticated_providers
 
@@ -54,18 +55,32 @@ def test_kimi_for_coding_alias():
 
 # -- Generic slug mismatch providers -----------------------------------------
 
+@pytest.mark.parametrize("alias", ["kimi", "kimi-coding", "kimi-for-coding", "moonshot"])
 @patch.dict(os.environ, {"KIMI_API_KEY": "fake-key"}, clear=False)
-def test_kimi_for_coding_overlay_uses_hermes_slug():
-    """kimi-for-coding overlay should resolve to slug='kimi-coding'."""
-    providers = list_authenticated_providers(current_provider="kimi-coding")
+def test_kimi_for_coding_overlay_uses_hermes_slug(alias):
+    """All Kimi aliases collapse into one accurately labelled canonical row."""
+    providers = list_authenticated_providers(
+        current_provider=alias,
+        user_providers={
+            alias: {
+                "name": "Kimi / Moonshot",
+                "discover_models": False,
+                "models": {"kimi-k3": {}},
+            }
+        },
+        probe_custom_providers=False,
+    )
 
-    kimi = next((p for p in providers if p["slug"] == "kimi-coding"), None)
-    assert kimi is not None, "kimi-coding should appear when KIMI_API_KEY is set"
-    assert kimi["is_current"] is True
-
-    # Must NOT appear under the models.dev key
-    kimi_mdev = next((p for p in providers if p["slug"] == "kimi-for-coding"), None)
-    assert kimi_mdev is None, "kimi-for-coding slug should not appear (resolved to kimi-coding)"
+    kimi_rows = [
+        provider
+        for provider in providers
+        if provider["slug"] in {"kimi", "kimi-coding", "kimi-for-coding", "moonshot"}
+    ]
+    assert len(kimi_rows) == 1
+    assert kimi_rows[0]["slug"] == "kimi-coding"
+    assert kimi_rows[0]["name"] == "Kimi / Moonshot"
+    assert kimi_rows[0]["is_current"] is True
+    assert "kimi-k3" in kimi_rows[0]["models"]
 
 
 @patch.dict(os.environ, {"KILOCODE_API_KEY": "fake-key"}, clear=False)

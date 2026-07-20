@@ -34,6 +34,7 @@ describe('model display names', () => {
     expect(displayProviderName('atomic')).toBe('Atomic')
     expect(displayProviderName('xai')).toBe('xAI API')
     expect(displayProviderName('xai-oauth')).toBe('xAI')
+    expect(displayProviderName('kimi-coding')).toBe('Kimi / Moonshot')
   })
 
   it('combines readable provider and model labels', () => {

@@ -9,7 +9,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   gemini: 'Google AI Studio',
   huggingface: 'Hugging Face',
   'kimi-coding-cn': 'Kimi Moonshot China',
-  'kimi-coding': 'Kimi Coding Plan',
+  'kimi-coding': 'Kimi / Moonshot',
   lmstudio: 'LM Studio',
   minimax: 'MiniMax',
   'minimax-cn': 'MiniMax China',

@@ -1874,7 +1874,7 @@ def list_authenticated_providers(
     from hermes_cli.models import (
         OPENROUTER_MODELS, _PROVIDER_MODELS,
         _MODELS_DEV_PREFERRED, _merge_with_models_dev, cached_provider_model_ids,
-        clear_provider_models_cache, get_curated_nous_model_ids,
+        clear_provider_models_cache, get_curated_nous_model_ids, normalize_provider,
     )
 
     # Explicit refresh: drop every provider's cached model-id list so the
@@ -2031,6 +2031,17 @@ def list_authenticated_providers(
     from hermes_cli.models import _AGGREGATOR_PROVIDERS as _AGG_PROVIDERS
     from hermes_cli.providers import ALIASES as _PROVIDER_ALIAS_TABLE
     for hermes_id, mdev_id in PROVIDER_TO_MODELS_DEV.items():
+        # PROVIDER_TO_MODELS_DEV contains legacy input aliases as well as real
+        # provider slugs (for example ``kimi`` / ``moonshot`` alongside
+        # ``kimi-coding``).  Picker rows must use the canonical runtime slug;
+        # otherwise the alias row is emitted first and later bypasses both slug
+        # deduplication and model_picker policy keyed by the canonical provider.
+        canonical_hermes_id = normalize_provider(hermes_id)
+        if (
+            canonical_hermes_id != hermes_id
+            and PROVIDER_TO_MODELS_DEV.get(canonical_hermes_id) == mdev_id
+        ):
+            continue
         # Skip vendor names that are merely aliases routing through an
         # aggregator (e.g. bare "openai" → "openrouter"). These are NOT
         # directly-routable providers: emitting them as their own picker
@@ -2120,9 +2131,20 @@ def list_authenticated_providers(
         # the slug, so merge declarations here before applying max_models.
         configured_models: list[str] = []
         if isinstance(user_providers, dict):
-            configured = user_providers.get(hermes_id)
-            if isinstance(configured, dict):
-                configured_models = _declared_model_ids(configured.get("models"))
+            for configured_slug, configured in user_providers.items():
+                configured_slug_norm = str(configured_slug).strip().lower()
+                configured_canonical = normalize_provider(configured_slug_norm)
+                is_same_models_dev_alias = (
+                    configured_canonical == hermes_id
+                    and (
+                        PROVIDER_TO_MODELS_DEV.get(configured_slug_norm) == mdev_id
+                        or configured_slug_norm == mdev_id
+                    )
+                )
+                if configured_slug_norm != hermes_id and not is_same_models_dev_alias:
+                    continue
+                if isinstance(configured, dict):
+                    configured_models.extend(_declared_model_ids(configured.get("models")))
         model_ids = list(dict.fromkeys([*configured_models, *model_ids]))
         total = len(model_ids)
         if hermes_id in _UNCAPPED_PICKER_PROVIDERS:
@@ -2132,12 +2154,15 @@ def list_authenticated_providers(
 
         slug = hermes_id
         pinfo = _mdev_pinfo(mdev_id)
-        display_name = pinfo.name if pinfo else mdev_id
+        # models.dev calls the combined Kimi route "Kimi For Coding", but this
+        # provider also serves ordinary pay-as-you-go Moonshot API keys.  Keep
+        # the shared label neutral rather than implying a Coding Plan account.
+        display_name = "Kimi / Moonshot" if slug == "kimi-coding" else (pinfo.name if pinfo else mdev_id)
 
         results.append({
             "slug": slug,
             "name": display_name,
-            "is_current": slug == current_provider or mdev_id == current_provider,
+            "is_current": slug == normalize_provider(current_provider) or mdev_id == current_provider,
             "is_user_defined": False,
             "models": top,
             "total_models": total,
@@ -2418,7 +2443,17 @@ def list_authenticated_providers(
                 continue
             # Skip if this slug was already emitted (e.g. canonical provider
             # with the same name) or will be picked up by section 4.
-            if ep_name.lower() in seen_slugs:
+            ep_name_norm = str(ep_name).strip().lower()
+            ep_name_canonical = normalize_provider(ep_name_norm)
+            is_emitted_models_dev_alias = (
+                ep_name_canonical in seen_slugs
+                and (
+                    PROVIDER_TO_MODELS_DEV.get(ep_name_norm)
+                    == PROVIDER_TO_MODELS_DEV.get(ep_name_canonical)
+                    or ep_name_norm == PROVIDER_TO_MODELS_DEV.get(ep_name_canonical)
+                )
+            )
+            if ep_name_norm in seen_slugs or is_emitted_models_dev_alias:
                 continue
             display_name = ep_cfg.get("name", "") or ep_name
             # ``base_url`` is Hermes's canonical write key (matches
