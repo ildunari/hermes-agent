@@ -169,7 +169,7 @@ describe('ModelMenuPanel runtime routing', () => {
       } as ClientSessionState
     })
     const { content } = renderPanel()
-    expect(await content.findByText(/openai: shared-model/)).toBeTruthy()
-    expect(await content.findByText(/anthropic: shared-model/)).toBeTruthy()
+    expect(await content.findByText(/OpenAI: shared-model/)).toBeTruthy()
+    expect(await content.findByText(/Anthropic: shared-model/)).toBeTruthy()
   })
 })

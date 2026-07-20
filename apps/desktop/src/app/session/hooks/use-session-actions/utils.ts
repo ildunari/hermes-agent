@@ -2,6 +2,7 @@ import { getSession } from '@/hermes'
 import { assistantTextPart, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
+import { parseRuntimeRouting } from '@/lib/runtime-routing'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { requestDesktopOnboarding } from '@/store/onboarding'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
@@ -514,7 +515,7 @@ export function applyRuntimeInfo(info: SessionRuntimeInfo | undefined): SessionR
   // Absence is meaningful for backward compatibility: an older backend does
   // not know this transient field, so reconnecting to one must clear routing
   // truth retained from the previous backend rather than display it forever.
-  sessionState.runtimeRouting = info.runtime_routing
+  sessionState.runtimeRouting = parseRuntimeRouting(info.runtime_routing)
 
   if (info.cwd) {
     setCurrentCwd(info.cwd)

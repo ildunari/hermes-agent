@@ -20,10 +20,11 @@ let handleEvent: ((event: RpcEvent) => void) | null = null
 let refreshHermesConfig: ReturnType<typeof vi.fn<() => Promise<void>>>
 let refreshSessions: ReturnType<typeof vi.fn<() => Promise<void>>>
 let queryClient: QueryClient
+let sessionStates: Map<string, ClientSessionState>
 
 function Harness() {
   const activeSessionIdRef = useRef<string | null>(ACTIVE_SID)
-  const sessionStateByRuntimeIdRef = useRef(new Map<string, ClientSessionState>())
+  const sessionStateByRuntimeIdRef = useRef(sessionStates)
 
   const stream = useMessageStream({
     activeSessionIdRef,
@@ -61,6 +62,7 @@ beforeEach(() => {
   refreshHermesConfig = vi.fn<() => Promise<void>>(async () => undefined)
   refreshSessions = vi.fn<() => Promise<void>>(async () => undefined)
   queryClient = new QueryClient()
+  sessionStates = new Map()
   setCurrentModel('')
   setCurrentProvider('')
 })
@@ -133,6 +135,34 @@ describe('session.info model-options invalidation gating', () => {
     sessionInfo(ACTIVE_SID, { model: 'm2', provider: 'p1', running: true })
 
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['model-options', ACTIVE_SID] })
+  })
+})
+
+describe('runtime.route validation', () => {
+  it('ignores a malformed schema-v1 event without crashing or replacing known routing', async () => {
+    await mountStream()
+
+    const knownRouting = {
+      schema_version: 1 as const,
+      state: 'fallback_activated' as const,
+      selected: { model: 'primary', provider: 'openai' },
+      runtime: { model: 'backup', provider: 'anthropic' },
+      fallback: { active: true, reason: 'rate_limit', chain_index: 0 }
+    }
+
+    sessionStates.set(ACTIVE_SID, { ...createClientSessionState(), runtimeRouting: knownRouting })
+
+    expect(() =>
+      act(() =>
+        handleEvent!({
+          payload: { ...knownRouting, runtime: { model: 'backup', provider: null } },
+          session_id: ACTIVE_SID,
+          type: 'runtime.route'
+        })
+      )
+    ).not.toThrow()
+
+    expect(sessionStates.get(ACTIVE_SID)?.runtimeRouting).toBe(knownRouting)
   })
 })
 

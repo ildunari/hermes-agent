@@ -4,7 +4,7 @@ import type { ChatMessage } from '@/lib/chat-messages'
 import { $approvalModes, approvalModeForProfile } from '@/store/approval-mode'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $currentUsage, setCurrentUsage } from '@/store/session'
-import type { SessionInfo } from '@/types/hermes'
+import type { SessionInfo, SessionRuntimeInfo } from '@/types/hermes'
 
 import {
   appendLiveSessionProjection,
@@ -57,6 +57,20 @@ describe('applyRuntimeInfo approval mode', () => {
 
   it('clears transient routing when an older backend omits the field', () => {
     const patch = applyRuntimeInfo({ model: 'selected', provider: 'openai' })
+    expect(patch).toHaveProperty('runtimeRouting', undefined)
+  })
+
+  it('clears transient routing when session.info contains malformed schema-v1 data', () => {
+    const patch = applyRuntimeInfo({
+      runtime_routing: {
+        schema_version: 1,
+        state: 'finished',
+        selected: { model: 'selected', provider: 'openai' },
+        runtime: { model: 'fallback', provider: 'anthropic' },
+        fallback: { active: 'true', reason: 'rate_limit', chain_index: 0 }
+      }
+    } as unknown as SessionRuntimeInfo)
+
     expect(patch).toHaveProperty('runtimeRouting', undefined)
   })
 })

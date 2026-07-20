@@ -8,6 +8,7 @@ import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { ChevronDown } from '@/lib/icons'
+import { displayProviderName } from '@/lib/model-display-name'
 import { formatModelStatusLabel } from '@/lib/model-status-label'
 import { isRuntimeFallback } from '@/lib/runtime-routing'
 import { cn } from '@/lib/utils'
@@ -76,7 +77,8 @@ export function ModelPill({
           <span>{formatModelStatusLabel(currentModel, { fastMode, reasoningEffort })}</span>
           {routedFallback && (
             <span className="ml-1 opacity-60">
-              · {routeLabel} · {formatModelStatusLabel(routedFallback.runtime.model)}
+              · {routeLabel} · {displayProviderName(routedFallback.runtime.provider)}:{' '}
+              {formatModelStatusLabel(routedFallback.runtime.model)}
             </span>
           )}
         </span>

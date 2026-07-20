@@ -1,17 +1,33 @@
 import type { GatewayEventPayload } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
+import { parseRuntimeRouting } from '@/lib/runtime-routing'
 
 import type { ClientSessionState } from '../../../types'
 
 type SessionRuntimeStatePatch = Partial<
   Pick<
     ClientSessionState,
-    'branch' | 'cwd' | 'fast' | 'model' | 'personality' | 'provider' | 'reasoningEffort' | 'serviceTier' | 'yolo'
+    | 'branch'
+    | 'cwd'
+    | 'fast'
+    | 'model'
+    | 'personality'
+    | 'provider'
+    | 'reasoningEffort'
+    | 'runtimeRouting'
+    | 'serviceTier'
+    | 'yolo'
   >
 >
 
 export function sessionInfoStatePatch(payload: GatewayEventPayload | undefined): SessionRuntimeStatePatch {
   const patch: SessionRuntimeStatePatch = {}
+
+  // A present malformed field clears stale routing; ordinary session.info
+  // heartbeats from older backends that do not advertise it remain no-ops.
+  if (payload && Object.hasOwn(payload, 'runtime_routing')) {
+    patch.runtimeRouting = parseRuntimeRouting(payload.runtime_routing)
+  }
 
   if (typeof payload?.model === 'string') {
     patch.model = payload.model || ''

@@ -222,11 +222,11 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
       {isRuntimeFallback(routing) && (
         <DropdownMenuLabel className="space-y-0.5 px-3 py-2 text-[11px] font-normal text-(--ui-text-tertiary)">
           <div>
-            {t.shell.statusbar.modelSelected} · {routing.selected.provider}: {routing.selected.model}
+            {t.shell.statusbar.modelSelected} · {displayProviderName(routing.selected.provider)}: {routing.selected.model}
           </div>
           <div>
             {routing.state === 'finished' ? t.shell.statusbar.modelLastResponse : t.shell.statusbar.modelRunning} ·{' '}
-            {routing.runtime.provider}: {routing.runtime.model}
+            {displayProviderName(routing.runtime.provider)}: {routing.runtime.model}
           </div>
         </DropdownMenuLabel>
       )}

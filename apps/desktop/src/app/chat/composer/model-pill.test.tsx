@@ -113,7 +113,7 @@ describe('ModelPill runtime routing', () => {
 
     const button = screen.getByRole('button')
     expect(button.textContent).toContain('Shared Model')
-    expect(button.textContent).toContain('· Running ·')
+    expect(button.textContent).toContain('· Running · Anthropic: Shared Model')
     expect(button.getAttribute('aria-label')).toContain('anthropic: shared-model')
     expect(button.getAttribute('aria-label')).toContain('openai: shared-model')
   })

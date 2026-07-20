@@ -12,6 +12,7 @@ import { playCompletionSound } from '@/lib/completion-sound'
 import { resolveGatewayEventSessionId } from '@/lib/gateway-events'
 import { triggerHaptic } from '@/lib/haptics'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
+import { parseRuntimeRouting } from '@/lib/runtime-routing'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
 import { setSessionCompacting } from '@/store/compaction'
@@ -47,7 +48,7 @@ import { clearActiveSessionTodos } from '@/store/todos'
 import { recordToolDiff } from '@/store/tool-diffs'
 import { reportInstallMethodWarning } from '@/store/updates'
 import { notifyWorkspaceChanged, toolMayMutateFiles } from '@/store/workspace-events'
-import type { RpcEvent, RuntimeRouting } from '@/types/hermes'
+import type { RpcEvent } from '@/types/hermes'
 
 import type { ClientSessionState } from '../../../types'
 
@@ -453,12 +454,12 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       } else if (event.type === 'runtime.route') {
         // Runtime routing is backend truth scoped to this event's session. It
         // must never flow through selected-model setters or persistence.
-        const routingPayload = payload as unknown as Partial<RuntimeRouting> | undefined
+        const routing = parseRuntimeRouting(payload)
 
-        if (sessionId && routingPayload?.schema_version === 1) {
+        if (sessionId && routing) {
           updateSessionState(sessionId, state => ({
             ...state,
-            runtimeRouting: routingPayload as RuntimeRouting
+            runtimeRouting: routing
           }))
         }
       } else if (event.type === 'message.complete') {

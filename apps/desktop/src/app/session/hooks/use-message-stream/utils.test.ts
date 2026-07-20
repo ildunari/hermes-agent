@@ -38,6 +38,23 @@ describe('sessionInfoStatePatch / hasSessionInfoStatePatch', () => {
     expect(hasSessionInfoStatePatch(patch)).toBe(true)
     expect(hasSessionInfoStatePatch(sessionInfoStatePatch(payload({})))).toBe(false)
   })
+
+  it('clears malformed session.info routing instead of storing it', () => {
+    const patch = sessionInfoStatePatch(
+      payload({
+        runtime_routing: {
+          schema_version: 1,
+          state: 'finished',
+          selected: { model: 'primary', provider: 'openai' },
+          runtime: { model: 'backup', provider: 'anthropic' },
+          fallback: { active: true, reason: 'rate_limit', chain_index: '0' }
+        }
+      })
+    )
+
+    expect(patch).toHaveProperty('runtimeRouting', undefined)
+    expect(hasSessionInfoStatePatch(patch)).toBe(true)
+  })
 })
 
 describe('delegateTaskPayloads', () => {
