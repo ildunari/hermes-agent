@@ -11,6 +11,7 @@ import asyncio
 import enum
 import json
 import os
+import plistlib
 import pwd
 import re
 import shlex
@@ -30,6 +31,13 @@ LAUNCHCTL_BIN = "/bin/launchctl"
 SUDO_BIN = "/usr/bin/sudo"
 VISUDO_BIN = "/usr/sbin/visudo"
 SUDOERS_DROPIN = Path("/private/etc/sudoers.d/hermes-restart-surfaces")
+USER_LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+SYSTEM_LAUNCH_DAEMONS_DIR = Path("/Library/LaunchDaemons")
+
+
+class BootstrapPolicy(enum.Enum):
+    NEVER = "never"
+    MULTIPLEX_CONFIGURED = "multiplex_configured"
 
 
 @dataclass(frozen=True)
@@ -40,6 +48,7 @@ class RestartTarget:
     label: str
     required: bool = True
     description: str = ""
+    bootstrap_policy: BootstrapPolicy = BootstrapPolicy.NEVER
 
     def domain(self, uid: int) -> str:
         return self.domain_template.format(uid=uid)
@@ -57,7 +66,12 @@ class RestartVerification(enum.Enum):
 
 
 GATEWAY_TARGETS: tuple[RestartTarget, ...] = (
-    RestartTarget("user/{uid}", "ai.hermes.gateway", description="default Hermes gateway"),
+    RestartTarget(
+        "user/{uid}",
+        "ai.hermes.gateway",
+        description="default Hermes gateway",
+        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+    ),
     RestartTarget("user/{uid}", "ai.hermes.gateway-gpt", description="GPT Hermes gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-coding", required=False, description="coding profile gateway"),
     RestartTarget("user/{uid}", "ai.hermes.gateway-email-assistant", required=False, description="email-assistant profile gateway"),
@@ -76,12 +90,41 @@ GATEWAY_TARGETS: tuple[RestartTarget, ...] = (
     # The WebUI/dashboard LaunchAgent owns the local dashboard backend on 9119.
     # It must move with /restart-gateways after smart updates; otherwise the
     # gateways can restart on new code while the dashboard keeps an old process.
-    RestartTarget("user/{uid}", "ai.hermes.webui", description="Hermes WebUI/dashboard"),
-    RestartTarget("system", "com.kosta.hermes-dashboard-system", required=False, description="dashboard backend on 9119"),
-    RestartTarget("system", "com.kosta.hermes-dashboard-proxy-system", required=False, description="dashboard path proxy"),
-    RestartTarget("user/{uid}", "ai.hermes.dashboard-host-rewrite-proxy", required=False, description="WebUI dashboard host rewrite proxy"),
+    RestartTarget(
+        "user/{uid}",
+        "ai.hermes.webui",
+        description="Hermes WebUI/dashboard",
+        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+    ),
+    RestartTarget(
+        "system",
+        "com.kosta.hermes-dashboard-system",
+        required=False,
+        description="dashboard backend on 9119",
+        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+    ),
+    RestartTarget(
+        "system",
+        "com.kosta.hermes-dashboard-proxy-system",
+        required=False,
+        description="dashboard path proxy",
+        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+    ),
+    RestartTarget(
+        "user/{uid}",
+        "ai.hermes.dashboard-host-rewrite-proxy",
+        required=False,
+        description="WebUI dashboard host rewrite proxy",
+        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+    ),
     # Dedicated remote dashboard backend for MacBook Hermes Desktop.
-    RestartTarget("user/{uid}", "ai.hermes.desktop-remote-dashboard", required=False, description="MacBook Hermes Desktop remote dashboard on 9120"),
+    RestartTarget(
+        "user/{uid}",
+        "ai.hermes.desktop-remote-dashboard",
+        required=False,
+        description="MacBook Hermes Desktop remote dashboard on 9120",
+        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+    ),
 )
 
 FULL_HERMES_TARGETS: tuple[RestartTarget, ...] = (
@@ -160,6 +203,8 @@ GATEWAY_STATUS_PATHS: dict[str, Path] = {
 # hiding a failed restart forever while covering normal long agent runs.
 DEFAULT_SAFE_WAIT_TIMEOUT = 24 * 60 * 60
 DEFAULT_SAFE_WAIT_INTERVAL = 2.0
+DEFAULT_BOOTSTRAP_WAIT_TIMEOUT = 10.0
+DEFAULT_BOOTSTRAP_WAIT_INTERVAL = 0.25
 # The system dashboard LaunchDaemon uses ThrottleInterval=30. A failed first
 # launch (for example, while an updated editable checkout is refreshing
 # bytecode) cannot be retried before that interval expires, so readiness must
@@ -368,6 +413,11 @@ def _describe_plan(
         f"Includes: {includes}",
         "Launchd targets (configured candidates; user/gui twins resolved at execution):",
     ]
+    if multiplex_config is not None:
+        lines.append(
+            "Bootstrap policy: load configured root/WebUI/dashboard candidates; "
+            "never auto-start named profile gateways"
+        )
     for target in _targets_for_scope(normalized, multiplex_config):
         req = "required" if target.required else "best-effort"
         desc = f" — {target.description}" if target.description else ""
@@ -399,14 +449,20 @@ def system_restart_sudoers_content(username: str | None = None) -> str:
     user = username or _default_sudoers_user()
     if not user or any(ch.isspace() or ch in {":", ",", "=", "\\"} for ch in user):
         raise RestartError(f"Unsafe sudoers username: {user!r}")
-    commands = ", ".join(
+    commands = [
         f"{LAUNCHCTL_BIN} kickstart -k {target.service_name(os.getuid())}"
         for target in system_restart_targets()
+    ]
+    commands.extend(
+        f"{LAUNCHCTL_BIN} bootstrap system "
+        f"{SYSTEM_LAUNCH_DAEMONS_DIR / f'{target.label}.plist'}"
+        for target in system_restart_targets()
+        if target.bootstrap_policy is BootstrapPolicy.MULTIPLEX_CONFIGURED
     )
     return (
         "# Managed by Hermes Agent. Allows unattended restarts only for the\n"
         "# Hermes-owned system LaunchDaemons used by /restart-gateways and /restart-hermes.\n"
-        f"Cmnd_Alias HERMES_RESTART_SURFACES = {commands}\n"
+        f"Cmnd_Alias HERMES_RESTART_SURFACES = {', '.join(commands)}\n"
         f"{user} ALL=(root) NOPASSWD: HERMES_RESTART_SURFACES\n"
     )
 
@@ -448,6 +504,49 @@ def _append_log(message: str) -> None:
         fh.write(f"[{_timestamp()}] {message}\n")
 
 
+_SENSITIVE_KEY_MARKERS = (
+    "password",
+    "passwd",
+    "passphrase",
+    "passcode",
+    "token",
+    "secret",
+    "key",
+    "credential",
+    "auth",
+    "cookie",
+    "bearer",
+    "signature",
+)
+_KEY_VALUE_PATTERN = re.compile(
+    r"(?P<key>[\"']?[A-Za-z0-9_.-]+[\"']?)\s*(?P<separator>=>|=|:)"
+)
+
+
+def _redact_sensitive_assignments(text: str) -> str:
+    redacted: list[str] = []
+    for line in text.splitlines():
+        for match in _KEY_VALUE_PATTERN.finditer(line):
+            key = match.group("key").strip("\"'").lower()
+            if any(marker in key for marker in _SENSITIVE_KEY_MARKERS):
+                line = f"{line[:match.end()]}[REDACTED]"
+                break
+        redacted.append(line)
+    return "\n".join(redacted)
+
+
+def _launchctl_output_summary(output: str) -> str:
+    state_match = re.search(
+        r"^\s*state\s*=\s*([A-Za-z0-9_.-]+)\s*$",
+        output,
+        re.MULTILINE,
+    )
+    pid_match = re.search(r"^\s*pid\s*=\s*(\d+)\s*$", output, re.MULTILINE)
+    state = state_match.group(1) if state_match else "unknown"
+    pid = pid_match.group(1) if pid_match else "none"
+    return f"state={state} pid={pid}"
+
+
 def _run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     printable = " ".join(shlex.quote(part) for part in cmd)
     _append_log(f"$ {printable}")
@@ -466,10 +565,22 @@ def _run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[st
         proc = subprocess.CompletedProcess(cmd, 124, stdout, stderr)
     stdout = (proc.stdout or "").strip()
     stderr = (proc.stderr or "").strip()
-    if stdout:
-        _append_log(f"stdout: {stdout[:2000]}")
-    if stderr:
-        _append_log(f"stderr: {stderr[:2000]}")
+    if cmd[:2] == [LAUNCHCTL_BIN, "print"]:
+        loaded = "yes" if proc.returncode == 0 else "no"
+        _append_log(f"launchctl: loaded={loaded} {_launchctl_output_summary(stdout)}")
+        detail = stderr or (stdout if proc.returncode != 0 else "")
+        if detail:
+            _append_log(f"launchctl error: {_redact_sensitive_assignments(detail)[:2000]}")
+    elif LAUNCHCTL_BIN in cmd:
+        if stdout:
+            _append_log(f"stdout: {_redact_sensitive_assignments(stdout)[:2000]}")
+        if stderr:
+            _append_log(f"stderr: {_redact_sensitive_assignments(stderr)[:2000]}")
+    else:
+        if stdout:
+            _append_log(f"stdout: {stdout[:2000]}")
+        if stderr:
+            _append_log(f"stderr: {stderr[:2000]}")
     _append_log(f"exit={proc.returncode}")
     return proc
 
@@ -823,6 +934,106 @@ def _resolve_loaded_service(service: str) -> tuple[str, subprocess.CompletedProc
     return service, result
 
 
+def _target_plist_path(target: RestartTarget) -> Path | None:
+    if target.domain_template == "system":
+        return SYSTEM_LAUNCH_DAEMONS_DIR / f"{target.label}.plist"
+    if target.domain_template.startswith(("user/", "gui/")):
+        return USER_LAUNCH_AGENTS_DIR / f"{target.label}.plist"
+    return None
+
+
+def _bootstrap_domains(target: RestartTarget, uid: int, plist_path: Path) -> tuple[str, ...]:
+    requested = target.domain(uid)
+    if requested == "system":
+        return (requested,)
+    alternate_service = _alternate_launchd_service(f"{requested}/{target.label}")
+    alternate = alternate_service.rsplit("/", 1)[0] if alternate_service else None
+    domains = list(dict.fromkeys(domain for domain in (requested, alternate) if domain))
+    try:
+        payload = plistlib.loads(plist_path.read_bytes())
+    except (OSError, plistlib.InvalidFileException):
+        payload = {}
+    raw_session_types = payload.get("LimitLoadToSessionType") if isinstance(payload, dict) else None
+    if isinstance(raw_session_types, str):
+        session_types = {raw_session_types}
+    elif isinstance(raw_session_types, (list, tuple)):
+        session_types = {str(value) for value in raw_session_types}
+    else:
+        session_types = set()
+    gui_domain = f"gui/{uid}"
+    if "Aqua" in session_types and gui_domain in domains:
+        domains.remove(gui_domain)
+        domains.insert(0, gui_domain)
+    return tuple(domains)
+
+
+def _bootstrap_service(domain: str, plist_path: Path) -> subprocess.CompletedProcess[str]:
+    cmd = [LAUNCHCTL_BIN, "bootstrap", domain, str(plist_path)]
+    proc = _run(cmd, timeout=30)
+    if proc.returncode == 0 or domain != "system":
+        return proc
+    sudo = _run([SUDO_BIN, "-n", *cmd], timeout=30)
+    return sudo if sudo.returncode == 0 else proc
+
+
+def _wait_for_target_loaded(
+    requested_service: str,
+    *,
+    timeout: float = DEFAULT_BOOTSTRAP_WAIT_TIMEOUT,
+    interval: float = DEFAULT_BOOTSTRAP_WAIT_INTERVAL,
+) -> tuple[str, subprocess.CompletedProcess[str]]:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        service, result = _resolve_loaded_service(requested_service)
+        if result.returncode == 0 or time.monotonic() >= deadline:
+            return service, result
+        time.sleep(max(0.05, interval))
+
+
+def _bootstrap_targets_before_drain(
+    targets: Iterable[RestartTarget],
+    *,
+    uid: int,
+    enabled: bool,
+) -> list[str]:
+    if not enabled:
+        return []
+    failures: list[str] = []
+    for target in targets:
+        if target.bootstrap_policy is not BootstrapPolicy.MULTIPLEX_CONFIGURED:
+            continue
+        requested_service = target.service_name(uid)
+        service, result = _resolve_loaded_service(requested_service)
+        if result.returncode == 0:
+            continue
+        plist_path = _target_plist_path(target)
+        if plist_path is None or not plist_path.is_file():
+            message = f"{requested_service} is not loaded and has no configured launchd plist"
+            _append_log(message)
+            if target.required:
+                failures.append(message)
+            continue
+        for domain in _bootstrap_domains(target, uid, plist_path):
+            bootstrap = _bootstrap_service(domain, plist_path)
+            if bootstrap.returncode != 0:
+                service, result = _resolve_loaded_service(requested_service)
+                if result.returncode == 0:
+                    _append_log(f"configured target became loaded as {service}")
+                    break
+                continue
+            service, result = _wait_for_target_loaded(requested_service)
+            if result.returncode == 0:
+                _append_log(f"bootstrapped configured target {service} from {plist_path}")
+                break
+        if result.returncode == 0:
+            continue
+        message = f"{requested_service} could not bootstrap from {plist_path}"
+        _append_log(message)
+        if target.required:
+            failures.append(message)
+    return failures
+
+
 def _launchctl_pid(result: subprocess.CompletedProcess[str]) -> int | None:
     """Extract a positive PID from ``launchctl print`` output."""
     match = re.search(r"^\s*pid\s*=\s*(\d+)\s*$", result.stdout or "", re.MULTILINE)
@@ -1078,7 +1289,25 @@ def restart_scope(
         time.sleep(delay)
 
     failures: list[str] = []
-    targets = targets_for_scope(normalized)
+    targets = (
+        _targets_for_scope(normalized, multiplex_config)
+        if multiplex_config is not None
+        else targets_for_scope(normalized)
+    )
+    failures.extend(
+        _bootstrap_targets_before_drain(
+            targets,
+            uid=uid,
+            enabled=multiplex_config is not None,
+        )
+    )
+    if failures:
+        _append_log("restart bootstrap failed: " + "; ".join(failures))
+        message = _completion_message(normalized, 1)
+        _notify_origin(notify_origin_json, message)
+        _notify_tty(notify_tty, message)
+        _write_completion_marker(completion_marker, normalized, 1, message)
+        return 1
     safe, busy = _wait_for_safe_restart(
         targets,
         timeout=safe_wait_timeout,

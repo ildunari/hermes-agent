@@ -1,9 +1,11 @@
 import json
+import plistlib
 import subprocess
 
 import pytest
 
 from hermes_cli.restart_surfaces import (
+    BootstrapPolicy,
     RestartTarget,
     RestartVerification,
     _desktop_busy_details as real_desktop_busy_details,
@@ -64,6 +66,14 @@ def _multiplex_config(*, api_port=8642, webhook_port=8644, bluebubbles_port=8647
     }
 
 
+def _write_launchd_plist(path, label, *, session_types=None):
+    payload = {"Label": label}
+    if session_types is not None:
+        payload["LimitLoadToSessionType"] = session_types
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(plistlib.dumps(payload))
+
+
 def test_gateway_scope_plan_includes_profile_gateway_domains():
     plan = describe_plan("gateways", uid=503)
     assert "user/503/ai.hermes.gateway" in plan
@@ -99,6 +109,7 @@ def test_multiplex_gateway_scope_plan_uses_single_root_topology(monkeypatch):
     plan = describe_plan("gateways", uid=503)
 
     assert "Includes: single root multiplex gateway, WebUI/dashboard" in plan
+    assert "never auto-start named profile gateways" in plan
     assert "user/503/ai.hermes.gateway (required)" in plan
     assert "user/gui twins resolved at execution" in plan
     assert "user/503/ai.hermes.webui" in plan
@@ -152,6 +163,237 @@ def test_multiplex_topology_probe_uses_readonly_config_without_gateway_discovery
     )
 
     assert real_multiplex_gateway_config() is config
+
+
+def test_multiplex_restart_bootstraps_required_services_before_drain(
+    monkeypatch,
+    tmp_path,
+):
+    from hermes_cli import restart_surfaces
+
+    uid = restart_surfaces.os.getuid()
+    targets = (
+        RestartTarget(
+            "user/{uid}",
+            "ai.hermes.gateway",
+            bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+        ),
+        RestartTarget(
+            "user/{uid}",
+            "ai.hermes.webui",
+            bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+        ),
+    )
+    launch_agents = tmp_path / "LaunchAgents"
+    for target in targets:
+        _write_launchd_plist(launch_agents / f"{target.label}.plist", target.label)
+
+    loaded = set()
+    events = []
+
+    def fake_run(cmd, *, timeout=30):
+        if cmd[:2] == ["/bin/launchctl", "print"]:
+            service = cmd[2]
+            return subprocess.CompletedProcess(
+                cmd,
+                0 if service in loaded else 1,
+                stdout="\tstate = running\n\tpid = 400\n" if service in loaded else "",
+                stderr="" if service in loaded else "Could not find service",
+            )
+        if cmd[:2] == ["/bin/launchctl", "bootstrap"]:
+            label = cmd[3].rsplit("/", 1)[-1].removesuffix(".plist")
+            loaded.add(f"{cmd[2]}/{label}")
+            events.append(f"bootstrap:{label}")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[:3] == ["/bin/launchctl", "kickstart", "-k"]:
+            events.append(f"kick:{cmd[-1].rsplit('/', 1)[-1]}")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(cmd)
+
+    def fake_drain(_targets, **_kwargs):
+        assert f"user/{uid}/ai.hermes.gateway" in loaded
+        assert f"user/{uid}/ai.hermes.webui" in loaded
+        events.append("drain")
+        return True, []
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "USER_LAUNCH_AGENTS_DIR", launch_agents)
+    monkeypatch.setattr(restart_surfaces, "_multiplex_gateway_config", _multiplex_config)
+    monkeypatch.setattr(restart_surfaces, "_targets_for_scope", lambda _scope, _config: targets)
+    monkeypatch.setattr(restart_surfaces, "_verification_ports_for_scope", lambda *_args: ())
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr(restart_surfaces, "_wait_for_safe_restart", fake_drain)
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_graceful_restart_gateway",
+        lambda *_args, **_kwargs: (RestartVerification.RESTARTED, None),
+    )
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_wait_for_scope_health",
+        lambda *_args, **_kwargs: ([], []),
+    )
+    monkeypatch.setattr(restart_surfaces.time, "sleep", lambda *_args: None)
+
+    assert restart_surfaces.restart_scope("gateways", delay=0) == 0
+    assert events[:3] == [
+        "bootstrap:ai.hermes.gateway",
+        "bootstrap:ai.hermes.webui",
+        "drain",
+    ]
+
+
+def test_named_profile_gateway_is_never_bootstrapped(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    named = next(
+        target
+        for target in restart_surfaces.GATEWAY_TARGETS
+        if target.label == "ai.hermes.gateway-poke" and target.domain_template.startswith("user/")
+    )
+    launch_agents = tmp_path / "LaunchAgents"
+    _write_launchd_plist(launch_agents / f"{named.label}.plist", named.label)
+
+    monkeypatch.setattr(restart_surfaces, "USER_LAUNCH_AGENTS_DIR", launch_agents)
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("named profile must not be probed or bootstrapped"),
+    )
+
+    assert named.bootstrap_policy is BootstrapPolicy.NEVER
+    assert restart_surfaces._bootstrap_targets_before_drain(
+        (named,),
+        uid=503,
+        enabled=True,
+    ) == []
+
+
+def test_nonmultiplex_restart_never_bootstraps_configured_targets(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget(
+        "user/{uid}",
+        "ai.hermes.gateway",
+        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+    )
+    launch_agents = tmp_path / "LaunchAgents"
+    _write_launchd_plist(launch_agents / f"{target.label}.plist", target.label)
+    monkeypatch.setattr(restart_surfaces, "USER_LAUNCH_AGENTS_DIR", launch_agents)
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("legacy topology must not bootstrap"),
+    )
+
+    assert restart_surfaces._bootstrap_targets_before_drain(
+        (target,),
+        uid=503,
+        enabled=False,
+    ) == []
+
+
+def test_bootstrap_prefers_gui_for_aqua_launchagent(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget(
+        "user/{uid}",
+        "ai.hermes.webui",
+        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+    )
+    launch_agents = tmp_path / "LaunchAgents"
+    _write_launchd_plist(
+        launch_agents / f"{target.label}.plist",
+        target.label,
+        session_types=["Aqua", "Background"],
+    )
+    loaded = set()
+    bootstrap_domains = []
+
+    def fake_run(cmd, *, timeout=30):
+        if cmd[:2] == ["/bin/launchctl", "print"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0 if cmd[2] in loaded else 1,
+                stdout="\tstate = running\n\tpid = 500\n" if cmd[2] in loaded else "",
+                stderr="",
+            )
+        if cmd[:2] == ["/bin/launchctl", "bootstrap"]:
+            bootstrap_domains.append(cmd[2])
+            loaded.add(f"{cmd[2]}/{target.label}")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "USER_LAUNCH_AGENTS_DIR", launch_agents)
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr(restart_surfaces.time, "sleep", lambda *_args: None)
+
+    assert restart_surfaces._bootstrap_targets_before_drain(
+        (target,),
+        uid=503,
+        enabled=True,
+    ) == []
+    assert bootstrap_domains == ["gui/503"]
+
+
+def test_system_bootstrap_uses_narrow_noninteractive_sudo_fallback(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget(
+        "system",
+        "com.kosta.hermes-dashboard-system",
+        required=False,
+        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+    )
+    launch_daemons = tmp_path / "LaunchDaemons"
+    plist_path = launch_daemons / f"{target.label}.plist"
+    _write_launchd_plist(plist_path, target.label)
+    loaded = False
+    calls = []
+
+    def fake_run(cmd, *, timeout=30):
+        nonlocal loaded
+        calls.append(cmd)
+        if cmd[:2] == ["/bin/launchctl", "print"]:
+            return subprocess.CompletedProcess(
+                cmd,
+                0 if loaded else 1,
+                stdout="\tstate = running\n" if loaded else "",
+                stderr="",
+            )
+        if cmd == ["/bin/launchctl", "bootstrap", "system", str(plist_path)]:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Operation not permitted")
+        if cmd == [
+            "/usr/bin/sudo",
+            "-n",
+            "/bin/launchctl",
+            "bootstrap",
+            "system",
+            str(plist_path),
+        ]:
+            loaded = True
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(restart_surfaces, "SYSTEM_LAUNCH_DAEMONS_DIR", launch_daemons)
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+    monkeypatch.setattr(restart_surfaces.time, "sleep", lambda *_args: None)
+
+    assert restart_surfaces._bootstrap_targets_before_drain(
+        (target,),
+        uid=503,
+        enabled=True,
+    ) == []
+    assert [
+        "/usr/bin/sudo",
+        "-n",
+        "/bin/launchctl",
+        "bootstrap",
+        "system",
+        str(plist_path),
+    ] in calls
 
 
 def test_full_hermes_scope_includes_known_surfaces():
@@ -577,6 +819,10 @@ def test_system_restart_sudoers_content_is_narrow():
 
     assert "Kosta ALL=(root) NOPASSWD: HERMES_RESTART_SURFACES" in content
     assert "/bin/launchctl kickstart -k system/com.kosta.hermes-dashboard-system" in content
+    assert (
+        "/bin/launchctl bootstrap system "
+        "/Library/LaunchDaemons/com.kosta.hermes-dashboard-system.plist"
+    ) in content
     assert "/bin/launchctl kickstart -k system/com.kosta.hermes-workspace-proxy-system" in content
     assert "ALL" not in content.split("Cmnd_Alias HERMES_RESTART_SURFACES = ", 1)[1].split("\n", 1)[0]
     assert "bootout" not in content
@@ -774,6 +1020,57 @@ def test_run_converts_subprocess_timeout_to_failed_process(monkeypatch, tmp_path
     assert proc.returncode == 124
     assert "timed out after 3s" in proc.stderr
     assert "exit=124" in (tmp_path / "restart.log").read_text()
+
+
+def test_launchctl_print_log_suppresses_secret_values_but_keeps_state(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    launchctl_stdout = """\
+service = {
+    state = running
+    pid = 4321
+    environment = {
+        DB_PASSWORD => pass-123
+        ACCESS_TOKEN => tok-456
+        CLIENT_SECRET => secret-789
+        OPENAI_API_KEY => key-abc
+        AUTH_CREDENTIAL => cred-def
+        PATH => /usr/local/bin
+    }
+}
+"""
+    launchctl_stderr = "launchctl diagnostic: retryable read error\nSESSION_COOKIE=cookie-ghi"
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["/bin/launchctl", "print"],
+            0,
+            stdout=launchctl_stdout,
+            stderr=launchctl_stderr,
+        ),
+    )
+
+    proc = restart_surfaces._launchctl_print("gui/503/ai.hermes.gateway")
+
+    assert "pass-123" in proc.stdout
+    log = (tmp_path / "restart.log").read_text()
+    assert "state=running" in log
+    assert "pid=4321" in log
+    assert "retryable read error" in log
+    assert "SESSION_COOKIE=[REDACTED]" in log
+    for forbidden in (
+        "pass-123",
+        "tok-456",
+        "secret-789",
+        "key-abc",
+        "cred-def",
+        "cookie-ghi",
+        "/usr/local/bin",
+    ):
+        assert forbidden not in log
 
 
 def test_optional_system_targets_try_noninteractive_sudo_without_modifying_plists(monkeypatch, tmp_path):
