@@ -140,3 +140,77 @@ def test_cli_restore_model_runtime_prefers_primary_runtime():
     assert stub.agent.model == "old/model"
     assert stub.agent.provider == "openrouter"
     assert stub.agent.calls == []
+
+
+def test_cli_once_restore_preserves_init_fallback_selected_identity():
+    import cli as cli_mod
+    from agent.runtime_routing import emit_runtime_route
+
+    class Agent(_FakeAgent):
+        def __init__(self):
+            super().__init__()
+            self.model = "runtime-backup"
+            self.provider = "openai"
+            self.api_key = "fallback-key"
+            self.base_url = "https://fallback.example/v1"
+            self.api_mode = "chat_completions"
+            self._primary_runtime = {
+                "model": "runtime-backup",
+                "provider": "openai",
+            }
+            self._primary_runtime_restorable = False
+            self._selected_runtime_identity = {
+                "model": "requested-primary",
+                "provider": "missing-provider",
+            }
+            self._fallback_activated = True
+            self._fallback_index = 1
+            self._runtime_route_reason = "authentication"
+            self._rate_limited_until = 0
+
+        def _restore_primary_runtime(self):
+            return False
+
+        def switch_model(self, **kwargs):
+            super().switch_model(**kwargs)
+            self._selected_runtime_identity = {
+                "model": kwargs["new_model"],
+                "provider": kwargs["new_provider"],
+            }
+            self._primary_runtime_restorable = True
+            self._fallback_activated = False
+            self._runtime_route_reason = "unknown"
+
+    stub = _StubCLI()
+    stub.model = "runtime-backup"
+    stub.provider = "openai"
+    stub.requested_provider = "openai"
+    stub.api_key = "fallback-key"
+    stub.base_url = "https://fallback.example/v1"
+    agent = Agent()
+    setattr(stub, "agent", agent)
+    snapshot_runtime = cli_mod.HermesCLI._snapshot_model_runtime.__get__(stub)
+    restore_runtime = cli_mod.HermesCLI._restore_model_runtime_snapshot.__get__(stub)
+    snapshot = snapshot_runtime()
+
+    agent.switch_model(
+        new_model="one-shot",
+        new_provider="anthropic",
+        api_key="one-shot-key",
+        base_url="https://api.anthropic.com",
+        api_mode="anthropic_messages",
+    )
+    restore_runtime(snapshot)
+
+    started = emit_runtime_route(agent, "started")
+    assert started["selected"] == {
+        "model": "requested-primary",
+        "provider": "missing-provider",
+    }
+    assert started["runtime"] == {"model": "runtime-backup", "provider": "openai"}
+    assert started["fallback"] == {
+        "active": True,
+        "reason": "authentication",
+        "chain_index": 0,
+    }
+    assert agent._primary_runtime_restorable is False

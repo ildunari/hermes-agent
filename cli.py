@@ -7939,6 +7939,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "agent_runtime_route_reason": getattr(
                 agent, "_runtime_route_reason", "unknown"
             ) if agent is not None else "unknown",
+            "agent_selected_runtime_identity": copy.deepcopy(
+                getattr(agent, "_selected_runtime_identity", None)
+            ) if agent is not None else None,
         }
 
     def _restore_model_runtime_snapshot(self, snapshot: dict | None) -> None:
@@ -7973,6 +7976,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             agent._runtime_route_reason = snapshot.get(
                 "agent_runtime_route_reason", "unknown"
             )
+            selected = snapshot.get("agent_selected_runtime_identity")
+            if isinstance(selected, dict):
+                agent._selected_runtime_identity = copy.deepcopy(selected)
 
         primary = snapshot.get("agent_primary_runtime")
         if primary and hasattr(agent, "_restore_primary_runtime"):
