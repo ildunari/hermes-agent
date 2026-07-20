@@ -150,6 +150,20 @@ DEFAULT_HEALTH_WAIT_INTERVAL = 0.5
 WEBUI_BUSY_LABELS = frozenset({"ai.hermes.webui"})
 WEBUI_HEALTH_URL = "http://127.0.0.1:8787/health"
 WEBUI_HEALTH_TIMEOUT = 3.0
+DESKTOP_BUSY_LABELS = frozenset({"ai.hermes.desktop-remote-dashboard"})
+DESKTOP_HEALTH_URL = "http://127.0.0.1:9120/health"
+DESKTOP_HEALTH_MARKER = "hermes-dashboard-ok"
+
+
+def _desktop_dashboard_is_running() -> bool:
+    """Return whether the optional remote Desktop dashboard is listening."""
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 9120), timeout=0.5):
+            return True
+    except OSError:
+        return False
 
 
 class RestartError(RuntimeError):
@@ -414,6 +428,43 @@ def _webui_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
     return []
 
 
+def _desktop_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
+    """Report dashboard-backed Desktop turns that a restart would destroy."""
+    if not any(target.label in DESKTOP_BUSY_LABELS for target in targets):
+        return []
+    if not _desktop_dashboard_is_running():
+        return []
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(DESKTOP_HEALTH_URL, timeout=WEBUI_HEALTH_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+        if not isinstance(payload, dict):
+            raise ValueError("health payload is not an object")
+        if "active_runs" not in payload and payload.get("marker") == DESKTOP_HEALTH_MARKER:
+            _append_log(
+                "desktop dashboard uses legacy health payload; allowing one-time upgrade restart"
+            )
+            return []
+        active_runs = payload["active_runs"]
+        if isinstance(active_runs, bool) or not isinstance(active_runs, int):
+            raise ValueError("active_runs is not an integer")
+        if active_runs < 0:
+            raise ValueError("active_runs is negative")
+    except Exception as exc:
+        return [
+            "ai.hermes.desktop-remote-dashboard: health probe unavailable or invalid; "
+            f"refusing restart ({type(exc).__name__})"
+        ]
+    if active_runs > 0:
+        oldest = payload.get("oldest_run_age_seconds")
+        detail = f"ai.hermes.desktop-remote-dashboard: active_runs={active_runs}"
+        if oldest is not None:
+            detail += f", oldest_run_age_seconds={oldest}"
+        return [detail]
+    return []
+
+
 def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
     busy: list[str] = []
     for target in targets:
@@ -439,6 +490,7 @@ def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
     return busy
 
 
+
 def _wait_for_safe_restart(
     targets: Iterable[RestartTarget],
     *,
@@ -449,7 +501,11 @@ def _wait_for_safe_restart(
     deadline = time.monotonic() + max(0.0, timeout)
     last_busy: list[str] = []
     while True:
-        last_busy = _gateway_busy_details(targets) + _webui_busy_details(targets)
+        last_busy = (
+            _gateway_busy_details(targets)
+            + _webui_busy_details(targets)
+            + _desktop_busy_details(targets)
+        )
         if not last_busy:
             _append_log("safe restart check passed")
             return True, []
@@ -477,6 +533,27 @@ def _wait_for_webui_safe_restart(
         if time.monotonic() >= deadline:
             return False, last_busy
         time.sleep(max(0.1, interval))
+
+
+def _wait_for_desktop_safe_restart(
+    target: RestartTarget,
+    *,
+    timeout: float = DEFAULT_SAFE_WAIT_TIMEOUT,
+    interval: float = DEFAULT_SAFE_WAIT_INTERVAL,
+) -> tuple[bool, list[str]]:
+    """Re-check Desktop turns at the dashboard restart boundary."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    last_busy: list[str] = []
+    while True:
+        last_busy = _desktop_busy_details((target,))
+        if not last_busy:
+            _append_log("final Desktop safe restart check passed")
+            return True, []
+        _append_log("final Desktop safe restart waiting: " + " | ".join(last_busy))
+        if time.monotonic() >= deadline:
+            return False, last_busy
+        time.sleep(max(0.1, interval))
+
 
 
 def _completion_message(scope: str, exit_code: int) -> str:
@@ -646,7 +723,16 @@ def _graceful_restart_gateway(
         replacement_pid = _launchctl_pid(current) if current.returncode == 0 else None
         if replacement_pid is not None:
             if replacement_pid != pid:
-                return RestartVerification.RESTARTED, None
+                # A launchd PID change proves the supervisor started a replacement,
+                # but it does not prove the old process released its listeners or
+                # that gateway_state.json belongs to the replacement yet. Waiting
+                # for both prevents the old/new overlap that produced transient
+                # token and port-binding conflicts during chained restarts.
+                if _pid_is_alive(pid):
+                    time.sleep(0.25)
+                    continue
+                if _gateway_pid(target, current) == replacement_pid:
+                    return RestartVerification.RESTARTED, None
         else:
             # A failed/empty launchctl read is not proof that the old PID
             # survived. Retry briefly; if launchd remains unreadable, dedupe the
@@ -658,7 +744,10 @@ def _graceful_restart_gateway(
                 if retry_pid is None:
                     continue
                 if retry_pid != pid:
-                    return RestartVerification.RESTARTED, None
+                    if _pid_is_alive(pid):
+                        continue
+                    if _gateway_pid(target, retry) == retry_pid:
+                        return RestartVerification.RESTARTED, None
                 break
             else:
                 return (
@@ -834,6 +923,17 @@ def restart_scope(
             )
             if not safe:
                 msg = "final WebUI safe restart wait timed out: " + " | ".join(busy)
+                failures.append(msg)
+                _append_log(msg)
+                break
+        if target.label in DESKTOP_BUSY_LABELS:
+            safe, busy = _wait_for_desktop_safe_restart(
+                target,
+                timeout=safe_wait_timeout,
+                interval=safe_wait_interval,
+            )
+            if not safe:
+                msg = "final Desktop safe restart wait timed out: " + " | ".join(busy)
                 failures.append(msg)
                 _append_log(msg)
                 break

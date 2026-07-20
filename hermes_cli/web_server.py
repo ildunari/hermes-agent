@@ -2685,13 +2685,15 @@ def _collect_profile_gateway_topology() -> Dict[str, Any]:
 
 @app.get("/health")
 async def get_health():
-    """Return constant-time dashboard process health for external watchdogs.
+    """Return constant-time dashboard process and active-turn health.
 
-    Keep this handler deliberately static: it must remain responsive without
-    loading config, touching the filesystem/database, probing the gateway, or
-    entering a thread pool. Operational detail belongs in ``/api/status``.
+    The active-turn snapshot is in-memory and non-blocking: this does not load
+    config, touch the filesystem/database, probe a gateway, or use a thread pool.
     """
-    return {"status": "ok", "marker": DASHBOARD_HEALTH_MARKER}
+    gateway_server = sys.modules.get("tui_gateway.server")
+    snapshot_fn = getattr(gateway_server, "active_turn_snapshot", None)
+    active_snapshot = snapshot_fn() if callable(snapshot_fn) else {"active_runs": 0}
+    return {"status": "ok", "marker": DASHBOARD_HEALTH_MARKER, **active_snapshot}
 
 
 @app.get("/api/status")

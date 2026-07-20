@@ -6,6 +6,7 @@ import pytest
 from hermes_cli.restart_surfaces import (
     RestartTarget,
     RestartVerification,
+    _desktop_busy_details as real_desktop_busy_details,
     _gateway_pid as real_gateway_pid,
     _graceful_restart_gateway as real_graceful_restart_gateway,
     _webui_busy_details as real_webui_busy_details,
@@ -23,6 +24,14 @@ def _no_live_webui_probe(monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.restart_surfaces._webui_busy_details",
         lambda _targets: [],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.restart_surfaces._desktop_busy_details",
+        lambda _targets: [],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.restart_surfaces._desktop_dashboard_is_running",
+        lambda: True,
     )
     # Most scope tests exercise orchestration around gateways and must never
     # signal the live gateway PID found in this developer's status files.
@@ -167,8 +176,10 @@ def test_graceful_gateway_restart_signals_and_waits_for_launchd_replacement(monk
         stderr="",
     )
     signals = []
-    monkeypatch.setattr(restart_surfaces, "_gateway_pid", lambda *_args: 100)
+    gateway_pids = iter((100, 101))
+    monkeypatch.setattr(restart_surfaces, "_gateway_pid", lambda *_args: next(gateway_pids))
     monkeypatch.setattr(restart_surfaces, "_launchctl_print", lambda _service: replacement)
+    monkeypatch.setattr(restart_surfaces, "_pid_is_alive", lambda pid: False)
     monkeypatch.setattr(restart_surfaces.os, "kill", lambda pid, sig: signals.append((pid, sig)))
 
     verification, failure = real_graceful_restart_gateway(
@@ -181,6 +192,44 @@ def test_graceful_gateway_restart_signals_and_waits_for_launchd_replacement(monk
     assert verification is RestartVerification.RESTARTED
     assert failure is None
     assert signals == [(100, restart_surfaces.signal.SIGUSR1)]
+
+
+def test_graceful_gateway_restart_waits_for_old_pid_exit_and_replacement_status(monkeypatch):
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway-gpt", required=True)
+    before = subprocess.CompletedProcess(
+        ["launchctl", "print"], 0, stdout="\tpid = 100\n", stderr=""
+    )
+    replacement = subprocess.CompletedProcess(
+        ["launchctl", "print"], 0, stdout="\tpid = 101\n", stderr=""
+    )
+    old_pid_alive = iter((True, False, False))
+    runtime_pids = iter((100, 100, 101))
+    monotonic_values = iter((0.0, 0.1, 0.2, 0.3, 0.4))
+
+    monkeypatch.setattr(
+        restart_surfaces, "_gateway_pid", lambda *_args: next(runtime_pids)
+    )
+    monkeypatch.setattr(restart_surfaces, "_launchctl_print", lambda _service: replacement)
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_pid_is_alive",
+        lambda pid: next(old_pid_alive) if pid == 100 else True,
+    )
+    monkeypatch.setattr(restart_surfaces.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(restart_surfaces.time, "sleep", lambda *_args: None)
+    monkeypatch.setattr(restart_surfaces.os, "kill", lambda *_args: None)
+
+    verification, failure = real_graceful_restart_gateway(
+        target,
+        "gui/503/ai.hermes.gateway-gpt",
+        before,
+        timeout=10,
+    )
+
+    assert verification is RestartVerification.RESTARTED
+    assert failure is None
 
 
 def test_graceful_gateway_restart_does_not_trust_status_pid_without_launchd_restart(monkeypatch):
@@ -840,6 +889,15 @@ def _webui_target():
     return RestartTarget("user/{uid}", "ai.hermes.webui", description="Hermes WebUI/dashboard")
 
 
+def _desktop_dashboard_target():
+    return RestartTarget(
+        "user/{uid}",
+        "ai.hermes.desktop-remote-dashboard",
+        required=False,
+        description="MacBook Hermes Desktop remote dashboard on 9120",
+    )
+
+
 def test_webui_busy_details_skipped_when_no_webui_target(monkeypatch):
     from hermes_cli import restart_surfaces
 
@@ -868,6 +926,73 @@ def test_webui_busy_details_reports_active_runs(monkeypatch):
     )
     busy = real_webui_busy_details([_webui_target()])
     assert busy == ["ai.hermes.webui: active_runs=2, oldest_run_age_seconds=41.5"]
+
+
+def test_desktop_busy_details_reports_active_slash_worker_turns(monkeypatch):
+    import io
+
+    class FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    payload = json.dumps({"active_runs": 4, "oldest_run_age_seconds": 83.0}).encode()
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda url, timeout=None: FakeResponse(payload),
+    )
+
+    busy = real_desktop_busy_details([_desktop_dashboard_target()])
+    assert busy == [
+        "ai.hermes.desktop-remote-dashboard: active_runs=4, oldest_run_age_seconds=83.0"
+    ]
+
+
+def test_desktop_busy_details_fails_closed_for_old_or_unreachable_dashboard(monkeypatch):
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+
+    busy = real_desktop_busy_details([_desktop_dashboard_target()])
+    assert len(busy) == 1
+    assert "health probe unavailable or invalid" in busy[0]
+
+
+def test_desktop_busy_details_allows_legacy_health_for_upgrade_restart(monkeypatch):
+    import io
+
+    class FakeResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    payload = json.dumps({"status": "ok", "marker": "hermes-dashboard-ok"}).encode()
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda url, timeout=None: FakeResponse(payload),
+    )
+
+    assert real_desktop_busy_details([_desktop_dashboard_target()]) == []
+
+
+def test_desktop_busy_details_skips_absent_optional_dashboard(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.restart_surfaces._desktop_dashboard_is_running",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("absent optional dashboard must not be probed")
+        ),
+    )
+
+    assert real_desktop_busy_details([_desktop_dashboard_target()]) == []
 
 
 def test_webui_busy_details_idle_and_unreachable_fail_closed(monkeypatch):
