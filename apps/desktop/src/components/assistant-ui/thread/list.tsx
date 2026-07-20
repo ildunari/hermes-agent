@@ -113,6 +113,27 @@ export function firstVisibleGroupIndex(groups: readonly MessageGroup[], budget: 
   return firstVisible
 }
 
+const MESSAGE_GROUP_BASE_CLASS = 'flex min-w-0 flex-col gap-(--conversation-turn-gap) pb-(--conversation-turn-gap)'
+
+const SKIPPED_CONTENT_CLASS = '[contain-intrinsic-size:auto_37.5rem] [content-visibility:auto]'
+
+export function messageGroupClassName(group: MessageGroup): string {
+  // A turn contains a sticky user bubble. Chromium can retain that sticky
+  // composited layer while content-visibility skips and later re-lays out its
+  // ancestor, visually painting the turn above older image/message content.
+  // Standalone non-user messages have no sticky descendant and remain safe to
+  // skip off-screen.
+  return cn(MESSAGE_GROUP_BASE_CLASS, group.kind === 'standalone' && SKIPPED_CONTENT_CLASS)
+}
+
+export function turnTailClassName(): string {
+  // Keep the expensive assistant/tool subtree skippable without making it an
+  // ancestor of the sticky user bubble. The outer turn remains the sticky
+  // containing block, so its geometry stays stable across Chromium relevance
+  // changes while the long non-user tail retains the performance optimization.
+  return cn('flex min-w-0 flex-col gap-(--conversation-turn-gap)', SKIPPED_CONTENT_CLASS)
+}
+
 const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   clampToComposer,
   components,
@@ -360,29 +381,33 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
               </button>
             )}
             {visibleGroups.map(group => (
-              // content-visibility:auto — off-screen turns skip style recalc,
-              // layout, and paint. On a long transcript this is what keeps
+              // content-visibility:auto — off-screen standalone messages and
+              // non-user turn tails skip style recalc, layout, and paint. This keeps
               // UNRELATED UI fast: any dialog/popover mount (Radix Presence
               // reads getComputedStyle) forces a whole-document style recalc,
               // measured ~650-730ms per open on a 1300-message session and
               // ~100-200ms with this on. contain-intrinsic-size keeps a
-              // placeholder height for never-rendered turns (auto: remembered
+              // placeholder height for never-rendered messages (auto: remembered
               // real size once rendered), so scrollbar/anchoring stay stable.
-              // Sticky human bubbles are unaffected — their turn is rendered
-              // whenever any part of it intersects the viewport.
-              <div
-                className="flex min-w-0 flex-col gap-(--conversation-turn-gap) pb-(--conversation-turn-gap) [contain-intrinsic-size:auto_37.5rem] [content-visibility:auto]"
-                key={group.id}
-              >
+              // Turn wrappers are deliberately excluded: they contain sticky user
+              // bubbles, and Chromium can paint stale sticky layers when their
+              // content-visibility ancestor crosses the relevance boundary. The
+              // assistant/tool tail is skipped in a sibling subtree instead.
+              <div className={messageGroupClassName(group)} data-slot="aui_message-group" key={group.id}>
                 <MessageRenderBoundary resetKey={messageSignature}>
                   {group.kind === 'turn' ? (
                     <div
                       className="composer-human-ai-pair-container relative flex min-w-0 flex-col gap-(--conversation-turn-gap)"
                       data-slot="aui_turn-pair"
                     >
-                      {group.indices.map(index => (
-                        <ThreadPrimitive.MessageByIndex components={components} index={index} key={index} />
-                      ))}
+                      <ThreadPrimitive.MessageByIndex components={components} index={group.indices[0]} />
+                      {group.indices.length > 1 && (
+                        <div className={turnTailClassName()} data-slot="aui_turn-tail">
+                          {group.indices.slice(1).map(index => (
+                            <ThreadPrimitive.MessageByIndex components={components} index={index} key={index} />
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <ThreadPrimitive.MessageByIndex components={components} index={group.index} />

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildGroups, firstVisibleGroupIndex, type MessageGroup } from './list'
+import {
+  buildGroups,
+  firstVisibleGroupIndex,
+  type MessageGroup,
+  messageGroupClassName,
+  turnTailClassName
+} from './list'
 
 // Signature rows are `${index}:${id}:${role}:${weight}` (see the useAuiState
 // selector in list.tsx).
@@ -78,5 +84,26 @@ describe('firstVisibleGroupIndex', () => {
 
   it('returns groups.length for an empty list', () => {
     expect(firstVisibleGroupIndex([], 60)).toBe(0)
+  })
+})
+
+describe('messageGroupClassName', () => {
+  it('never places a sticky user turn inside skipped-content containment', () => {
+    const turn: MessageGroup = { id: 'user', indices: [0, 1], kind: 'turn', weight: 2 }
+
+    expect(messageGroupClassName(turn)).not.toContain('content-visibility:auto')
+    expect(messageGroupClassName(turn)).not.toContain('contain-intrinsic-size:auto_37.5rem')
+  })
+
+  it('keeps skipped-content containment for standalone non-user messages', () => {
+    const standalone: MessageGroup = { id: 'assistant', index: 0, kind: 'standalone', weight: 1 }
+
+    expect(messageGroupClassName(standalone)).toContain('content-visibility:auto')
+    expect(messageGroupClassName(standalone)).toContain('contain-intrinsic-size:auto_37.5rem')
+  })
+
+  it('moves skipped-content containment below the sticky user bubble', () => {
+    expect(turnTailClassName()).toContain('content-visibility:auto')
+    expect(turnTailClassName()).toContain('contain-intrinsic-size:auto_37.5rem')
   })
 })
