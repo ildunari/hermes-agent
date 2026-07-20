@@ -43,8 +43,11 @@ def build_runtime_route(agent: Any, state: str, *, reason: Any = None) -> dict[s
     primary = getattr(agent, "_primary_runtime", None)
     if not isinstance(primary, dict):
         primary = {}
-    selected_model = primary.get("model", getattr(agent, "model", ""))
-    selected_provider = primary.get("provider", getattr(agent, "provider", ""))
+    selected = getattr(agent, "_selected_runtime_identity", None)
+    if not isinstance(selected, dict):
+        selected = primary
+    selected_model = selected.get("model", getattr(agent, "model", ""))
+    selected_provider = selected.get("provider", getattr(agent, "provider", ""))
     active = bool(getattr(agent, "_fallback_activated", False))
     chain_index = max(0, int(getattr(agent, "_fallback_index", 0) or 0) - (1 if active else 0))
     payload = {

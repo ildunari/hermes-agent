@@ -54,6 +54,11 @@ describe('applyRuntimeInfo approval mode', () => {
 
     expect($currentUsage.get()).toEqual({ calls: 0, input: 12, output: 8, total: 20 })
   })
+
+  it('clears transient routing when an older backend omits the field', () => {
+    const patch = applyRuntimeInfo({ model: 'selected', provider: 'openai' })
+    expect(patch).toHaveProperty('runtimeRouting', undefined)
+  })
 })
 
 describe('isSessionGoneError', () => {

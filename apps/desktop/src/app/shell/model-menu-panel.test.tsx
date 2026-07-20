@@ -2,8 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, findByText, fireEvent, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { ClientSessionState } from '@/app/types'
 import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu'
 import { $activeSessionId, $currentModel, $currentProvider, $currentReasoningEffort } from '@/store/session'
+import { $sessionStates } from '@/store/session-states'
 
 import { ModelMenuPanel } from './model-menu-panel'
 
@@ -31,6 +33,7 @@ beforeEach(() => {
   $currentModel.set('')
   $currentProvider.set('')
   $currentReasoningEffort.set('')
+  $sessionStates.set({})
   getGlobalModelOptions.mockResolvedValue({ providers: [MOA_PROVIDER] })
 })
 
@@ -149,5 +152,24 @@ describe('ModelMenuPanel MoA presets', () => {
     // Pre-session picks are UI state shipped on the next session.create — the
     // row must not be disabled and must still route through onSelectModel.
     expect(onSelectModel).toHaveBeenCalledWith({ model: 'BeastMode', provider: 'moa' })
+  })
+})
+
+describe('ModelMenuPanel runtime routing', () => {
+  it('shows provider identity for a same-model cross-provider fallback', async () => {
+    $sessionStates.set({
+      'runtime-1': {
+        runtimeRouting: {
+          schema_version: 1,
+          state: 'finished',
+          selected: { model: 'shared-model', provider: 'openai' },
+          runtime: { model: 'shared-model', provider: 'anthropic' },
+          fallback: { active: true, reason: 'rate_limit', chain_index: 0 }
+        }
+      } as ClientSessionState
+    })
+    const { content } = renderPanel()
+    expect(await content.findByText(/openai: shared-model/)).toBeTruthy()
+    expect(await content.findByText(/anthropic: shared-model/)).toBeTruthy()
   })
 })

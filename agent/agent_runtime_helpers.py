@@ -2419,6 +2419,15 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
     # ── Reset fallback state ──
     agent._fallback_activated = False
     agent._fallback_index = 0
+    agent._selected_runtime_identity = {
+        "model": str(agent.model or ""),
+        "provider": str(agent.provider or ""),
+    }
+    # A successful deliberate switch starts a fresh routing lifecycle.  Do not
+    # let a finished fallback from the previous selection masquerade as truth
+    # for the new selection before its first turn starts.
+    agent._runtime_routing = None
+    agent._runtime_route_reason = "unknown"
 
     # When the user deliberately swaps primary providers (e.g. openrouter
     # → anthropic), drop any fallback entries that target the OLD primary

@@ -5605,6 +5605,16 @@ class APIServerAdapter(BasePlatformAdapter):
                     pass
         return _callback
 
+    def _settled_run_routing(self, run_id: str, *, agent=None, result=None):
+        """Return the latest safe routing snapshot for any terminal run state."""
+        if isinstance(result, dict) and isinstance(result.get("runtime_routing"), dict):
+            return result["runtime_routing"]
+        routing = getattr(agent, "_runtime_routing", None) if agent is not None else None
+        if isinstance(routing, dict):
+            return routing
+        routing = self._run_statuses.get(run_id, {}).get("runtime_routing")
+        return routing if isinstance(routing, dict) else None
+
     def _sorted_run_statuses(self, *, active_only: bool = False) -> List[Dict[str, Any]]:
         """Return a newest-first snapshot of API-created runs."""
         statuses = [dict(status) for status in self._run_statuses.values()]
@@ -5902,6 +5912,7 @@ class APIServerAdapter(BasePlatformAdapter):
         request_profile = _api_request_profile.get()
 
         async def _run_and_close():
+            agent = None
             try:
                 self._set_run_status(run_id, "running")
                 from gateway.run import _load_gateway_config
@@ -6009,15 +6020,18 @@ class APIServerAdapter(BasePlatformAdapter):
                         return r, u
 
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
+                settled_routing = self._settled_run_routing(run_id, agent=agent, result=result)
                 if run_id in self._stopping_run_ids:
                     _put_event_if_active({
                         "event": "run.cancelled",
                         "run_id": run_id,
                         "timestamp": time.time(),
+                        "runtime_routing": settled_routing,
                     })
                     self._set_run_status(
                         run_id,
                         "cancelled",
+                        runtime_routing=settled_routing,
                         last_event="run.cancelled",
                     )
                 # Check for structured failure (non-retryable client errors like
@@ -6030,11 +6044,13 @@ class APIServerAdapter(BasePlatformAdapter):
                         "run_id": run_id,
                         "timestamp": time.time(),
                         "error": error_msg,
+                        "runtime_routing": settled_routing,
                     })
                     self._set_run_status(
                         run_id,
                         "failed",
                         error=error_msg,
+                        runtime_routing=settled_routing,
                         last_event="run.failed",
                     )
                 else:
@@ -6045,20 +6061,22 @@ class APIServerAdapter(BasePlatformAdapter):
                         "timestamp": time.time(),
                         "output": final_response,
                         "usage": usage,
-                        "runtime_routing": result.get("runtime_routing") if isinstance(result, dict) else None,
+                        "runtime_routing": settled_routing,
                     })
                     self._set_run_status(
                         run_id,
                         "completed",
                         output=final_response,
                         usage=usage,
-                        runtime_routing=result.get("runtime_routing") if isinstance(result, dict) else None,
+                        runtime_routing=settled_routing,
                         last_event="run.completed",
                     )
             except asyncio.CancelledError:
+                settled_routing = self._settled_run_routing(run_id, agent=agent)
                 self._set_run_status(
                     run_id,
                     "cancelled",
+                    runtime_routing=settled_routing,
                     last_event="run.cancelled",
                 )
                 try:
@@ -6066,16 +6084,19 @@ class APIServerAdapter(BasePlatformAdapter):
                         "event": "run.cancelled",
                         "run_id": run_id,
                         "timestamp": time.time(),
+                        "runtime_routing": settled_routing,
                     })
                 except Exception:
                     pass
                 raise
             except Exception as exc:
                 logger.exception("[api_server] run %s failed", run_id)
+                settled_routing = self._settled_run_routing(run_id, agent=agent)
                 self._set_run_status(
                     run_id,
                     "failed",
                     error=_redact_api_error_text(exc),
+                    runtime_routing=settled_routing,
                     last_event="run.failed",
                 )
                 try:
@@ -6084,6 +6105,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         "run_id": run_id,
                         "timestamp": time.time(),
                         "error": _redact_api_error_text(exc),
+                        "runtime_routing": settled_routing,
                     })
                 except Exception:
                     pass

@@ -438,7 +438,12 @@ def test_apply_model_switch_does_not_leak_process_env():
         "HERMES_INFERENCE_PROVIDER",
     )
 
-    sess_b = {"agent": _FakeAgent(), "session_key": "k-B", "model_override": None}
+    stale_route = {"selected": {"model": "old", "provider": "old-provider"}}
+    sess_b = {
+        "agent": _FakeAgent(), "session_key": "k-B", "model_override": None,
+        "runtime_routing": stale_route,
+        "_metadata_mirror": {"runtime_routing": stale_route},
+    }
     sess_a = {"agent": _FakeAgent(), "session_key": "k-A", "model_override": None}
 
     with (
@@ -447,9 +452,10 @@ def test_apply_model_switch_does_not_leak_process_env():
         patch("hermes_cli.model_switch.resolve_persist_behavior",
               return_value=False),
         patch("hermes_cli.model_switch.switch_model", return_value=_FakeResult()),
-        patch("tui_gateway.server._emit"),
+        patch("tui_gateway.server._emit") as mock_emit,
         patch("tui_gateway.server._restart_slash_worker"),
-        patch("tui_gateway.server._session_info", return_value={}),
+        patch("tui_gateway.server._session_info",
+              side_effect=lambda agent, session: {"model": agent.model, "provider": agent.provider}),
         patch("tui_gateway.server._persist_model_switch") as mock_persist,
     ):
         before = {k: os.environ.get(k) for k in env_keys}
@@ -466,6 +472,9 @@ def test_apply_model_switch_does_not_leak_process_env():
     assert sess_b["model_override"]["provider"] == "zai"
     # The switched agent mutated in place.
     assert sess_b["agent"].model == "zai/glm-5.1"
+    assert "runtime_routing" not in sess_b
+    assert "runtime_routing" not in sess_b["_metadata_mirror"]
+    assert mock_emit.call_args.args[2] == {"model": "zai/glm-5.1", "provider": "zai"}
     # Sibling session is completely untouched.
     assert sess_a["model_override"] is None
     assert sess_a["agent"].model == "minimax/m3"

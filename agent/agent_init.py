@@ -378,6 +378,14 @@ def init_agent(
     _install_safe_stdio()
 
     agent.model = model
+    # Selected intent is not always the runtime that successfully initializes.
+    # Keep this identity independent from the operational snapshot used to
+    # restore turn-scoped fallbacks: init-time credential fallback mutates
+    # model/provider before _primary_runtime can be captured.
+    agent._selected_runtime_identity = {
+        "model": str(model or ""),
+        "provider": str(provider or "").strip().lower(),
+    }
     agent.max_iterations = max_iterations
     # Shared iteration budget — parent creates, children inherit.
     # Consumed by every LLM turn across parent + all subagents.
@@ -2259,6 +2267,11 @@ def init_agent(
     # activates during a turn, the next turn restores these values so the
     # preferred model gets a fresh attempt each time.  Uses a single dict
     # so new state fields are easy to add without N individual attributes.
+    if not getattr(agent, "_fallback_activated", False):
+        agent._selected_runtime_identity = {
+            "model": str(agent.model or ""),
+            "provider": str(agent.provider or ""),
+        }
     _cc = agent.context_compressor
     agent._primary_runtime = {
         "model": agent.model,

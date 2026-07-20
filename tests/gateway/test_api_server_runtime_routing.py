@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,3 +27,17 @@ async def test_runs_runtime_routing_callback_updates_status_and_stream():
     assert event["routing"] == payload
     assert adapter._run_statuses["run_1"]["runtime_routing"] == payload
     assert adapter._run_statuses["run_1"]["last_event"] == "runtime.routing"
+
+
+def test_settled_routing_prefers_result_then_agent_then_live_status():
+    adapter = object.__new__(APIServerAdapter)
+    prior = {"state": "finished"}
+    adapter._run_statuses = {"run_1": {"runtime_routing": prior}}
+    assert adapter._settled_run_routing("run_1") is prior
+
+    agent_route = {"state": "fallback_activated"}
+    agent = SimpleNamespace(_runtime_routing=agent_route)
+    assert adapter._settled_run_routing("run_1", agent=agent) is agent_route
+
+    result_route = {"state": "finished", "runtime": {"model": "backup"}}
+    assert adapter._settled_run_routing("run_1", agent=agent, result={"runtime_routing": result_route}) is result_route

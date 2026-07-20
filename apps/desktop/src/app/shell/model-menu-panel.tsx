@@ -25,6 +25,7 @@ import {
   modelDisplayParts,
   reasoningEffortLabel
 } from '@/lib/model-status-label'
+import { isRuntimeFallback } from '@/lib/runtime-routing'
 import { normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
 import { $modelPresets, applyModelPreset, modelPresetKey } from '@/store/model-presets'
@@ -218,14 +219,14 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
     <>
       <DropdownMenuSearch aria-label={copy.search} onValueChange={setSearch} placeholder={copy.search} value={search} />
 
-      {routing?.fallback.active && routing.runtime.model !== routing.selected.model && (
+      {isRuntimeFallback(routing) && (
         <DropdownMenuLabel className="space-y-0.5 px-3 py-2 text-[11px] font-normal text-(--ui-text-tertiary)">
           <div>
-            {t.shell.statusbar.modelSelected} · {routing.selected.model}
+            {t.shell.statusbar.modelSelected} · {routing.selected.provider}: {routing.selected.model}
           </div>
           <div>
             {routing.state === 'finished' ? t.shell.statusbar.modelLastResponse : t.shell.statusbar.modelRunning} ·{' '}
-            {routing.runtime.model}
+            {routing.runtime.provider}: {routing.runtime.model}
           </div>
         </DropdownMenuLabel>
       )}

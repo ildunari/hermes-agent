@@ -3369,6 +3369,13 @@ def _apply_model_switch(
                 f"Model switch to {result.new_model} failed ({exc}); "
                 f"staying on {getattr(agent, 'model', current_model)}."
             ) from exc
+        # switch_model() refreshed the agent identity. Clear the session and
+        # compute-host mirrors as well so _session_info cannot prefer a stale
+        # pre-switch fallback snapshot over the successful explicit selection.
+        session.pop("runtime_routing", None)
+        mirror = dict(_metadata_mirror(session))
+        mirror.pop("runtime_routing", None)
+        session["_metadata_mirror"] = mirror
         _restart_slash_worker(sid, session)
         _persist_live_session_runtime(session)
         _persist_live_session_system_prompt(session)

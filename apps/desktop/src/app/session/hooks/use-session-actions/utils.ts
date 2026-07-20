@@ -511,9 +511,10 @@ export function applyRuntimeInfo(info: SessionRuntimeInfo | undefined): SessionR
     sessionState.provider = info.provider
   }
 
-  if (info.runtime_routing) {
-    sessionState.runtimeRouting = info.runtime_routing
-  }
+  // Absence is meaningful for backward compatibility: an older backend does
+  // not know this transient field, so reconnecting to one must clear routing
+  // truth retained from the previous backend rather than display it forever.
+  sessionState.runtimeRouting = info.runtime_routing
 
   if (info.cwd) {
     setCurrentCwd(info.cwd)

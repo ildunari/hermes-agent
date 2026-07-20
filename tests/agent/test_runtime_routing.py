@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from agent.error_classifier import FailoverReason
 from agent.runtime_routing import build_runtime_route, emit_runtime_route
@@ -50,3 +51,50 @@ def test_primary_route_uses_live_identity_without_snapshot():
     )
     assert payload["selected"] == payload["runtime"] == {"model": "chosen", "provider": "openai"}
     assert payload["fallback"]["active"] is False
+
+
+def test_selected_identity_is_independent_from_init_fallback_snapshot():
+    payload = build_runtime_route(
+        _agent(
+            _selected_runtime_identity={"model": "requested", "provider": "requested-provider"},
+            _primary_runtime={"model": "fallback-model", "provider": "fallback-provider"},
+        ),
+        "started",
+    )
+    assert payload["selected"] == {"model": "requested", "provider": "requested-provider"}
+    assert payload["runtime"] == {"model": "fallback-model", "provider": "fallback-provider"}
+
+
+def test_real_init_time_credential_fallback_preserves_requested_identity():
+    from run_agent import AIAgent
+
+    fallback_client = MagicMock()
+    fallback_client.api_key = "fallback-key"
+    fallback_client.base_url = "https://fallback.example/v1"
+    fallback_client.default_headers = {}
+
+    def resolve(provider, **_kwargs):
+        return (fallback_client, "resolved-backup") if provider == "openai" else (None, None)
+
+    with (
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+        patch("agent.auxiliary_client.resolve_provider_client", side_effect=resolve),
+    ):
+        agent = AIAgent(
+            model="wanted-model",
+            provider="missing-provider",
+            api_key="",
+            base_url="",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            fallback_model={"provider": "openai", "model": "backup-model"},
+        )
+
+    route = build_runtime_route(agent, "started")
+    assert getattr(agent, "_primary_runtime")["model"] == "resolved-backup"  # operational restore remains viable
+    assert route["selected"] == {"model": "wanted-model", "provider": "missing-provider"}
+    assert route["runtime"] == {"model": "resolved-backup", "provider": "openai"}
+    assert route["fallback"]["active"] is True

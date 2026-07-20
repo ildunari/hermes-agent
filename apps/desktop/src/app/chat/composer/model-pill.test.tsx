@@ -87,7 +87,8 @@ describe('ModelPill runtime routing', () => {
     $activeSessionId.set('live-1')
     $sessionStates.set({ 'live-1': { runtimeRouting: routing('fallback_activated') } as ClientSessionState })
     render(<ModelPill disabled={false} model={modelState()} />)
-    expect(screen.getByRole('button').textContent).toContain('Running ·')
+    expect(screen.getByRole('button').textContent).toContain('Primary Model')
+    expect(screen.getByRole('button').textContent).toContain('· Running ·')
     expect(screen.getByRole('button').textContent).toContain('Backup Model')
     expect($currentModel.get()).toBe('primary-model')
   })
@@ -99,5 +100,21 @@ describe('ModelPill runtime routing', () => {
     render(<ModelPill disabled={false} model={modelState()} />)
     expect(screen.getByRole('button').textContent).toContain('Last response ·')
     expect(screen.getByRole('button').textContent).toContain('Backup Model')
+  })
+
+  it('shows provider-only fallback and exposes routing in the non-dropdown accessible name', () => {
+    setCurrentModel('shared-model')
+    $activeSessionId.set('live-1')
+    const providerFallback = routing('fallback_activated')
+    providerFallback.selected = { model: 'shared-model', provider: 'openai' }
+    providerFallback.runtime = { model: 'shared-model', provider: 'anthropic' }
+    $sessionStates.set({ 'live-1': { runtimeRouting: providerFallback } as ClientSessionState })
+    render(<ModelPill disabled={false} model={modelState()} />)
+
+    const button = screen.getByRole('button')
+    expect(button.textContent).toContain('Shared Model')
+    expect(button.textContent).toContain('· Running ·')
+    expect(button.getAttribute('aria-label')).toContain('anthropic: shared-model')
+    expect(button.getAttribute('aria-label')).toContain('openai: shared-model')
   })
 })

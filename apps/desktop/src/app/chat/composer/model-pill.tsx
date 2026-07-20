@@ -9,6 +9,7 @@ import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { ChevronDown } from '@/lib/icons'
 import { formatModelStatusLabel } from '@/lib/model-status-label'
+import { isRuntimeFallback } from '@/lib/runtime-routing'
 import { cn } from '@/lib/utils'
 import {
   $activeSessionId,
@@ -60,10 +61,7 @@ export function ModelPill({
   const pinnedOverride = !activeSessionId && modelSource === 'manual' && Boolean(currentModel.trim())
   const routing = activeSessionId ? sessionStates[activeSessionId]?.runtimeRouting : undefined
 
-  const routedFallback =
-    routing?.fallback.active && routing.runtime.model !== routing.selected.model ? routing : undefined
-
-  const displayModel = routedFallback?.runtime.model || currentModel
+  const routedFallback = isRuntimeFallback(routing) ? routing : undefined
   const routeLabel = routedFallback ? (routing?.state === 'finished' ? copy.modelLastResponse : copy.modelRunning) : ''
 
   // The model resolves a beat after the gateway/session comes up. Rather than
@@ -73,10 +71,14 @@ export function ModelPill({
     <ChevronDown className="size-3.5 shrink-0 opacity-70" />
   ) : (
     <>
-      {displayModel.trim() ? (
-        <span className="truncate">
-          {routeLabel && <span className="mr-1 opacity-60">{routeLabel} ·</span>}
-          {formatModelStatusLabel(displayModel, { fastMode, reasoningEffort })}
+      {currentModel.trim() ? (
+        <span className="min-w-0 truncate">
+          <span>{formatModelStatusLabel(currentModel, { fastMode, reasoningEffort })}</span>
+          {routedFallback && (
+            <span className="ml-1 opacity-60">
+              · {routeLabel} · {formatModelStatusLabel(routedFallback.runtime.model)}
+            </span>
+          )}
         </span>
       ) : (
         <GlyphSpinner className="opacity-50" spinner="braille" />
@@ -114,9 +116,9 @@ export function ModelPill({
 
   if (!model.modelMenuContent) {
     return (
-      <Tip label={pinnedOverride ? `${copy.openModelPicker} — ${copy.modelPinned}` : copy.openModelPicker} side="top">
+      <Tip label={`${copy.openModelPicker} — ${title}`} side="top">
         <Button
-          aria-label={copy.openModelPicker}
+          aria-label={`${copy.openModelPicker} — ${title}`}
           className={pillClass}
           disabled={disabled}
           onClick={() => setModelPickerOpen(true)}
