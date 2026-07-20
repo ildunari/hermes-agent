@@ -1836,6 +1836,9 @@ export interface Translations {
       switchModel: string
       openModelPicker: string
       modelPinned: string
+      modelSelected: string
+      modelRunning: string
+      modelLastResponse: string
       modelTitle: (provider: string, model: string) => string
       providerModelTitle: (provider: string, model: string) => string
     }

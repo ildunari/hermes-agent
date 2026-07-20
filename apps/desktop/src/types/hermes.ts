@@ -429,6 +429,7 @@ export interface SessionRuntimeInfo {
   model?: string
   personality?: string
   provider?: string
+  runtime_routing?: RuntimeRouting
   reasoning_effort?: string
   running?: boolean
   service_tier?: string
@@ -437,6 +438,23 @@ export interface SessionRuntimeInfo {
   usage?: Partial<UsageStats>
   version?: string
   yolo?: boolean
+}
+
+export interface RuntimeRoutingIdentity {
+  model: string
+  provider: string
+}
+
+export interface RuntimeRouting {
+  schema_version: 1
+  state: 'fallback_activated' | 'finished' | 'primary_restored' | 'started'
+  selected: RuntimeRoutingIdentity
+  runtime: RuntimeRoutingIdentity
+  fallback: {
+    active: boolean
+    reason: string
+    chain_index: number
+  }
 }
 
 export interface UsageStats {

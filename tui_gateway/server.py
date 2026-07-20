@@ -1204,7 +1204,15 @@ def write_json(obj: dict) -> bool:
        behaviour and keeping tests that monkey-patch ``_real_stdout`` green.
     """
     if obj.get("method") == "event":
-        sid = ((obj.get("params") or {}).get("session_id")) or ""
+        params = obj.get("params") or {}
+        sid = params.get("session_id") or ""
+        if sid and params.get("type") == "runtime.route" and isinstance(params.get("payload"), dict):
+            session = _sessions.get(sid)
+            if session is not None:
+                session["runtime_routing"] = dict(params["payload"])
+                mirror = dict(_metadata_mirror(session))
+                mirror["runtime_routing"] = dict(params["payload"])
+                session["_metadata_mirror"] = mirror
         if sid and (t := (_sessions.get(sid) or {}).get("transport")) is not None:
             return t.write(obj)
 
@@ -3798,9 +3806,15 @@ def _session_info(agent, session: dict | None = None) -> dict:
         yolo = bool(_YOLO_MODE_FROZEN) or session_yolo or approval_mode == "off"
     except Exception:
         yolo = False
+    routing = (session or {}).get("runtime_routing") or mirror.get("runtime_routing")
+    if not isinstance(routing, dict) and agent is not None:
+        routing = getattr(agent, "_runtime_routing", None)
+    selected_route = routing.get("selected", {}) if isinstance(routing, dict) else {}
     info: dict = {
-        "model": mirror.get("model", getattr(agent, "model", "")),
-        "provider": mirror.get("provider", getattr(agent, "provider", "")),
+        # Keep model/provider as selected intent while runtime_routing carries
+        # the backend that is actually executing.
+        "model": selected_route.get("model", mirror.get("model", getattr(agent, "model", ""))),
+        "provider": selected_route.get("provider", mirror.get("provider", getattr(agent, "provider", ""))),
         "reasoning_effort": reasoning_effort,
         "service_tier": service_tier,
         "fast": service_tier == "priority",
@@ -3823,6 +3837,8 @@ def _session_info(agent, session: dict | None = None) -> dict:
         "usage": _session_usage_snapshot(session),
         "profile_name": _current_profile_name(),
     }
+    if isinstance(routing, dict):
+        info["runtime_routing"] = routing
     try:
         from hermes_cli.config import (
             detect_install_method,
@@ -4310,6 +4326,18 @@ def _mirror_subagent_to_child(event_type: str, payload: dict) -> None:
             _child_mirrors.pop(child_key, None)
 
 
+def _on_agent_event(sid: str, name: str, payload: dict) -> None:
+    """Bridge additive core lifecycle events to this runtime session."""
+    if name == "runtime:route" and isinstance(payload, dict):
+        session = _sessions.get(sid)
+        if session is not None:
+            session["runtime_routing"] = dict(payload)
+        _emit("runtime.route", sid, payload)
+        return
+    if name == "session:compress":
+        _emit(name, sid, payload)
+
+
 def _agent_cbs(sid: str) -> dict:
     return {
         "tool_start_callback": lambda tc_id, name, args: _on_tool_start(
@@ -4353,6 +4381,7 @@ def _agent_cbs(sid: str) -> dict:
         "notice_clear_callback": lambda key: _emit(
             "notification.clear", sid, {"key": key}
         ),
+        "event_callback": lambda name, payload: _on_agent_event(sid, name, payload),
         "clarify_callback": lambda q, c: _block(
             "clarify.request", sid, {"question": q, "choices": c}
         ),

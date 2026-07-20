@@ -2,7 +2,9 @@ import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import type { ChatBarState } from '@/app/chat/composer/types'
+import type { ClientSessionState } from '@/app/types'
 import { $activeSessionId, $currentModel, setCurrentModel, setCurrentModelSource } from '@/store/session'
+import { $sessionStates } from '@/store/session-states'
 
 import { ModelPill } from './model-pill'
 
@@ -18,6 +20,7 @@ afterEach(() => {
   $activeSessionId.set(null)
   setCurrentModel('')
   setCurrentModelSource('')
+  $sessionStates.set({})
 })
 
 // #62055: a manual composer pick is sticky and silently overrides the
@@ -67,5 +70,34 @@ describe('ModelPill pinned-override badge', () => {
     render(<ModelPill disabled={false} model={modelState({ modelMenuContent: <div /> })} />)
     expect(screen.getByTestId('model-pinned-dot')).toBeTruthy()
     expect($currentModel.get()).toBe('deepseek/deepseek-v4-flash')
+  })
+})
+
+describe('ModelPill runtime routing', () => {
+  const routing = (state: 'fallback_activated' | 'finished') => ({
+    schema_version: 1 as const,
+    state,
+    selected: { model: 'primary-model', provider: 'openai' },
+    runtime: { model: 'backup-model', provider: 'anthropic' },
+    fallback: { active: true, reason: 'rate_limit', chain_index: 0 }
+  })
+
+  it('shows running fallback without changing selected intent', () => {
+    setCurrentModel('primary-model')
+    $activeSessionId.set('live-1')
+    $sessionStates.set({ 'live-1': { runtimeRouting: routing('fallback_activated') } as ClientSessionState })
+    render(<ModelPill disabled={false} model={modelState()} />)
+    expect(screen.getByRole('button').textContent).toContain('Running ·')
+    expect(screen.getByRole('button').textContent).toContain('Backup Model')
+    expect($currentModel.get()).toBe('primary-model')
+  })
+
+  it('labels the runtime that produced the last response', () => {
+    setCurrentModel('primary-model')
+    $activeSessionId.set('live-1')
+    $sessionStates.set({ 'live-1': { runtimeRouting: routing('finished') } as ClientSessionState })
+    render(<ModelPill disabled={false} model={modelState()} />)
+    expect(screen.getByRole('button').textContent).toContain('Last response ·')
+    expect(screen.getByRole('button').textContent).toContain('Backup Model')
   })
 })

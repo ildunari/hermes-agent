@@ -1991,6 +1991,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        event_callback=None,
         gateway_session_key: Optional[str] = None,
         model_override: Optional[Dict[str, Any]] = None,
         route: Optional[Dict[str, Any]] = None,
@@ -2120,6 +2121,7 @@ class APIServerAdapter(BasePlatformAdapter):
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
             tool_complete_callback=tool_complete_callback,
+            event_callback=event_callback,
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
@@ -5577,6 +5579,32 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return _callback
 
+    def _make_run_routing_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
+        """Bridge core runtime:route events into public Runs events/status."""
+        def _callback(name: str, payload: Dict[str, Any]) -> None:
+            if name != "runtime:route" or not isinstance(payload, dict):
+                return
+            routing = dict(payload)
+            event = {
+                "event": "runtime.routing",
+                "run_id": run_id,
+                "timestamp": time.time(),
+                "routing": routing,
+            }
+            self._set_run_status(
+                run_id,
+                self._run_statuses.get(run_id, {}).get("status", "running"),
+                last_event="runtime.routing",
+                runtime_routing=routing,
+            )
+            q = self._run_streams.get(run_id)
+            if q is not None:
+                try:
+                    loop.call_soon_threadsafe(q.put_nowait, event)
+                except Exception:
+                    pass
+        return _callback
+
     def _sorted_run_statuses(self, *, active_only: bool = False) -> List[Dict[str, Any]]:
         """Return a newest-first snapshot of API-created runs."""
         statuses = [dict(status) for status in self._run_statuses.values()]
@@ -5835,6 +5863,7 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_approval_sessions[run_id] = approval_session_key
 
         event_cb = self._make_run_event_callback(run_id, loop)
+        routing_cb = self._make_run_routing_callback(run_id, loop)
 
         def _put_event_if_active(event: Optional[Dict]) -> None:
             """Enqueue only while this run still owns live transport state."""
@@ -5895,6 +5924,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         session_id=session_id,
                         stream_delta_callback=_text_cb,
                         tool_progress_callback=event_cb,
+                        event_callback=routing_cb,
                         gateway_session_key=gateway_session_key,
                         model_override=self._api_run_model_override(user_config),
                         route=route,
@@ -6015,12 +6045,14 @@ class APIServerAdapter(BasePlatformAdapter):
                         "timestamp": time.time(),
                         "output": final_response,
                         "usage": usage,
+                        "runtime_routing": result.get("runtime_routing") if isinstance(result, dict) else None,
                     })
                     self._set_run_status(
                         run_id,
                         "completed",
                         output=final_response,
                         usage=usage,
+                        runtime_routing=result.get("runtime_routing") if isinstance(result, dict) else None,
                         last_event="run.completed",
                     )
             except asyncio.CancelledError:

@@ -170,7 +170,8 @@ class TestRunConversationCodexPath:
         assert agent.context_compressor.last_prompt_tokens == 300_000
         assert agent.context_compressor.awaiting_real_usage_after_compression is False
         assert agent.context_compressor._ineffective_compression_count == 1
-        assert events == [
+        compression_events = [event for event in events if event[0] == "session:compress"]
+        assert compression_events == [
             (
                 "session:compress",
                 {
@@ -185,6 +186,8 @@ class TestRunConversationCodexPath:
                 },
             )
         ]
+        route_states = [payload["state"] for name, payload in events if name == "runtime:route"]
+        assert route_states == ["started", "finished"]
 
     def test_projected_messages_are_spliced(self, fake_session):
         agent = _make_codex_agent()

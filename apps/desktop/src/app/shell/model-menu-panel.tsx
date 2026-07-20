@@ -44,6 +44,7 @@ import {
   $currentProvider,
   $currentReasoningEffort
 } from '@/store/session'
+import { $sessionStates } from '@/store/session-states'
 import type { ModelOptionProvider, ModelOptionsResponse } from '@/types/hermes'
 
 import { ModelEditSubmenu, normalizeReasoningEffort, resolveFastControl } from './model-edit-submenu'
@@ -79,6 +80,8 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
   const currentModel = useStore($currentModel)
   const currentProvider = useStore($currentProvider)
   const currentReasoningEffort = useStore($currentReasoningEffort)
+  const sessionStates = useStore($sessionStates)
+  const routing = activeSessionId ? sessionStates[activeSessionId]?.runtimeRouting : undefined
   const modelPresets = useStore($modelPresets)
   const visibleModels = useStore($visibleModels)
 
@@ -215,6 +218,18 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
     <>
       <DropdownMenuSearch aria-label={copy.search} onValueChange={setSearch} placeholder={copy.search} value={search} />
 
+      {routing?.fallback.active && routing.runtime.model !== routing.selected.model && (
+        <DropdownMenuLabel className="space-y-0.5 px-3 py-2 text-[11px] font-normal text-(--ui-text-tertiary)">
+          <div>
+            {t.shell.statusbar.modelSelected} · {routing.selected.model}
+          </div>
+          <div>
+            {routing.state === 'finished' ? t.shell.statusbar.modelLastResponse : t.shell.statusbar.modelRunning} ·{' '}
+            {routing.runtime.model}
+          </div>
+        </DropdownMenuLabel>
+      )}
+
       <DropdownMenuSeparator className="mx-0" />
 
       {loading ? (
@@ -271,6 +286,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
                 const preset = modelPresets[modelPresetKey(group.provider.slug, family.id)] ?? {}
                 const effEffort = isCurrent ? currentReasoningEffort : (preset.effort ?? '')
                 const effFast = isCurrent ? currentFastMode : (preset.fast ?? false)
+
                 const normalizedEffort = normalizeReasoningEffort(
                   effEffort,
                   caps?.reasoning_efforts,

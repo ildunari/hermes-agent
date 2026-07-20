@@ -1,7 +1,7 @@
 import type * as React from 'react'
 
 import type { ChatMessage } from '@/lib/chat-messages'
-import type { UsageStats } from '@/types/hermes'
+import type { RuntimeRouting, UsageStats } from '@/types/hermes'
 
 export interface ContextSuggestion {
   text: string
@@ -143,6 +143,8 @@ export interface ClientSessionState {
   cwd: string
   model: string
   provider: string
+  /** Backend-owned routing truth for this runtime session. Never persisted. */
+  runtimeRouting?: RuntimeRouting
   reasoningEffort: string
   serviceTier: string
   fast: boolean

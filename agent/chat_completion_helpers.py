@@ -1968,6 +1968,10 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,
         )
+        # Emit only after the entire swap succeeds. Failed/skipped candidates
+        # must never be presented as the running runtime.
+        from agent.runtime_routing import emit_runtime_route
+        emit_runtime_route(agent, "fallback_activated", reason=reason)
         # Reset the stale-call circuit breaker (#58962): the streak measured
         # the OLD provider's unresponsiveness.  Carrying it over would
         # short-circuit the freshly activated fallback before it gets a

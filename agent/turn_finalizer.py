@@ -466,6 +466,9 @@ def finalize_turn(
             break
 
     # Build result with interrupt info if applicable
+    from agent.runtime_routing import emit_runtime_route
+    runtime_routing = emit_runtime_route(agent, "finished")
+
     result = {
         "final_response": final_response,
         "last_reasoning": last_reasoning,
@@ -480,6 +483,7 @@ def finalize_turn(
         "response_previewed": getattr(agent, "_response_was_previewed", False),
         "model": agent.model,
         "provider": agent.provider,
+        "runtime_routing": runtime_routing,
         "base_url": agent.base_url,
         "input_tokens": agent.session_input_tokens,
         "output_tokens": agent.session_output_tokens,

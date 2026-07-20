@@ -830,8 +830,12 @@ def run_codex_app_server_turn(
         except Exception:
             logger.debug("background review spawn raised", exc_info=True)
 
+    from agent.runtime_routing import emit_runtime_route
+    runtime_routing = emit_runtime_route(agent, "finished")
+
     return {
         "final_response": turn.final_text,
+        "runtime_routing": runtime_routing,
         "messages": messages,
         "api_calls": api_calls,
         "completed": not turn.interrupted and turn.error is None,

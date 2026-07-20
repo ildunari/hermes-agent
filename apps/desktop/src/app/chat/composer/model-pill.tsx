@@ -19,6 +19,7 @@ import {
   $currentReasoningEffort,
   setModelPickerOpen
 } from '@/store/session'
+import { $sessionStates } from '@/store/session-states'
 
 import type { ChatBarState } from './types'
 
@@ -48,6 +49,7 @@ export function ModelPill({
   const reasoningEffort = useStore($currentReasoningEffort)
   const modelSource = useStore($currentModelSource)
   const activeSessionId = useStore($activeSessionId)
+  const sessionStates = useStore($sessionStates)
   const [open, setOpen] = useState(false)
 
   // The composer pick is sticky: a manual selection is pinned and every NEW
@@ -56,6 +58,13 @@ export function ModelPill({
   // pin whenever a draft (no live session) is running on a manual override. A
   // live session's footer reflects that session's model, so no badge there.
   const pinnedOverride = !activeSessionId && modelSource === 'manual' && Boolean(currentModel.trim())
+  const routing = activeSessionId ? sessionStates[activeSessionId]?.runtimeRouting : undefined
+
+  const routedFallback =
+    routing?.fallback.active && routing.runtime.model !== routing.selected.model ? routing : undefined
+
+  const displayModel = routedFallback?.runtime.model || currentModel
+  const routeLabel = routedFallback ? (routing?.state === 'finished' ? copy.modelLastResponse : copy.modelRunning) : ''
 
   // The model resolves a beat after the gateway/session comes up. Rather than
   // flash a literal "No model", show a quiet loader (inherits the pill text
@@ -64,8 +73,11 @@ export function ModelPill({
     <ChevronDown className="size-3.5 shrink-0 opacity-70" />
   ) : (
     <>
-      {currentModel.trim() ? (
-        <span className="truncate">{formatModelStatusLabel(currentModel, { fastMode, reasoningEffort })}</span>
+      {displayModel.trim() ? (
+        <span className="truncate">
+          {routeLabel && <span className="mr-1 opacity-60">{routeLabel} ·</span>}
+          {formatModelStatusLabel(displayModel, { fastMode, reasoningEffort })}
+        </span>
       ) : (
         <GlyphSpinner className="opacity-50" spinner="braille" />
       )}
@@ -94,7 +106,11 @@ export function ModelPill({
     ? copy.modelTitle(currentProvider, currentModel || copy.modelNone)
     : copy.switchModel
 
-  const title = pinnedOverride ? `${baseTitle} — ${copy.modelPinned}` : baseTitle
+  const routingTitle = routedFallback
+    ? `${routeLabel}: ${routedFallback.runtime.provider}: ${routedFallback.runtime.model} — ${copy.modelSelected}: ${routedFallback.selected.provider}: ${routedFallback.selected.model}`
+    : baseTitle
+
+  const title = pinnedOverride ? `${routingTitle} — ${copy.modelPinned}` : routingTitle
 
   if (!model.modelMenuContent) {
     return (

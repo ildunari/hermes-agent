@@ -418,7 +418,8 @@ export const en: Translations = {
       chatWidthWide: 'Wide',
       chatWidthFull: 'Full',
       tableLayoutTitle: 'Markdown Tables',
-      tableLayoutDesc: 'Fit wraps tables inside the chat; Scroll preserves useful column widths with horizontal scrolling.',
+      tableLayoutDesc:
+        'Fit wraps tables inside the chat; Scroll preserves useful column widths with horizontal scrolling.',
       tableLayoutFit: 'Fit',
       tableLayoutScroll: 'Scroll',
       translucencyTitle: 'Window Translucency',
@@ -2207,6 +2208,9 @@ export const en: Translations = {
       switchModel: 'Switch model',
       openModelPicker: 'Open model picker',
       modelPinned: 'pinned by you; new chats use this instead of the Settings default',
+      modelSelected: 'Selected',
+      modelRunning: 'Running',
+      modelLastResponse: 'Last response',
       modelTitle: (provider, model) => `Model · ${provider}: ${model}`,
       providerModelTitle: (provider, model) => `${provider} · ${model}`
     }

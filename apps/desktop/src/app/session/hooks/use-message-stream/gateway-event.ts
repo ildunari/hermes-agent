@@ -47,7 +47,7 @@ import { clearActiveSessionTodos } from '@/store/todos'
 import { recordToolDiff } from '@/store/tool-diffs'
 import { reportInstallMethodWarning } from '@/store/updates'
 import { notifyWorkspaceChanged, toolMayMutateFiles } from '@/store/workspace-events'
-import type { RpcEvent } from '@/types/hermes'
+import type { RpcEvent, RuntimeRouting } from '@/types/hermes'
 
 import type { ClientSessionState } from '../../../types'
 
@@ -449,6 +449,17 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         // message stream. No reasoning/transcript mutation here.
         if (isActiveEvent) {
           setPetActivity({ reasoning: true })
+        }
+      } else if (event.type === 'runtime.route') {
+        // Runtime routing is backend truth scoped to this event's session. It
+        // must never flow through selected-model setters or persistence.
+        const routingPayload = payload as unknown as Partial<RuntimeRouting> | undefined
+
+        if (sessionId && routingPayload?.schema_version === 1) {
+          updateSessionState(sessionId, state => ({
+            ...state,
+            runtimeRouting: routingPayload as RuntimeRouting
+          }))
         }
       } else if (event.type === 'message.complete') {
         if (!sessionId) {

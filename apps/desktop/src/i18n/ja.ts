@@ -2131,6 +2131,9 @@ export const ja = defineLocale({
       switchModel: 'モデルを切り替え',
       openModelPicker: 'モデルピッカーを開く',
       modelPinned: '手動で固定中 — 新しいチャットは設定のデフォルトではなくこのモデルを使用します',
+      modelSelected: '選択中',
+      modelRunning: '実行中',
+      modelLastResponse: '前回の応答',
       modelTitle: (provider, model) => `モデル · ${provider}: ${model}`,
       providerModelTitle: (provider, model) => `${provider} · ${model}`
     }

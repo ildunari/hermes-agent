@@ -469,7 +469,16 @@ export async function resolveStoredSession(storedSessionId: string): Promise<Ses
 type SessionRuntimeStatePatch = Partial<
   Pick<
     ClientSessionState,
-    'branch' | 'cwd' | 'fast' | 'model' | 'personality' | 'provider' | 'reasoningEffort' | 'serviceTier' | 'yolo'
+    | 'branch'
+    | 'cwd'
+    | 'fast'
+    | 'model'
+    | 'personality'
+    | 'provider'
+    | 'reasoningEffort'
+    | 'runtimeRouting'
+    | 'serviceTier'
+    | 'yolo'
   >
 >
 
@@ -500,6 +509,10 @@ export function applyRuntimeInfo(info: SessionRuntimeInfo | undefined): SessionR
   if (typeof info.provider === 'string') {
     setCurrentProvider(info.provider)
     sessionState.provider = info.provider
+  }
+
+  if (info.runtime_routing) {
+    sessionState.runtimeRouting = info.runtime_routing
   }
 
   if (info.cwd) {

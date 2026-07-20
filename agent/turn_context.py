@@ -368,7 +368,13 @@ def build_turn_context(
     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
 
     # Restore the primary runtime if the previous turn activated fallback.
-    agent._restore_primary_runtime()
+    restored_primary = agent._restore_primary_runtime()
+    from agent.runtime_routing import emit_runtime_route
+    if restored_primary:
+        emit_runtime_route(agent, "primary_restored")
+    # A cooldown may intentionally keep this turn on the previous fallback.
+    # The started snapshot therefore comes after restoration has settled.
+    emit_runtime_route(agent, "started")
 
     # Tell auxiliary_client what the live main provider/model are for this turn
     # after primary restoration has settled the runtime.
