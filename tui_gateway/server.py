@@ -3177,6 +3177,10 @@ def _snapshot_agent_model_runtime(agent) -> dict:
         "base_url": getattr(agent, "base_url", ""),
         "api_mode": getattr(agent, "api_mode", ""),
         "primary_runtime": copy.deepcopy(getattr(agent, "_primary_runtime", None)),
+        "primary_runtime_restorable": getattr(agent, "_primary_runtime_restorable", True),
+        "fallback_activated": bool(getattr(agent, "_fallback_activated", False)),
+        "fallback_index": getattr(agent, "_fallback_index", 0),
+        "runtime_route_reason": getattr(agent, "_runtime_route_reason", "unknown"),
         "selected_runtime_identity": copy.deepcopy(
             getattr(agent, "_selected_runtime_identity", None)
         ),
@@ -3192,6 +3196,9 @@ def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
         if primary and hasattr(agent, "_restore_primary_runtime"):
             try:
                 agent._primary_runtime = copy.deepcopy(primary)
+                agent._primary_runtime_restorable = snapshot.get(
+                    "primary_runtime_restorable", True
+                )
                 agent._fallback_activated = True
                 agent._rate_limited_until = 0
                 if agent._restore_primary_runtime():
@@ -3207,6 +3214,12 @@ def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
                 api_mode=snapshot.get("api_mode", ""),
             )
     finally:
+        agent._primary_runtime_restorable = snapshot.get(
+            "primary_runtime_restorable", True
+        )
+        agent._fallback_activated = bool(snapshot.get("fallback_activated", False))
+        agent._fallback_index = snapshot.get("fallback_index", 0)
+        agent._runtime_route_reason = snapshot.get("runtime_route_reason", "unknown")
         selected = snapshot.get("selected_runtime_identity")
         if isinstance(selected, dict):
             agent._selected_runtime_identity = copy.deepcopy(selected)

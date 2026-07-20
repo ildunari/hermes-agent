@@ -45,6 +45,7 @@ def test_switch_model_clears_previous_config_context_length(mock_ctx_len):
     """Switching models must not reuse the previous model.context_length override."""
     agent = _make_agent_with_compressor(config_context_length=32_768)
     setattr(agent, "_fallback_activated", True)
+    setattr(agent, "_primary_runtime_restorable", False)
     setattr(agent, "_runtime_routing", {"state": "finished", "runtime": {"model": "old-fallback"}})
 
     assert agent.context_compressor.model == "primary-model"
@@ -63,6 +64,7 @@ def test_switch_model_clears_previous_config_context_length(mock_ctx_len):
     assert agent.context_compressor.context_length == 131_072
     assert getattr(agent, "_runtime_routing") is None
     assert getattr(agent, "_fallback_activated") is False
+    assert getattr(agent, "_primary_runtime_restorable") is True
     assert getattr(agent, "_selected_runtime_identity") == {"model": "new-model", "provider": "openrouter"}
 
 

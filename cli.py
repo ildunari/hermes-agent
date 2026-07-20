@@ -7929,6 +7929,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "agent_primary_runtime": copy.deepcopy(
                 getattr(agent, "_primary_runtime", None)
             ) if agent is not None else None,
+            "agent_primary_runtime_restorable": getattr(
+                agent, "_primary_runtime_restorable", True
+            ) if agent is not None else True,
+            "agent_fallback_activated": bool(
+                getattr(agent, "_fallback_activated", False)
+            ) if agent is not None else False,
+            "agent_fallback_index": getattr(agent, "_fallback_index", 0) if agent is not None else 0,
+            "agent_runtime_route_reason": getattr(
+                agent, "_runtime_route_reason", "unknown"
+            ) if agent is not None else "unknown",
         }
 
     def _restore_model_runtime_snapshot(self, snapshot: dict | None) -> None:
@@ -7952,13 +7962,29 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         if agent is None:
             return
 
+        def _restore_routing_state() -> None:
+            agent._primary_runtime_restorable = snapshot.get(
+                "agent_primary_runtime_restorable", True
+            )
+            agent._fallback_activated = bool(
+                snapshot.get("agent_fallback_activated", False)
+            )
+            agent._fallback_index = snapshot.get("agent_fallback_index", 0)
+            agent._runtime_route_reason = snapshot.get(
+                "agent_runtime_route_reason", "unknown"
+            )
+
         primary = snapshot.get("agent_primary_runtime")
         if primary and hasattr(agent, "_restore_primary_runtime"):
             try:
                 agent._primary_runtime = copy.deepcopy(primary)
+                agent._primary_runtime_restorable = snapshot.get(
+                    "agent_primary_runtime_restorable", True
+                )
                 agent._fallback_activated = True
                 agent._rate_limited_until = 0
                 if agent._restore_primary_runtime():
+                    _restore_routing_state()
                     return
             except Exception:
                 logger.debug("CLI one-turn model restore via primary runtime failed", exc_info=True)
@@ -7974,6 +8000,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 )
             except Exception as exc:
                 logger.warning("CLI one-turn model restore failed: %s", exc)
+        _restore_routing_state()
 
     @staticmethod
     def _compute_model_picker_viewport(

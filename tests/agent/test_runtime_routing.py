@@ -98,3 +98,90 @@ def test_real_init_time_credential_fallback_preserves_requested_identity():
     assert route["selected"] == {"model": "wanted-model", "provider": "missing-provider"}
     assert route["runtime"] == {"model": "resolved-backup", "provider": "openai"}
     assert route["fallback"]["active"] is True
+
+
+def test_init_credential_fallback_remains_truthful_across_turn_boundaries():
+    from agent.turn_context import build_turn_context
+    from run_agent import AIAgent
+
+    events = []
+    fallback_client = MagicMock()
+    fallback_client.api_key = "fallback-key"
+    fallback_client.base_url = "https://fallback.example/v1"
+    fallback_client.default_headers = {}
+
+    def resolve(provider, **_kwargs):
+        return (fallback_client, "resolved-backup") if provider == "openai" else (None, None)
+
+    with (
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+        patch("agent.auxiliary_client.resolve_provider_client", side_effect=resolve),
+    ):
+        agent = AIAgent(
+            model="wanted-model",
+            provider="missing-provider",
+            api_key="",
+            base_url="",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            fallback_model={"provider": "openai", "model": "backup-model"},
+            event_callback=lambda name, payload: events.append((name, payload)),
+        )
+
+    assert agent._selected_runtime_identity == {
+        "model": "wanted-model",
+        "provider": "missing-provider",
+    }
+    assert agent._primary_runtime["model"] == "resolved-backup"
+    assert agent._primary_runtime_restorable is False
+
+    # Exercise the real turn prologue, including restoration and started-event
+    # ownership, rather than calling the restore helper in isolation.
+    agent._cached_system_prompt = "cached"
+    agent.compression_enabled = False
+    agent._skip_mcp_refresh = True
+
+    def start_turn(message):
+        with patch("hermes_cli.plugins.invoke_hook", return_value=[]):
+            return build_turn_context(
+                agent,
+                message,
+                None,
+                None,
+                None,
+                None,
+                None,
+                restore_or_build_system_prompt=lambda *_args: None,
+                install_safe_stdio=lambda: None,
+                sanitize_surrogates=lambda value: value,
+                summarize_user_message_for_log=lambda value: str(value),
+                set_session_context=lambda *_args: None,
+                set_current_write_origin=lambda *_args: None,
+                ra=lambda: SimpleNamespace(_set_interrupt=lambda *_args: None),
+            )
+
+    start_turn("first")
+    started = events[-1][1]
+    assert [payload["state"] for _, payload in events] == ["started"]
+    assert started["selected"] == {"model": "wanted-model", "provider": "missing-provider"}
+    assert started["runtime"] == {"model": "resolved-backup", "provider": "openai"}
+    assert started["fallback"] == {
+        "active": True,
+        "reason": "authentication",
+        "chain_index": 0,
+    }
+
+    finished = emit_runtime_route(agent, "finished")
+    assert finished["runtime"] == {"model": "resolved-backup", "provider": "openai"}
+    assert finished["fallback"]["active"] is True
+    assert finished["fallback"]["reason"] == "authentication"
+
+    start_turn("second")
+    second_started = events[-1][1]
+    assert second_started["state"] == "started"
+    assert second_started["runtime"] == {"model": "resolved-backup", "provider": "openai"}
+    assert second_started["fallback"]["active"] is True
+    assert "primary_restored" not in [payload["state"] for _, payload in events]

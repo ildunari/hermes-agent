@@ -1407,6 +1407,16 @@ def restore_primary_runtime(agent) -> bool:
         agent._fallback_index = 0
         return False
 
+    # Credential fallback can happen during construction, before a usable
+    # primary runtime ever exists.  In that case ``_primary_runtime`` records
+    # the live fallback as the durable operational baseline; restoring it into
+    # itself would only clear truthful fallback state and emit a false
+    # ``primary_restored`` event.  A path that installs a genuinely usable
+    # primary (notably ``switch_model``) explicitly marks its new snapshot
+    # restorable.
+    if not getattr(agent, "_primary_runtime_restorable", True):
+        return False
+
     if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
         return False  # primary still in rate-limit cooldown, stay on fallback
 
@@ -2415,6 +2425,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
         })
+    agent._primary_runtime_restorable = True
 
     # ── Reset fallback state ──
     agent._fallback_activated = False

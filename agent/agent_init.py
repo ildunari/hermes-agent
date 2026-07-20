@@ -2263,7 +2263,7 @@ def init_agent(
     # ``run_conversation``'s preflight) runs it at most once per agent.
     agent._compression_feasibility_checked = False
 
-    # Snapshot primary runtime for per-turn restoration.  When fallback
+    # Snapshot the operational runtime for per-turn restoration.  When fallback
     # activates during a turn, the next turn restores these values so the
     # preferred model gets a fresh attempt each time.  Uses a single dict
     # so new state fields are easy to add without N individual attributes.
@@ -2298,6 +2298,17 @@ def init_agent(
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
         })
+    # An init-time credential fallback is the only runtime that successfully
+    # initialized, not a turn-scoped detour from a viable primary.  Its snapshot
+    # is therefore an operational baseline and must not be "restored" into
+    # itself at the first turn boundary (which would falsely clear active
+    # routing).  Deliberate model switches replace the snapshot and make it
+    # restorable again.
+    agent._primary_runtime_restorable = not bool(
+        getattr(agent, "_fallback_activated", False)
+    )
+    if not agent._primary_runtime_restorable:
+        agent._runtime_route_reason = "authentication"
 
 
 

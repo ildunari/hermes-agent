@@ -86,3 +86,37 @@ def test_one_turn_restore_owns_top_level_while_last_response_stays_historical(mo
     started = emit_runtime_route(agent, "started")
     assert started["selected"] == {"model": "primary", "provider": "openai"}
     assert started["runtime"] == {"model": "primary", "provider": "openai"}
+
+
+def test_one_turn_restore_preserves_init_fallback_operational_baseline():
+    from tui_gateway import server
+
+    agent = SimpleNamespace(
+        model="backup", provider="openai", api_key="fallback-key",
+        base_url="https://fallback.example/v1", api_mode="chat_completions",
+        _primary_runtime={"model": "backup", "provider": "openai"},
+        _primary_runtime_restorable=False,
+        _selected_runtime_identity={"model": "requested", "provider": "missing"},
+        _fallback_activated=True, _fallback_index=0,
+        _runtime_route_reason="authentication", _rate_limited_until=0,
+    )
+    agent._restore_primary_runtime = lambda: False
+
+    def switch_model(**kwargs):
+        agent.model = kwargs["new_model"]
+        agent.provider = kwargs["new_provider"]
+        agent._primary_runtime_restorable = True
+        agent._fallback_activated = False
+
+    agent.switch_model = switch_model
+    snapshot = server._snapshot_agent_model_runtime(agent)
+
+    agent.model = "one-shot"
+    agent.provider = "anthropic"
+    server._restore_agent_model_runtime(agent, snapshot)
+
+    assert (agent.model, agent.provider) == ("backup", "openai")
+    assert agent._selected_runtime_identity == {"model": "requested", "provider": "missing"}
+    assert agent._primary_runtime_restorable is False
+    assert agent._fallback_activated is True
+    assert agent._runtime_route_reason == "authentication"
