@@ -25,9 +25,18 @@ def run(
     check: bool = True,
     input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    env = os.environ.copy()
+    # Git exports its live index path to hooks.  Letting that leak into the
+    # isolated clone makes `git apply --index` target the caller's already-
+    # staged index instead of the clone, so every pre-commit gate fails and can
+    # leave the caller detached.  Each subprocess must discover repository
+    # state from its own cwd.
+    for name in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"):
+        env.pop(name, None)
     return subprocess.run(
         args,
         cwd=root,
+        env=env,
         input=input_bytes,
         capture_output=True,
         check=check,
