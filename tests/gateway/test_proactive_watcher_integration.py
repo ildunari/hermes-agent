@@ -40,7 +40,13 @@ def test_runtime_model_calls_are_exact_and_nonfallback(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_poke_watcher_runs_real_loop_records_health_and_wires_web(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("runner_profile", "multiplex_profiles"),
+    (("poke", False), pytest.param("default", True, id="root-multiplex")),
+)
+async def test_poke_watcher_runs_real_loop_records_health_and_wires_web(
+    monkeypatch, tmp_path, runner_profile, multiplex_profiles
+):
     lane = {"provider": "openai-codex", "model": "gpt-5.6-sol", "reasoning_effort": "medium", "fallback": False}
     raw = {"auxiliary": {"proactive_gate": lane, "proactive_semantic": lane}, "agent": {"proactive": {
         "enabled": True, "mode": "observe", "dry_run": True,
@@ -52,7 +58,9 @@ async def test_poke_watcher_runs_real_loop_records_health_and_wires_web(monkeypa
     }}}
     profile_home = tmp_path / "profiles" / "poke"
     seen = {}
-    monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "poke")
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_active_profile_name", lambda: runner_profile
+    )
     monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda profile: profile_home if profile == "poke" else tmp_path / "profiles" / profile)
     monkeypatch.setattr("gateway.run._load_gateway_config_for_profile", lambda profile: raw if profile == "poke" else {})
     monkeypatch.setattr("gateway.proactive_status.probe_model_readiness",lambda:{
@@ -82,9 +90,14 @@ async def test_poke_watcher_runs_real_loop_records_health_and_wires_web(monkeypa
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
     runner.adapters = {Platform.BLUEBUBBLES: SimpleNamespace(is_connected=True)}
-    runner.config = SimpleNamespace(platforms={
-        Platform.BLUEBUBBLES: SimpleNamespace(extra={"guest_contacts_file": str(registry_path)}),
-    })
+    runner.config = SimpleNamespace(
+        multiplex_profiles=multiplex_profiles,
+        platforms={
+            Platform.BLUEBUBBLES: SimpleNamespace(
+                extra={"guest_contacts_file": str(registry_path)}
+            ),
+        },
+    )
 
     async def stop_after_tick(_seconds):
         runner._running = False

@@ -8134,7 +8134,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Drive isolated profile policy off-loop and Poke-owned transport on-loop."""
         from hermes_cli.profiles import get_active_profile_name
         runner_profile = get_active_profile_name() or os.getenv("HERMES_PROFILE") or "default"
-        if runner_profile != "poke":
+        if (
+            runner_profile != "poke"
+            and "poke" not in self._shared_bluebubbles_transport_profiles()
+        ):
             logger.info("Proactive watcher disabled for non-Poke runner profile=%s", runner_profile)
             return
         transport_runner_id = f"poke:{os.getpid()}:{uuid.uuid4().hex}"

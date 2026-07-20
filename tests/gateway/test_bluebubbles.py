@@ -72,6 +72,53 @@ class TestBlueBubblesConfigLoading:
         assert bc.extra["require_mention"] is True
         assert bc.extra["mention_patterns"] == ["(?i)^amos\\b"]
 
+    @pytest.mark.parametrize(
+        "config_yaml",
+        (
+            "bluebubbles:\n  enabled: false\n",
+            "platforms:\n  bluebubbles:\n    enabled: false\n",
+        ),
+        ids=("top-level", "platforms"),
+    )
+    def test_explicit_disabled_bluebubbles_loads_env_credentials_without_enabling(
+        self, monkeypatch, tmp_path, config_yaml
+    ):
+        from gateway.config import load_gateway_config
+
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(config_yaml, encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
+        monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
+        monkeypatch.setenv("BLUEBUBBLES_WEBHOOK_PORT", "9999")
+
+        config = load_gateway_config()
+
+        bluebubbles = config.platforms[Platform.BLUEBUBBLES]
+        assert bluebubbles.enabled is False
+        assert bluebubbles.extra["server_url"] == "http://localhost:1234"
+        assert bluebubbles.extra["password"] == "secret"
+        assert bluebubbles.extra["webhook_port"] == 9999
+        assert "_enabled_explicit" not in bluebubbles.extra
+
+    def test_bluebubbles_env_bridge_preserves_api_server_explicit_false(self, monkeypatch):
+        from gateway.config import GatewayConfig, _apply_env_overrides
+
+        monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://localhost:1234")
+        monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")
+        monkeypatch.setenv("API_SERVER_ENABLED", "true")
+        config = GatewayConfig(
+            platforms={
+                Platform.API_SERVER: PlatformConfig(enabled=False),
+            }
+        )
+
+        _apply_env_overrides(config)
+
+        assert config.platforms[Platform.API_SERVER].enabled is False
+        assert config.platforms[Platform.BLUEBUBBLES].enabled is True
+
     def test_apply_env_sets_cross_host_webhook_public_url(self, monkeypatch):
         monkeypatch.setenv("BLUEBUBBLES_SERVER_URL", "http://mini:1234")
         monkeypatch.setenv("BLUEBUBBLES_PASSWORD", "secret")

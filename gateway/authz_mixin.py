@@ -18,6 +18,7 @@ import time -> no import cycle. The lazy import preserves the exact logger name
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Optional
 
 from gateway.config import Platform
@@ -46,6 +47,61 @@ def _auth_env(name: str, default: str = "") -> str:
 class GatewayAuthorizationMixin:
     """User/chat authorization methods for ``GatewayRunner``."""
 
+    def _shared_bluebubbles_transport_profiles(self) -> frozenset[str]:
+        config = getattr(self, "config", None)
+        if not getattr(config, "multiplex_profiles", False):
+            return frozenset()
+        platform_config = getattr(config, "platforms", {}).get(Platform.BLUEBUBBLES)
+        extra = getattr(platform_config, "extra", None)
+        if not isinstance(extra, dict):
+            return frozenset()
+        registry_path = (
+            extra.get("guest_contacts_file")
+            or extra.get("contact_registry")
+            or os.getenv("HERMES_BLUEBUBBLES_GUEST_CONTACTS")
+        )
+        if not registry_path:
+            return frozenset()
+        path = Path(str(registry_path)).expanduser()
+        try:
+            stat = path.stat()
+            cache_key = (
+                str(path.resolve()),
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_mtime_ns,
+                stat.st_size,
+            )
+        except OSError:
+            return frozenset()
+        cached = getattr(self, "_shared_bluebubbles_profiles_cache", None)
+        if cached and cached[0] == cache_key:
+            return cached[1]
+        try:
+            from gateway.guest_access import load_contact_registry
+
+            registry = load_contact_registry(path)
+        except Exception:
+            return frozenset()
+        profiles: set[str] = set()
+        owner_profile = str(registry.owner_profile or "").strip()
+        if (
+            owner_profile
+            and registry.owner_contact_id == "kosta-owner"
+            and registry.owner_identities
+        ):
+            profiles.add(owner_profile)
+        guest_profile = str(registry.guest_profile or "").strip()
+        if guest_profile and any(
+            "bluebubbles" in contact.allowed_surfaces
+            and contact.bluebubbles_identity_set()
+            for contact in registry.contacts
+        ):
+            profiles.add(guest_profile)
+        resolved = frozenset(profiles)
+        self._shared_bluebubbles_profiles_cache = (cache_key, resolved)
+        return resolved
+
     def _authorization_adapter(
         self,
         platform: Optional[Platform],
@@ -56,8 +112,9 @@ class GatewayAuthorizationMixin:
         In multiplex mode, secondary-profile adapters live in
         ``_profile_adapters[profile]`` while the default/active profile uses
         ``self.adapters``. ``SessionSource.profile`` selects which map to consult.
-        When a stamped profile has its own adapter registry entry, the default
-        profile's same-platform adapter must not be consulted as a fallback.
+        A stamped profile without its own adapter fails closed, except for a
+        BlueBubbles owner/guest profile explicitly registered to share the
+        root multiplex transport.
         """
         if not platform:
             return None
@@ -65,10 +122,15 @@ class GatewayAuthorizationMixin:
         if profile_name and profile_name != "default":
             profile_adapters = getattr(self, "_profile_adapters", None) or {}
             if profile_name in profile_adapters:
-                return profile_adapters[profile_name].get(platform)
-            # Fail closed: a stamped secondary profile with no registry entry
-            # (e.g. its adapter failed to connect) must NOT fall back to the
-            # default profile's adapter — that sends replies out the wrong bot.
+                adapter = profile_adapters[profile_name].get(platform)
+                if adapter is not None:
+                    return adapter
+            if (
+                platform == Platform.BLUEBUBBLES
+                and profile_name in self._shared_bluebubbles_transport_profiles()
+            ):
+                adapters = getattr(self, "adapters", None) or {}
+                return adapters.get(platform)
             return None
         adapters = getattr(self, "adapters", None) or {}
         return adapters.get(platform)

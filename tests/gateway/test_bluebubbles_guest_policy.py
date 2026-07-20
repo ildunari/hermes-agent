@@ -266,19 +266,22 @@ def test_guest_runtime_uses_guest_profile_provider_config():
         }
     }
 
-    def fake_resolve_runtime_provider(**kwargs):
-        assert kwargs["requested"] == "openrouter"
-        assert kwargs["explicit_base_url"] == "https://openrouter.ai/api/v1"
-        assert kwargs["target_model"] == "guest-model"
+    def fake_resolve_runtime_provider(
+        *, requested, explicit_api_key, explicit_base_url, target_model
+    ):
+        assert requested == "openrouter"
+        assert explicit_api_key is None
+        assert explicit_base_url == "https://openrouter.ai/api/v1"
+        assert target_model == "guest-model"
         return {
             "provider": "openrouter",
             "api_key": "guest-key",
-            "base_url": kwargs["explicit_base_url"],
+            "base_url": explicit_base_url,
             "api_mode": "chat_completions",
             "args": [],
         }
 
-    with patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=fake_resolve_runtime_provider):
+    with patch("hermes_cli.runtime_provider.resolve_runtime_provider", new=fake_resolve_runtime_provider):
         runtime = _resolve_runtime_agent_kwargs(guest_config)
 
     assert runtime["provider"] == "openrouter"

@@ -2254,10 +2254,8 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     bluebubbles_server_url = getenv("BLUEBUBBLES_SERVER_URL")
     bluebubbles_password = getenv("BLUEBUBBLES_PASSWORD")
     if bluebubbles_server_url and bluebubbles_password:
-        if Platform.BLUEBUBBLES not in config.platforms:
-            config.platforms[Platform.BLUEBUBBLES] = PlatformConfig()
-        config.platforms[Platform.BLUEBUBBLES].enabled = True
-        config.platforms[Platform.BLUEBUBBLES].extra.update({
+        bluebubbles_config = _enable_from_env(Platform.BLUEBUBBLES)
+        bluebubbles_config.extra.update({
             "server_url": bluebubbles_server_url.rstrip("/"),
             "password": bluebubbles_password,
             "webhook_host": getenv("BLUEBUBBLES_WEBHOOK_HOST", "127.0.0.1"),
@@ -2271,7 +2269,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         })
         bluebubbles_require_mention = getenv("BLUEBUBBLES_REQUIRE_MENTION")
         if bluebubbles_require_mention is not None:
-            config.platforms[Platform.BLUEBUBBLES].extra["require_mention"] = (
+            bluebubbles_config.extra["require_mention"] = (
                 bluebubbles_require_mention.lower() in {"true", "1", "yes", "on"}
             )
         bluebubbles_mention_patterns = getenv("BLUEBUBBLES_MENTION_PATTERNS")
@@ -2284,7 +2282,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                     for part in bluebubbles_mention_patterns.replace("\n", ",").split(",")
                     if part.strip()
                 ]
-            config.platforms[Platform.BLUEBUBBLES].extra["mention_patterns"] = parsed_patterns
+            bluebubbles_config.extra["mention_patterns"] = parsed_patterns
     bluebubbles_home = getenv("BLUEBUBBLES_HOME_CHANNEL")
     if bluebubbles_home and Platform.BLUEBUBBLES in config.platforms:
         config.platforms[Platform.BLUEBUBBLES].home_channel = HomeChannel(

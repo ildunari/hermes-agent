@@ -1,6 +1,6 @@
 """Regression tests for multiplex profile-aware own-policy authorization."""
 
-from types import SimpleNamespace
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,18 +28,18 @@ def _make_multiplex_runner(monkeypatch):
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(multiplex_profiles=True)
 
-    default_adapter = SimpleNamespace(
-        send=AsyncMock(),
-        enforces_own_access_policy=True,
-        _dm_policy="allowlist",
-        _group_policy="pairing",
-    )
-    secondary_adapter = SimpleNamespace(
-        send=AsyncMock(),
-        enforces_own_access_policy=True,
-        _dm_policy="open",
-        _group_policy="open",
-    )
+    default_adapter = MagicMock()
+    default_adapter.send = AsyncMock()
+    default_adapter.authorization_is_upstream = False
+    default_adapter.enforces_own_access_policy = True
+    default_adapter._dm_policy = "allowlist"
+    default_adapter._group_policy = "pairing"
+    secondary_adapter = MagicMock()
+    secondary_adapter.send = AsyncMock()
+    secondary_adapter.authorization_is_upstream = False
+    secondary_adapter.enforces_own_access_policy = True
+    secondary_adapter._dm_policy = "open"
+    secondary_adapter._group_policy = "open"
 
     runner.adapters = {Platform.WECOM: default_adapter}
     runner._profile_adapters = {
@@ -48,6 +48,52 @@ def _make_multiplex_runner(monkeypatch):
     runner.pairing_store = MagicMock()
     runner.pairing_store.is_approved.return_value = False
     return runner, default_adapter, secondary_adapter
+
+
+def _make_shared_bluebubbles_runner(tmp_path):
+    from gateway.run import GatewayRunner
+
+    registry_path = tmp_path / "contacts.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "owner_identities": ["owner@example.com"],
+                "owner_profile": "poke",
+                "owner_contact_id": "kosta-owner",
+                "guest_profile": "guest",
+                "contacts": {
+                    "stephen-lucier": {
+                        "identities": {
+                            "bluebubbles": {"handles": ["guest@example.com"]}
+                        },
+                        "allowed_surfaces": ["bluebubbles"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        multiplex_profiles=True,
+        platforms={
+            Platform.BLUEBUBBLES: PlatformConfig(
+                enabled=True,
+                extra={"guest_contacts_file": str(registry_path)},
+            ),
+        },
+    )
+    root_bluebubbles = MagicMock()
+    root_bluebubbles.send = AsyncMock(return_value=None)
+    root_wecom = MagicMock()
+    root_wecom.send = AsyncMock(return_value=None)
+    runner.adapters = {
+        Platform.BLUEBUBBLES: root_bluebubbles,
+        Platform.WECOM: root_wecom,
+    }
+    runner._profile_adapters = {"poke": {}, "guest": {}}
+    runner._thread_metadata_for_source = MagicMock(return_value={"reply_to": "m-1"})
+    return runner, root_bluebubbles, root_wecom
 
 
 def test_secondary_open_policy_not_authorized_by_default_allowlist(monkeypatch):
@@ -125,6 +171,54 @@ def test_adapter_for_source_resolves_secondary_profile_adapter(monkeypatch):
             profile=None,
         )
     ) is default_adapter
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ("poke", "guest"))
+async def test_registered_bluebubbles_profile_reply_uses_root_transport(
+    tmp_path, profile
+):
+    runner, root_bluebubbles, _root_wecom = _make_shared_bluebubbles_runner(tmp_path)
+    source = SessionSource(
+        platform=Platform.BLUEBUBBLES,
+        user_id=f"{profile}@example.com",
+        chat_id=f"{profile}-chat",
+        user_name=profile,
+        chat_type="dm",
+        profile=profile,
+    )
+
+    await runner._send_goal_status_notice(source, "routed reply")
+
+    root_bluebubbles.send.assert_awaited_once_with(
+        f"{profile}-chat",
+        "routed reply",
+        metadata={"reply_to": "m-1"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("platform", "profile"),
+    (
+        (Platform.BLUEBUBBLES, "reviewer"),
+        (Platform.WECOM, "poke"),
+    ),
+    ids=("unexpected-bluebubbles-profile", "non-bluebubbles-platform"),
+)
+def test_shared_bluebubbles_root_transport_fallback_stays_fail_closed(
+    tmp_path, platform, profile
+):
+    runner, _root_bluebubbles, _root_wecom = _make_shared_bluebubbles_runner(tmp_path)
+    source = SessionSource(
+        platform=platform,
+        user_id="user@example.com",
+        chat_id="dm-chat",
+        user_name="user",
+        chat_type="dm",
+        profile=profile,
+    )
+
+    assert runner._adapter_for_source(source) is None
 
 
 def test_secondary_allowlist_dm_behavior_ignores_unauthorized(monkeypatch):
