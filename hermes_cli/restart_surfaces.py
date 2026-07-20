@@ -109,6 +109,31 @@ VERIFY_PORTS: dict[str, tuple[int, ...]] = {
     "hermes": (8642, 8643, 8644, 8776, 8787, 9119, 9120, 9192, 3192, 3100),
 }
 
+_NAMED_GATEWAY_LABEL_PREFIX = "ai.hermes.gateway-"
+_MULTIPLEX_SURFACE_PORTS: dict[str, tuple[int, ...]] = {
+    "gateways": (8787, 9119, 9120),
+    "hermes": (8776, 8787, 9119, 9120, 9192, 3192, 3100),
+}
+_PORT_BINDING_PLATFORM_PORTS: dict[str, tuple[str, int]] = {
+    "webhook": ("port", 8644),
+    "api_server": ("port", 8642),
+    "msgraph_webhook": ("port", 8646),
+    "feishu": ("webhook_port", 8765),
+    "wecom_callback": ("port", 8645),
+    "bluebubbles": ("webhook_port", 8645),
+    "sms": ("webhook_port", 8080),
+    "whatsapp_cloud": ("webhook_port", 8090),
+    "line": ("port", 8646),
+}
+_PLATFORM_PORT_ENV: dict[str, str] = {
+    "webhook": "WEBHOOK_PORT",
+    "api_server": "API_SERVER_PORT",
+    "msgraph_webhook": "MSGRAPH_WEBHOOK_PORT",
+    "wecom_callback": "WECOM_CALLBACK_PORT",
+    "bluebubbles": "BLUEBUBBLES_WEBHOOK_PORT",
+    "whatsapp_cloud": "WHATSAPP_CLOUD_WEBHOOK_PORT",
+}
+
 # Ports served by best-effort (required=False) targets — chiefly the dashboard
 # LaunchDaemon (9119) and the MacBook remote dashboard (9120). Their daemons use
 # ThrottleInterval=30, so a first-launch miss can't retry for 30s and a cold
@@ -193,10 +218,126 @@ def _unique_targets(targets: Iterable[RestartTarget]) -> tuple[RestartTarget, ..
     return tuple(unique)
 
 
-def targets_for_scope(scope: str) -> tuple[RestartTarget, ...]:
+def _multiplex_gateway_config() -> Any | None:
+    try:
+        from hermes_cli import managed_scope
+        from hermes_cli.config import load_config_readonly, read_raw_config
+        from utils import is_truthy_value
+
+        config = load_config_readonly()
+        raw_config = managed_scope.apply_managed_overlay(read_raw_config())
+    except Exception as exc:
+        _append_log(
+            "restart topology config probe failed; preserving legacy profile targets "
+            f"({type(exc).__name__})"
+        )
+        return None
+    env_value = os.getenv("GATEWAY_MULTIPLEX_PROFILES", "").strip().lower()
+    if env_value in {"1", "true", "yes", "on"}:
+        multiplex = True
+    elif env_value in {"0", "false", "no", "off"}:
+        multiplex = False
+    elif "multiplex_profiles" in raw_config:
+        multiplex = is_truthy_value(raw_config.get("multiplex_profiles"))
+    elif isinstance(raw_config.get("gateway"), dict) and "multiplex_profiles" in raw_config["gateway"]:
+        multiplex = is_truthy_value(raw_config["gateway"].get("multiplex_profiles"))
+    else:
+        multiplex = is_truthy_value(config.get("multiplex_profiles"))
+    return config if multiplex else None
+
+
+def _targets_for_scope(
+    scope: str,
+    multiplex_config: Any | None,
+) -> tuple[RestartTarget, ...]:
     normalized = normalize_scope(scope)
     targets = GATEWAY_TARGETS if normalized == "gateways" else FULL_HERMES_TARGETS
+    if multiplex_config is not None:
+        targets = tuple(
+            target
+            for target in targets
+            if not target.label.startswith(_NAMED_GATEWAY_LABEL_PREFIX)
+        )
     return _unique_targets(targets)
+
+
+def targets_for_scope(scope: str) -> tuple[RestartTarget, ...]:
+    return _targets_for_scope(scope, _multiplex_gateway_config())
+
+
+def _multiplex_listener_ports(config: Any) -> tuple[int, ...]:
+    from gateway.config import platform_binds_port
+
+    ports: set[int] = set()
+    platform_blocks: dict[str, dict[str, Any]] = {}
+    gateway_section = config.get("gateway") if isinstance(config, dict) else None
+    for source in (
+        gateway_section.get("platforms") if isinstance(gateway_section, dict) else None,
+        config.get("platforms") if isinstance(config, dict) else None,
+    ):
+        if not isinstance(source, dict):
+            continue
+        for platform_name, raw_block in source.items():
+            if not isinstance(raw_block, dict):
+                continue
+            prior = platform_blocks.get(str(platform_name), {})
+            prior_extra_raw = prior.get("extra")
+            prior_extra: dict[str, Any] = (
+                prior_extra_raw if isinstance(prior_extra_raw, dict) else {}
+            )
+            block_extra_raw = raw_block.get("extra")
+            block_extra: dict[str, Any] = (
+                block_extra_raw if isinstance(block_extra_raw, dict) else {}
+            )
+            merged_block: dict[str, Any] = dict(prior)
+            merged_block.update({str(key): value for key, value in raw_block.items()})
+            merged_extra: dict[str, Any] = dict(prior_extra)
+            merged_extra.update(block_extra)
+            merged_block["extra"] = merged_extra
+            platform_blocks[str(platform_name)] = merged_block
+    for platform_name, platform_config in platform_blocks.items():
+        if not platform_config.get("enabled", False):
+            continue
+        platform_name = platform_name.strip().lower()
+        port_spec = _PORT_BINDING_PLATFORM_PORTS.get(platform_name)
+        extra = platform_config.get("extra")
+        if port_spec is None or not isinstance(extra, dict):
+            continue
+        effective = {**extra, **platform_config}
+        if not platform_binds_port(platform_name, effective):
+            continue
+        if platform_name == "bluebubbles" and effective.get("webhook_register", True) is False:
+            continue
+        port_key, default_port = port_spec
+        raw_port = os.getenv(_PLATFORM_PORT_ENV.get(platform_name, "")) or effective.get(
+            port_key,
+            default_port,
+        )
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            port = default_port
+        if 1 <= port <= 65535:
+            ports.add(port)
+    return tuple(sorted(ports))
+
+
+def _verification_ports_for_scope(
+    scope: str,
+    multiplex_config: Any | None,
+) -> tuple[int, ...]:
+    normalized = normalize_scope(scope)
+    if multiplex_config is None:
+        return VERIFY_PORTS.get(normalized, ())
+    return tuple(
+        dict.fromkeys(
+            (*_multiplex_listener_ports(multiplex_config), *_MULTIPLEX_SURFACE_PORTS[normalized])
+        )
+    )
+
+
+def verification_ports_for_scope(scope: str) -> tuple[int, ...]:
+    return _verification_ports_for_scope(scope, _multiplex_gateway_config())
 
 
 def system_restart_targets() -> tuple[RestartTarget, ...]:
@@ -205,32 +346,47 @@ def system_restart_targets() -> tuple[RestartTarget, ...]:
     return tuple(target for target in _unique_targets(FULL_HERMES_TARGETS) if target.domain_template == "system")
 
 
-def describe_plan(scope: str, *, uid: int | None = None) -> str:
-    """Return a human-readable dry-run plan without changing runtime state."""
-
+def _describe_plan(
+    scope: str,
+    *,
+    uid: int,
+    multiplex_config: Any | None,
+) -> str:
     normalized = normalize_scope(scope)
-    uid = uid if uid is not None else os.getuid()
     command = "/restart-gateways" if normalized == "gateways" else "/restart-hermes"
-    includes = (
-        "default + GPT profile gateways, optional profile gateways, WebUI/dashboard"
-        if normalized == "gateways"
-        else "gateway restart scope plus Workspace, watchdog, Codex supervisor, proxies, voice bridge, and Claude-Hermes surfaces"
-    )
+    if normalized == "gateways":
+        includes = (
+            "single root multiplex gateway, WebUI/dashboard"
+            if multiplex_config is not None
+            else "default + GPT profile gateways, optional profile gateways, WebUI/dashboard"
+        )
+    else:
+        includes = "gateway restart scope plus Workspace, watchdog, Codex supervisor, proxies, voice bridge, and Claude-Hermes surfaces"
     lines = [
         f"Restart scope: {normalized}",
         f"Canonical command: {command}",
         f"Includes: {includes}",
-        "Launchd targets:",
+        "Launchd targets (configured candidates; user/gui twins resolved at execution):",
     ]
-    for target in targets_for_scope(normalized):
+    for target in _targets_for_scope(normalized, multiplex_config):
         req = "required" if target.required else "best-effort"
         desc = f" — {target.description}" if target.description else ""
         lines.append(f"- {target.service_name(uid)} ({req}){desc}")
-    ports = VERIFY_PORTS.get(normalized, ())
+    ports = _verification_ports_for_scope(normalized, multiplex_config)
     if ports:
         lines.append("Verification ports: " + ", ".join(str(p) for p in ports))
     lines.append(f"Log: {LOG_PATH}")
     return "\n".join(lines)
+
+
+def describe_plan(scope: str, *, uid: int | None = None) -> str:
+    """Return a human-readable dry-run plan without changing runtime state."""
+
+    return _describe_plan(
+        scope,
+        uid=uid if uid is not None else os.getuid(),
+        multiplex_config=_multiplex_gateway_config(),
+    )
 
 
 def _default_sudoers_user() -> str:
@@ -783,18 +939,30 @@ def _verify_http_url(url: str, expected: tuple[int, ...] = (200, 401)) -> str | 
     return None
 
 
-def _verify_scope_health(scope: str, *, active_labels: set[str] | None = None) -> list[str]:
+def _verify_scope_health(
+    scope: str,
+    *,
+    active_labels: set[str] | None = None,
+    verify_ports: Iterable[int] | None = None,
+) -> list[str]:
     """Backward-compatible wrapper: return REQUIRED failures only.
 
     Best-effort probes (dashboard ports) are checked separately via
     :func:`_verify_scope_health_split` and must not drive the exit code.
     """
-    required, _best_effort = _verify_scope_health_split(scope, active_labels=active_labels)
+    required, _best_effort = _verify_scope_health_split(
+        scope,
+        active_labels=active_labels,
+        verify_ports=verify_ports,
+    )
     return required
 
 
 def _verify_scope_health_split(
-    scope: str, *, active_labels: set[str] | None = None
+    scope: str,
+    *,
+    active_labels: set[str] | None = None,
+    verify_ports: Iterable[int] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Probe scope health, partitioning failures into (required, best_effort).
 
@@ -804,7 +972,11 @@ def _verify_scope_health_split(
     """
     required: list[str] = []
     best_effort: list[str] = []
-    ports = list(VERIFY_PORTS.get(scope, ()))
+    ports = list(
+        verification_ports_for_scope(scope)
+        if verify_ports is None
+        else verify_ports
+    )
     # The MacBook remote dashboard is optional. Its absent port must not fail an
     # otherwise healthy restart when that LaunchAgent is not loaded.
     if active_labels is not None and "ai.hermes.desktop-remote-dashboard" not in active_labels:
@@ -839,6 +1011,7 @@ def _wait_for_scope_health(
     scope: str,
     *,
     active_labels: set[str],
+    verify_ports: Iterable[int] | None = None,
     timeout: float | None = None,
     interval: float | None = None,
 ) -> tuple[list[str], list[str]]:
@@ -861,7 +1034,11 @@ def _wait_for_scope_health(
     required: list[str] = []
     best_effort: list[str] = []
     while True:
-        required, best_effort = _verify_scope_health_split(scope, active_labels=active_labels)
+        required, best_effort = _verify_scope_health_split(
+            scope,
+            active_labels=active_labels,
+            verify_ports=verify_ports,
+        )
         if not required or time.monotonic() >= deadline:
             return required, best_effort
         time.sleep(max(0.1, interval))
@@ -885,8 +1062,16 @@ def restart_scope(
 
     normalized = normalize_scope(scope)
     uid = os.getuid()
+    multiplex_config = _multiplex_gateway_config()
+    verify_ports = _verification_ports_for_scope(normalized, multiplex_config)
     _append_log(f"restart requested scope={normalized} dry_run={dry_run} uid={uid}")
-    _append_log(describe_plan(normalized, uid=uid).replace("\n", " | "))
+    _append_log(
+        _describe_plan(
+            normalized,
+            uid=uid,
+            multiplex_config=multiplex_config,
+        ).replace("\n", " | ")
+    )
     if dry_run:
         return 0
     if delay > 0:
@@ -988,7 +1173,9 @@ def restart_scope(
                 failures.append(msg)
 
     required_failures, best_effort_failures = _wait_for_scope_health(
-        normalized, active_labels=active_labels
+        normalized,
+        active_labels=active_labels,
+        verify_ports=verify_ports,
     )
     for failure in best_effort_failures:
         _append_log(f"restart verification warning (best-effort): {failure}")

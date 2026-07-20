@@ -9,12 +9,14 @@ from hermes_cli.restart_surfaces import (
     _desktop_busy_details as real_desktop_busy_details,
     _gateway_pid as real_gateway_pid,
     _graceful_restart_gateway as real_graceful_restart_gateway,
+    _multiplex_gateway_config as real_multiplex_gateway_config,
     _webui_busy_details as real_webui_busy_details,
     describe_plan,
     enqueue_detached_restart,
     normalize_scope,
     restart_scope,
     targets_for_scope,
+    verification_ports_for_scope,
 )
 
 
@@ -39,6 +41,27 @@ def _no_live_webui_probe(monkeypatch):
         "hermes_cli.restart_surfaces._graceful_restart_gateway",
         lambda *_args, **_kwargs: (RestartVerification.RESTARTED, None),
     )
+    monkeypatch.setattr(
+        "hermes_cli.restart_surfaces._multiplex_gateway_config",
+        lambda: None,
+    )
+
+
+def _multiplex_config(*, api_port=8642, webhook_port=8644, bluebubbles_port=8647):
+    return {
+        "multiplex_profiles": True,
+        "platforms": {
+            "api_server": {"enabled": True, "port": api_port},
+            "webhook": {"enabled": True, "port": webhook_port},
+            "bluebubbles": {
+                "enabled": True,
+                "extra": {
+                    "webhook_register": True,
+                    "webhook_port": bluebubbles_port,
+                },
+            },
+        },
+    }
 
 
 def test_gateway_scope_plan_includes_profile_gateway_domains():
@@ -62,6 +85,73 @@ def test_gateway_scope_plan_includes_profile_gateway_domains():
     assert "user/503/ai.hermes.dashboard-host-rewrite-proxy" in plan
     assert "user/503/ai.hermes.desktop-remote-dashboard" in plan
     assert "Verification ports: 8642, 8643, 8644, 8787, 9119, 9120" in plan
+
+
+def test_multiplex_gateway_scope_plan_uses_single_root_topology(monkeypatch):
+    from hermes_cli import restart_surfaces
+
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_multiplex_gateway_config",
+        lambda: _multiplex_config(),
+    )
+
+    plan = describe_plan("gateways", uid=503)
+
+    assert "Includes: single root multiplex gateway, WebUI/dashboard" in plan
+    assert "user/503/ai.hermes.gateway (required)" in plan
+    assert "user/gui twins resolved at execution" in plan
+    assert "user/503/ai.hermes.webui" in plan
+    assert "system/com.kosta.hermes-dashboard-system" in plan
+    assert "user/503/ai.hermes.dashboard-host-rewrite-proxy" in plan
+    assert "user/503/ai.hermes.desktop-remote-dashboard" in plan
+    assert "ai.hermes.gateway-gpt" not in plan
+    assert "ai.hermes.gateway-coding" not in plan
+    assert "ai.hermes.gateway-design" not in plan
+    assert "ai.hermes.gateway-poke" not in plan
+    assert "Verification ports: 8642, 8644, 8647, 8787, 9119, 9120" in plan
+
+
+def test_multiplex_gateway_listener_ports_follow_merged_config(monkeypatch):
+    from hermes_cli import restart_surfaces
+
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_multiplex_gateway_config",
+        lambda: _multiplex_config(
+            api_port=19642,
+            webhook_port=19644,
+            bluebubbles_port=19647,
+        ),
+    )
+
+    assert verification_ports_for_scope("gateways") == (
+        19642,
+        19644,
+        19647,
+        8787,
+        9119,
+        9120,
+    )
+
+
+def test_multiplex_topology_probe_uses_readonly_config_without_gateway_discovery(
+    monkeypatch,
+):
+    config = _multiplex_config()
+
+    monkeypatch.delenv("GATEWAY_MULTIPLEX_PROFILES", raising=False)
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: config)
+    monkeypatch.setattr(
+        "hermes_cli.config.read_raw_config",
+        lambda: {"multiplex_profiles": True},
+    )
+    monkeypatch.setattr(
+        "gateway.config.load_gateway_config",
+        lambda: pytest.fail("restart dry-run must not run gateway/plugin discovery"),
+    )
+
+    assert real_multiplex_gateway_config() is config
 
 
 def test_full_hermes_scope_includes_known_surfaces():
