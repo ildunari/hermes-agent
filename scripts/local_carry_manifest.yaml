@@ -300,3 +300,82 @@ features:
           - categorized_alias
           - '"name": resolved_name'
         description: category__skill aliases resolve to categorized skills while frontmatter names remain canonical
+
+  - id: runtime.fallback-routing
+    title: Backend-owned runtime fallback routing lifecycle
+    owner_paths:
+      - agent/runtime_routing.py
+      - agent/turn_finalizer.py
+      - apps/desktop/src/app/chat/composer/model-pill.test.tsx
+      - apps/desktop/src/app/chat/composer/model-pill.tsx
+      - apps/desktop/src/app/session/hooks/use-message-stream/index.ts
+      - apps/desktop/src/app/session/hooks/use-message-stream/session-info-side-effects.test.tsx
+      - apps/desktop/src/app/session/hooks/use-message-stream/utils.test.ts
+      - apps/desktop/src/app/session/hooks/use-message-stream/utils.ts
+      - apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
+      - apps/desktop/src/app/types.ts
+      - apps/desktop/src/lib/chat-messages.ts
+      - apps/desktop/src/lib/runtime-routing.test.ts
+      - apps/desktop/src/lib/runtime-routing.ts
+    collision_paths:
+      - agent/turn_finalizer.py
+      - apps/desktop/src/app/chat/composer/model-pill.tsx
+      - apps/desktop/src/app/session/hooks/use-message-stream/index.ts
+      - apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
+      - apps/desktop/src/app/types.ts
+      - apps/desktop/src/lib/chat-messages.ts
+    tests:
+      - tests/agent/test_runtime_routing.py
+      - tests/gateway/test_api_server_runtime_routing.py
+      - tests/tui_gateway/test_runtime_routing.py
+      - apps/desktop/src/lib/runtime-routing.test.ts
+      - apps/desktop/src/app/chat/composer/model-pill.test.tsx
+      - apps/desktop/src/app/session/hooks/use-message-stream/session-info-side-effects.test.tsx
+      - apps/desktop/src/app/session/hooks/use-message-stream/utils.test.ts
+      - apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx
+    checks:
+      - id: runtime-routing-backend-contract
+        path: agent/runtime_routing.py
+        needles: [schema_version, normalize_fallback_reason, emit_runtime_route, 'runtime:route']
+        description: schema-v1 backend routing lifecycle emits safe runtime identity changes
+      - id: runtime-routing-finalizer
+        path: agent/turn_finalizer.py
+        needles: [emit_runtime_route, runtime_routing, '"finished"']
+        description: completed turns settle the backend-owned routing result
+      - id: runtime-routing-desktop-boundary
+        path: apps/desktop/src/lib/runtime-routing.ts
+        needles: [parseRuntimeRouting, schema_version, isRuntimeFallback, Number.isSafeInteger]
+        description: Desktop validates routing events before exposing fallback state
+      - id: runtime-routing-model-pill
+        path: apps/desktop/src/app/chat/composer/model-pill.tsx
+        needles: [isRuntimeFallback, runtimeRouting, model-fallback-indicator, displayProviderName]
+        description: active fallback identity remains visible in the model pill
+      - id: runtime-routing-stream-ingestion
+        path: apps/desktop/src/app/session/hooks/use-message-stream/utils.ts
+        needles: [parseRuntimeRouting, runtime_routing, runtimeRouting]
+        description: stream events cross the validated routing boundary
+      - id: runtime-routing-stream-settlement
+        path: apps/desktop/src/app/session/hooks/use-message-stream/index.ts
+        needles: [runtimeRouting, "state.runtimeRouting?.state === 'finished'"]
+        description: stream failures clear transient routes while retaining settled truth
+      - id: runtime-routing-prompt-settlement
+        path: apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
+        needles: [runtimeRouting, "state.runtimeRouting?.state === 'finished'"]
+        description: cancellation follows the same settled routing lifecycle
+
+  - id: desktop.sticky-turn-visibility
+    title: Keep sticky user turns outside skipped content
+    owner_paths:
+      - apps/desktop/src/components/assistant-ui/thread/list.test.ts
+      - apps/desktop/src/components/assistant-ui/thread/list.tsx
+    collision_paths:
+      - apps/desktop/src/components/assistant-ui/thread/list.tsx
+    tests:
+      - apps/desktop/src/components/assistant-ui/thread/list.test.ts
+    checks:
+      - id: desktop-sticky-turn-content-visibility
+        path: apps/desktop/src/components/assistant-ui/thread/list.tsx
+        needles: [MESSAGE_GROUP_BASE_CLASS, SKIPPED_CONTENT_CLASS, messageGroupClassName, turnTailClassName, 'content-visibility:auto', 'contain-intrinsic-size:auto_37.5rem']
+        forbidden_needles:
+          - 'className="flex min-w-0 flex-col gap-(--conversation-turn-gap) pb-(--conversation-turn-gap) [contain-intrinsic-size:auto_37.5rem] [content-visibility:auto]"'
+        description: sticky user bubbles stay paintable while off-screen tails retain content skipping
