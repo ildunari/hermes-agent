@@ -42,7 +42,7 @@ import {
   switcherActive,
   switcherJustClosed
 } from '@/store/session-switcher'
-import { openNewSessionInNewWindow } from '@/store/windows'
+import { openNewWindow } from '@/store/windows'
 import { useTheme } from '@/themes/context'
 
 import { requestComposerFocus, requestVoiceToggle } from '../chat/composer/focus'
@@ -147,11 +147,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
     },
     'session.newTab': () => deps.openNewSessionTab(),
-    // Carry the live profile into the new window: its renderer boots from the
-    // Electron main's stored preference (usually the default profile), not
-    // from this window's in-memory gateway state — without the hint a ⌘⇧N
-    // from a non-default profile lands the draft on Default.
-    'session.newWindow': () => void openNewSessionInNewWindow(normalizeProfileKey($activeGatewayProfile.get())),
+    'session.newWindow': () => void openNewWindow(),
     // ⌃Tab cycles the focused session/main tab strip; only a non-tabbed focus
     // falls through to the recent-session switcher.
     'session.next': () => void (cycleTreeTabInFocusedZone(1) || stepSession(1)),

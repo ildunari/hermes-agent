@@ -78,11 +78,16 @@ export function canOpenSessionWindow(): boolean {
   return typeof window !== 'undefined' && typeof window.hermesDesktop?.openSessionWindow === 'function'
 }
 
+// True when the shell can open a full peer app window (⌘⇧N / "New Window").
+export function canOpenNewWindow(): boolean {
+  return typeof window !== 'undefined' && typeof window.hermesDesktop?.openWindow === 'function'
+}
+
 type WindowOpenResult = { ok: boolean; error?: string } | undefined
 
 // Run a window-open bridge call, surfacing any failure as a toast. Shared by the
-// session pop-out and the new-session pop-out.
-async function openWindow(call: () => Promise<WindowOpenResult>, failMessage: string): Promise<void> {
+// session pop-out and the new-window opener.
+async function runWindowOpen(call: () => Promise<WindowOpenResult>, failMessage: string): Promise<void> {
   try {
     const result = await call()
 
@@ -102,7 +107,10 @@ export async function openSessionInNewWindow(sessionId: string, opts?: { watch?:
     return
   }
 
-  await openWindow(() => window.hermesDesktop.openSessionWindow(sessionId, opts), 'Could not open chat in a new window')
+  await runWindowOpen(
+    () => window.hermesDesktop.openSessionWindow(sessionId, opts),
+    'Could not open chat in a new window'
+  )
 }
 
 // Open a fresh compact window on the new-session draft, carried over to the
@@ -114,7 +122,7 @@ export async function openNewSessionInNewWindow(profile?: string): Promise<void>
     return
   }
 
-  await openWindow(() => window.hermesDesktop.openNewSessionWindow(profile), 'Could not open new session window')
+  await runWindowOpen(() => window.hermesDesktop.openNewSessionWindow(profile), 'Could not open new session window')
 }
 
 // The profile a new-session window was asked to open on (`profile` query param,
@@ -128,4 +136,14 @@ export function newSessionWindowProfile(): null | string {
   } catch {
     return null
   }
+}
+
+// Open a new full-chrome app window — a peer instance of the primary that
+// renders the complete app against the shared backend. No-ops outside Electron.
+export async function openNewWindow(): Promise<void> {
+  if (!canOpenNewWindow()) {
+    return
+  }
+
+  await runWindowOpen(() => window.hermesDesktop.openWindow(), 'Could not open a new window')
 }
