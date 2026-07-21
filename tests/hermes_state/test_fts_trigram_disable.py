@@ -119,6 +119,24 @@ def test_disabled_fresh_db_has_no_trigram_and_search_still_works(
         db.close()
 
 
+def test_explicit_profile_db_uses_adjacent_config_not_process_profile(
+    tmp_path, monkeypatch
+):
+    process_home = tmp_path / "profiles" / "gpt"
+    target_home = tmp_path / "profiles" / "coding"
+    monkeypatch.setenv("HERMES_HOME", str(process_home))
+    _write_config(process_home, disabled=False)
+    _write_config(target_home, disabled=True)
+
+    db = SessionDB(db_path=target_home / "state.db")
+    try:
+        assert db._fts_trigram_disabled is True
+        assert db._trigram_available is False
+        assert _objects(db._conn) == set()
+    finally:
+        db.close()
+
+
 def test_disabled_existing_trigram_drops_objects_without_backfill(
     tmp_path, monkeypatch
 ):

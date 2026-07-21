@@ -27,6 +27,8 @@ import threading
 import time
 from pathlib import Path
 
+import yaml
+
 from agent.memory_manager import sanitize_context
 from agent.message_sanitization import _sanitize_surrogates
 from hermes_constants import get_hermes_home
@@ -224,7 +226,7 @@ def _truthy_config_value(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _config_disables_fts_trigram() -> bool:
+def _config_disables_fts_trigram(db_path: Optional[Path] = None) -> bool:
     """Return the config-backed trigram disable flag.
 
     ``sessions.disable_fts_trigram`` is the documented surface. The env var is
@@ -234,6 +236,20 @@ def _config_disables_fts_trigram() -> bool:
     env_value = os.getenv("HERMES_DISABLE_FTS_TRIGRAM")
     if env_value is not None:
         return _truthy_config_value(env_value)
+    target_config = Path(db_path).parent / "config.yaml" if db_path else None
+    if target_config and target_config.is_file():
+        try:
+            with target_config.open("r", encoding="utf-8") as fh:
+                target_cfg = yaml.safe_load(fh) or {}
+            sessions_cfg = target_cfg.get("sessions") or {}
+            if isinstance(sessions_cfg, dict):
+                return _truthy_config_value(sessions_cfg.get("disable_fts_trigram"))
+        except Exception as exc:
+            logger.debug(
+                "Could not read sessions.disable_fts_trigram from %s: %s",
+                target_config,
+                exc,
+            )
     try:
         from hermes_cli.config import load_config
 
@@ -1129,7 +1145,7 @@ class SessionDB:
         # unrecoverable database can't put writers into a rebuild loop.
         self._fts_runtime_rebuild_attempted = False
         self._fts_enabled = False
-        self._fts_trigram_disabled = _config_disables_fts_trigram()
+        self._fts_trigram_disabled = _config_disables_fts_trigram(self.db_path)
         self._trigram_available = False
         self._fts_unavailable_warned = False
         self._has_sessions_last_active = True
