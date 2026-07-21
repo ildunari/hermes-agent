@@ -160,6 +160,29 @@ features:
         needles: [weighted_score, upstream_churn, Thinning ratchet]
         description: forward-only collision density ratchet
 
+  - id: security.approval-contract-isolation
+    title: Approval prompt contract isolation and safe verifier cleanup
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - tools/approval.py
+      - tests/tools/test_command_guards.py
+    collision_paths:
+      - tools/approval.py
+      - tests/tools/test_command_guards.py
+    tests:
+      - tests/tools/test_command_guards.py
+      - tests/tools/test_approval.py
+    checks:
+      - id: approval-manual-contract-fixture
+        path: tests/tools/test_command_guards.py
+        needles: [_get_approval_mode, manual]
+        description: command-guard prompt tests are isolated from the configured smart approval mode
+      - id: approval-verifier-temp-alias
+        path: tools/approval.py
+        needles: [raw_temp_dir, canonical_operand, raw_operand]
+        description: verifier cleanup accepts the canonical macOS /tmp alias without permitting nested aliases
+
   - id: webui.session-defaults
     title: WebUI session visibility, labels, and uncapped pins
     tests:
