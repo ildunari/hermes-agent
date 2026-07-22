@@ -25,9 +25,9 @@ import {
   toggleSidebarOpen
 } from '@/store/layout'
 
-import { appViewForPath, isOverlayView, SETTINGS_ROUTE } from '../routes'
 import { BROWSER_PANE_ID } from '../browser/browser-pane'
 import { $browserPaneOpen, closeBrowserPane, openBrowserPane } from '../browser/browser-store'
+import { appViewForPath, isOverlayView, SETTINGS_ROUTE } from '../routes'
 
 import { titlebarButtonClass } from './titlebar'
 
@@ -128,13 +128,10 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     }
   }
 
-  // POSITIONAL toggles: each button shows/hides everything on its physical
-  // side of the main zone (the layout tree collapses the whole side), so they
-  // stay correct through flips and rearranges. $sidebarOpen ≙ left side,
-  // $fileBrowserOpen ≙ right side. Never an active highlight — plain
-  // show/hide affordances.
+  // The left button controls the sessions side. The right-sidebar button is
+  // pane-scoped: it controls the file panel only, while the globe button below
+  // independently controls the browser pane.
   const leftEdge = { open: sidebarOpen, toggle: toggleSidebarOpen }
-  const rightEdge = { open: fileBrowserOpen, toggle: toggleFileBrowserOpen }
 
   const leftToolbarTools: TitlebarTool[] = [
     {
@@ -165,10 +162,16 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     actionId: 'view.toggleRightSidebar',
     icon: <Codicon name="layout-sidebar-right" />,
     id: 'right-sidebar',
-    label: rightEdge.open ? t.titlebar.hideRightSidebar : t.titlebar.showRightSidebar,
+    label: fileBrowserOpen ? t.titlebar.hideRightSidebar : t.titlebar.showRightSidebar,
     onSelect: () => {
       triggerHaptic('tap')
-      rightEdge.toggle()
+
+      if (fileBrowserOpen) {
+        toggleFileBrowserOpen()
+      } else {
+        toggleFileBrowserOpen()
+        revealTreePane('files')
+      }
     }
   }
 

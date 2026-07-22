@@ -55,9 +55,9 @@ import { $reviewOpen, closeReview, REVIEW_PANE_ID } from '@/store/review'
 import { $currentCwd, $selectedStoredSessionId, $sessions, sessionMatchesStoredId } from '@/store/session'
 import { $sessionColorById, sessionColorFor } from '@/store/session-color'
 
-import type { SessionDragPayload } from '../chat/composer/inline-refs'
-import { BrowserPane, BROWSER_PANE_ID } from '../browser/browser-pane'
+import { BROWSER_PANE_ID, BrowserPane } from '../browser/browser-pane'
 import { $browserPaneOpen, closeBrowserPane, openBrowserPane } from '../browser/browser-store'
+import type { SessionDragPayload } from '../chat/composer/inline-refs'
 import { watchRouteTiles } from '../chat/route-tile'
 import { startSessionDrag } from '../chat/session-drag'
 import {
@@ -536,11 +536,10 @@ $panesFlipped.listen(flipped => {
   }
 })
 
-// POSITIONAL side toggles (titlebar buttons, ⌘B / ⌘J): $sidebarOpen ≙ the
-// LEFT side of the main zone, $fileBrowserOpen ≙ the RIGHT — everything on
-// that side hides together, whatever panes have been rearranged there.
+// The sessions button still controls the left root side. The file-browser
+// button owns only the files pane: the browser has its own button and must not
+// disappear just because the neighboring file panel is closed.
 bindTreeSideVisibility('left', $sidebarOpen, setSidebarOpen)
-bindTreeSideVisibility('right', $fileBrowserOpen, setFileBrowserOpen)
 
 // The browser owns an app-global pane toggle. It is intentionally independent
 // of profile/workspace state; opening it docks beside chat through the same
@@ -561,7 +560,15 @@ $browserPaneOpen.listen(open => {
 // rode the rail's row and vanished with it), its zone stands on its own.
 const $hasWorkspace = computed($currentCwd, cwd => Boolean(cwd.trim()))
 
-bindPaneVisibility('files', $hasWorkspace)
+bindPaneVisibility(
+  'files',
+  computed([$fileBrowserOpen, $hasWorkspace], (open, workspace) => open && workspace),
+  () => setFileBrowserOpen(false),
+  () => {
+    setFileBrowserOpen(true)
+    revealTreePane('files')
+  }
+)
 // ⌘G — the review sidebar appears/disappears (and comes to the front).
 bindPaneVisibility(
   'review',
@@ -607,17 +614,14 @@ registry.register({
   } satisfies PaletteContribution
 })
 
-// Sessions/files Close = collapse their SIDE (⌘B/⌘J truthful, titlebar button
-// flips back) — but only while the pane actually lives in that root side
-// column. Dragged next to main, a side collapse can't hide it (the collapse
-// skips main-bearing children), so Close falls back to dismissal there —
-// otherwise ⌘W/Close silently no-op.
+// Sessions Close collapses its side while it lives in the default root column;
+// once dragged beside main, dismissal is the only close operation that can hide
+// it. Files is pane-scoped everywhere so its Close action cannot also hide the
+// independently controlled browser pane.
 registerPaneCloser('sessions', () =>
   paneRootSide('sessions') === 'left' ? setSidebarOpen(false) : dismissTreePane('sessions')
 )
-registerPaneCloser('files', () =>
-  paneRootSide('files') === 'right' ? setFileBrowserOpen(false) : dismissTreePane('files')
-)
+registerPaneCloser('files', () => setFileBrowserOpen(false))
 
 // A preview target lands NEXT TO the file tree — position-aware: wherever
 // files currently lives (default rail, ⌘\-flipped, dragged into a stack), the
