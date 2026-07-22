@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $notifications, clearNotifications } from '@/store/notifications'
 
-import { browserPartitionForProfile, browserProfileScope } from './browser-partition'
+import { BROWSER_PARTITION } from './browser-partition'
 import { __resetBrowserPersistenceForTests } from './browser-persistence'
 import {
   $browserTabs,
@@ -117,21 +117,8 @@ describe('browser webview layer', () => {
     Reflect.deleteProperty(window, 'hermesDesktop')
   })
 
-  it('maps normalized profiles to the canonical persistent Chromium partition', async () => {
-    await expect(browserProfileScope('')).resolves.toBe('O7U3sPz8CoQw576B7YjZjO')
-    await expect(browserProfileScope(' coding ')).resolves.toBe('TikzYIaYz8WsHCfGsGIDLa')
-    await expect(browserPartitionForProfile('Team Alpha')).resolves.toBe(
-      'persist:hermes-browser:v1:XKzgqNyJtaQF9dBSPJEnDi'
-    )
-  })
-
-  it('maps case aliases to one profile partition without merging distinct profiles', async () => {
-    await expect(browserPartitionForProfile('Default')).resolves.toBe(await browserPartitionForProfile('default'))
-    await expect(browserPartitionForProfile(' CODING ')).resolves.toBe(await browserPartitionForProfile('coding'))
-    await expect(browserPartitionForProfile('Team-Alpha')).resolves.toBe(await browserPartitionForProfile('team-alpha'))
-    await expect(browserPartitionForProfile('team-alpha')).resolves.not.toBe(
-      await browserPartitionForProfile('team-beta')
-    )
+  it('uses one app-global persistent Chromium partition', () => {
+    expect(BROWSER_PARTITION).toBe('persist:hermes-browser')
   })
 
   it('closes a failed resource tab with a visible localized notification', async () => {
@@ -170,7 +157,7 @@ describe('browser webview layer', () => {
         url: 'https://one.test',
         workspaceId: 'w'
       })
-      second = createBrowserTab({ geometry, profile: 'default', url: 'https://two.test', workspaceId: 'w' })
+      second = createBrowserTab({ geometry, profile: 'coding', url: 'https://two.test', workspaceId: 'w' })
     })
 
     await waitFor(() => expect(rendered.container.querySelectorAll('webview')).toHaveLength(2))
@@ -180,7 +167,8 @@ describe('browser webview layer', () => {
     const firstHost = rendered.container.querySelector(`[data-browser-tab-host="${first.id}"]`) as HTMLElement
     const secondHost = rendered.container.querySelector(`[data-browser-tab-host="${second.id}"]`) as HTMLElement
 
-    expect(firstWebview?.getAttribute('partition')).toBe('persist:hermes-browser:v1:O7U3sPz8CoQw576B7YjZjO')
+    expect(firstWebview?.getAttribute('partition')).toBe(BROWSER_PARTITION)
+    expect(secondWebview?.getAttribute('partition')).toBe(BROWSER_PARTITION)
     expect(firstWebview?.getAttribute('src')).toMatch(/^about:blank#hermes-browser-attach=/)
     expect(firstWebview?.hasAttribute('preload')).toBe(false)
     await waitFor(() => {

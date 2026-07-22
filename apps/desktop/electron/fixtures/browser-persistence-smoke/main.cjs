@@ -3,7 +3,7 @@ const fs = require('node:fs')
 
 const userData = process.env.HERMES_BROWSER_SMOKE_USER_DATA
 const phase = process.env.HERMES_BROWSER_SMOKE_PHASE
-const persistentPartition = 'persist:hermes-browser:v1:smoke-profile-scope'
+const persistentPartition = 'persist:hermes-browser'
 const privatePartition = 'hermes-browser-private:v1:00000000-0000-4000-8000-000000000001'
 const url = 'https://scope.test/'
 

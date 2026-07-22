@@ -14,8 +14,8 @@ import { EventEmitter } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  BROWSER_PARTITION,
   BrowserGuestSecurityController,
-  browserPartitionForProfile
 } from './browser-guest-security'
 
 class FakeContents extends EventEmitter {
@@ -112,7 +112,7 @@ function setup() {
 async function bindGuest(fixture: ReturnType<typeof setup>, opts: {
   tabId: string; surfaceEpoch: string; taskId: string; taskGeneration: number; guestId: number
 }) {
-  const partition = browserPartitionForProfile('default')
+  const partition = BROWSER_PARTITION
   const prepared = (await fixture.handlers.get('hermes:browser-guest:prepare')!(
     { sender: fixture.host },
     { partition, private: false, profile: 'default', surfaceEpoch: opts.surfaceEpoch, tabId: opts.tabId }
@@ -147,7 +147,7 @@ describe('V3 adversarial probes', () => {
   // not reach any privileged hermes:browser-* handler.
   it('rejects every privileged IPC handler invoked by a non-host sender id', async () => {
     const fixture = setup()
-    const partition = browserPartitionForProfile('default')
+    const partition = BROWSER_PARTITION
     const attacker = { sender: { id: 999 } as FakeContents }
 
     expect(await fixture.handlers.get('hermes:browser-guest:prepare')!(
@@ -230,7 +230,7 @@ describe('V3 adversarial probes', () => {
   // tuple, and cannot be replayed once consumed.
   it('binds the pixel grant to its exact tuple and forbids replay', async () => {
     const fixture = setup()
-    const partition = browserPartitionForProfile('default')
+    const partition = BROWSER_PARTITION
     const prepared = (await fixture.handlers.get('hermes:browser-guest:prepare')!(
       { sender: fixture.host },
       { partition, private: false, profile: 'default', surfaceEpoch: 'surf-p', tabId: 'tab-p' }

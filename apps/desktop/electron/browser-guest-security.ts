@@ -27,9 +27,8 @@ import {
 import type { SnpObservation, SnpScope } from './browser-sensitive-navigation-policy'
 
 const ATTACH_PREFIX = 'about:blank#hermes-browser-attach='
-const PERSISTENT_PARTITION_PREFIX = 'persist:hermes-browser:v1:'
+export const BROWSER_PARTITION = 'persist:hermes-browser'
 const PRIVATE_PARTITION_PREFIX = 'hermes-browser-private:v1:'
-const PROFILE_SCOPE_DOMAIN = 'hermes-browser-profile-v1\0'
 const REPORTER_WORLD_ID = 1004
 const MAX_REPORTS_IN_FLIGHT_PER_BINDING = 2
 const MAX_REPORTS_PER_BINDING_WINDOW = 12
@@ -560,16 +559,6 @@ function normalizeProfile(profile: unknown): string {
   return typeof profile === 'string' ? profile.trim().toLowerCase() : ''
 }
 
-export function browserPartitionForProfile(profile: string): string {
-  const digest = crypto
-    .createHash('sha256')
-    .update(`${PROFILE_SCOPE_DOMAIN}${normalizeProfile(profile)}`)
-    .digest('base64url')
-    .slice(0, 22)
-
-  return `${PERSISTENT_PARTITION_PREFIX}${digest}`
-}
-
 function isAllowedBrowserRequest(rawUrl: string): boolean {
   try {
     const parsed = new URL(rawUrl)
@@ -612,7 +601,7 @@ function attachmentTokenFromUrl(rawUrl: unknown): string | null {
 function isBrowserPartition(partition: unknown): partition is string {
   return (
     typeof partition === 'string' &&
-    (partition.startsWith(PERSISTENT_PARTITION_PREFIX) || partition.startsWith(PRIVATE_PARTITION_PREFIX))
+    (partition === BROWSER_PARTITION || partition.startsWith(PRIVATE_PARTITION_PREFIX))
   )
 }
 
@@ -839,7 +828,7 @@ export class BrowserGuestSecurityController {
         partition
       )
 
-    const validPersistentPartition = !request.private && partition === browserPartitionForProfile(profile)
+    const validPersistentPartition = !request.private && partition === BROWSER_PARTITION
 
     if (!validPrivatePartition && !validPersistentPartition) {
       return { error: 'browser-partition-mismatch', ok: false }
@@ -2784,7 +2773,7 @@ export class BrowserGuestSecurityController {
     }
 
     const origin = this.#siteForUrl(requestingUrl ?? guest.guest.getURL())
-    const durable = guest.partition.startsWith(PERSISTENT_PARTITION_PREFIX)
+    const durable = guest.partition === BROWSER_PARTITION
       ? this.#deps.durablePermissionDecision?.(guest.profile, origin, permission) ?? null
       : null
     if (durable === 'deny' || (!task && durable !== 'allow')) {callback(false); return}
@@ -2858,7 +2847,7 @@ export class BrowserGuestSecurityController {
     item.setSavePath(destination)
     const downloadOrigin = this.#siteForUrl(guest.guest.getURL())
     if (
-      guest.partition.startsWith(PERSISTENT_PARTITION_PREFIX) &&
+      guest.partition === BROWSER_PARTITION &&
       typeof item.once === 'function' &&
       typeof item.getTotalBytes === 'function'
     ) {
@@ -2888,7 +2877,7 @@ export class BrowserGuestSecurityController {
     })
     browserSession.setPermissionCheckHandler((contents, permission, requestingOrigin) => {
       const guest = contents ? this.#bindingForGuestContents(contents) : null
-      if (!guest || !guest.partition.startsWith(PERSISTENT_PARTITION_PREFIX) || !validIdentifier(permission, 256)) {return false}
+      if (!guest || guest.partition !== BROWSER_PARTITION || !validIdentifier(permission, 256)) {return false}
       const task = this.#taskForGuest(guest)
       // Agent-bound permissions always retain exact one-shot consent. Durable
       // policy can pre-deny them, but never turns a stored grant into task authority.

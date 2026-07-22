@@ -45,7 +45,7 @@ import { BrowserCheckpointCache } from './browser-checkpoint-cache'
 import { appendDesktopAssociation, BrowserDarkClient, DesktopConnectionAssociation } from './browser-dark-client'
 import { browserDataClearPlan } from './browser-data-semantics'
 import {
-  browserPartitionForProfile,
+  BROWSER_PARTITION,
   type BrowserPendingUploadChooser,
   createBrowserGuestSecurityController
 } from './browser-guest-security'
@@ -780,7 +780,7 @@ async function clearBrowserSiteData(
   let siteData = false
 
   try {
-    const browserSession = session.fromPartition(browserPartitionForProfile(profile))
+    const browserSession = session.fromPartition(BROWSER_PARTITION)
     siteData = await runBrowserSiteDataClear(
       async () => {
         await browserSession.closeAllConnections()

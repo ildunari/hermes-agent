@@ -5,8 +5,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { digestAnnotationText } from './browser-annotation-reporter'
 import {
   ATTACH_PREFIX,
+  BROWSER_PARTITION,
   BrowserGuestSecurityController,
-  browserPartitionForProfile,
   isAllowedBrowserNavigation,
   REPORTER_WORLD_ID
 } from './browser-guest-security'
@@ -266,7 +266,7 @@ async function setupBoundAutomation(
   }
 ) {
   const fixture = setup(requestPixelConsent, options)
-  const partition = browserPartitionForProfile('default')
+  const partition = BROWSER_PARTITION
 
   const prepared = (await fixture.handlers.get('hermes:browser-guest:prepare')!(
     { sender: fixture.host },
@@ -352,7 +352,7 @@ async function setupBoundAutomation(
 
 async function setupBoundReport(tabId = 'tab-report') {
   const fixture = setup()
-  const partition = browserPartitionForProfile('default')
+  const partition = BROWSER_PARTITION
   const prepared = (await fixture.handlers.get('hermes:browser-guest:prepare')!(
     { sender: fixture.host },
     {
@@ -390,8 +390,8 @@ async function setupBoundReport(tabId = 'tab-report') {
 }
 
 describe('browser guest security', () => {
-  it('derives the same canonical partition as the renderer and denies unsafe navigation', () => {
-    expect(browserPartitionForProfile(' CODING ')).toBe('persist:hermes-browser:v1:TikzYIaYz8WsHCfGsGIDLa')
+  it('exports the app-global partition and denies unsafe navigation', () => {
+    expect(BROWSER_PARTITION).toBe('persist:hermes-browser')
     expect(isAllowedBrowserNavigation('https://example.test/path')).toBe(false)
 
     for (const denied of [
@@ -419,7 +419,7 @@ describe('browser guest security', () => {
     const prepare = handlers.get('hermes:browser-guest:prepare')!
 
     const request = {
-      partition: browserPartitionForProfile('coding'),
+      partition: BROWSER_PARTITION,
       private: false,
       profile: 'coding',
       surfaceEpoch: 'surface-1',
@@ -431,6 +431,15 @@ describe('browser guest security', () => {
       ok: false
     })
     expect(await prepare({ sender: host }, { ...request, partition: 'persist:hermes-preview' })).toEqual({
+      error: 'browser-partition-mismatch',
+      ok: false
+    })
+    expect(
+      await prepare(
+        { sender: host },
+        { ...request, partition: 'persist:hermes-browser:v1:TikzYIaYz8WsHCfGsGIDLa' }
+      )
+    ).toEqual({
       error: 'browser-partition-mismatch',
       ok: false
     })
@@ -471,7 +480,7 @@ describe('browser guest security', () => {
 
   it('correlates out-of-order same-profile guests by exact attachment token', async () => {
     const { handlers, host, sessionFromPartition } = setup()
-    const partition = browserPartitionForProfile('default')
+    const partition = BROWSER_PARTITION
     const prepare = handlers.get('hermes:browser-guest:prepare')!
     const activate = handlers.get('hermes:browser-guest:activate')!
     const prepared = [] as Array<{ attachmentUrl: string; generation: string; tabId: string }>
@@ -516,7 +525,7 @@ describe('browser guest security', () => {
 
   it('binds one claimed tab, pins preferences, denies native authority, and navigates through main', async () => {
     const { handlers, host, sessionFromPartition } = setup()
-    const partition = browserPartitionForProfile('default')
+    const partition = BROWSER_PARTITION
     const prepare = handlers.get('hermes:browser-guest:prepare')!
 
     const prepared = (await prepare(
@@ -622,7 +631,7 @@ describe('browser guest security', () => {
 
   it('reports through a fixed debugger-created isolated world and rejects arbitrary debugger methods', async () => {
     const { controller, handlers, host, sessionFromPartition } = setup()
-    const partition = browserPartitionForProfile('default')
+    const partition = BROWSER_PARTITION
 
     const prepared = (await handlers.get('hermes:browser-guest:prepare')!(
       { sender: host },
@@ -914,7 +923,7 @@ describe('browser guest security', () => {
 
   it('keeps the binding alive when a newer activation supersedes an aborted load', async () => {
     const { handlers, host, sessionFromPartition } = setup()
-    const partition = browserPartitionForProfile('coding')
+    const partition = BROWSER_PARTITION
 
     const request = {
       partition,
@@ -974,7 +983,7 @@ describe('browser guest security', () => {
 
   it('fences automation dispatch, enforces method arguments before debugger, and forwards events', async () => {
     const { controller, handlers, host, sessionFromPartition } = setup()
-    const partition = browserPartitionForProfile('default')
+    const partition = BROWSER_PARTITION
 
     const prepared = (await handlers.get('hermes:browser-guest:prepare')!(
       { sender: host },
@@ -1426,7 +1435,7 @@ describe('browser guest security', () => {
     ['debugger-frame', []]
   ])('retires the complete binding when %s observes a forbidden committed destination', async (source, eventArgs) => {
     const { controller, handlers, host, sessionFromPartition } = setup()
-    const partition = browserPartitionForProfile(`post-${source}`)
+    const partition = BROWSER_PARTITION
     const tabId = `tab-${source}`
 
     const prepared = (await handlers.get('hermes:browser-guest:prepare')!(
@@ -2092,7 +2101,7 @@ describe('browser guest security', () => {
     expect(fixture.guest.debugger.sendCommand.mock.calls.filter(
       ([method, params]) => method === 'DOM.setFileInputFiles' && (params as any).files.length > 0
     )).toHaveLength(1)
-    const browserSession = fixture.sessionFromPartition(browserPartitionForProfile('default'))
+    const browserSession = fixture.sessionFromPartition(BROWSER_PARTITION)
     const before = browserSession.beforeRequest.mock.calls[0][0] as (details: any, callback: (result: any) => void) => void
     const completed = browserSession.completedRequest.mock.calls[0][0] as (details: any) => void
     before({
@@ -2129,7 +2138,7 @@ describe('browser guest security', () => {
       files: [{ displayName: 'report.pdf', mimeType: 'application/pdf', sha256: 'a'.repeat(64), size: 123 }],
       settled
     })
-    const browserSession = fixture.sessionFromPartition(browserPartitionForProfile('default'))
+    const browserSession = fixture.sessionFromPartition(BROWSER_PARTITION)
     const before = browserSession.beforeRequest.mock.calls[0][0] as (details: any, callback: (result: any) => void) => void
     const completed = browserSession.completedRequest.mock.calls[0][0] as (details: any) => void
     const failed = browserSession.failedRequest.mock.calls[0][0] as (details: any) => void
@@ -2170,7 +2179,7 @@ describe('browser guest security', () => {
 
     const reportSettled = await assignInput(77, '/trusted/staging/report.pdf')
     const appendixSettled = await assignInput(78, '/trusted/staging/appendix.pdf')
-    const browserSession = fixture.sessionFromPartition(browserPartitionForProfile('default'))
+    const browserSession = fixture.sessionFromPartition(BROWSER_PARTITION)
     const before = browserSession.beforeRequest.mock.calls[0][0] as (details: any, callback: (result: any) => void) => void
     const completed = browserSession.completedRequest.mock.calls[0][0] as (details: any) => void
 
@@ -2192,7 +2201,7 @@ describe('browser guest security', () => {
     })
   })
 
-  it('settles colliding request ids only in the exact partition session and web contents', async () => {
+  it('settles colliding request ids only for the exact web contents in the app-global session', async () => {
     const received = vi.fn(async (_chooser: any) => new Promise<void>(() => undefined))
     const fixture = await setupBoundAutomation(undefined, { handleUploadChooser: received })
     const debuggerResult = async (method: string, params: Record<string, unknown>) =>
@@ -2212,11 +2221,10 @@ describe('browser guest security', () => {
     })
 
     const otherProfile = 'collision-profile'
-    const otherPartition = browserPartitionForProfile(otherProfile)
     const otherPrepared = (await fixture.handlers.get('hermes:browser-guest:prepare')!(
       { sender: fixture.host },
       {
-        partition: otherPartition,
+        partition: BROWSER_PARTITION,
         private: false,
         profile: otherProfile,
         surfaceEpoch: 'surface-collision',
@@ -2227,9 +2235,9 @@ describe('browser guest security', () => {
       'will-attach-webview',
       { preventDefault: vi.fn() },
       {},
-      { partition: otherPartition, src: otherPrepared.attachmentUrl }
+      { partition: BROWSER_PARTITION, src: otherPrepared.attachmentUrl }
     )
-    const otherGuest = new FakeContents(92, fixture.sessionFromPartition(otherPartition))
+    const otherGuest = new FakeContents(92, fixture.sessionFromPartition(BROWSER_PARTITION))
     otherGuest.url = otherPrepared.attachmentUrl
     fixture.host.emit('did-attach-webview', {}, otherGuest)
     await vi.waitFor(() =>
@@ -2258,32 +2266,28 @@ describe('browser guest security', () => {
       settled: otherSettled
     })
 
-    const defaultSession = fixture.sessionFromPartition(browserPartitionForProfile('default'))
-    const otherSession = fixture.sessionFromPartition(otherPartition)
-    const defaultBefore = defaultSession.beforeRequest.mock.calls[0][0] as (details: any, callback: (result: any) => void) => void
-    const otherBefore = otherSession.beforeRequest.mock.calls[0][0] as (details: any, callback: (result: any) => void) => void
-    const defaultCompleted = defaultSession.completedRequest.mock.calls[0][0] as (details: any) => void
-    const otherCompleted = otherSession.completedRequest.mock.calls[0][0] as (details: any) => void
+    const browserSession = fixture.sessionFromPartition(BROWSER_PARTITION)
+    const before = browserSession.beforeRequest.mock.calls[0][0] as (details: any, callback: (result: any) => void) => void
+    const completed = browserSession.completedRequest.mock.calls[0][0] as (details: any) => void
     const upload = {
       id: 61,
       method: 'POST',
       uploadData: [{ file: '/trusted/staging/report.pdf' }],
       url: 'https://uploads.example.test/submit'
     }
-    defaultBefore({ ...upload, webContentsId: fixture.guest.id }, vi.fn())
-    otherBefore({ ...upload, webContentsId: otherGuest.id }, vi.fn())
+    before({ ...upload, webContentsId: fixture.guest.id }, vi.fn())
+    before({ ...upload, webContentsId: otherGuest.id }, vi.fn())
 
-    defaultCompleted({ id: 61, webContentsId: otherGuest.id })
-    otherCompleted({ id: 61, webContentsId: fixture.guest.id })
+    completed({ id: 61, webContentsId: 999 })
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(defaultSettled).not.toHaveBeenCalled()
     expect(otherSettled).not.toHaveBeenCalled()
 
-    otherCompleted({ id: 61, webContentsId: otherGuest.id })
+    completed({ id: 61, webContentsId: otherGuest.id })
     await vi.waitFor(() => expect(otherSettled).toHaveBeenCalledExactlyOnceWith('completed'))
     expect(defaultSettled).not.toHaveBeenCalled()
 
-    defaultCompleted({ id: 61, webContentsId: fixture.guest.id })
+    completed({ id: 61, webContentsId: fixture.guest.id })
     await vi.waitFor(() => expect(defaultSettled).toHaveBeenCalledExactlyOnceWith('completed'))
   })
 
@@ -2307,7 +2311,7 @@ describe('browser guest security', () => {
         files: [{ displayName: 'report.pdf', mimeType: 'application/pdf', sha256: 'a'.repeat(64), size: 123 }],
         settled
       })
-      const browserSession = fixture.sessionFromPartition(browserPartitionForProfile('default'))
+      const browserSession = fixture.sessionFromPartition(BROWSER_PARTITION)
       const before = browserSession.beforeRequest.mock.calls[0][0] as (details: any, callback: (result: any) => void) => void
       const completed = browserSession.completedRequest.mock.calls[0][0] as (details: any) => void
       before({

@@ -5,7 +5,7 @@ import { BrowserAnnotationsPanel } from './browser-annotations-panel'
 import { BrowserConsentDialog } from './browser-consent-dialog'
 import { BrowserController } from './browser-controller'
 import { completeExplicitBrowserResourceIntent, failExplicitBrowserResourceIntent } from './browser-intent-production'
-import { browserPartitionForProfile } from './browser-partition'
+import { BROWSER_PARTITION } from './browser-partition'
 import { BrowserPersistenceCoordinator } from './browser-persistence'
 import {
   $browserPaneGeometry,
@@ -116,7 +116,7 @@ function BrowserWebview({ foreground, tab }: BrowserWebviewProps) {
 
     const mount = async () => {
       await hydrateBrowserTimeline(tab.profile, tab.workspaceId)
-      const partition = tab.privatePartition ?? (await browserPartitionForProfile(tab.profile))
+      const partition = tab.privatePartition ?? BROWSER_PARTITION
 
       if (disposed) {
         return

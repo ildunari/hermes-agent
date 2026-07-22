@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { BROWSER_PARTITION } from './browser-guest-security'
 import { BrowserResourceDeliveryController, type BrowserResourceGuestBinding } from './browser-resource-delivery'
 import { BrowserResourceGrantRegistry } from './browser-resource-grants'
 
@@ -7,7 +8,7 @@ const binding: BrowserResourceGuestBinding = {
   generation: 'guest-generation-1',
   guestId: 91,
   hostId: 41,
-  partition: 'persist:hermes-browser:v1:test',
+  partition: BROWSER_PARTITION,
   profile: 'coding',
   tabId: 'browser:tab-1',
   workspaceId: 'session-1'
