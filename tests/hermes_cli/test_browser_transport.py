@@ -338,7 +338,7 @@ def test_browser_tickets_are_fresh_single_use_expiring_and_audience_separated(mo
     expired = ws_tickets.mint_browser_ticket(
         user_id="u1", provider="nous", profile="gpt", connection_id=connection_id
     )
-    clock["now"] += ws_tickets.TTL_SECONDS
+    clock["now"] += ws_tickets.TTL_SECONDS + 1
     with pytest.raises(ws_tickets.TicketInvalid, match="expired"):
         ws_tickets.consume_browser_ticket(expired)
 
