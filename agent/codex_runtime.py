@@ -779,20 +779,28 @@ def run_codex_app_server_turn(
         # users see no live tool-progress or interim commentary while
         # codex_app_server is running — only the final answer (#33200).
         # Supersedes the narrower item/started-only bridge from #38835.
-        agent._codex_session = CodexAppServerSession(
-            cwd=cwd,
-            codex_bin=_codex_app_server_string(runtime_config.get("codex_bin")),
-            codex_home=_codex_app_server_string(runtime_config.get("codex_home")),
-            codex_config_overrides=codex_overrides or None,
-            model=forward_model,
-            model_provider=forward_provider,
-            approval_callback=approval_callback,
-            request_routing=_ServerRequestRouting(
+        session_kwargs: dict[str, Any] = {
+            "cwd": cwd,
+            "approval_callback": approval_callback,
+            "request_routing": _ServerRequestRouting(
                 auto_approve_exec=auto_approve_requests,
                 auto_approve_apply_patch=auto_approve_requests,
             ),
-            on_event=make_codex_app_server_event_bridge(agent),
-        )
+            "on_event": make_codex_app_server_event_bridge(agent),
+        }
+        codex_bin = _codex_app_server_string(runtime_config.get("codex_bin"))
+        codex_home = _codex_app_server_string(runtime_config.get("codex_home"))
+        if codex_bin is not None:
+            session_kwargs["codex_bin"] = codex_bin
+        if codex_home is not None:
+            session_kwargs["codex_home"] = codex_home
+        if codex_overrides:
+            session_kwargs["codex_config_overrides"] = codex_overrides
+        if forward_model is not None:
+            session_kwargs["model"] = forward_model
+        if forward_provider is not None:
+            session_kwargs["model_provider"] = forward_provider
+        agent._codex_session = CodexAppServerSession(**session_kwargs)
 
     # NOTE: the user message is ALREADY appended to messages by the
     # standard run_conversation() flow (line ~11823) before the early

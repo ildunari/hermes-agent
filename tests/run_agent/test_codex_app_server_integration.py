@@ -12,6 +12,7 @@ Verifies that:
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -439,6 +440,103 @@ class TestRunConversationCodexPath:
         )
         return captured
 
+    def test_runtime_config_plumbs_session_kwargs(self, monkeypatch, tmp_path):
+        captured = self._capture_routing_agent(monkeypatch)
+        instructions_path = tmp_path / "instructions.txt"
+        instructions_path.write_text('line one\nquote "two"\\tail', encoding="utf-8")
+
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {
+                    "codex_app_server": {
+                        "codex_bin": "/tmp/opencodex",
+                        "codex_home": "/tmp/codex-home",
+                        "config_overrides": ["foo=1", 7, "", "bar=true"],
+                        "developer_instructions_file": str(instructions_path),
+                    }
+                }
+            },
+        ):
+            agent = _make_codex_agent()
+            with patch.object(
+                agent, "_spawn_background_review", return_value=None
+            ):
+                agent.run_conversation("write something")
+
+        assert captured["codex_bin"] == "/tmp/opencodex"
+        assert captured["codex_home"] == "/tmp/codex-home"
+        assert captured["codex_config_overrides"][:2] == ["foo=1", "bar=true"]
+        assert captured["codex_config_overrides"][2] == (
+            "developer_instructions="
+            + json.dumps('line one\nquote "two"\\tail')
+        )
+
+    def test_runtime_config_defaults_when_missing(self, monkeypatch):
+        captured = self._capture_routing_agent(monkeypatch)
+        with patch("hermes_cli.config.load_config", return_value={}):
+            agent = _make_codex_agent()
+            with patch.object(
+                agent, "_spawn_background_review", return_value=None
+            ):
+                agent.run_conversation("write something")
+
+        assert "codex_bin" not in captured
+        assert "codex_home" not in captured
+        assert "codex_config_overrides" not in captured
+        assert "model" not in captured
+        assert "model_provider" not in captured
+
+    def test_forward_model_uses_effective_model(self, monkeypatch):
+        captured = self._capture_routing_agent(monkeypatch)
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {
+                    "default": "openai/gpt-5-codex",
+                    "codex_app_server": {"forward_model": True},
+                }
+            },
+        ):
+            agent = _make_codex_agent(model="")
+            with patch.object(
+                agent, "_spawn_background_review", return_value=None
+            ):
+                agent.run_conversation("write something")
+
+        assert captured["model"] == "gpt-5-codex"
+        assert captured["model_provider"] == "openai"
+
+    def test_usage_records_last_executed_model_on_acceptance_mismatch(
+        self, monkeypatch
+    ):
+        def fake_run_turn(self, user_input: str, **kwargs):
+            self.accepted_model = "gpt-5-codex"
+            self.accepted_provider = "openai"
+            return TurnResult(
+                final_text="done",
+                projected_messages=[{"role": "assistant", "content": "done"}],
+                turn_id="turn-usage-2",
+                thread_id="thread-usage-2",
+                token_usage_last={
+                    "totalTokens": 10,
+                    "inputTokens": 5,
+                    "cachedInputTokens": 0,
+                    "outputTokens": 5,
+                    "reasoningOutputTokens": 0,
+                },
+            )
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        monkeypatch.setattr(
+            CodexAppServerSession, "ensure_started", lambda self: "thread-usage-2"
+        )
+        agent = _make_codex_agent(model="o3")
+        with patch.object(agent, "_spawn_background_review", return_value=None):
+            agent.run_conversation("hello")
+
+        assert agent.last_executed_model == "gpt-5-codex"
+
     def test_approvals_mode_off_auto_approves_codex_server_requests(
         self, monkeypatch
     ):
@@ -822,4 +920,3 @@ class TestCodexToolProgressBridge:
 
         assert "on_event" in captured_init and captured_init["on_event"] is not None
         assert ("tool.started", "exec_command", "pytest") in events
-

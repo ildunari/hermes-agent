@@ -14,6 +14,7 @@ from typing import Any, Optional
 import pytest
 
 import agent.transports.codex_app_server_session as session_mod
+from agent.transports import hermes_tools_mcp_server
 from agent.transports.codex_app_server_session import (
     CodexAppServerSession,
     _ServerRequestRouting,
@@ -160,6 +161,49 @@ class TestLifecycle:
         method, params = next(r for r in client.requests if r[0] == "thread/start")
         assert params["cwd"] == "/tmp"
         assert "permissions" not in params  # see session.ensure_started() comment
+
+    def test_thread_start_forwards_model_and_captures_acceptance(self):
+        client = FakeClient()
+        client._request_handler = lambda method, params: (
+            {
+                "thread": {"id": "thread-fake-001"},
+                "activePermissionProfile": {"id": "workspace-write"},
+                "model": "codex-accepted",
+                "modelProvider": "openai",
+            }
+            if method == "thread/start"
+            else {"turn": {"id": "turn-fake-001"}}
+            if method == "turn/start"
+            else {}
+        )
+        s = make_session(client, model="codex-5", model_provider="openai")
+        s.ensure_started()
+        method, params = next(r for r in client.requests if r[0] == "thread/start")
+        assert params["model"] == "codex-5"
+        assert params["modelProvider"] == "openai"
+        assert s.accepted_model == "codex-accepted"
+        assert s.accepted_provider == "openai"
+
+    def test_thread_start_accepts_nested_model_echo(self):
+        client = FakeClient()
+        client._request_handler = lambda method, params: (
+            {
+                "thread": {
+                    "id": "thread-fake-001",
+                    "model": "codex-nested",
+                    "modelProvider": "openai",
+                },
+                "activePermissionProfile": {"id": "workspace-write"},
+            }
+            if method == "thread/start"
+            else {"turn": {"id": "turn-fake-001"}}
+            if method == "turn/start"
+            else {}
+        )
+        s = make_session(client, model="codex-5", model_provider="openai")
+        s.ensure_started()
+        assert s.accepted_model == "codex-nested"
+        assert s.accepted_provider == "openai"
 
     def test_close_idempotent(self):
         client = FakeClient()
@@ -1214,6 +1258,30 @@ class TestThreadStartCrossFill:
         s = make_session(client)
         with pytest.raises(CodexAppServerError, match="no thread id"):
             s.ensure_started()
+
+
+class TestHermesToolsExpose:
+    def test_unset_keeps_full_list(self, monkeypatch):
+        monkeypatch.delenv("HERMES_TOOLS_EXPOSE", raising=False)
+        assert hermes_tools_mcp_server._resolved_exposed_tools() == (
+            hermes_tools_mcp_server.EXPOSED_TOOLS
+        )
+
+    def test_filter_keeps_only_known_names(self, monkeypatch):
+        monkeypatch.setenv(
+            "HERMES_TOOLS_EXPOSE",
+            "browser_click,missing, web_search ,browser_click",
+        )
+        assert hermes_tools_mcp_server._resolved_exposed_tools() == (
+            "web_search",
+            "browser_click",
+        )
+
+    def test_blank_env_keeps_full_list(self, monkeypatch):
+        monkeypatch.setenv("HERMES_TOOLS_EXPOSE", " , ")
+        assert hermes_tools_mcp_server._resolved_exposed_tools() == (
+            hermes_tools_mcp_server.EXPOSED_TOOLS
+        )
 
 
 class TestHasTurnAbortedMarker:

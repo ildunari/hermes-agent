@@ -320,9 +320,13 @@ class CodexAppServerSession:
                 ),
             )
         self._thread_id = thread_id
-        accepted_model = result.get("model")
+        accepted_model = thread_obj.get("model")
+        if accepted_model is None:
+            accepted_model = result.get("model")
         self.accepted_model = accepted_model if isinstance(accepted_model, str) else None
-        accepted_provider = result.get("modelProvider")
+        accepted_provider = thread_obj.get("modelProvider")
+        if accepted_provider is None:
+            accepted_provider = result.get("modelProvider")
         self.accepted_provider = (
             accepted_provider if isinstance(accepted_provider, str) else None
         )
