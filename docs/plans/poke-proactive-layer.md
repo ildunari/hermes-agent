@@ -120,7 +120,7 @@ Pitfalls to enforce in review:
 
 ## Component 2 — Maintenance job (the ledger brain, offline)
 
-New file: `gateway/contact_memory/interest_maintenance.py` + a profile cron job (LLM job, cheap model — gemini-3.5-flash via vibeproxy or the local Qwen worker; NOT the main Sol lane). Trigger: per contact, ≥20 unfolded events OR 7 days since last run, whichever first. Letta sleep-time pattern.
+New file: `gateway/contact_memory/interest_maintenance.py` + a profile cron job (LLM job, cheap model — gemini-3.6-flash-high via vibeproxy or the local Qwen worker; NOT the main Sol lane). Trigger: per contact, ≥20 unfolded events OR 7 days since last run, whichever first. Letta sleep-time pattern.
 
 Steps per run (single batched LLM call per contact, deterministic pre/post processing around it):
 1. Deterministic: fold unfolded `interest_event` rows into raw_score deltas per topic string; mark `folded_at`.
@@ -198,7 +198,7 @@ agent:
     backoff_days: 30
     exploration_floor: 0.10
     fetch_model: {provider: vibeproxy, model: claude-sonnet-5}
-    maintenance_model: {provider: vibeproxy, model: gemini-3.5-flash}
+    maintenance_model: {provider: vibeproxy, model: gemini-3.6-flash-high}
 ```
 
 Guest specifics: guest routing already maps senders → contacts via `guest_contacts_file`; the scheduler must resolve the SAME contact hash the memory broker uses so ledger and sends line up (single source of truth: reuse the broker's contact-id derivation, do not re-derive). Group chats: proactive sends are DM-only in v1 — never initiate into a group. Guest-profile audience rules apply unchanged: candidates may only reference `guest_ok`/`public` facts; the gate runs with the same `RetrievalScope` the guest lane uses. Rollout order: Poke first (Kosta's own threads), Guest only after Gate C.

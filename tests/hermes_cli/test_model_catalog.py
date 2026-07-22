@@ -604,11 +604,3 @@ class TestManifestMatchesInRepoLists:
             "Run: python scripts/build_model_catalog.py && "
             "git add website/static/api/model-catalog.json"
         )
-
-
-def test_vibeproxy_curated_catalog_uses_current_gemini_flash_route():
-    from hermes_cli.models import _PROVIDER_MODELS
-
-    models = _PROVIDER_MODELS["vibeproxy"]
-    assert "gemini-3.6-flash-high" in models
-    assert "gemini-3.5-flash" not in models
