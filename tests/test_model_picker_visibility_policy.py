@@ -101,21 +101,21 @@ def test_hidden_model_policy_allows_new_models_by_default():
 
 def test_picker_labels_do_not_change_runtime_route_ids():
     rows = [
-        {"slug": "vibeproxy", "name": "VibeProxy", "models": ["gemini-3.5-flash-low"]}
+        {"slug": "vibeproxy", "name": "VibeProxy", "models": ["gemini-3.6-flash-high"]}
     ]
 
     labeled = apply_model_picker_labels(
         rows,
         {"vibeproxy": "CLI Proxy"},
-        {"vibeproxy": {"gemini-3.5-flash-low": "Gemini 3.5 Flash"}},
+        {"vibeproxy": {"gemini-3.6-flash-high": "Gemini 3.6 Flash"}},
     )
 
     assert labeled == [
         {
             "slug": "vibeproxy",
             "name": "CLI Proxy",
-            "models": ["gemini-3.5-flash-low"],
-            "model_labels": {"gemini-3.5-flash-low": "Gemini 3.5 Flash"},
+            "models": ["gemini-3.6-flash-high"],
+            "model_labels": {"gemini-3.6-flash-high": "Gemini 3.6 Flash"},
         }
     ]
     assert rows[0]["name"] == "VibeProxy"
@@ -213,7 +213,7 @@ def test_explicit_only_keeps_configured_vibeproxy_and_moa_presets(monkeypatch):
                 "claude-fable-5",
                 "claude-opus-4-8",
                 "claude-sonnet-5",
-                "gemini-3.5-flash-low",
+                "gemini-3.6-flash-high",
                 "gemini-3.1-pro-low",
             ],
             "total_models": 5,
@@ -272,7 +272,7 @@ def test_explicit_only_keeps_configured_vibeproxy_and_moa_presets(monkeypatch):
         "claude-fable-5",
         "claude-opus-4-8",
         "claude-sonnet-5",
-        "gemini-3.5-flash-low",
+        "gemini-3.6-flash-high",
         "gemini-3.1-pro-low",
     ]
     assert by_slug["moa"]["models"] == ["default", "Speed", "Design"]

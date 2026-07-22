@@ -8,7 +8,7 @@ _DATE_TOKEN_RE = re.compile(r"^(?:20\d{6}|20\d{2}[._-]?\d{2}[._-]?\d{2})$")
 _VERSION_TOKEN_RE = re.compile(r"^\d+(?:\.\d+)?$")
 
 # Antigravity / Cloud Code Assist exposes each Gemini model as effort-suffixed
-# route IDs (e.g. ``gemini-3.1-pro-low``, ``gemini-3.5-flash-extra-low``). The
+# route IDs (e.g. ``gemini-3.1-pro-low``, ``gemini-3.6-flash-high``). The
 # suffix is the wire tier, not a distinct model, and the reasoning-effort
 # picker already controls thinking depth — so it must not leak into the name
 # shown to the user. This strips the trailing effort tier for display only;

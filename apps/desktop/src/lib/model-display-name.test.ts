@@ -20,6 +20,8 @@ describe('model display names', () => {
   it('hides the Antigravity Gemini effort-tier suffix from the display name', () => {
     expect(displayModelName('gemini-3.1-pro-low')).toBe('Gemini 3.1 Pro')
     expect(displayModelName('gemini-3.1-pro-low', { provider: 'vibeproxy' })).toBe('Gemini 3.1 Pro')
+    expect(displayModelName('gemini-3.6-flash-high', { provider: 'vibeproxy' })).toBe('Gemini 3.6 Flash')
+    // Persisted legacy routes remain display-compatible.
     expect(displayModelName('gemini-3.5-flash-low')).toBe('Gemini 3.5 Flash')
     expect(displayModelName('gemini-3.5-flash-extra-low')).toBe('Gemini 3.5 Flash')
     // Non-effort gemini ids keep their real trailing token.

@@ -156,7 +156,7 @@ export function displayModelName(model: string, options: { provider?: string } =
 
   const visible = raw.includes('/') ? raw.split('/').filter(Boolean).pop() || raw : raw
   // Antigravity / Cloud Code Assist Gemini ids carry an effort-tier suffix
-  // (gemini-3.1-pro-low, gemini-3.5-flash-extra-low). It is the wire tier, not
+  // (gemini-3.1-pro-low, gemini-3.6-flash-high). It is the wire tier, not
   // a distinct model, and the reasoning selector owns effort — strip it for
   // display only. The raw id passed to callbacks/persistence is untouched.
   const withoutEffort = visible.replace(/^(gemini-.+?)-(?:extra-low|low|medium|high)$/i, '$1')

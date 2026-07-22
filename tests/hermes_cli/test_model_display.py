@@ -31,6 +31,8 @@ def test_prettify_model_label_hides_antigravity_gemini_effort_suffix():
     # The reasoning-effort picker owns thinking depth; the effort-tier suffix
     # baked into the Antigravity Gemini route id must not show in the name.
     assert prettify_model_label("gemini-3.1-pro-low") == "Gemini 3.1 Pro"
+    assert prettify_model_label("gemini-3.6-flash-high") == "Gemini 3.6 Flash"
+    # Legacy route IDs remain display-compatible for persisted selections.
     assert prettify_model_label("gemini-3.5-flash-low") == "Gemini 3.5 Flash"
     assert prettify_model_label("gemini-3.5-flash-extra-low") == "Gemini 3.5 Flash"
     # Real trailing tokens that are not effort tiers are preserved.
