@@ -6,6 +6,7 @@ profile switcher can target any profile's HERMES_HOME. These tests pin:
 reads/writes land in the REQUESTED profile, the dashboard's own profile
 stays untouched, and the chat PTY env is scoped via HERMES_HOME.
 """
+import json
 import pytest
 import yaml
 
@@ -270,6 +271,104 @@ class TestProfileScopedMcp:
 
 
 class TestProfileScopedModel:
+    @staticmethod
+    def _configure_opencodex_profile(profile_home, tmp_path):
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir(exist_ok=True)
+        catalog = codex_home / "catalog.json"
+        catalog.write_text(
+            json.dumps(
+                {
+                    "models": [
+                        {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol"},
+                        {"slug": "xai/grok-4.5", "display_name": "Grok 4.5"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (codex_home / "config.toml").write_text(
+            f'model_catalog_json = "{catalog}"\n', encoding="utf-8"
+        )
+        (profile_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "model": {
+                        "provider": "openai-codex",
+                        "default": "gpt-5.6-sol",
+                        "openai_runtime": "codex_app_server",
+                        "codex_app_server": {
+                            "codex_home": str(codex_home),
+                            "forward_model": True,
+                        },
+                    }
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+
+    def test_opencodex_profile_options_expose_only_proxy_catalog(
+        self, client, isolated_profiles, tmp_path
+    ):
+        self._configure_opencodex_profile(
+            isolated_profiles["worker_beta"], tmp_path
+        )
+
+        resp = client.get(
+            "/api/model/options", params={"profile": "worker_beta"}
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["provider"] == "openai-codex"
+        assert [row["slug"] for row in body["providers"]] == ["openai-codex"]
+        assert body["providers"][0]["models"] == ["gpt-5.6-sol", "xai/grok-4.5"]
+
+    def test_opencodex_profile_assignment_canonicalizes_provider_and_model(
+        self, client, isolated_profiles, tmp_path
+    ):
+        self._configure_opencodex_profile(
+            isolated_profiles["worker_beta"], tmp_path
+        )
+
+        resp = client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "xai-oauth",
+                "model": "Grok 4.5",
+                "profile": "worker_beta",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["provider"] == "openai-codex"
+        assert resp.json()["model"] == "xai/grok-4.5"
+        written = _cfg(isolated_profiles["worker_beta"])["model"]
+        assert written["provider"] == "openai-codex"
+        assert written["default"] == "xai/grok-4.5"
+
+    def test_opencodex_profile_assignment_rejects_unknown_model(
+        self, client, isolated_profiles, tmp_path
+    ):
+        self._configure_opencodex_profile(
+            isolated_profiles["worker_beta"], tmp_path
+        )
+
+        resp = client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "xai-oauth",
+                "model": "grok-9",
+                "profile": "worker_beta",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "not in the OpenCodex catalog" in resp.json()["detail"]
+
     def test_model_set_main_scoped(self, client, isolated_profiles):
         resp = client.post(
             "/api/model/set",

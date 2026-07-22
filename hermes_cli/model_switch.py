@@ -1275,6 +1275,56 @@ def switch_model(
     Returns:
         ModelSwitchResult with all information the caller needs.
     """
+    from hermes_cli.config import load_config
+    from hermes_cli.opencodex_catalog import (
+        OpenCodexCatalogError,
+        load_configured_opencodex_catalog,
+        opencodex_runtime_provider,
+    )
+
+    try:
+        _switch_config = load_config() or {}
+        _opencodex_catalog = load_configured_opencodex_catalog(_switch_config)
+    except OpenCodexCatalogError as exc:
+        return ModelSwitchResult(
+            success=False,
+            is_global=is_global,
+            error_message=str(exc),
+        )
+    except Exception:
+        _switch_config = {}
+        _opencodex_catalog = None
+    if _opencodex_catalog is not None:
+        match = _opencodex_catalog.resolve(
+            raw_input, provider_hint=explicit_provider
+        )
+        if match.model is None:
+            return ModelSwitchResult(
+                success=False,
+                is_global=is_global,
+                error_message=match.error,
+            )
+        target = opencodex_runtime_provider(_switch_config)
+        model_cfg = _switch_config.get("model")
+        configured_base_url = (
+            str(model_cfg.get("base_url") or "").strip()
+            if isinstance(model_cfg, dict)
+            else ""
+        )
+        return ModelSwitchResult(
+            success=True,
+            new_model=match.model.slug,
+            target_provider=target,
+            provider_changed=current_provider.strip().lower() != target,
+            base_url=configured_base_url or current_base_url,
+            api_mode="codex_app_server",
+            provider_label="OpenCodex",
+            resolved_via_alias=(
+                raw_input.strip() if raw_input.strip() != match.model.slug else ""
+            ),
+            is_global=is_global,
+        )
+
     from hermes_cli.models import (
         copilot_model_api_mode,
         detect_provider_for_model,
@@ -1414,7 +1464,6 @@ def switch_model(
     # =================================================================
     else:
         try:
-            from hermes_cli.config import load_config
             from hermes_cli.moa_config import exact_moa_preset_name, normalize_moa_config
 
             _moa_cfg = normalize_moa_config(load_config().get("moa") or {})

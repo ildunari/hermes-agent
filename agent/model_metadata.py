@@ -2193,7 +2193,34 @@ def get_model_context_length(
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
         return config_context_length
 
-    # 0a. MoA virtual provider — ``model`` is a preset name, not a real model,
+    # 0a. OpenCodex app-server catalog. Its context metadata is the same source
+    # used to construct the Codex thread, including the effective percentage
+    # reserved for safe compaction. Using the generic Codex OAuth table here
+    # made Hermes display/preflight use 272K while the live OpenCodex thread
+    # reported 353.4K for the same gpt-5.6-sol model.
+    if (provider or "").strip().lower() in {"openai", "openai-codex"}:
+        try:
+            from hermes_cli.opencodex_catalog import (
+                OpenCodexCatalogError,
+                load_configured_opencodex_catalog,
+            )
+
+            try:
+                catalog = load_configured_opencodex_catalog()
+            except OpenCodexCatalogError:
+                catalog = None
+            if catalog is not None:
+                match = catalog.resolve(model)
+                if match.model is not None:
+                    effective_window = match.model.effective_context_window
+                    if effective_window > 0:
+                        return effective_window
+        except Exception:
+            logger.debug(
+                "OpenCodex context-length resolution failed", exc_info=True
+            )
+
+    # 0b. MoA virtual provider — ``model`` is a preset name, not a real model,
     # and ``base_url`` is the local virtual endpoint, so every probe below would
     # miss and fall through to the 256K default. The aggregator is the acting
     # model, so resolve the context window from the aggregator slot's real
@@ -2221,7 +2248,7 @@ def get_model_context_length(
             logger.debug("MoA aggregator context-length resolution failed", exc_info=True)
         # Fall through to the generic default if aggregator resolution failed.
 
-    # 0b. custom_providers per-model override — check before any probe.
+    # 0c. custom_providers per-model override — check before any probe.
     # This closes the gap where /model switch and display paths used to fall
     # back to 128K despite the user having a per-model context_length set.
     # See #15779.

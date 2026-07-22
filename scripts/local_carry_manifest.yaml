@@ -553,12 +553,20 @@ features:
     title: Codex app-server launch-scoped profile wiring
     owner_paths:
       - agent/codex_runtime.py
+      - agent/model_metadata.py
       - agent/transports/codex_app_server_session.py
       - agent/transports/hermes_tools_mcp_server.py
+      - hermes_cli/opencodex_catalog.py
+      - hermes_cli/inventory.py
+      - hermes_cli/model_switch.py
       - tests/agent/transports/test_codex_app_server_session.py
+      - tests/hermes_cli/test_opencodex_profile_models.py
+      - tests/hermes_cli/test_web_server_profile_unification.py
       - tests/run_agent/test_codex_app_server_integration.py
     tests:
       - tests/agent/transports/test_codex_app_server_session.py
+      - tests/hermes_cli/test_opencodex_profile_models.py
+      - tests/hermes_cli/test_web_server_profile_unification.py
       - tests/run_agent/test_codex_app_server_integration.py
     checks:
       - id: codex-profile-runtime-config
@@ -567,8 +575,20 @@ features:
         description: runtime config stays launch-scoped and records accepted model truthfully
       - id: codex-profile-session-forwarding
         path: agent/transports/codex_app_server_session.py
-        needles: [modelProvider, accepted_model, accepted_provider]
-        description: codex session forwards requested model and captures accepted echo
+        needles: [modelProvider, accepted_model, accepted_provider, requested_model]
+        description: codex session forwards requested model, captures accepted echo, and exposes its bound identity
+      - id: codex-profile-opencodex-catalog
+        path: hermes_cli/opencodex_catalog.py
+        needles: [OpenCodexCatalog, model_catalog_json, provider_hint]
+        description: OpenCodex catalog models normalize safely without changing the Hermes runtime provider
+      - id: codex-profile-picker-routing
+        path: hermes_cli/inventory.py
+        needles: [opencodex_catalog, opencodex]
+        description: Codex profile pickers expose only the OpenCodex catalog through one virtual provider
+      - id: codex-profile-switch-routing
+        path: hermes_cli/model_switch.py
+        needles: [load_configured_opencodex_catalog, codex_app_server]
+        description: live model switches keep the Codex runtime and forward canonical catalog ids
       - id: codex-profile-hermes-tools-allowlist
         path: agent/transports/hermes_tools_mcp_server.py
         needles: [HERMES_TOOLS_EXPOSE, _resolved_exposed_tools]

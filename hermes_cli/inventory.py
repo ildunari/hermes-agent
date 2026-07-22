@@ -37,6 +37,8 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Optional
 
+from hermes_cli.opencodex_catalog import OpenCodexCatalog
+
 logger = logging.getLogger(__name__)
 
 # ─── Public types ───────────────────────────────────────────────────────
@@ -61,6 +63,7 @@ class ConfigContext:
     provider_labels: dict[str, str] | None = None
     model_labels: dict[str, dict[str, str]] | None = None
     excluded_providers: list | None = None
+    opencodex_catalog: OpenCodexCatalog | None = None
 
     def with_overrides(
         self,
@@ -131,6 +134,17 @@ def load_picker_context() -> ConfigContext:
         provider_labels = {}
         model_labels = {}
     excluded = cfg.get("model_catalog", {}).get("excluded_providers") or []
+    from hermes_cli.opencodex_catalog import (
+        load_configured_opencodex_catalog,
+        opencodex_runtime_provider,
+    )
+
+    opencodex_catalog = load_configured_opencodex_catalog(cfg)
+    if opencodex_catalog is not None:
+        current_provider = opencodex_runtime_provider(cfg)
+        matched = opencodex_catalog.resolve(current_model)
+        if matched.model is not None:
+            current_model = matched.model.slug
     return ConfigContext(
         current_provider=current_provider,
         current_model=current_model,
@@ -144,6 +158,7 @@ def load_picker_context() -> ConfigContext:
         provider_labels=provider_labels,
         model_labels=model_labels,
         excluded_providers=excluded if isinstance(excluded, list) else [],
+        opencodex_catalog=opencodex_catalog,
     )
 
 
@@ -208,6 +223,31 @@ def build_models_payload(
       GUI/TUI picker opens fast while making the active custom provider's model
       list match the classic CLI picker.
     """
+    if ctx.opencodex_catalog is not None:
+        catalog = ctx.opencodex_catalog
+        row = {
+            "slug": "openai-codex",
+            "name": "OpenCodex",
+            "models": [item.slug for item in catalog.models],
+            "total_models": len(catalog.models),
+            "is_current": True,
+            "is_user_defined": False,
+            "source": "opencodex",
+            "authenticated": True,
+            "auth_type": "codex_app_server",
+            "key_env": "",
+            "warning": "",
+            "model_labels": catalog.model_labels,
+        }
+        rows = [row]
+        if capabilities:
+            _apply_capabilities(rows)
+        return {
+            "providers": rows,
+            "model": ctx.current_model,
+            "provider": "openai-codex",
+        }
+
     from hermes_cli.model_switch import list_authenticated_providers
 
     rows = list_authenticated_providers(

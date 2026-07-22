@@ -261,6 +261,16 @@ class CodexAppServerSession:
 
     # ---------- lifecycle ----------
 
+    @property
+    def requested_model(self) -> Optional[str]:
+        """Model bound to this app-server thread at construction time."""
+        return self._model
+
+    @property
+    def requested_provider(self) -> Optional[str]:
+        """Codex model-provider bound to this thread, when explicitly set."""
+        return self._model_provider
+
     def ensure_started(self) -> str:
         """Spawn the subprocess, do the initialize handshake, and start a
         thread. Returns the codex thread id. Idempotent — repeated calls

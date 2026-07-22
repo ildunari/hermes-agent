@@ -138,7 +138,7 @@ class TestRunConversationCodexPath:
                 turn_id="turn-usage-1",
                 thread_id="thread-usage-1",
                 token_usage_last={
-                    "totalTokens": 130,
+                    "totalTokens": 105,
                     "inputTokens": 80,
                     "cachedInputTokens": 20,
                     "outputTokens": 25,
@@ -156,28 +156,28 @@ class TestRunConversationCodexPath:
             result = agent.run_conversation("hello")
 
         assert result["api_calls"] == 1
-        assert result["prompt_tokens"] == 100
+        assert result["prompt_tokens"] == 80
         assert result["completion_tokens"] == 25
-        assert result["total_tokens"] == 130
-        assert result["input_tokens"] == 80
+        assert result["total_tokens"] == 105
+        assert result["input_tokens"] == 60
         assert result["output_tokens"] == 25
         assert result["cache_read_tokens"] == 20
         assert result["cache_write_tokens"] == 0
         assert result["reasoning_tokens"] == 5
-        assert result["last_prompt_tokens"] == 100
+        assert result["last_prompt_tokens"] == 80
 
         assert agent.session_api_calls == 1
-        assert agent.session_prompt_tokens == 100
+        assert agent.session_prompt_tokens == 80
         assert agent.session_completion_tokens == 25
-        assert agent.session_total_tokens == 130
-        assert agent.session_input_tokens == 80
+        assert agent.session_total_tokens == 105
+        assert agent.session_input_tokens == 60
         assert agent.session_output_tokens == 25
         assert agent.session_cache_read_tokens == 20
         assert agent.session_cache_write_tokens == 0
         assert agent.session_reasoning_tokens == 5
-        assert agent.context_compressor.last_prompt_tokens == 100
+        assert agent.context_compressor.last_prompt_tokens == 80
         assert agent.context_compressor.last_completion_tokens == 25
-        assert agent.context_compressor.last_total_tokens == 130
+        assert agent.context_compressor.last_total_tokens == 105
         assert agent.context_compressor.context_length == 200000
 
     def test_native_codex_compaction_updates_bookkeeping(self, monkeypatch):
@@ -557,6 +557,47 @@ class TestRunConversationCodexPath:
 
         assert captured["model"] == "openai/gpt-5-codex"
         assert "model_provider" not in captured
+
+    def test_forwarded_model_switch_starts_a_fresh_codex_thread(self, monkeypatch):
+        """A running app-server thread is model-bound; a live picker switch
+        must recreate it so the new canonical OpenCodex model is forwarded."""
+        constructed: list[str] = []
+        closed: list[str] = []
+
+        def fake_init(self, **kwargs):
+            self._thread_id = f"thread-{len(constructed) + 1}"
+            self._model = kwargs.get("model")
+            constructed.append(self._model)
+
+        def fake_run_turn(self, user_input: str, **kwargs):
+            return TurnResult(
+                final_text="ok",
+                projected_messages=[{"role": "assistant", "content": "ok"}],
+                turn_id="turn-stub",
+                thread_id=self._thread_id,
+                accepted_model=self._model,
+            )
+
+        def fake_close(self):
+            closed.append(self._model)
+
+        monkeypatch.setattr(CodexAppServerSession, "__init__", fake_init)
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        monkeypatch.setattr(CodexAppServerSession, "close", fake_close)
+        monkeypatch.setattr(
+            CodexAppServerSession, "ensure_started", lambda self: self._thread_id
+        )
+        cfg = {"model": {"codex_app_server": {"forward_model": True}}}
+
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            agent = _make_codex_agent(model="gpt-5.6-sol")
+            with patch.object(agent, "_spawn_background_review", return_value=None):
+                agent.run_conversation("first")
+                agent.model = "xai/grok-4.5"
+                agent.run_conversation("second")
+
+        assert constructed == ["gpt-5.6-sol", "xai/grok-4.5"]
+        assert closed == ["gpt-5.6-sol"]
 
     def test_usage_records_last_executed_model_on_acceptance_mismatch(
         self, monkeypatch, caplog

@@ -121,7 +121,10 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens,
     totalTokens.
 
-    Hermes' canonical prompt bucket includes uncached input + cached input.
+    OpenCodex normalizes ``inputTokens`` to the OpenAI Responses convention:
+    it is the total prompt size and already includes cache reads/writes.
+    Hermes' canonical buckets separate uncached input from cache reads, so the
+    latter must be subtracted before constructing ``CanonicalUsage``.
     The Codex app-server protocol does not currently expose cache-write tokens,
     so that bucket remains zero on this runtime.
 
@@ -182,14 +185,14 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
 
     from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
 
-    input_tokens = _coerce_usage_int(usage.get("inputTokens"))
+    input_total = _coerce_usage_int(usage.get("inputTokens"))
     cache_read_tokens = _coerce_usage_int(usage.get("cachedInputTokens"))
     output_tokens = _coerce_usage_int(usage.get("outputTokens"))
     reasoning_tokens = _coerce_usage_int(usage.get("reasoningOutputTokens"))
     reported_total = _coerce_usage_int(usage.get("totalTokens"))
 
     canonical_usage = CanonicalUsage(
-        input_tokens=input_tokens,
+        input_tokens=max(0, input_total - cache_read_tokens),
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=0,
@@ -724,14 +727,46 @@ def run_codex_app_server_turn(
         _ServerRequestRouting,
     )
 
-    # Lazy session: one CodexAppServerSession per AIAgent instance.
-    # Spawned on first turn, reused across turns, closed at AIAgent
-    # shutdown (see _cleanup hook).
+    runtime_config = _codex_app_server_config(agent)
+    forward_model, forward_provider = _effective_codex_forward_model(
+        agent, runtime_config
+    )
+
+    # App-server threads are model-bound at thread/start. A live picker switch
+    # must retire the old thread or the UI changes while Codex keeps executing
+    # the previous model. Preserve the thread only when its complete forwarded
+    # identity still matches.
+    existing_session = getattr(agent, "_codex_session", None)
+    bound_model = (
+        getattr(existing_session, "requested_model", None)
+        if existing_session is not None
+        else None
+    )
+    bound_provider = (
+        getattr(existing_session, "requested_provider", None)
+        if existing_session is not None
+        else None
+    )
+    if not isinstance(bound_model, str):
+        bound_model = None
+    if not isinstance(bound_provider, str):
+        bound_provider = None
+    if existing_session is not None and (
+        bound_model != forward_model or bound_provider != forward_provider
+    ):
+        try:
+            existing_session.close()
+        except Exception:
+            logger.debug("codex app-server model-switch close failed", exc_info=True)
+        agent._codex_session = None
+
+    # Lazy session: one CodexAppServerSession per model-bound thread. Spawned
+    # on first turn, reused while routing stays stable, and recreated after a
+    # deliberate model switch.
     if not hasattr(agent, "_codex_session") or agent._codex_session is None:
         from agent.runtime_cwd import resolve_agent_cwd
 
         cwd = getattr(agent, "session_cwd", None) or str(resolve_agent_cwd())
-        runtime_config = _codex_app_server_config(agent)
         codex_overrides = _codex_app_server_overrides(
             runtime_config.get("config_overrides")
         )
@@ -740,9 +775,6 @@ def run_codex_app_server_turn(
         )
         if developer_override:
             codex_overrides.append(developer_override)
-        forward_model, forward_provider = _effective_codex_forward_model(
-            agent, runtime_config
-        )
         # Approval callback: defer to Hermes' standard prompt flow if a
         # CLI thread has installed one. Gateway / cron contexts get the
         # codex-side fail-closed default.
