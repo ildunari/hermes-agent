@@ -386,6 +386,31 @@ features:
         needles: [runtimeRouting, "state.runtimeRouting?.state === 'finished'"]
         description: cancellation follows the same settled routing lifecycle
 
+  - id: runtime.codex-profile-wiring
+    title: Codex app-server launch-scoped profile wiring
+    owner_paths:
+      - agent/codex_runtime.py
+      - agent/transports/codex_app_server_session.py
+      - agent/transports/hermes_tools_mcp_server.py
+      - tests/agent/transports/test_codex_app_server_session.py
+      - tests/run_agent/test_codex_app_server_integration.py
+    tests:
+      - tests/agent/transports/test_codex_app_server_session.py
+      - tests/run_agent/test_codex_app_server_integration.py
+    checks:
+      - id: codex-profile-runtime-config
+        path: agent/codex_runtime.py
+        needles: [developer_instructions, forward_model, last_executed_model]
+        description: runtime config stays launch-scoped and records accepted model truthfully
+      - id: codex-profile-session-forwarding
+        path: agent/transports/codex_app_server_session.py
+        needles: [modelProvider, accepted_model, accepted_provider]
+        description: codex session forwards requested model and captures accepted echo
+      - id: codex-profile-hermes-tools-allowlist
+        path: agent/transports/hermes_tools_mcp_server.py
+        needles: [HERMES_TOOLS_EXPOSE, _resolved_exposed_tools]
+        description: hermes-tools MCP exposure is env-scoped and filtered to known tools
+
   - id: desktop.sticky-turn-visibility
     title: Keep sticky user turns outside skipped content
     owner_paths:

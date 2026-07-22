@@ -28,6 +28,77 @@ from agent.stream_single_writer import claim_stream_writer, stream_writer_is_cur
 logger = logging.getLogger(__name__)
 
 
+def _codex_app_server_config(agent) -> dict[str, Any]:
+    """Return a sanitized model.codex_app_server config mapping."""
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config() or {}
+    except Exception:
+        logger.debug("codex app-server config load failed", exc_info=True)
+        return {}
+
+    model_config = config.get("model")
+    if not isinstance(model_config, dict):
+        return {}
+    runtime_config = model_config.get("codex_app_server")
+    return runtime_config if isinstance(runtime_config, dict) else {}
+
+
+def _codex_app_server_string(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _codex_app_server_overrides(raw_overrides: Any) -> list[str]:
+    if not isinstance(raw_overrides, list):
+        return []
+    return [value for value in raw_overrides if isinstance(value, str) and value]
+
+
+def _developer_instructions_override(path: Any) -> str | None:
+    file_path = _codex_app_server_string(path)
+    if file_path is None:
+        return None
+    try:
+        with open(file_path, "r", encoding="utf-8") as handle:
+            contents = handle.read()
+    except OSError:
+        logger.debug(
+            "codex app-server developer instructions file unreadable: %s",
+            file_path,
+            exc_info=True,
+        )
+        return None
+    encoded = json.dumps(contents, ensure_ascii=False)
+    # TOML basic strings reject a literal DEL (U+007F); JSON leaves it raw when
+    # ensure_ascii=False, so escape it explicitly. C0 controls are already
+    # escaped by json.dumps.
+    encoded = encoded.replace("\x7f", "\\u007f")
+    return f"developer_instructions={encoded}"
+
+
+def _effective_codex_forward_model(agent, runtime_config: dict[str, Any]) -> tuple[str | None, str | None]:
+    if runtime_config.get("forward_model") is not True:
+        return None, None
+
+    model_name = _codex_app_server_string(getattr(agent, "model", None))
+    provider_name = _codex_app_server_string(runtime_config.get("model_provider"))
+    if not model_name:
+        model_config = {}
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config() or {}
+            maybe_model_config = config.get("model")
+            if isinstance(maybe_model_config, dict):
+                model_config = maybe_model_config
+        except Exception:
+            logger.debug("codex app-server forward-model fallback load failed", exc_info=True)
+        model_name = _codex_app_server_string(model_config.get("default"))
+
+    return model_name, provider_name
+
+
 def _coerce_usage_int(value: Any) -> int:
     if isinstance(value, bool):
         return 0
@@ -58,6 +129,26 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     as one API call for session/status accounting.
     """
     agent.session_api_calls += 1
+
+    runtime_config = _codex_app_server_config(agent)
+    accepted_model = _codex_app_server_string(getattr(turn, "accepted_model", None))
+    accepted_provider = _codex_app_server_string(
+        getattr(turn, "accepted_provider", None)
+    )
+    if accepted_model:
+        # Track the accepted model unconditionally: pre-profile-wiring behavior
+        # updated ``last_executed_model`` whenever the harness echoed a model,
+        # and absent config must preserve that byte-for-byte. ``forward_model``
+        # only controls what we *request*, not what we record.
+        requested_model = _codex_app_server_string(getattr(agent, "model", None))
+        if requested_model != accepted_model:
+            logger.info(
+                "codex app-server accepted model mismatch: requested=%s accepted=%s provider=%s",
+                requested_model or "",
+                accepted_model,
+                accepted_provider or "",
+            )
+        agent.last_executed_model = accepted_model
 
     usage = getattr(turn, "token_usage_last", None)
     if not isinstance(usage, dict) or not usage:
@@ -640,6 +731,18 @@ def run_codex_app_server_turn(
         from agent.runtime_cwd import resolve_agent_cwd
 
         cwd = getattr(agent, "session_cwd", None) or str(resolve_agent_cwd())
+        runtime_config = _codex_app_server_config(agent)
+        codex_overrides = _codex_app_server_overrides(
+            runtime_config.get("config_overrides")
+        )
+        developer_override = _developer_instructions_override(
+            runtime_config.get("developer_instructions_file")
+        )
+        if developer_override:
+            codex_overrides.append(developer_override)
+        forward_model, forward_provider = _effective_codex_forward_model(
+            agent, runtime_config
+        )
         # Approval callback: defer to Hermes' standard prompt flow if a
         # CLI thread has installed one. Gateway / cron contexts get the
         # codex-side fail-closed default.
@@ -677,15 +780,28 @@ def run_codex_app_server_turn(
         # users see no live tool-progress or interim commentary while
         # codex_app_server is running — only the final answer (#33200).
         # Supersedes the narrower item/started-only bridge from #38835.
-        agent._codex_session = CodexAppServerSession(
-            cwd=cwd,
-            approval_callback=approval_callback,
-            request_routing=_ServerRequestRouting(
+        session_kwargs: dict[str, Any] = {
+            "cwd": cwd,
+            "approval_callback": approval_callback,
+            "request_routing": _ServerRequestRouting(
                 auto_approve_exec=auto_approve_requests,
                 auto_approve_apply_patch=auto_approve_requests,
             ),
-            on_event=make_codex_app_server_event_bridge(agent),
-        )
+            "on_event": make_codex_app_server_event_bridge(agent),
+        }
+        codex_bin = _codex_app_server_string(runtime_config.get("codex_bin"))
+        codex_home = _codex_app_server_string(runtime_config.get("codex_home"))
+        if codex_bin is not None:
+            session_kwargs["codex_bin"] = codex_bin
+        if codex_home is not None:
+            session_kwargs["codex_home"] = codex_home
+        if codex_overrides:
+            session_kwargs["codex_config_overrides"] = codex_overrides
+        if forward_model is not None:
+            session_kwargs["model"] = forward_model
+        if forward_provider is not None:
+            session_kwargs["model_provider"] = forward_provider
+        agent._codex_session = CodexAppServerSession(**session_kwargs)
 
     # NOTE: the user message is ALREADY appended to messages by the
     # standard run_conversation() flow (line ~11823) before the early

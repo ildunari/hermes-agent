@@ -12,6 +12,8 @@ Verifies that:
 
 from __future__ import annotations
 
+import json
+import tomllib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -64,6 +66,15 @@ def _make_codex_agent(**kwargs):
         skip_memory=True,
         **kwargs,
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_run_agent_home(monkeypatch, tmp_path):
+    """Keep run_agent's import-time home snapshot inside the test sandbox."""
+    hermes_home = tmp_path / "hermes_integration"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(run_agent, "_hermes_home", hermes_home)
 
 
 class TestApiModeAccepted:
@@ -439,6 +450,198 @@ class TestRunConversationCodexPath:
         )
         return captured
 
+    def test_runtime_config_plumbs_session_kwargs(self, monkeypatch, tmp_path):
+        captured = self._capture_routing_agent(monkeypatch)
+        instructions_path = tmp_path / "instructions.txt"
+        contents = 'emoji 🧪\nquote "two"\\tail'
+        instructions_path.write_text(contents, encoding="utf-8")
+
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {
+                    "codex_app_server": {
+                        "codex_bin": "/tmp/opencodex",
+                        "codex_home": "/tmp/codex-home",
+                        "config_overrides": ["foo=1", 7, "", "bar=true"],
+                        "developer_instructions_file": str(instructions_path),
+                    }
+                }
+            },
+        ):
+            agent = _make_codex_agent()
+            with patch.object(
+                agent, "_spawn_background_review", return_value=None
+            ):
+                agent.run_conversation("write something")
+
+        assert captured["codex_bin"] == "/tmp/opencodex"
+        assert captured["codex_home"] == "/tmp/codex-home"
+        assert captured["codex_config_overrides"][:2] == ["foo=1", "bar=true"]
+        override = captured["codex_config_overrides"][2]
+        assert override == (
+            "developer_instructions=" + json.dumps(contents, ensure_ascii=False)
+        )
+        _, value_part = override.split("=", 1)
+        assert tomllib.loads("x = " + value_part)["x"] == contents
+
+    def test_runtime_config_defaults_when_missing(self, monkeypatch):
+        captured = self._capture_routing_agent(monkeypatch)
+        with patch("hermes_cli.config.load_config", return_value={}):
+            agent = _make_codex_agent()
+            with patch.object(
+                agent, "_spawn_background_review", return_value=None
+            ):
+                agent.run_conversation("write something")
+
+        assert "codex_bin" not in captured
+        assert "codex_home" not in captured
+        assert "codex_config_overrides" not in captured
+        assert "model" not in captured
+        assert "model_provider" not in captured
+
+    def test_forward_model_preserves_full_model_slug(self, monkeypatch):
+        captured = self._capture_routing_agent(monkeypatch)
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {
+                    "default": "openai/gpt-5-codex",
+                    "codex_app_server": {"forward_model": True},
+                }
+            },
+        ):
+            agent = _make_codex_agent(model="")
+            with patch.object(
+                agent, "_spawn_background_review", return_value=None
+            ):
+                agent.run_conversation("write something")
+
+        assert captured["model"] == "openai/gpt-5-codex"
+
+    def test_forward_model_uses_explicit_provider(self, monkeypatch):
+        captured = self._capture_routing_agent(monkeypatch)
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {
+                    "codex_app_server": {
+                        "forward_model": True,
+                        "model_provider": "openai",
+                    }
+                }
+            },
+        ):
+            agent = _make_codex_agent(model="openai/gpt-5-codex")
+            with patch.object(
+                agent, "_spawn_background_review", return_value=None
+            ):
+                agent.run_conversation("write something")
+
+        assert captured["model"] == "openai/gpt-5-codex"
+        assert captured["model_provider"] == "openai"
+
+    def test_forward_model_omits_absent_provider(self, monkeypatch):
+        captured = self._capture_routing_agent(monkeypatch)
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {"codex_app_server": {"forward_model": True}}
+            },
+        ):
+            agent = _make_codex_agent(model="openai/gpt-5-codex")
+            with patch.object(
+                agent, "_spawn_background_review", return_value=None
+            ):
+                agent.run_conversation("write something")
+
+        assert captured["model"] == "openai/gpt-5-codex"
+        assert "model_provider" not in captured
+
+    def test_usage_records_last_executed_model_on_acceptance_mismatch(
+        self, monkeypatch, caplog
+    ):
+        def fake_run_turn(self, user_input: str, **kwargs):
+            return TurnResult(
+                final_text="done",
+                projected_messages=[{"role": "assistant", "content": "done"}],
+                turn_id="turn-usage-2",
+                thread_id="thread-usage-2",
+                accepted_model="gpt-5-codex",
+                accepted_provider="openai",
+                token_usage_last={
+                    "totalTokens": 10,
+                    "inputTokens": 5,
+                    "cachedInputTokens": 0,
+                    "outputTokens": 5,
+                    "reasoningOutputTokens": 0,
+                },
+            )
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        monkeypatch.setattr(
+            CodexAppServerSession, "ensure_started", lambda self: "thread-usage-2"
+        )
+        agent = _make_codex_agent(model="o3")
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {"codex_app_server": {"forward_model": True}}
+            },
+        ), patch.object(
+            agent, "_spawn_background_review", return_value=None
+        ), caplog.at_level("INFO", logger="agent.codex_runtime"):
+            agent.run_conversation("hello")
+
+        assert agent.last_executed_model == "gpt-5-codex"
+        assert "accepted model mismatch" in caplog.text
+
+    def test_usage_updates_last_executed_model_without_forward_config(
+        self, monkeypatch
+    ):
+        """Absent config preserves legacy tracking: the accepted model is always
+        recorded, matching pre-profile-wiring behavior byte-for-byte."""
+
+        def fake_run_turn(self, user_input: str, **kwargs):
+            return TurnResult(
+                final_text="done",
+                accepted_model="gpt-5-codex",
+                accepted_provider="openai",
+            )
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        agent = _make_codex_agent(model="o3")
+        agent.last_executed_model = "stale-prior-value"
+        with patch("hermes_cli.config.load_config", return_value={}), patch.object(
+            agent, "_spawn_background_review", return_value=None
+        ):
+            agent.run_conversation("hello")
+
+        assert agent.last_executed_model == "gpt-5-codex"
+
+    def test_usage_updates_last_executed_model_when_acceptance_matches(
+        self, monkeypatch, caplog
+    ):
+        model = "openai/gpt-5-codex"
+
+        def fake_run_turn(self, user_input: str, **kwargs):
+            return TurnResult(final_text="done", accepted_model=model)
+
+        monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
+        agent = _make_codex_agent(model=model)
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {"codex_app_server": {"forward_model": True}}
+            },
+        ), patch.object(
+            agent, "_spawn_background_review", return_value=None
+        ), caplog.at_level("INFO", logger="agent.codex_runtime"):
+            agent.run_conversation("hello")
+
+        assert agent.last_executed_model == model
+        assert "accepted model mismatch" not in caplog.text
+
     def test_approvals_mode_off_auto_approves_codex_server_requests(
         self, monkeypatch
     ):
@@ -672,6 +875,8 @@ class TestSessionRetirementOnRunAgent:
                 error="turn timed out after 600.0s",
                 turn_id="tu1",
                 thread_id="th1",
+                accepted_model="gpt-5-codex",
+                accepted_provider="openai",
                 should_retire=True,
             )
 
@@ -683,13 +888,19 @@ class TestSessionRetirementOnRunAgent:
         monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
         monkeypatch.setattr(CodexAppServerSession, "close", fake_close)
 
-        agent = _make_codex_agent()
-        with patch.object(agent, "_spawn_background_review", return_value=None):
+        agent = _make_codex_agent(model="o3")
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {"codex_app_server": {"forward_model": True}}
+            },
+        ), patch.object(agent, "_spawn_background_review", return_value=None):
             result = agent.run_conversation("hi")
 
         # The session was closed and cleared
         assert closes["count"] == 1
         assert getattr(agent, "_codex_session", "MISSING") is None
+        assert agent.last_executed_model == "gpt-5-codex"
         # Partial result was still returned (caller still sees the error)
         assert result["partial"] is True
         assert result["error"] == "turn timed out after 600.0s"
@@ -822,4 +1033,3 @@ class TestCodexToolProgressBridge:
 
         assert "on_event" in captured_init and captured_init["on_event"] is not None
         assert ("tool.started", "exec_command", "pytest") in events
-

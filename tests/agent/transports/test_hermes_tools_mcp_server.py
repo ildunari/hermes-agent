@@ -139,6 +139,33 @@ class TestModuleSurface:
         assert isinstance(m.EXPOSED_TOOLS, tuple)
         assert len(m.EXPOSED_TOOLS) > 0
 
+    def test_unset_exposure_filter_keeps_full_allowlist(self, monkeypatch):
+        from agent.transports import hermes_tools_mcp_server as m
+
+        monkeypatch.delenv("HERMES_TOOLS_EXPOSE", raising=False)
+        assert m._resolved_exposed_tools() == m.EXPOSED_TOOLS
+
+    def test_empty_exposure_filter_exposes_nothing(self, monkeypatch):
+        from agent.transports import hermes_tools_mcp_server as m
+
+        for value in ("", "   ", " , , "):
+            monkeypatch.setenv("HERMES_TOOLS_EXPOSE", value)
+            assert m._resolved_exposed_tools() == ()
+
+    def test_exposure_filter_is_case_sensitive_and_warns_unknown_names(
+        self, monkeypatch, caplog
+    ):
+        from agent.transports import hermes_tools_mcp_server as m
+
+        monkeypatch.setenv(
+            "HERMES_TOOLS_EXPOSE", "web_search,WEB_SEARCH,not_a_tool"
+        )
+        with caplog.at_level("WARNING", logger=m.__name__):
+            assert m._resolved_exposed_tools() == ("web_search",)
+
+        assert "WEB_SEARCH" in caplog.text
+        assert "not_a_tool" in caplog.text
+
     def test_exposed_tools_are_safe_subset(self):
         """We MUST NOT expose tools codex already has, because codex'
         own builtins are better-integrated with its sandbox + approvals.
