@@ -634,3 +634,17 @@ features:
         path: hermes_cli/models.py
         needles: ['"gemini": [', '"gemini-3.6-flash"']
         description: native Gemini picker catalog includes the current 3.6 Flash model
+
+  - id: runtime.computer-use-ended-session-revival
+    title: Revive daemon-ended computer-use sessions once
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - tools/computer_use/cua_backend.py
+    tests:
+      - tests/tools/test_computer_use.py
+    checks:
+      - id: computer-use-ended-session-revival
+        path: tools/computer_use/cua_backend.py
+        needles: [_is_ended_logical_session_result, "start_session", "reviving once"]
+        description: ended logical driver sessions are revived before one bounded action retry

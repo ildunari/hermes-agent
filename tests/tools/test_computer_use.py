@@ -1545,6 +1545,62 @@ class TestCuaDriverSessionReconnect:
         assert bridge.calls[1][0] == ("call", "list_apps", {})
         assert len(bridge.calls) == 2
 
+    def test_call_tool_revives_ended_logical_session_once(self):
+        """A daemon-side session tombstone is revived before retrying the call."""
+        class FakeBridge:
+            def __init__(self):
+                self.calls = []
+                self.effects = [
+                    {
+                        "data": (
+                            "session 'hermes-dead' has ended; tool call "
+                            "'list_windows' was rejected. Call start_session with "
+                            "this id to revive it before issuing further actions, "
+                            "or use a new session id."
+                        ),
+                        "isError": True,
+                    },
+                    {"data": "revived", "isError": False},
+                    {"data": "windows", "isError": False},
+                ]
+
+            def run(self, value, timeout=None):
+                self.calls.append((value, timeout))
+                return self.effects.pop(0)
+
+        bridge = FakeBridge()
+        session = self._make_session(bridge)
+        args = {"session": "hermes-dead"}
+
+        assert session.call_tool("list_windows", args) == {
+            "data": "windows", "isError": False
+        }
+        assert [call[0] for call in bridge.calls] == [
+            ("call", "list_windows", args),
+            ("call", "start_session", {"session": "hermes-dead"}),
+            ("call", "list_windows", args),
+        ]
+
+    def test_call_tool_does_not_revive_unrelated_logical_error(self):
+        """Only the driver's explicit ended-session rejection is retryable."""
+        error = {"data": "target window not found", "isError": True}
+
+        class FakeBridge:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, value, timeout=None):
+                self.calls.append((value, timeout))
+                return error
+
+        bridge = FakeBridge()
+        session = self._make_session(bridge)
+
+        assert session.call_tool(
+            "list_windows", {"session": "hermes-live"}
+        ) is error
+        assert len(bridge.calls) == 1
+
     def test_call_tool_does_not_retry_on_unrelated_error(self):
         """Non-transport errors must propagate without a reconnect attempt."""
         class FakeBridge:

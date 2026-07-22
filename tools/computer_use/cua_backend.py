@@ -1075,20 +1075,30 @@ class _CuaDriverSession:
     # into start() when the session-start hasn't flipped _started yet.
     _LIFECYCLE_CALLS = frozenset({"start_session", "end_session"})
 
-    def call_tool(self, name: str, args: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
-        # A prior session may have died (MCP drop / driver crash): its
-        # lifecycle coro reset _started to False in its finally (#55048
-        # Bug 1). Re-enter start() so we rebuild the session instead of
-        # calling _require_started() straight into a "not started" raise or
-        # a None session. start() is idempotent when already started. Skip
-        # this for the start_session/end_session handshake, which start()/
-        # stop() drive directly while _started is still in flux.
-        if not self._started and name not in self._LIFECYCLE_CALLS:
-            logger.warning(
-                "cua-driver session not active on %s; (re)starting before call", name
-            )
-            self.start()
-        self._require_started()
+    @staticmethod
+    def _is_ended_logical_session_result(result: Dict[str, Any]) -> bool:
+        """True when cua-driver rejected a call because its run session ended.
+
+        The daemon deliberately keeps ended session IDs as tombstones so late
+        actions cannot mutate the desktop. A long-lived Hermes backend can
+        legitimately outlive that daemon-side session (for example after a
+        daemon restart or stale-session cleanup), so revive the same ID once
+        before giving up.
+        """
+        if result.get("isError") is not True:
+            return False
+        data = result.get("data")
+        return (
+            isinstance(data, str)
+            and "session '" in data
+            and " has ended; tool call '" in data
+            and "Call start_session with this id to revive it" in data
+        )
+
+    def _call_tool_once(
+        self, name: str, args: Dict[str, Any], timeout: float
+    ) -> Dict[str, Any]:
+        """Run one logical tool call, retaining transport-level recovery."""
         # The cua-driver daemon proxy returns POSIX EAGAIN ("Resource
         # temporarily unavailable") for heavier calls like get_window_state when
         # its non-blocking socket buffer is full. On some machines/builds this
@@ -1115,6 +1125,47 @@ class _CuaDriverSession:
             with self._lock:
                 self._restart_session_locked()
             return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+
+    def call_tool(self, name: str, args: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
+        # A prior session may have died (MCP drop / driver crash): its
+        # lifecycle coro reset _started to False in its finally (#55048
+        # Bug 1). Re-enter start() so we rebuild the session instead of
+        # calling _require_started() straight into a "not started" raise or
+        # a None session. start() is idempotent when already started. Skip
+        # this for the start_session/end_session handshake, which start()/
+        # stop() drive directly while _started is still in flux.
+        if not self._started and name not in self._LIFECYCLE_CALLS:
+            logger.warning(
+                "cua-driver session not active on %s; (re)starting before call", name
+            )
+            self.start()
+        self._require_started()
+
+        result = self._call_tool_once(name, args, timeout)
+        session_id = args.get("session")
+        if (
+            name not in self._LIFECYCLE_CALLS
+            and isinstance(session_id, str)
+            and session_id
+            and self._is_ended_logical_session_result(result)
+        ):
+            # This is a daemon-level session tombstone, not a broken MCP
+            # transport. Revive the same logical run and retry the rejected
+            # action exactly once. Never recurse through call_tool(): the retry
+            # must stay bounded if revival itself fails or the daemon rejects
+            # the action again.
+            logger.warning(
+                "cua-driver logical session %s ended during %s; reviving once",
+                session_id,
+                name,
+            )
+            revived = self._call_tool_once(
+                "start_session", {"session": session_id}, timeout
+            )
+            if revived.get("isError") is True:
+                return result
+            return self._call_tool_once(name, args, timeout)
+        return result
 
 
 def _extract_tool_result(mcp_result: Any) -> Dict[str, Any]:
