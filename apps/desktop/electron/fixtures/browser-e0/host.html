@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #111; }
+  #guest { position: absolute; left: 20px; top: 20px; width: 640px; height: 420px; display: flex; }
+  #overlay { position: absolute; left: 200px; top: 150px; width: 200px; height: 120px; z-index: 10; background: rgb(255, 0, 255); pointer-events: none; }
+</style>
+<webview id="guest"
+  partition="persist:hermes-preview"
+  webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"></webview>
+<div id="overlay"></div>
+<script>
+  const guest = document.querySelector('#guest')
+  const overlay = document.querySelector('#overlay')
+  window.__e0 = { overlayClicks: 0 }
+  overlay.addEventListener('click', () => { window.__e0.overlayClicks += 1 })
+  window.e0 = {
+    setOverlayPointerEvents(value) { overlay.style.pointerEvents = value },
+    load(url) { guest.src = url },
+    guestId() { return guest.getWebContentsId() },
+    overlayClicks() { return window.__e0.overlayClicks }
+  }
+</script>

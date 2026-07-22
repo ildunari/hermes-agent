@@ -1,0 +1,6 @@
+{
+  "name": "hermes-browser-e0-fixture",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs"
+}

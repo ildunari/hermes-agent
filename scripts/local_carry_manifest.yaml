@@ -95,6 +95,117 @@ checks:
     description: shareable rerere setup helper
 
 features:
+  - id: desktop.browser-workspace
+    title: Profile-independent in-app browser workspace (chat left, browser right)
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - apps/desktop/electron/browser-activity-repository.test.ts
+      - apps/desktop/electron/browser-activity-repository.ts
+      - apps/desktop/electron/browser-annotation-isolated-world.test.ts
+      - apps/desktop/electron/browser-annotation-isolated-world.ts
+      - apps/desktop/electron/browser-annotation-main-report.test.ts
+      - apps/desktop/electron/browser-annotation-main-report.ts
+      - apps/desktop/electron/browser-annotation-projection.test.ts
+      - apps/desktop/electron/browser-annotation-projection.ts
+      - apps/desktop/electron/browser-annotation-reporter.test.ts
+      - apps/desktop/electron/browser-annotation-reporter.ts
+      - apps/desktop/electron/browser-annotation-screenshot.test.ts
+      - apps/desktop/electron/browser-annotation-screenshot.ts
+      - apps/desktop/electron/browser-checkpoint-cache.test.ts
+      - apps/desktop/electron/browser-checkpoint-cache.ts
+      - apps/desktop/electron/browser-consent.test.ts
+      - apps/desktop/electron/browser-consent.ts
+      - apps/desktop/electron/browser-dark-client.test.ts
+      - apps/desktop/electron/browser-dark-client.ts
+      - apps/desktop/electron/browser-data-semantics.test.ts
+      - apps/desktop/electron/browser-data-semantics.ts
+      - apps/desktop/electron/browser-guest-security.test.ts
+      - apps/desktop/electron/browser-guest-security.ts
+      - apps/desktop/electron/browser-guest-security.v3probe.test.ts
+      - apps/desktop/electron/browser-navigation-policy.test.ts
+      - apps/desktop/electron/browser-navigation-policy.ts
+      - apps/desktop/electron/browser-profile-deletion.test.ts
+      - apps/desktop/electron/browser-profile-deletion.ts
+      - apps/desktop/electron/browser-public-suffix-asset.ts
+      - apps/desktop/electron/browser-resource-delivery.test.ts
+      - apps/desktop/electron/browser-resource-delivery.ts
+      - apps/desktop/electron/browser-resource-grants.test.ts
+      - apps/desktop/electron/browser-resource-grants.ts
+      - apps/desktop/electron/browser-sensitive-navigation-policy.test.ts
+      - apps/desktop/electron/browser-sensitive-navigation-policy.ts
+      - apps/desktop/electron/browser-site-data-clear.test.ts
+      - apps/desktop/electron/browser-site-data-clear.ts
+      - apps/desktop/electron/browser-state-repair.ts
+      - apps/desktop/electron/browser-state-repository.test.ts
+      - apps/desktop/electron/browser-state-repository.ts
+      - apps/desktop/electron/browser-upload-consent.test.ts
+      - apps/desktop/electron/browser-upload-consent.ts
+      - apps/desktop/electron/browser-upload-copy.test.ts
+      - apps/desktop/electron/browser-upload-copy.ts
+      - apps/desktop/electron/browser-upload-production.test.ts
+      - apps/desktop/electron/browser-upload-production.ts
+      - apps/desktop/electron/browser-upload-staging.test.ts
+      - apps/desktop/electron/browser-upload-staging.ts
+      - apps/desktop/electron/fixtures/browser-e0/host.html
+      - apps/desktop/electron/fixtures/browser-e0/main.mjs
+      - apps/desktop/electron/fixtures/browser-e0/package.json
+      - apps/desktop/electron/fixtures/browser-e0/verdicts.mjs
+      - apps/desktop/electron/fixtures/browser-e0/verdicts.test.mjs
+      - apps/desktop/electron/fixtures/browser-persistence-smoke/main.cjs
+      - apps/desktop/electron/fixtures/browser-persistence-smoke/package.json
+      - apps/desktop/electron/fixtures/browser-sqlite-smoke/main.cjs
+      - apps/desktop/electron/fixtures/browser-sqlite-smoke/package.json
+      - apps/desktop/scripts/generate-browser-public-suffix-asset.mjs
+      - apps/desktop/src/app/browser/browser-activity-copy.test.ts
+      - apps/desktop/src/app/browser/browser-annotations-panel.test.tsx
+      - apps/desktop/src/app/browser/browser-annotations-panel.tsx
+      - apps/desktop/src/app/browser/browser-consent-dialog.test.tsx
+      - apps/desktop/src/app/browser/browser-consent-dialog.tsx
+      - apps/desktop/src/app/browser/browser-consent.test.ts
+      - apps/desktop/src/app/browser/browser-consent.ts
+      - apps/desktop/src/app/browser/browser-controller.test.tsx
+      - apps/desktop/src/app/browser/browser-controller.tsx
+      - apps/desktop/src/app/browser/browser-intent-production.test.ts
+      - apps/desktop/src/app/browser/browser-intent-production.ts
+      - apps/desktop/src/app/browser/browser-intent-resolver.test.ts
+      - apps/desktop/src/app/browser/browser-intent-resolver.ts
+      - apps/desktop/src/app/browser/browser-lifecycle.test.ts
+      - apps/desktop/src/app/browser/browser-lifecycle.ts
+      - apps/desktop/src/app/browser/browser-partition.ts
+      - apps/desktop/src/app/browser/browser-persistence.test.tsx
+      - apps/desktop/src/app/browser/browser-persistence.tsx
+      - apps/desktop/src/app/browser/browser-store.test.ts
+      - apps/desktop/src/app/browser/browser-store.ts
+      - apps/desktop/src/app/browser/browser-supervision.test.ts
+      - apps/desktop/src/app/browser/browser-supervision.ts
+      - apps/desktop/src/app/browser/browser-webviews.test.tsx
+      - apps/desktop/src/app/browser/browser-webviews.tsx
+      - apps/desktop/src/app/settings/browser-settings.test.tsx
+      - apps/desktop/src/app/settings/browser-settings.tsx
+      - apps/desktop/src/components/chat/generated-image-result.test.ts
+      - apps/desktop/src/i18n/v4-parity-probe.test.ts
+      - hermes_cli/browser_annotation_bundle.py
+      - hermes_cli/browser_annotation_lineage.py
+      - hermes_cli/browser_annotation_rpc.py
+      - hermes_cli/browser_annotation_worker.py
+      - hermes_cli/browser_annotation_worker_registry.py
+      - hermes_cli/browser_annotations_db.py
+      - hermes_cli/browser_annotations_models.py
+      - hermes_cli/browser_resource_grants.py
+      - hermes_cli/browser_transport.py
+      - hermes_cli/browser_upload_sources.py
+      - hermes_cli/browser_wire_v1.json
+      - tools/authenticated_browser_projection.py
+      - tools/in_app_browser_refs.py
+      - tools/in_app_browser_relay.py
+    tests:
+      - apps/desktop/electron/browser-guest-security.test.ts
+    checks:
+      - id: browser-guest-security-contract
+        path: apps/desktop/electron/browser-guest-security.ts
+        needles: [AUTOMATION_DEBUGGER_METHODS]
+        description: hardened CDP method allowlist for agent-driven guests
   - id: update.futureproof-system
     title: Recoverable, resource-bounded slim update system
     owner: kosta

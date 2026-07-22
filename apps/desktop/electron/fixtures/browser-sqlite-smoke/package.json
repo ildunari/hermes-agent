@@ -1,0 +1,5 @@
+{
+  "name": "browser-sqlite-smoke",
+  "main": "main.cjs",
+  "private": true
+}
