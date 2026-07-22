@@ -97,7 +97,7 @@ def test_default_config_creates_trigram_and_triggers_write(tmp_path):
         db.close()
 
 
-def test_disabled_fresh_db_has_no_trigram_and_search_still_works(
+def test_disabled_fresh_v23_db_keeps_compact_trigram_and_search_works(
     tmp_path, monkeypatch
 ):
     home = tmp_path / "home"
@@ -108,18 +108,20 @@ def test_disabled_fresh_db_has_no_trigram_and_search_still_works(
     try:
         assert db._fts_enabled is True
         assert db._fts_trigram_disabled is True
-        assert db._trigram_available is False
-        assert _objects(db._conn) == set()
+        assert db._trigram_available is True
+        assert ("table", "messages_fts_trigram") in _objects(db._conn)
 
         _seed_message(db, "hello unicode 大别山项目")
         assert len(db.search_messages("hello")) == 1
         assert len(db.search_messages("大别山项目")) == 1
-        assert _objects(db._conn) == set()
+        assert db._conn.execute(
+            "SELECT COUNT(*) FROM messages_fts_trigram"
+        ).fetchone()[0] == 1
     finally:
         db.close()
 
 
-def test_explicit_profile_db_uses_adjacent_config_not_process_profile(
+def test_explicit_profile_v23_db_keeps_compact_trigram_despite_legacy_flag(
     tmp_path, monkeypatch
 ):
     process_home = tmp_path / "profiles" / "gpt"
@@ -131,13 +133,13 @@ def test_explicit_profile_db_uses_adjacent_config_not_process_profile(
     db = SessionDB(db_path=target_home / "state.db")
     try:
         assert db._fts_trigram_disabled is True
-        assert db._trigram_available is False
-        assert _objects(db._conn) == set()
+        assert db._trigram_available is True
+        assert ("table", "messages_fts_trigram") in _objects(db._conn)
     finally:
         db.close()
 
 
-def test_disabled_existing_trigram_drops_objects_without_backfill(
+def test_disabled_existing_v23_trigram_is_not_dropped_or_backfilled(
     tmp_path, monkeypatch
 ):
     db_path = tmp_path / "state.db"
@@ -171,10 +173,11 @@ def test_disabled_existing_trigram_drops_objects_without_backfill(
     db = SessionDB(db_path=db_path)
     try:
         assert db._fts_trigram_disabled is True
-        assert db._trigram_available is False
-        assert _objects(db._conn) == set()
+        assert db._trigram_available is True
+        assert ("table", "messages_fts_trigram") in _objects(db._conn)
         assert not any(
-            "INSERT INTO messages_fts_trigram" in sql for sql in traced_sql
+            "messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')" in sql
+            for sql in traced_sql
         )
 
         db.append_message("s1", role="assistant", content="after disable")
@@ -183,7 +186,7 @@ def test_disabled_existing_trigram_drops_objects_without_backfill(
         db.close()
 
 
-def test_disabled_existing_trigram_drops_even_when_fts5_probe_fails(
+def test_disabled_existing_v23_trigram_is_preserved_when_fts5_probe_fails(
     tmp_path, monkeypatch
 ):
     db_path = tmp_path / "state.db"
@@ -206,13 +209,13 @@ def test_disabled_existing_trigram_drops_even_when_fts5_probe_fails(
     db = SessionDB(db_path=db_path)
     try:
         assert db._fts_enabled is False
-        assert _objects(db._conn) == set()
+        assert _objects(db._conn) == {("table", "messages_fts_trigram")}
         db.append_message("s1", role="assistant", content="writes still work")
     finally:
         db.close()
 
 
-def test_disabled_existing_trigram_uses_schema_cleanup_when_drop_fails(
+def test_disabled_existing_v23_trigram_never_attempts_legacy_drop(
     tmp_path, monkeypatch
 ):
     db_path = tmp_path / "state.db"
@@ -241,17 +244,17 @@ def test_disabled_existing_trigram_uses_schema_cleanup_when_drop_fails(
 
     db = SessionDB(db_path=db_path)
     try:
-        assert _objects(db._conn) == set()
+        assert ("table", "messages_fts_trigram") in _objects(db._conn)
         remaining_shadow_rows = db._conn.execute(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE name LIKE 'messages_fts_trigram_%'"
         ).fetchone()[0]
-        assert remaining_shadow_rows == 0
+        assert remaining_shadow_rows > 0
     finally:
         db.close()
 
 
-def test_reenable_recreates_trigram_and_backfills(tmp_path, monkeypatch):
+def test_legacy_disable_flag_does_not_remove_v23_trigram(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("HERMES_HOME", str(home))
     db_path = tmp_path / "state.db"
@@ -266,7 +269,7 @@ def test_reenable_recreates_trigram_and_backfills(tmp_path, monkeypatch):
     _write_config(home, disabled=True)
     disabled = SessionDB(db_path=db_path)
     try:
-        assert _objects(disabled._conn) == set()
+        assert ("table", "messages_fts_trigram") in _objects(disabled._conn)
     finally:
         disabled.close()
 
