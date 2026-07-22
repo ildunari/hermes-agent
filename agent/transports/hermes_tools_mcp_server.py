@@ -149,6 +149,17 @@ EXPOSED_TOOLS: tuple[str, ...] = (
 )
 
 
+def _resolved_exposed_tools() -> tuple[str, ...]:
+    raw = os.environ.get("HERMES_TOOLS_EXPOSE")
+    if raw is None:
+        return EXPOSED_TOOLS
+    names = [name.strip() for name in raw.split(",") if name.strip()]
+    if not names:
+        return EXPOSED_TOOLS
+    allowed = set(names)
+    return tuple(name for name in EXPOSED_TOOLS if name in allowed)
+
+
 def _build_server() -> Any:
     """Create the FastMCP server with Hermes tools attached. Lazy imports
     so the module can be imported without the mcp package installed
@@ -187,7 +198,9 @@ def _build_server() -> Any:
 
     exposed_count = 0
 
-    for name in EXPOSED_TOOLS:
+    resolved_tools = _resolved_exposed_tools()
+
+    for name in resolved_tools:
         spec = all_defs.get(name)
         if spec is None:
             logger.debug(
@@ -240,7 +253,7 @@ def _build_server() -> Any:
     logger.info(
         "hermes-tools MCP server registered %d/%d tools",
         exposed_count,
-        len(EXPOSED_TOOLS),
+        len(resolved_tools),
     )
     return mcp
 

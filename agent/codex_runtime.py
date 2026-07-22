@@ -28,6 +28,78 @@ from agent.stream_single_writer import claim_stream_writer, stream_writer_is_cur
 logger = logging.getLogger(__name__)
 
 
+def _codex_app_server_config(agent) -> dict[str, Any]:
+    """Return a sanitized model.codex_app_server config mapping."""
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config() or {}
+    except Exception:
+        logger.debug("codex app-server config load failed", exc_info=True)
+        return {}
+
+    model_config = config.get("model")
+    if not isinstance(model_config, dict):
+        return {}
+    runtime_config = model_config.get("codex_app_server")
+    return runtime_config if isinstance(runtime_config, dict) else {}
+
+
+def _codex_app_server_string(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _codex_app_server_overrides(raw_overrides: Any) -> list[str]:
+    if not isinstance(raw_overrides, list):
+        return []
+    return [value for value in raw_overrides if isinstance(value, str) and value]
+
+
+def _developer_instructions_override(path: Any) -> str | None:
+    file_path = _codex_app_server_string(path)
+    if file_path is None:
+        return None
+    try:
+        with open(file_path, "r", encoding="utf-8") as handle:
+            contents = handle.read()
+    except OSError:
+        logger.debug(
+            "codex app-server developer instructions file unreadable: %s",
+            file_path,
+            exc_info=True,
+        )
+        return None
+    return f"developer_instructions={json.dumps(contents)}"
+
+
+def _effective_codex_forward_model(agent, runtime_config: dict[str, Any]) -> tuple[str | None, str | None]:
+    if runtime_config.get("forward_model") is not True:
+        return None, None
+
+    model_name = _codex_app_server_string(getattr(agent, "model", None))
+    provider_name = None
+    if not model_name:
+        model_config = {}
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config() or {}
+            maybe_model_config = config.get("model")
+            if isinstance(maybe_model_config, dict):
+                model_config = maybe_model_config
+        except Exception:
+            logger.debug("codex app-server forward-model fallback load failed", exc_info=True)
+        model_name = _codex_app_server_string(model_config.get("default"))
+
+    if model_name and "/" in model_name:
+        provider_name, bare_model = model_name.split("/", 1)
+        if bare_model:
+            model_name = bare_model
+        else:
+            provider_name = None
+    return model_name, provider_name
+
+
 def _coerce_usage_int(value: Any) -> int:
     if isinstance(value, bool):
         return 0
@@ -58,6 +130,24 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     as one API call for session/status accounting.
     """
     agent.session_api_calls += 1
+
+    session = getattr(agent, "_codex_session", None)
+    accepted_model = _codex_app_server_string(
+        getattr(session, "accepted_model", None)
+    )
+    accepted_provider = _codex_app_server_string(
+        getattr(session, "accepted_provider", None)
+    )
+    if accepted_model:
+        requested_model = _codex_app_server_string(getattr(agent, "model", None))
+        if requested_model != accepted_model:
+            logger.info(
+                "codex app-server accepted model mismatch: requested=%s accepted=%s provider=%s",
+                requested_model or "",
+                accepted_model,
+                accepted_provider or "",
+            )
+            agent.last_executed_model = accepted_model
 
     usage = getattr(turn, "token_usage_last", None)
     if not isinstance(usage, dict) or not usage:
@@ -640,6 +730,18 @@ def run_codex_app_server_turn(
         from agent.runtime_cwd import resolve_agent_cwd
 
         cwd = getattr(agent, "session_cwd", None) or str(resolve_agent_cwd())
+        runtime_config = _codex_app_server_config(agent)
+        codex_overrides = _codex_app_server_overrides(
+            runtime_config.get("config_overrides")
+        )
+        developer_override = _developer_instructions_override(
+            runtime_config.get("developer_instructions_file")
+        )
+        if developer_override:
+            codex_overrides.append(developer_override)
+        forward_model, forward_provider = _effective_codex_forward_model(
+            agent, runtime_config
+        )
         # Approval callback: defer to Hermes' standard prompt flow if a
         # CLI thread has installed one. Gateway / cron contexts get the
         # codex-side fail-closed default.
@@ -679,6 +781,11 @@ def run_codex_app_server_turn(
         # Supersedes the narrower item/started-only bridge from #38835.
         agent._codex_session = CodexAppServerSession(
             cwd=cwd,
+            codex_bin=_codex_app_server_string(runtime_config.get("codex_bin")),
+            codex_home=_codex_app_server_string(runtime_config.get("codex_home")),
+            codex_config_overrides=codex_overrides or None,
+            model=forward_model,
+            model_provider=forward_provider,
             approval_callback=approval_callback,
             request_routing=_ServerRequestRouting(
                 auto_approve_exec=auto_approve_requests,

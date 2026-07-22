@@ -214,6 +214,8 @@ class CodexAppServerSession:
         codex_profile: Optional[str] = None,
         codex_config_overrides: Optional[list[str]] = None,
         codex_extra_args: Optional[list[str]] = None,
+        model: Optional[str] = None,
+        model_provider: Optional[str] = None,
         permission_profile: Optional[str] = None,
         approval_callback: Optional[Callable[..., str]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
@@ -228,6 +230,8 @@ class CodexAppServerSession:
         self._codex_profile = codex_profile
         self._codex_config_overrides = list(codex_config_overrides or [])
         self._codex_extra_args = list(codex_extra_args or [])
+        self._model = model
+        self._model_provider = model_provider
         self._permission_profile = (
             permission_profile or _HERMES_TO_CODEX_PERMISSION_PROFILE.get(
                 os.environ.get("HERMES_TERMINAL_SECURITY_MODE", "auto"),
@@ -242,6 +246,8 @@ class CodexAppServerSession:
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
+        self.accepted_model: Optional[str] = None
+        self.accepted_provider: Optional[str] = None
         self._interrupt_event = threading.Event()
         # Pending file-change items, keyed by item id. Populated on
         # item/started for fileChange items; consumed by the approval
@@ -289,6 +295,10 @@ class CodexAppServerSession:
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
         params: dict[str, Any] = {"cwd": self._cwd}
+        if self._model:
+            params["model"] = self._model
+        if self._model_provider:
+            params["modelProvider"] = self._model_provider
         result = self._client.request("thread/start", params, timeout=self._startup_timeout_seconds)
         # Cross-fill thread.id/sessionId — different codex versions have
         # serialized this under either key. Mirrors openclaw beta.8's
@@ -310,6 +320,12 @@ class CodexAppServerSession:
                 ),
             )
         self._thread_id = thread_id
+        accepted_model = result.get("model")
+        self.accepted_model = accepted_model if isinstance(accepted_model, str) else None
+        accepted_provider = result.get("modelProvider")
+        self.accepted_provider = (
+            accepted_provider if isinstance(accepted_provider, str) else None
+        )
         logger.info(
             "codex app-server thread started: id=%s profile=%s cwd=%s",
             self._thread_id[:8],
