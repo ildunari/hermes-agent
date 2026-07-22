@@ -196,7 +196,7 @@ Video analysis has its own auxiliary route, independent of image analysis:
 auxiliary:
   video:
     provider: gemini
-    model: gemini-3.5-flash
+    model: gemini-3.6-flash
     timeout: 600
     temperature: 0.1
 

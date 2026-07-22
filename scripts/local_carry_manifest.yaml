@@ -402,3 +402,27 @@ features:
         forbidden_needles:
           - 'className="flex min-w-0 flex-col gap-(--conversation-turn-gap) pb-(--conversation-turn-gap) [contain-intrinsic-size:auto_37.5rem] [content-visibility:auto]"'
         description: sticky user bubbles stay paintable while off-screen tails retain content skipping
+
+  - id: models.gemini-36-auxiliary
+    title: Gemini 3.6 native auxiliary and curated provider default
+    owner_paths:
+      - hermes_cli/models.py
+      - plugins/model-providers/gemini/__init__.py
+    collision_paths:
+      - hermes_cli/models.py
+      - plugins/model-providers/gemini/__init__.py
+    tests:
+      - tests/plugins/model_providers/test_gemini_profile.py
+      - tests/tools/test_video_analyze.py
+      - tests/agent/test_auxiliary_client.py
+      - tests/hermes_cli/test_model_catalog.py
+    checks:
+      - id: gemini-native-auxiliary-default
+        path: plugins/model-providers/gemini/__init__.py
+        needles: ['default_aux_model="gemini-3.6-flash"']
+        forbidden_needles: ['default_aux_model="gemini-3.5-flash"']
+        description: native Gemini auxiliary requests default to the current 3.6 Flash model
+      - id: gemini-native-curated-catalog
+        path: hermes_cli/models.py
+        needles: ['"gemini": [', '"gemini-3.6-flash"']
+        description: native Gemini picker catalog includes the current 3.6 Flash model
