@@ -1067,6 +1067,7 @@ def handle_function_call(
     tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
+    annotation_isolated: bool = False,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -1184,10 +1185,11 @@ def handle_function_call(
                 tool_request_middleware_trace=list(_tool_middleware_trace),
                 enabled_toolsets=enabled_toolsets,
                 disabled_toolsets=disabled_toolsets,
+                annotation_isolated=annotation_isolated,
             )
 
     _tool_original_args = dict(function_args)
-    if not skip_tool_request_middleware:
+    if not skip_tool_request_middleware and not annotation_isolated:
         try:
             from hermes_cli.middleware import apply_tool_request_middleware
 
@@ -1221,7 +1223,7 @@ def handle_function_call(
         # gate denied/timed-out/errored (fail-closed). Observer plugins see
         # the hook on that same pass. When skip=True, the caller already
         # fired it — do nothing here.
-        if not skip_pre_tool_call_hook:
+        if not skip_pre_tool_call_hook and not annotation_isolated:
             block_message: Optional[str] = None
             try:
                 from hermes_cli.plugins import resolve_pre_tool_block
@@ -1319,19 +1321,22 @@ def handle_function_call(
                         session_id=session_id,
                         user_task=user_task,
                     )
-            from hermes_cli.middleware import run_tool_execution_middleware
+            if annotation_isolated:
+                result = _dispatch(function_args)
+            else:
+                from hermes_cli.middleware import run_tool_execution_middleware
 
-            result = run_tool_execution_middleware(
-                function_name,
-                function_args,
-                _dispatch,
-                original_args=_tool_original_args,
-                task_id=task_id or "",
-                session_id=session_id or "",
-                tool_call_id=tool_call_id or "",
-                turn_id=turn_id or "",
-                api_request_id=api_request_id or "",
-            )
+                result = run_tool_execution_middleware(
+                    function_name,
+                    function_args,
+                    _dispatch,
+                    original_args=_tool_original_args,
+                    task_id=task_id or "",
+                    session_id=session_id or "",
+                    tool_call_id=tool_call_id or "",
+                    turn_id=turn_id or "",
+                    api_request_id=api_request_id or "",
+                )
         finally:
             if _approval_tokens is not None and reset_current_observability_context is not None:
                 try:
@@ -1340,18 +1345,19 @@ def handle_function_call(
                     pass
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
 
-        _emit_post_tool_call_hook(
-            function_name=function_name,
-            function_args=function_args,
-            result=result,
-            task_id=task_id,
-            session_id=session_id,
-            tool_call_id=tool_call_id,
-            turn_id=turn_id,
-            api_request_id=api_request_id,
-            duration_ms=duration_ms,
-            middleware_trace=list(_tool_middleware_trace),
-        )
+        if not annotation_isolated:
+            _emit_post_tool_call_hook(
+                function_name=function_name,
+                function_args=function_args,
+                result=result,
+                task_id=task_id,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+                duration_ms=duration_ms,
+                middleware_trace=list(_tool_middleware_trace),
+            )
 
         # Generic tool-result canonicalization seam: plugins receive the
         # final result string (JSON, usually) and may replace it by
@@ -1363,7 +1369,7 @@ def handle_function_call(
         # field derivation and the payload dispatch.
         try:
             from hermes_cli.plugins import has_hook, invoke_hook
-            if has_hook("transform_tool_result"):
+            if not annotation_isolated and has_hook("transform_tool_result"):
                 status, error_type, error_message = _tool_result_observer_fields(result)
                 hook_results = invoke_hook(
                     "transform_tool_result",

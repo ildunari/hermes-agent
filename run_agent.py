@@ -470,6 +470,7 @@ class AIAgent:
         clarify_callback: callable = None,
         read_terminal_callback: callable = None,
         step_callback: callable = None,
+        pre_provider_dispatch_callback: callable = None,
         stream_delta_callback: callable = None,
         interim_assistant_callback: callable = None,
         tool_gen_callback: callable = None,
@@ -548,6 +549,7 @@ class AIAgent:
             clarify_callback=clarify_callback,
             read_terminal_callback=read_terminal_callback,
             step_callback=step_callback,
+            pre_provider_dispatch_callback=pre_provider_dispatch_callback,
             stream_delta_callback=stream_delta_callback,
             interim_assistant_callback=interim_assistant_callback,
             tool_gen_callback=tool_gen_callback,
@@ -2621,6 +2623,8 @@ class AIAgent:
         retryable: Optional[bool] = None,
         reason: Optional[str] = None,
     ) -> None:
+        if getattr(self, "_annotation_isolated", False):
+            return
         # Lazy module import (not from-import) so tests that
         # ``monkeypatch.setattr("hermes_cli.plugins.has_hook", ...)`` still
         # take effect on this call site. After first call the import is a
@@ -2668,6 +2672,8 @@ class AIAgent:
         error: Optional[Exception] = None,
     ) -> Optional[Path]:
         """Forwarder — see ``agent.agent_runtime_helpers.dump_api_request_debug``."""
+        if getattr(self, "_annotation_isolated", False):
+            return None
         from agent.agent_runtime_helpers import dump_api_request_debug
         return dump_api_request_debug(self, api_kwargs, reason=reason, error=error)
 
