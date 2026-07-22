@@ -69,7 +69,12 @@ def _developer_instructions_override(path: Any) -> str | None:
             exc_info=True,
         )
         return None
-    return f"developer_instructions={json.dumps(contents, ensure_ascii=False)}"
+    encoded = json.dumps(contents, ensure_ascii=False)
+    # TOML basic strings reject a literal DEL (U+007F); JSON leaves it raw when
+    # ensure_ascii=False, so escape it explicitly. C0 controls are already
+    # escaped by json.dumps.
+    encoded = encoded.replace("\x7f", "\\u007f")
+    return f"developer_instructions={encoded}"
 
 
 def _effective_codex_forward_model(agent, runtime_config: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -130,7 +135,11 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     accepted_provider = _codex_app_server_string(
         getattr(turn, "accepted_provider", None)
     )
-    if runtime_config.get("forward_model") is True and accepted_model:
+    if accepted_model:
+        # Track the accepted model unconditionally: pre-profile-wiring behavior
+        # updated ``last_executed_model`` whenever the harness echoed a model,
+        # and absent config must preserve that byte-for-byte. ``forward_model``
+        # only controls what we *request*, not what we record.
         requested_model = _codex_app_server_string(getattr(agent, "model", None))
         if requested_model != accepted_model:
             logger.info(

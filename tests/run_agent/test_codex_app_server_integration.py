@@ -596,9 +596,12 @@ class TestRunConversationCodexPath:
         assert agent.last_executed_model == "gpt-5-codex"
         assert "accepted model mismatch" in caplog.text
 
-    def test_usage_does_not_update_last_executed_model_without_forward_config(
+    def test_usage_updates_last_executed_model_without_forward_config(
         self, monkeypatch
     ):
+        """Absent config preserves legacy tracking: the accepted model is always
+        recorded, matching pre-profile-wiring behavior byte-for-byte."""
+
         def fake_run_turn(self, user_input: str, **kwargs):
             return TurnResult(
                 final_text="done",
@@ -608,13 +611,13 @@ class TestRunConversationCodexPath:
 
         monkeypatch.setattr(CodexAppServerSession, "run_turn", fake_run_turn)
         agent = _make_codex_agent(model="o3")
-        agent.last_executed_model = "unchanged"
+        agent.last_executed_model = "stale-prior-value"
         with patch("hermes_cli.config.load_config", return_value={}), patch.object(
             agent, "_spawn_background_review", return_value=None
         ):
             agent.run_conversation("hello")
 
-        assert agent.last_executed_model == "unchanged"
+        assert agent.last_executed_model == "gpt-5-codex"
 
     def test_usage_updates_last_executed_model_when_acceptance_matches(
         self, monkeypatch, caplog
