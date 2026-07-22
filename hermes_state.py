@@ -3078,6 +3078,20 @@ class SessionDB:
                             cursor, include_trigram=trigram_enabled
                         )
             else:
+                # A manually removed/corrupt v23 virtual table can leave the
+                # external triggers behind (they belong to ``messages``, not
+                # the FTS table). Trigger count alone would then look healthy:
+                # _ensure_fts_schema() recreates an empty table and the compact
+                # layout marker remains current, but existing messages are not
+                # searchable through that index. Remember table presence before
+                # DDL so any recreated compact index is rebuilt from canonical
+                # ``messages`` content before this open completes.
+                base_table_missing = (
+                    self._fts_table_probe(cursor, "messages_fts") is False
+                )
+                trigram_table_missing = (
+                    self._fts_table_probe(cursor, "messages_fts_trigram") is False
+                )
                 triggers_need_repair = (
                     self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)
                 )
@@ -3093,7 +3107,11 @@ class SessionDB:
                         cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
                     )
                     self._trigram_available = trigram_enabled
-                    if triggers_need_repair:
+                    if (
+                        triggers_need_repair
+                        or base_table_missing
+                        or (trigram_enabled and trigram_table_missing)
+                    ):
                         self._rebuild_fts_indexes(
                             cursor,
                             include_trigram=trigram_enabled,
