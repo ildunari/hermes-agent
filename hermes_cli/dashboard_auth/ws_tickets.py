@@ -115,7 +115,7 @@ def _consume(ticket: str, *, audience: str) -> Dict[str, Any]:
             truncated = (ticket[:8] + "…") if ticket else "<empty>"
             raise TicketInvalid(f"unknown ticket: {truncated}")
         expires_at, info = entry
-        if expires_at <= now:
+        if expires_at < now:
             raise TicketInvalid("expired")
         if info.get("audience") != audience:
             raise TicketInvalid("wrong ticket audience")

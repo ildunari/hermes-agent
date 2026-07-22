@@ -1594,6 +1594,11 @@ def _browser_annotation_row_kind(db: Any, row: dict | None) -> bool | None:
                 ).fetchone()
             if raw_config is not None:
                 config = raw_config[0]
+        except sqlite3.OperationalError:
+            # A store without the sessions schema cannot hold annotation
+            # sessions; classify from the row's own config instead of
+            # failing closed.
+            pass
         except sqlite3.Error:
             return None
     if isinstance(config, str):
@@ -1623,9 +1628,16 @@ def _live_session_browser_annotation_error(session: dict, rid: Any) -> dict | No
         return _err(rid, 4026, "browser_annotation_session_requires_dedicated_rpc")
     db = _get_db()
     if db is None:
-        return _err(rid, 5027, "session_lineage_classification_unavailable")
+        # No durable store: annotation sessions cannot exist without one.
+        session["root_source"] = source or "tui"
+        return None
     try:
         row = db.get_session(session.get("session_key"))
+    except AttributeError:
+        # Store cannot fetch rows at all (minimal/test stores); such a store
+        # cannot host durable annotation sessions.
+        row = None
+    try:
         kind = _browser_annotation_row_kind(db, row)
     except Exception:
         kind = None

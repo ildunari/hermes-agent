@@ -624,6 +624,11 @@ def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:
             for path in iter_hermes_node_dirs()
             if path.is_dir() and node_version_supported(str(path / node_name))
         ]
+    if not managed:
+        # Fall back to presence: a managed tree we cannot version-probe is
+        # still better on PATH than leaving npm's child scripts with no node
+        # at all (the stripped-PATH updater chain scenario).
+        managed = [str(path) for path in iter_hermes_node_dirs() if path.is_dir()]
     for entry in reversed(managed):
         if entry not in parts:
             parts.insert(0, entry)
