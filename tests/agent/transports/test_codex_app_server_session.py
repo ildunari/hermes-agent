@@ -240,6 +240,29 @@ class TestRunTurn:
         # turn_id propagated for downstream session-DB linkage
         assert r.turn_id == "turn-fake-001"
 
+    def test_accepted_model_survives_turn_start_retirement(self):
+        client = FakeClient()
+
+        def respond(method, params):
+            if method == "thread/start":
+                return {
+                    "thread": {
+                        "id": "thread-fake-001",
+                        "model": "openai/gpt-5-codex",
+                        "modelProvider": "openai",
+                    }
+                }
+            if method == "turn/start":
+                raise TimeoutError("turn start wedged")
+            return {}
+
+        client._request_handler = respond
+        r = make_session(client).run_turn("hi", turn_timeout=2.0)
+
+        assert r.should_retire is True
+        assert r.accepted_model == "openai/gpt-5-codex"
+        assert r.accepted_provider == "openai"
+
     def test_token_usage_notification_is_captured(self):
         client = FakeClient()
         client.queue_notification(

@@ -82,6 +82,8 @@ class TurnResult:
     token_usage_last: Optional[dict[str, Any]] = None
     token_usage_total: Optional[dict[str, Any]] = None
     model_context_window: Optional[int] = None
+    accepted_model: Optional[str] = None
+    accepted_provider: Optional[str] = None
     compacted: bool = False
     # Hint to the caller that the underlying codex subprocess is likely
     # wedged (turn-level timeout fired, post-tool watchdog tripped, or
@@ -438,6 +440,8 @@ class CodexAppServerSession:
             # turn re-spawns cleanly.
             result.should_retire = True
             return result
+        result.accepted_model = self.accepted_model
+        result.accepted_provider = self.accepted_provider
         assert self._client is not None and self._thread_id is not None
         result.thread_id = self._thread_id
 
@@ -712,6 +716,9 @@ class CodexAppServerSession:
             )
             result.should_retire = True
             return result
+
+        result.accepted_model = self.accepted_model
+        result.accepted_provider = self.accepted_provider
 
         assert self._client is not None and self._thread_id is not None
         result.thread_id = self._thread_id

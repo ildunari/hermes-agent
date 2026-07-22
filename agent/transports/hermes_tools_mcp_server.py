@@ -155,8 +155,14 @@ def _resolved_exposed_tools() -> tuple[str, ...]:
         return EXPOSED_TOOLS
     names = [name.strip() for name in raw.split(",") if name.strip()]
     if not names:
-        return EXPOSED_TOOLS
+        return ()
     allowed = set(names)
+    unknown = sorted(allowed.difference(EXPOSED_TOOLS))
+    if unknown:
+        logger.warning(
+            "ignoring unknown HERMES_TOOLS_EXPOSE names: %s",
+            ", ".join(unknown),
+        )
     return tuple(name for name in EXPOSED_TOOLS if name in allowed)
 
 

@@ -69,7 +69,7 @@ def _developer_instructions_override(path: Any) -> str | None:
             exc_info=True,
         )
         return None
-    return f"developer_instructions={json.dumps(contents)}"
+    return f"developer_instructions={json.dumps(contents, ensure_ascii=False)}"
 
 
 def _effective_codex_forward_model(agent, runtime_config: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -77,7 +77,7 @@ def _effective_codex_forward_model(agent, runtime_config: dict[str, Any]) -> tup
         return None, None
 
     model_name = _codex_app_server_string(getattr(agent, "model", None))
-    provider_name = None
+    provider_name = _codex_app_server_string(runtime_config.get("model_provider"))
     if not model_name:
         model_config = {}
         try:
@@ -91,12 +91,6 @@ def _effective_codex_forward_model(agent, runtime_config: dict[str, Any]) -> tup
             logger.debug("codex app-server forward-model fallback load failed", exc_info=True)
         model_name = _codex_app_server_string(model_config.get("default"))
 
-    if model_name and "/" in model_name:
-        provider_name, bare_model = model_name.split("/", 1)
-        if bare_model:
-            model_name = bare_model
-        else:
-            provider_name = None
     return model_name, provider_name
 
 
@@ -131,14 +125,12 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     """
     agent.session_api_calls += 1
 
-    session = getattr(agent, "_codex_session", None)
-    accepted_model = _codex_app_server_string(
-        getattr(session, "accepted_model", None)
-    )
+    runtime_config = _codex_app_server_config(agent)
+    accepted_model = _codex_app_server_string(getattr(turn, "accepted_model", None))
     accepted_provider = _codex_app_server_string(
-        getattr(session, "accepted_provider", None)
+        getattr(turn, "accepted_provider", None)
     )
-    if accepted_model:
+    if runtime_config.get("forward_model") is True and accepted_model:
         requested_model = _codex_app_server_string(getattr(agent, "model", None))
         if requested_model != accepted_model:
             logger.info(
@@ -147,7 +139,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
                 accepted_model,
                 accepted_provider or "",
             )
-            agent.last_executed_model = accepted_model
+        agent.last_executed_model = accepted_model
 
     usage = getattr(turn, "token_usage_last", None)
     if not isinstance(usage, dict) or not usage:
