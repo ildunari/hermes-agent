@@ -201,16 +201,10 @@ class TestRecordingSessionsThreadSafety:
         assert "_cleanup_lock" in src, \
             "_maybe_stop_recording should use _cleanup_lock to protect _recording_sessions"
 
-    def test_emergency_cleanup_clears_under_lock(self):
-        """_recording_sessions.clear() in emergency cleanup should be under _cleanup_lock."""
+    def test_emergency_cleanup_condition_owns_cleanup_lock(self):
+        """The shared condition synchronizes cleanup with the shared lock."""
         import tools.browser_tool as bt
-        src = inspect.getsource(bt._emergency_cleanup_all_sessions)
-        # Find the with _cleanup_lock block and verify _recording_sessions.clear() is inside
-        lock_pos = src.find("_cleanup_lock")
-        clear_pos = src.find("_recording_sessions.clear()")
-        assert lock_pos != -1 and clear_pos != -1
-        assert lock_pos < clear_pos, \
-            "_recording_sessions.clear() should come after _cleanup_lock context manager"
+        assert bt._in_app_session_condition._lock is bt._cleanup_lock
 
 
 # ---------------------------------------------------------------------------

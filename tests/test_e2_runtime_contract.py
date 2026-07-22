@@ -124,6 +124,47 @@ def test_managed_node22_is_not_prepended_and_heals_before_browser_admission(
     assert with_hermes_node_path()["PATH"].split(os.pathsep)[0] == str(managed)
 
 
+@pytest.mark.parametrize("old_major", [22, 23])
+def test_old_path_node_bootstraps_managed_node_before_browser_validation(
+    old_major: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hermes"
+    path_bin = tmp_path / "path-bin"
+    _executable(path_bin / "node", f"v{old_major}.9.0")
+    browser = _executable(path_bin / "agent-browser", "agent-browser 0.32.0")
+    managed_node = home / "node" / "bin" / "node"
+    calls: list[str] = []
+
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("PATH", str(path_bin))
+    monkeypatch.setattr(hermes_constants, "_managed_node_heal_attempted", False)
+
+    def bootstrap() -> bool:
+        calls.append("bootstrap")
+        _executable(managed_node, "v24.18.0")
+        return True
+
+    monkeypatch.setattr(hermes_constants, "heal_hermes_managed_node", bootstrap)
+
+    assert agent_browser_runnable(str(browser)) is True
+    assert calls == ["bootstrap"]
+
+
+def test_old_path_node_browser_validation_fails_when_bootstrap_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path_bin = tmp_path / "path-bin"
+    _executable(path_bin / "node", "v23.11.0")
+    browser = _executable(path_bin / "agent-browser", "agent-browser 0.32.0")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("PATH", str(path_bin))
+    monkeypatch.setattr(hermes_constants, "_managed_node_heal_attempted", False)
+    monkeypatch.setattr(hermes_constants, "heal_hermes_managed_node", lambda: False)
+
+    assert agent_browser_runnable(str(browser)) is False
+
+
 def test_browser_dependency_rejects_exact_cli_under_node22(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

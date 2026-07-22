@@ -31,7 +31,9 @@ class TestBrowserCleanup:
         self.orig_active_sessions = browser_tool._active_sessions.copy()
         self.orig_session_last_activity = browser_tool._session_last_activity.copy()
         self.orig_recording_sessions = browser_tool._recording_sessions.copy()
-        self.orig_cleanup_done = browser_tool._cleanup_done
+        self.orig_last_active_session_key = browser_tool._last_active_session_key.copy()
+        self.orig_in_app_session_expectations = browser_tool._in_app_session_expectations.copy()
+        self.orig_cleanup_done = browser_tool._cleanup_runtime.done
 
     def teardown_method(self):
         self.browser_tool._active_sessions.clear()
@@ -40,7 +42,11 @@ class TestBrowserCleanup:
         self.browser_tool._session_last_activity.update(self.orig_session_last_activity)
         self.browser_tool._recording_sessions.clear()
         self.browser_tool._recording_sessions.update(self.orig_recording_sessions)
-        self.browser_tool._cleanup_done = self.orig_cleanup_done
+        self.browser_tool._last_active_session_key.clear()
+        self.browser_tool._last_active_session_key.update(self.orig_last_active_session_key)
+        self.browser_tool._in_app_session_expectations.clear()
+        self.browser_tool._in_app_session_expectations.update(self.orig_in_app_session_expectations)
+        self.browser_tool._cleanup_runtime.done = self.orig_cleanup_done
 
     def test_cleanup_browser_clears_tracking_state(self):
         browser_tool = self.browser_tool
@@ -123,12 +129,14 @@ class TestBrowserCleanup:
 
     def test_emergency_cleanup_clears_all_tracking_state(self):
         browser_tool = self.browser_tool
-        browser_tool._cleanup_done = False
+        browser_tool._cleanup_runtime.done = False
         browser_tool._active_sessions["task-1"] = {"session_name": "sess-1"}
         browser_tool._active_sessions["task-2"] = {"session_name": "sess-2"}
         browser_tool._session_last_activity["task-1"] = 1.0
         browser_tool._session_last_activity["task-2"] = 2.0
         browser_tool._recording_sessions.update({"task-1", "task-2"})
+        browser_tool._last_active_session_key.update({"task-1": "task-1", "task-2": "task-2"})
+        browser_tool._in_app_session_expectations.update({"task-1": 10.0, "task-2": 20.0})
 
         with patch("tools.browser_tool.cleanup_all_browsers") as mock_cleanup_all:
             browser_tool._emergency_cleanup_all_sessions()
@@ -137,4 +145,6 @@ class TestBrowserCleanup:
         assert browser_tool._active_sessions == {}
         assert browser_tool._session_last_activity == {}
         assert browser_tool._recording_sessions == set()
-        assert browser_tool._cleanup_done is True
+        assert browser_tool._last_active_session_key == {}
+        assert browser_tool._in_app_session_expectations == {}
+        assert browser_tool._cleanup_runtime.done is True

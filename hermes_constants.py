@@ -494,7 +494,7 @@ def _heal_managed_node_windows() -> bool:
 
 
 def heal_hermes_managed_node() -> bool:
-    """Redownload Hermes-managed Node when the tree exists but is broken.
+    """Install or redownload a supported Hermes-managed Node.
 
     Runs at most once per process. POSIX installs shell out to
     ``heal_managed_node`` in ``scripts/lib/node-bootstrap.sh``; Windows
@@ -502,8 +502,6 @@ def heal_hermes_managed_node() -> bool:
     """
     global _managed_node_heal_attempted
     if _managed_node_heal_attempted:
-        return False
-    if not hermes_managed_node_tree_present():
         return False
     _managed_node_heal_attempted = True
 
@@ -529,7 +527,13 @@ def heal_hermes_managed_node() -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    node_name = "node.exe" if sys.platform == "win32" else "node"
+    return any(
+        node_version_supported(str(directory / node_name))
+        for directory in iter_hermes_node_dirs()
+    )
 
 
 def find_hermes_node_executable(command: str) -> str | None:
@@ -604,7 +608,7 @@ def find_node_executable(command: str) -> str | None:
 
 
 def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:
-    """Return *env* with Hermes-managed Node directories prepended to PATH."""
+    """Return *env* with a supported Hermes-managed Node prepended to PATH."""
     merged = dict(os.environ if env is None else env)
     existing = merged.get("PATH", "")
     parts = [p for p in existing.split(os.pathsep) if p]
@@ -614,6 +618,12 @@ def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:
         for path in iter_hermes_node_dirs()
         if path.is_dir() and node_version_supported(str(path / node_name))
     ]
+    if not managed and hermes_managed_node_tree_present() and heal_hermes_managed_node():
+        managed = [
+            str(path)
+            for path in iter_hermes_node_dirs()
+            if path.is_dir() and node_version_supported(str(path / node_name))
+        ]
     for entry in reversed(managed):
         if entry not in parts:
             parts.insert(0, entry)
@@ -665,6 +675,10 @@ def agent_browser_runnable(path: str | None) -> bool:
         node_path = str(managed_node)
     else:
         node_path = shutil.which("node")
+        if not node_version_supported(node_path):
+            if not heal_hermes_managed_node():
+                return False
+            node_path = find_hermes_node_executable("node")
     if not node_version_supported(node_path):
         return False
     import subprocess

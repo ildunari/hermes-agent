@@ -49,7 +49,6 @@ Usage:
     browser_click("@e5", task_id="task_123")
 """
 
-import atexit
 import functools
 import json
 import logging
@@ -1472,15 +1471,23 @@ def _socket_safe_tmpdir() -> str:
 # Stores: session_name (always), bb_session_id + cdp_url (cloud mode only).
 # The tiny state module keeps live ownership coherent across config-sensitive
 # browser_tool reloads.
-from tools.browser_session_state import ACTIVE_SESSIONS as _active_sessions
-_recording_sessions: set = set()  # session_keys with active recordings
+from tools.browser_session_state import (
+    ACTIVE_SESSIONS as _active_sessions,
+    CLEANUP_LOCK as _cleanup_lock,
+    CLEANUP_RUNTIME as _cleanup_runtime,
+    IN_APP_SESSION_CONDITION as _in_app_session_condition,
+    IN_APP_SESSION_EXPECTATIONS as _in_app_session_expectations,
+    LAST_ACTIVE_SESSION_KEY as _last_active_session_key,
+    RECORDING_SESSIONS as _recording_sessions,
+    SESSION_LAST_ACTIVITY as _session_last_activity,
+    register_exit_cleanup,
+)
 
 # Tracks the most recent session_key used per task_id. Set by browser_navigate()
 # after it chooses a backend for a URL; read by every non-nav browser tool
 # (snapshot/click/fill/eval/...) so they target the session that served the last
 # navigation.  Without this, a task that navigated to localhost on the local
 # sidecar would fall back to the cloud session on its next snapshot call.
-_last_active_session_key: Dict[str, str] = {}  # task_id -> session_key
 _LOCAL_SUFFIX = "::local"
 
 
@@ -1871,9 +1878,6 @@ def unregister_in_app_browser_session(
     retire_abp_task(task_id)
     return True
 
-# Flag to track if cleanup has been done
-_cleanup_done = False
-
 # =============================================================================
 # Inactivity Timeout Configuration
 # =============================================================================
@@ -1906,20 +1910,6 @@ BROWSER_SESSION_INACTIVITY_TIMEOUT = _get_session_inactivity_timeout()
 # this condition for the exact in-app relay rather than racing into the ordinary
 # local/cloud backend and permanently occupying the task id.
 _IN_APP_BIND_TIMEOUT_SECONDS = 10.0
-_in_app_session_expectations: Dict[str, float] = {}
-
-# Track last activity time per session
-_session_last_activity: Dict[str, float] = {}
-
-# Background cleanup thread state
-_cleanup_thread = None
-_cleanup_running = False
-# Protects _session_last_activity AND _active_sessions for thread safety
-# (subagents run concurrently via ThreadPoolExecutor)
-_cleanup_lock = threading.Lock()
-_in_app_session_condition = threading.Condition(_cleanup_lock)
-
-
 def expect_in_app_browser_session(task_id: str, timeout: float = _IN_APP_BIND_TIMEOUT_SECONDS) -> None:
     """Require the next browser access for ``task_id`` to use Desktop's relay."""
     if not isinstance(task_id, str) or not task_id or len(task_id) > 256:
@@ -1941,10 +1931,9 @@ def _emergency_cleanup_all_sessions():
     crashed hermes processes — this way every clean hermes exit sweeps
     accumulated orphans, not just ones that actively used the browser tool.
     """
-    global _cleanup_done
-    if _cleanup_done:
+    if _cleanup_runtime.done:
         return
-    _cleanup_done = True
+    _cleanup_runtime.done = True
 
     # Clean up this process's own sessions first, so their owner_pid files
     # are removed before the reaper scans.
@@ -1956,10 +1945,13 @@ def _emergency_cleanup_all_sessions():
         except Exception as e:
             logger.error("Emergency cleanup error: %s", e)
         finally:
-            with _cleanup_lock:
+            with _in_app_session_condition:
                 _active_sessions.clear()
                 _session_last_activity.clear()
                 _recording_sessions.clear()
+                _last_active_session_key.clear()
+                _in_app_session_expectations.clear()
+                _in_app_session_condition.notify_all()
 
     # Sweep orphans from other crashed hermes processes.  Safe even if we
     # never used the browser — uses owner_pid liveness to avoid reaping
@@ -1976,9 +1968,6 @@ def _emergency_cleanup_all_sessions():
 # corrupts the coroutine state and makes the process unkillable.  atexit
 # handlers run on any normal exit (including sys.exit), so browser sessions
 # are still cleaned up without hijacking signals.
-atexit.register(_emergency_cleanup_all_sessions)
-
-
 # =============================================================================
 # Inactivity Cleanup Functions
 # =============================================================================
@@ -2254,7 +2243,7 @@ def _browser_cleanup_thread_worker():
     except Exception as e:
         logger.warning("Orphan reap error: %s", e)
 
-    while _cleanup_running:
+    while _cleanup_runtime.running:
         try:
             _cleanup_inactive_browser_sessions()
         except Exception as e:
@@ -2262,33 +2251,30 @@ def _browser_cleanup_thread_worker():
 
         # Sleep in 1-second intervals so we can stop quickly if needed
         for _ in range(30):
-            if not _cleanup_running:
+            if not _cleanup_runtime.running:
                 break
             time.sleep(1)
 
 
 def _start_browser_cleanup_thread():
     """Start the background cleanup thread if not already running."""
-    global _cleanup_thread, _cleanup_running
-
     with _cleanup_lock:
-        if _cleanup_thread is None or not _cleanup_thread.is_alive():
-            _cleanup_running = True
-            _cleanup_thread = threading.Thread(
+        if _cleanup_runtime.thread is None or not _cleanup_runtime.thread.is_alive():
+            _cleanup_runtime.running = True
+            _cleanup_runtime.thread = threading.Thread(
                 target=_browser_cleanup_thread_worker,
                 daemon=True,
                 name="browser-cleanup"
             )
-            _cleanup_thread.start()
+            _cleanup_runtime.thread.start()
             logger.info("Started inactivity cleanup thread (timeout: %ss)", BROWSER_SESSION_INACTIVITY_TIMEOUT)
 
 
 def _stop_browser_cleanup_thread():
     """Stop the background cleanup thread."""
-    global _cleanup_running
-    _cleanup_running = False
-    if _cleanup_thread is not None:
-        _cleanup_thread.join(timeout=5)
+    _cleanup_runtime.running = False
+    if _cleanup_runtime.thread is not None:
+        _cleanup_runtime.thread.join(timeout=5)
 
 
 def _update_session_activity(task_id: str):
@@ -2297,8 +2283,9 @@ def _update_session_activity(task_id: str):
         _session_last_activity[task_id] = time.time()
 
 
-# Register cleanup thread stop on exit
-atexit.register(_stop_browser_cleanup_thread)
+# Register one reload-stable exit dispatcher. Reloads refresh these callbacks
+# without stacking stale atexit handlers or creating a second cleanup thread.
+register_exit_cleanup(_emergency_cleanup_all_sessions, _stop_browser_cleanup_thread)
 
 
 # ============================================================================
@@ -5254,11 +5241,14 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
     # cleaning a sidecar drops the binding only if that sidecar was still the
     # recorded owner. This prevents a later click/snapshot from resurrecting a
     # cleaned sidecar on about:blank while preserving a primary-session binding.
-    if _is_local_sidecar_key(task_id):
-        if _last_active_session_key.get(bare_task_id) == task_id:
+    with _in_app_session_condition:
+        if _is_local_sidecar_key(task_id):
+            if _last_active_session_key.get(bare_task_id) == task_id:
+                _last_active_session_key.pop(bare_task_id, None)
+        else:
             _last_active_session_key.pop(bare_task_id, None)
-    else:
-        _last_active_session_key.pop(bare_task_id, None)
+            _in_app_session_expectations.pop(bare_task_id, None)
+        _in_app_session_condition.notify_all()
 
 
 def _cleanup_single_browser_session(task_id: str) -> None:

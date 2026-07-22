@@ -519,8 +519,8 @@ class TestEmergencyCleanupRunsReaper:
         """_emergency_cleanup_all_sessions must call _reap_orphaned_browser_sessions."""
         import tools.browser_tool as bt
 
-        # Reset the _cleanup_done flag so the cleanup actually runs
-        monkeypatch.setattr(bt, "_cleanup_done", False)
+        # Reset the reload-stable cleanup singleton so cleanup actually runs.
+        monkeypatch.setattr(bt._cleanup_runtime, "done", False)
 
         reaper_called = []
         orig_reaper = bt._reap_orphaned_browser_sessions

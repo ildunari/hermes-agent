@@ -234,13 +234,16 @@ class TestHermesManagedNode:
         bin_dir = node_dir / "bin"
         node_dir.mkdir(parents=True)
         bin_dir.mkdir()
+        node = node_dir / "node.exe"
+        node.write_text("#!/bin/sh\necho 'v24.0.0'\n")
+        node.chmod(0o755)
         monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
         monkeypatch.setenv("HERMES_HOME", str(home))
 
         env = with_hermes_node_path({"PATH": "system-node"})
         parts = env["PATH"].split(os.pathsep)
 
-        assert parts[:2] == [str(node_dir), str(bin_dir)]
+        assert parts[0] == str(node_dir)
         assert parts[-1] == "system-node"
 
 
@@ -259,6 +262,7 @@ class TestNodeToolRunnable:
         assert node_tool_runnable("") is False
 
     def test_runnable_stub_accepted(self, tmp_path):
+        self._stub(tmp_path, "node", "#!/bin/sh\necho 'v24.0.0'\nexit 0\n")
         good = self._stub(tmp_path, "npm", "#!/bin/sh\necho '11.10.0'\nexit 0\n")
         assert node_tool_runnable(str(good)) is True
 
@@ -271,7 +275,7 @@ class TestNodeToolRunnable:
         profile_home = tmp_path / "profiles" / "assistant"
         managed_bin = profile_home / "node" / "bin"
         managed_bin.mkdir(parents=True)
-        self._stub(managed_bin, "node", "#!/bin/sh\necho '22.0.0'\nexit 0\n")
+        self._stub(managed_bin, "node", "#!/bin/sh\necho 'v24.0.0'\nexit 0\n")
         broken_npm = self._stub(managed_bin, "npm", "#!/bin/sh\nexit 1\n")
         heal_called = {"value": False}
 
@@ -285,7 +289,7 @@ class TestNodeToolRunnable:
 
         def _heal():
             heal_called["value"] = True
-            broken_npm.write_text("#!/bin/sh\necho '22.0.0'\nexit 0\n")
+            broken_npm.write_text("#!/bin/sh\necho '11.10.0'\nexit 0\n")
             broken_npm.chmod(0o755)
             return True
 
@@ -300,8 +304,9 @@ class TestNodeToolRunnable:
         profile_home = tmp_path / "profiles" / "assistant"
         managed_bin = profile_home / "node" / "bin"
         managed_bin.mkdir(parents=True)
+        self._stub(managed_bin, "node", "#!/bin/sh\necho 'v24.0.0'\nexit 0\n")
         broken_npm = self._stub(managed_bin, "npm", "#!/bin/sh\nexit 1\n")
-        healed_npm = self._stub(managed_bin, "npm", "#!/bin/sh\necho '22.0.0'\nexit 0\n")
+        healed_npm = self._stub(tmp_path, "healed-npm", "#!/bin/sh\necho '11.10.0'\nexit 0\n")
 
         system_bin = tmp_path / "system-bin"
         system_bin.mkdir()
@@ -318,8 +323,8 @@ class TestNodeToolRunnable:
 
         monkeypatch.setattr(hermes_constants, "heal_hermes_managed_node", _heal)
 
-        assert find_hermes_node_executable("npm") == str(healed_npm)
-        assert find_node_executable("npm") == str(healed_npm)
+        assert find_hermes_node_executable("npm") == str(broken_npm)
+        assert find_node_executable("npm") == str(broken_npm)
         assert find_node_executable("npm") != str(good_npm)
 
     def test_broken_managed_npm_returns_none_when_heal_fails(self, tmp_path, monkeypatch):
@@ -343,7 +348,8 @@ class TestNodeToolRunnable:
         profile_home = tmp_path / "profiles" / "assistant"
         managed_bin = profile_home / "node" / "bin"
         managed_bin.mkdir(parents=True)
-        managed_npm = self._stub(managed_bin, "npm", "#!/bin/sh\necho '22.0.0'\nexit 0\n")
+        self._stub(managed_bin, "node", "#!/bin/sh\necho 'v24.0.0'\nexit 0\n")
+        managed_npm = self._stub(managed_bin, "npm", "#!/bin/sh\necho '11.10.0'\nexit 0\n")
 
         system_bin = tmp_path / "system-bin"
         system_bin.mkdir()
