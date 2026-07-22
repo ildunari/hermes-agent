@@ -68,6 +68,15 @@ def _make_codex_agent(**kwargs):
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_run_agent_home(monkeypatch, tmp_path):
+    """Keep run_agent's import-time home snapshot inside the test sandbox."""
+    hermes_home = tmp_path / "hermes_integration"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(run_agent, "_hermes_home", hermes_home)
+
+
 class TestApiModeAccepted:
     def test_api_mode_is_codex_app_server(self):
         agent = _make_codex_agent()

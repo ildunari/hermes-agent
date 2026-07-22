@@ -1300,11 +1300,9 @@ class TestHermesToolsExpose:
             "browser_click",
         )
 
-    def test_blank_env_keeps_full_list(self, monkeypatch):
+    def test_blank_env_exposes_nothing(self, monkeypatch):
         monkeypatch.setenv("HERMES_TOOLS_EXPOSE", " , ")
-        assert hermes_tools_mcp_server._resolved_exposed_tools() == (
-            hermes_tools_mcp_server.EXPOSED_TOOLS
-        )
+        assert hermes_tools_mcp_server._resolved_exposed_tools() == ()
 
 
 class TestHasTurnAbortedMarker:
