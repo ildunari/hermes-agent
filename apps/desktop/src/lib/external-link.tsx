@@ -1,6 +1,7 @@
 import type { ComponentProps, ReactNode } from 'react'
 import { useEffect, useMemo, useState } from 'react'
 
+import { openExplicitBrowserIntent } from '@/app/browser/browser-intent-production'
 import { ArrowUpRight } from '@/lib/icons'
 
 import { cn } from './utils'
@@ -203,6 +204,7 @@ export function openExternalLink(href: string): void {
 interface ExternalLinkProps extends Omit<ComponentProps<'a'>, 'href' | 'target'> {
   href: string
   children?: ReactNode
+  inAppBrowser?: boolean
   showExternalIcon?: boolean
 }
 
@@ -214,6 +216,8 @@ export function ExternalLink({
   children,
   className,
   href,
+  inAppBrowser = false,
+  onAuxClick,
   onClick,
   showExternalIcon = true,
   ...rest
@@ -224,19 +228,38 @@ export function ExternalLink({
     <a
       className={cn('font-semibold text-foreground underline underline-offset-4 decoration-current/20', className)}
       href={target}
-      onClick={event => {
-        event.stopPropagation()
-        onClick?.(event)
+      onAuxClick={event => {
+        onAuxClick?.(event)
 
-        if (event.defaultPrevented) {
+        if (!inAppBrowser || event.defaultPrevented) {
           return
         }
 
         event.preventDefault()
-        openExternalLink(target)
+        event.stopPropagation()
+
+        if (event.button === 1 && window.hermesDesktop) {
+          openExplicitBrowserIntent({ source: 'transcript-link', targetRef: target })
+        }
+      }}
+      onClick={event => {
+        event.stopPropagation()
+        onClick?.(event)
+
+        if (event.defaultPrevented && !inAppBrowser) {
+          return
+        }
+
+        event.preventDefault()
+
+        if (inAppBrowser && window.hermesDesktop) {
+          openExplicitBrowserIntent({ source: 'transcript-link', targetRef: target })
+        } else {
+          openExternalLink(target)
+        }
       }}
       rel="noopener noreferrer"
-      target="_blank"
+      target={inAppBrowser ? undefined : '_blank'}
       {...rest}
     >
       {children ?? urlSlugTitleLabel(target)}
@@ -249,6 +272,7 @@ interface PrettyLinkProps extends Omit<ComponentProps<'a'>, 'href' | 'target'> {
   href: string
   label?: string
   fallbackLabel?: string
+  inAppBrowser?: boolean
 }
 
 export function PrettyLink({ className, fallbackLabel, href, label, ...rest }: PrettyLinkProps) {
@@ -268,9 +292,16 @@ interface LinkifiedTextProps {
   text: string
   pretty?: boolean
   explicitOnly?: boolean
+  inAppBrowser?: boolean
 }
 
-export function LinkifiedText({ className, explicitOnly = false, pretty = true, text }: LinkifiedTextProps) {
+export function LinkifiedText({
+  className,
+  explicitOnly = false,
+  inAppBrowser = false,
+  pretty = true,
+  text
+}: LinkifiedTextProps) {
   const nodes: ReactNode[] = []
   let cursor = 0
 
@@ -285,9 +316,9 @@ export function LinkifiedText({ className, explicitOnly = false, pretty = true, 
 
     nodes.push(
       pretty ? (
-        <PrettyLink href={url} key={`${url}-${index}`} />
+        <PrettyLink href={url} inAppBrowser={inAppBrowser} key={`${url}-${index}`} />
       ) : (
-        <ExternalLink href={url} key={`${url}-${index}`}>
+        <ExternalLink href={url} inAppBrowser={inAppBrowser} key={`${url}-${index}`}>
           {raw}
         </ExternalLink>
       )

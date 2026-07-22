@@ -45,7 +45,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import yaml
 
@@ -101,9 +101,9 @@ try:
         WebSocket, WebSocketDisconnect,
     )
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel, SecretStr
+    from pydantic import BaseModel, ConfigDict, SecretStr
     from starlette.concurrency import run_in_threadpool
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually
@@ -117,9 +117,9 @@ except ImportError:
             WebSocket, WebSocketDisconnect,
         )
         from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+        from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
         from fastapi.staticfiles import StaticFiles
-        from pydantic import BaseModel, SecretStr
+        from pydantic import BaseModel, ConfigDict, SecretStr
         from starlette.concurrency import run_in_threadpool
     except Exception:
         raise SystemExit(
@@ -181,6 +181,7 @@ def _resolve_restart_drain_timeout() -> float:
 
 @asynccontextmanager
 async def _lifespan(app: "FastAPI"):
+    _capture_browser_active_profile(app)
     app.state.event_channels = {}  # dict[str, set]
     app.state.event_lock = asyncio.Lock()
     app.state.pty_active_session_files = {}  # dict[str, Path]
@@ -189,6 +190,7 @@ async def _lifespan(app: "FastAPI"):
     # On app.state (not a module global) so the Lock binds to the running
     # event loop during lifespan startup — see _get_event_state's docstring.
     app.state.chat_argv_lock = asyncio.Lock()
+    _start_browser_annotation_rpc(app)
 
     # Fire hermes_cli.gateway import into a background thread so the event
     # loop is not blocked and HERMES_DASHBOARD_READY fires without delay.
@@ -226,6 +228,15 @@ async def _lifespan(app: "FastAPI"):
         pty_reaper_task.cancel()
         selftest_task.cancel()
         await PTY_REGISTRY.close_all()
+        browser_grants = getattr(app.state, "browser_resource_grants", None)
+        if browser_grants is not None:
+            browser_grants.revoke_all()
+        upload_sources = getattr(app.state, "browser_upload_sources", None)
+        if upload_sources is not None:
+            upload_sources.revoke_all()
+        annotation_rpc = getattr(app.state, "browser_annotation_rpc", None)
+        if annotation_rpc is not None:
+            annotation_rpc.registry.close()
         if cron_stop is not None:
             cron_stop.set()
 
@@ -288,6 +299,7 @@ app.include_router(_memory_oauth_router)
 _SESSION_TOKEN = os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN") or secrets.token_urlsafe(32)
 _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 _SSH_OWNER_NONCE: Optional[str] = None
+_BROWSER_ANNOTATION_RPC_LOCK = threading.RLock()
 
 
 def _apply_ssh_session_token(token: str) -> None:
@@ -688,16 +700,101 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+def _browser_workspace_root(target_app: FastAPI, profile: str, source_session_id: str) -> Path | None:
+    """Resolve a source session's server-authoritative workspace root."""
+    try:
+        _require_browser_gateway_profile(target_app, profile)
+        home = getattr(target_app.state, "browser_active_home", None)
+        if not isinstance(home, str):
+            _capture_browser_active_profile(target_app)
+            home = target_app.state.browser_active_home
+        from hermes_state import SessionDB, workspace_key
+
+        db_path = Path(home) / "state.db"
+        if not db_path.is_file():
+            return None
+        db = SessionDB(db_path=db_path, read_only=True)
+        try:
+            resolved = db.resolve_session_id(source_session_id)
+            row = db.get_session(resolved) if resolved else None
+        finally:
+            db.close()
+        root = workspace_key(row) if row else None
+        if not root:
+            return None
+        candidate = Path(root).expanduser().resolve(strict=True)
+        return candidate if candidate.is_dir() else None
+    except Exception:
+        return None
+
+
+def _browser_resource_grant_authority(target_app: FastAPI):
+    authority = getattr(target_app.state, "browser_resource_grants", None)
+    if authority is None:
+        from hermes_cli.browser_resource_grants import BrowserResourceGrantAuthority
+
+        authority = BrowserResourceGrantAuthority(
+            workspace_root=lambda profile, session_id: _browser_workspace_root(
+                target_app, profile, session_id
+            )
+        )
+        target_app.state.browser_resource_grants = authority
+    return authority
+
+
+def _browser_upload_source_authority(target_app: FastAPI):
+    authority = getattr(target_app.state, "browser_upload_sources", None)
+    if authority is None:
+        from hermes_cli.browser_upload_sources import BrowserUploadSourceAuthority
+
+        authority = BrowserUploadSourceAuthority(
+            workspace_root=lambda profile, session_id: _browser_workspace_root(
+                target_app, profile, session_id
+            )
+        )
+        target_app.state.browser_upload_sources = authority
+    return authority
+
+
+def _browser_grant_ref_and_kind(path: str) -> tuple[str, str]:
+    match = re.fullmatch(r"/api/browser/(artifacts|preview)/([A-Za-z0-9_-]{32})(?:/.*)?", path)
+    if not match:
+        raise ValueError("not a browser grant delivery route")
+    return match.group(2), "artifact" if match.group(1) == "artifacts" else "preview"
+
+
+def _authorize_browser_grant_delivery(request: Request):
+    from hermes_cli.browser_resource_grants import scope_from_headers
+
+    ref, kind = _browser_grant_ref_and_kind(request.url.path)
+    credential = request.headers.get("x-hermes-browser-grant", "")
+    scope = scope_from_headers(request.headers)
+    _require_browser_gateway_profile(request.app, scope.profile)
+    authority = _browser_resource_grant_authority(request.app)
+    if kind == "artifact":
+        return authority.authorize_artifact(ref, credential, scope, request.headers.get("range"))
+    return authority.authorize_preview(ref, credential, scope)
+
+
 @app.middleware("http")
 async def _token_auth_seam(request: Request, call_next):
-    """Outermost auth seam: non-interactive bearer-token auth for opted-in routes.
+    """Outermost auth seam: scoped browser grants or opted-in bearer routes."""
+    # Artifact/preview guests never receive dashboard cookies or the gateway
+    # session token. Electron injects only the short-lived grant credential and
+    # exact lifecycle tuple. A valid tuple may bypass the dashboard auth gates;
+    # the delivery route repeats authorization before touching bytes/upstream.
+    if request.url.path.startswith(("/api/browser/artifacts/", "/api/browser/preview/")):
+        try:
+            _authorize_browser_grant_delivery(request)
+        except Exception:
+            # Delivery routes are exclusively grant-authenticated. Never fall
+            # through to dashboard token/OAuth auth (and its cookies/content),
+            # even when the caller happens to carry those credentials.
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        request.state.token_authenticated = True
+        request.state.browser_grant_authenticated = True
+        return await call_next(request)
 
-    Registered LAST so it runs FIRST (Starlette middleware is outermost-last).
-    A registered token route is fully owned here — authenticate by token,
-    attach the principal + ``token_authenticated`` flag, and let the downstream
-    cookie/session gates skip enforcement. Non-token routes pass straight
-    through untouched.
-    """
     from hermes_cli.dashboard_auth.token_auth import token_auth_middleware
     return await token_auth_middleware(request, call_next)
 
@@ -7127,6 +7224,7 @@ def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
 @app.put("/api/config")
 async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
     try:
+        target_profile = body.profile or profile or "default"
         with _profile_scope(body.profile or profile):
             # The dashboard form is schema-driven (see CONFIG_SCHEMA). Any root
             # key absent from the schema — most visibly ``custom_providers``, but
@@ -7137,6 +7235,11 @@ async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
             existing = read_raw_config()
             incoming = _denormalize_config_from_web(body.config)
             save_config(_deep_merge(existing, incoming))
+            target_enabled = _browser_in_app_enabled(app)
+        if target_profile == _browser_active_profile(app) and not target_enabled:
+            from hermes_cli.browser_transport import get_browser_transport_manager
+
+            await get_browser_transport_manager(app).disable(profile=target_profile)
         return {"ok": True}
     except HTTPException:
         raise
@@ -17065,8 +17168,29 @@ def _ws_auth_mode() -> str:
     return "loopback"
 
 
-def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
-    """Validate WS-upgrade auth; return ``(reason, credential)``.
+def _principal_from_identity(identity: Mapping[str, Any]) -> str:
+    """Derive the stable connection principal from validated credential data."""
+
+    provider = str(identity.get("provider") or "unknown")
+    user_id = str(identity.get("user_id") or "unknown")
+    return f"{provider}:{user_id}"
+
+
+def _local_token_identity() -> dict[str, str]:
+    """Credential-derived process principal for legacy token-auth connections."""
+
+    digest = hashlib.sha256(_SESSION_TOKEN.encode()).hexdigest()
+    return {
+        "provider": "dashboard-token",
+        "user_id": digest,
+        "principal": f"dashboard-token:{digest}",
+    }
+
+
+def _ws_auth_context(
+    ws: "WebSocket",
+) -> tuple[Optional[str], str, Optional[dict[str, Any]]]:
+    """Validate WS auth and retain its credential-derived identity.
 
     ``reason`` is None when the credential is accepted, else a short
     machine-parseable token explaining the rejection (``no_credential``,
@@ -17114,8 +17238,11 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
         internal = ws.query_params.get("internal", "")
         if internal:
             try:
-                consume_internal_credential(internal)
-                return None, "internal"
+                info = consume_internal_credential(internal)
+                return None, "internal", {
+                    **info,
+                    "principal": _principal_from_identity(info),
+                }
             except TicketInvalid as exc:
                 audit_log(
                     AuditEvent.WS_TICKET_REJECTED,
@@ -17123,15 +17250,18 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
                     ip=(ws.client.host if ws.client else ""),
                     path=ws.url.path,
                 )
-                return "internal_invalid", "internal"
+                return "internal_invalid", "internal", None
 
         ticket = ws.query_params.get("ticket", "")
         if not ticket:
-            return "no_credential", "none"
+            return "no_credential", "none", None
 
         try:
-            consume_ticket(ticket)
-            return None, "ticket"
+            info = consume_ticket(ticket)
+            return None, "ticket", {
+                **info,
+                "principal": _principal_from_identity(info),
+            }
         except TicketInvalid as exc:
             audit_log(
                 AuditEvent.WS_TICKET_REJECTED,
@@ -17139,19 +17269,26 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
                 ip=(ws.client.host if ws.client else ""),
                 path=ws.url.path,
             )
-            return "ticket_invalid", "ticket"
+            return "ticket_invalid", "ticket", None
 
     token = ws.query_params.get("token", "")
     if not token:
-        return "no_credential", "none"
+        return "no_credential", "none", None
     if hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        return None, "token"
-    return "token_mismatch", "token"
+        return None, "token", _local_token_identity()
+    return "token_mismatch", "token", None
+
+
+def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
+    """Backward-compatible reason/credential view of :func:`_ws_auth_context`."""
+
+    reason, credential, _identity = _ws_auth_context(ws)
+    return reason, credential
 
 
 def _ws_auth_ok(ws: "WebSocket") -> bool:
     """True when the WS-upgrade credential is accepted. See _ws_auth_reason."""
-    return _ws_auth_reason(ws)[0] is None
+    return _ws_auth_context(ws)[0] is None
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
@@ -18227,13 +18364,1353 @@ async def pty_ws(ws: WebSocket) -> None:
 # ---------------------------------------------------------------------------
 
 
+class BrowserTicketRequest(BaseModel):
+    profile: str
+    connection_id: str
+
+
+class BrowserControlRequest(BaseModel):
+    profile: str
+
+
+class BrowserGrantScopeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    connection_id: str
+    tab_id: str
+    guest_generation: str
+    source_session_id: str
+
+
+class BrowserArtifactGrantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    profile: str
+    path: str
+    scope: BrowserGrantScopeRequest
+    ttl_seconds: int = 120
+
+
+class BrowserPreviewGrantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    profile: str
+    upstream_url: str
+    scope: BrowserGrantScopeRequest
+    ttl_seconds: int = 120
+
+
+class BrowserGrantRevokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    profile: str
+    scope: BrowserGrantScopeRequest
+
+
+class BrowserUploadSourceScopeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    connection_id: str
+    transport_id: str
+    browser_sid: str
+    capability_generation: str
+    task_id: str
+    task_generation: str
+    tab_id: str
+    tab_incarnation: str
+    binding_generation: str
+    document_generation: str
+    frame_id: str
+    origin: str
+    chooser_id: str
+    backend_node_id: str
+    form_fingerprint: str
+    chooser_mode: str
+    source_session_id: str
+
+
+class BrowserUploadCandidateListRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    profile: str
+    scope: BrowserUploadSourceScopeRequest
+
+
+class BrowserUploadSourceGrantRequest(BrowserUploadCandidateListRequest):
+    candidate_id: str
+    source_record_revision: str
+    ttl_seconds: int = 120
+
+
+class BrowserUploadSourceRevokeRequest(BrowserUploadCandidateListRequest):
+    opaque_refs: list[str]
+
+
+class BrowserAnnotationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    profile: str
+    record: dict[str, Any]
+    first_revision: dict[str, Any]
+    source_message_id: int | None = None
+
+
+class BrowserAnnotationStatusRequest(BaseModel):
+    profile: str
+    status: str
+    expected_revision: int
+
+
+class BrowserAnnotationReattachRequest(BaseModel):
+    profile: str
+    revision: dict[str, Any]
+    new_scope: dict[str, Any]
+    expected_record_revision: int
+
+
+class BrowserAnnotationImportRequest(BaseModel):
+    profile: str
+    manifest: dict[str, Any]
+
+
+class BrowserAnnotationDeleteRequest(BaseModel):
+    profile: str
+
+
+class BrowserAnnotationCaptureRequest(BaseModel):
+    profile: str
+    blob: dict[str, Any]
+    content_base64: str
+    purpose: str | None = None
+
+
+class BrowserAnnotationRpcRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class BrowserAnnotationThreadMessageRequest(BrowserAnnotationRpcRequest):
+    profile: str
+    thread_generation: int = 1
+    body: str
+    intent: str
+    anchor_revision_id: str
+    reply_to_message_id: int | None = None
+    client_request_id: str
+    anchor_stale_at_submit: bool = False
+
+
+class BrowserAnnotationTurnRequest(BrowserAnnotationRpcRequest):
+    profile: str
+    thread_generation: int = 1
+
+
+def _infer_browser_active_profile() -> str:
+    """Infer the gateway process profile from its startup HERMES_HOME."""
+
+    from hermes_cli.profiles import get_active_profile_name
+
+    selected = get_active_profile_name()
+    if selected == "custom":
+        selected = os.environ.get("HERMES_PROFILE", "").strip() or "default"
+    try:
+        from hermes_cli.browser_transport import validate_profile
+
+        return validate_profile(selected)
+    except Exception:
+        return "default"
+
+
+def _capture_browser_active_profile(target_app: FastAPI) -> str:
+    """Freeze browser profile/config authority for this server process."""
+
+    selected = _infer_browser_active_profile()
+    target_app.state.browser_active_profile = selected
+    target_app.state.browser_active_home = str(get_hermes_home())
+    return selected
+
+
+def _browser_active_profile(target_app: FastAPI) -> str:
+    selected = getattr(target_app.state, "browser_active_profile", None)
+    return selected if isinstance(selected, str) else _capture_browser_active_profile(target_app)
+
+
+def _require_browser_gateway_profile(target_app: FastAPI, profile: str) -> str:
+    """Reject assertions that do not match trusted process profile authority."""
+
+    from hermes_cli.browser_transport import BrowserProtocolError, validate_profile
+
+    asserted = validate_profile(profile)
+    if asserted != _browser_active_profile(target_app):
+        raise BrowserProtocolError(
+            "browser_wrong_profile", "asserted profile is not this gateway's selected profile"
+        )
+    return asserted
+
+
+def _browser_in_app_enabled(target_app: FastAPI) -> bool:
+    """Read only the config home frozen as authority at process startup."""
+
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    home = getattr(target_app.state, "browser_active_home", None)
+    if not isinstance(home, str):
+        _capture_browser_active_profile(target_app)
+        home = target_app.state.browser_active_home
+    token = set_hermes_home_override(home)
+    try:
+        cfg = load_config() or {}
+        browser = cfg.get("browser") if isinstance(cfg, dict) else None
+        in_app = browser.get("in_app") if isinstance(browser, dict) else None
+        return isinstance(in_app, dict) and in_app.get("enabled") is True
+    except Exception:
+        return False
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _http_auth_identity(request: Request) -> dict[str, Any]:
+    """Return the identity already validated by the existing HTTP authority."""
+
+    sess = getattr(request.state, "session", None)
+    if sess is not None:
+        info = {"provider": sess.provider, "user_id": sess.user_id}
+        return {**info, "principal": _principal_from_identity(info)}
+    if _has_valid_session_token(request):
+        return _local_token_identity()
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _browser_grant_scope(body_scope: BrowserGrantScopeRequest, profile: str, recipient: str):
+    from hermes_cli.browser_resource_grants import BrowserGrantScope
+
+    return BrowserGrantScope(
+        recipient=recipient,
+        profile=profile,
+        connection_id=body_scope.connection_id,
+        tab_id=body_scope.tab_id,
+        guest_generation=body_scope.guest_generation,
+        source_session_id=body_scope.source_session_id,
+    ).validated()
+
+
+def _browser_grant_http_error(exc: Exception) -> HTTPException:
+    from hermes_cli.browser_resource_grants import BrowserGrantError
+
+    if isinstance(exc, BrowserGrantError):
+        return HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    _log.exception("browser resource grant failure")
+    return HTTPException(status_code=500, detail={"code": "grant_unavailable"})
+
+
+def _browser_upload_scope(body_scope: BrowserUploadSourceScopeRequest, profile: str, recipient: str):
+    from hermes_cli.browser_upload_sources import BrowserUploadSourceScope
+
+    return BrowserUploadSourceScope(
+        recipient=recipient,
+        profile=profile,
+        **body_scope.model_dump(),
+    ).validated()
+
+
+def _authenticate_browser_upload_scope(request: Request, scope) -> None:
+    from hermes_cli.browser_transport import get_browser_transport_manager
+
+    get_browser_transport_manager(request.app).validate_upload_scope(
+        principal=scope.recipient,
+        profile=scope.profile,
+        connection_id=scope.connection_id,
+        transport_id=scope.transport_id,
+        browser_sid=scope.browser_sid,
+        capability_generation=scope.capability_generation,
+        binding_generation=scope.binding_generation,
+        task_id=scope.task_id,
+        task_generation=scope.task_generation,
+        tab_id=scope.tab_id,
+        source_session_id=scope.source_session_id,
+    )
+
+
+def _browser_upload_http_error(exc: Exception) -> HTTPException:
+    from hermes_cli.browser_upload_sources import BrowserUploadSourceError
+    from hermes_cli.browser_transport import BrowserProtocolError
+
+    if isinstance(exc, BrowserUploadSourceError):
+        return HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    if isinstance(exc, BrowserProtocolError):
+        return HTTPException(status_code=403, detail={"code": exc.code})
+    _log.exception("browser upload source failure")
+    return HTTPException(status_code=500, detail={"code": "UPLOAD_TRANSFER_FAILED"})
+
+
+def _browser_artifact_headers(read) -> dict[str, str]:
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-store",
+        "Content-Length": str(max(0, read.end - read.start + 1)),
+        "Content-Type": read.mime_type,
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if read.status_code == 206:
+        headers["Content-Range"] = f"bytes {read.start}-{read.end}/{read.size}"
+    if read.mime_type.startswith("text/html"):
+        headers["Content-Security-Policy"] = (
+            "sandbox allow-scripts allow-forms; default-src 'none'; "
+            "img-src 'self' data: blob:; media-src 'self' data: blob:; "
+            "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+            "font-src 'self' data:; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"
+        )
+    else:
+        headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    return headers
+
+
+@app.post("/api/browser/grants/artifact", status_code=201)
+async def mint_browser_artifact_grant(body: BrowserArtifactGrantRequest, request: Request):
+    identity = _http_auth_identity(request)
+    try:
+        profile = _require_browser_gateway_profile(request.app, body.profile)
+        scope = _browser_grant_scope(body.scope, profile, str(identity["principal"]))
+        grant = _browser_resource_grant_authority(request.app).mint_artifact(
+            scope, body.path, ttl_seconds=body.ttl_seconds
+        )
+        return {
+            "kind": "artifact",
+            "opaqueRef": grant.ref,
+            "deliveryCredential": grant.credential,
+            # Main needs the credential-derived recipient to reproduce the exact
+            # delivery tuple. This response terminates in Electron main; preload
+            # returns only a separate local opaque URL to the renderer.
+            "recipient": scope.recipient,
+            "displayName": grant.display_name,
+            "mimeType": grant.mime_type,
+            "size": grant.size,
+            "expiresInSeconds": body.ttl_seconds,
+        }
+    except Exception as exc:
+        raise _browser_grant_http_error(exc) from exc
+
+
+@app.post("/api/browser/grants/preview", status_code=201)
+async def mint_browser_preview_grant(body: BrowserPreviewGrantRequest, request: Request):
+    identity = _http_auth_identity(request)
+    try:
+        profile = _require_browser_gateway_profile(request.app, body.profile)
+        scope = _browser_grant_scope(body.scope, profile, str(identity["principal"]))
+        grant = _browser_resource_grant_authority(request.app).mint_preview(
+            scope, body.upstream_url, ttl_seconds=body.ttl_seconds
+        )
+        encoded_path = "/".join(
+            urllib.parse.quote(segment, safe="-._~") for segment in grant.initial_path.split("/")
+        )
+        return {
+            "kind": "preview",
+            "opaqueRef": grant.ref,
+            "deliveryCredential": grant.credential,
+            "recipient": scope.recipient,
+            "proxyPath": f"/api/browser/preview/{grant.ref}/{encoded_path.lstrip('/')}",
+            "expiresInSeconds": body.ttl_seconds,
+        }
+    except Exception as exc:
+        raise _browser_grant_http_error(exc) from exc
+
+
+@app.post("/api/browser/grants/revoke")
+async def revoke_browser_resource_grants(body: BrowserGrantRevokeRequest, request: Request):
+    identity = _http_auth_identity(request)
+    try:
+        profile = _require_browser_gateway_profile(request.app, body.profile)
+        scope = _browser_grant_scope(body.scope, profile, str(identity["principal"]))
+        revoked = _browser_resource_grant_authority(request.app).revoke_scope(scope)
+        return {"ok": True, "revoked": revoked}
+    except Exception as exc:
+        raise _browser_grant_http_error(exc) from exc
+
+
+@app.post("/api/browser/upload-sources/candidates")
+async def list_browser_upload_source_candidates(
+    body: BrowserUploadCandidateListRequest, request: Request
+):
+    identity = _http_auth_identity(request)
+    try:
+        profile = _require_browser_gateway_profile(request.app, body.profile)
+        scope = _browser_upload_scope(body.scope, profile, str(identity["principal"]))
+        _authenticate_browser_upload_scope(request, scope)
+        candidates = _browser_upload_source_authority(request.app).list_candidates(scope)
+        return {
+            "kind": "browser-upload-candidates",
+            "candidates": [
+                {
+                    "candidateId": candidate.candidate_id,
+                    "sourceRecordRevision": candidate.source_record_revision,
+                    "displayName": candidate.display_name,
+                    "mimeType": candidate.mime_type,
+                    "size": candidate.size,
+                }
+                for candidate in candidates
+            ],
+        }
+    except Exception as exc:
+        raise _browser_upload_http_error(exc) from exc
+
+
+@app.post("/api/browser/upload-sources/grant", status_code=201)
+async def mint_browser_upload_source_grant(
+    body: BrowserUploadSourceGrantRequest, request: Request
+):
+    identity = _http_auth_identity(request)
+    try:
+        profile = _require_browser_gateway_profile(request.app, body.profile)
+        scope = _browser_upload_scope(body.scope, profile, str(identity["principal"]))
+        _authenticate_browser_upload_scope(request, scope)
+        ticket = _browser_upload_source_authority(request.app).mint(
+            scope,
+            body.candidate_id,
+            body.source_record_revision,
+            ttl_seconds=body.ttl_seconds,
+        )
+        return {
+            "kind": "browser-upload-source",
+            "opaqueRef": ticket.ref,
+            "sourceRecordRevision": ticket.source_record_revision,
+            "deliveryCredential": ticket.credential,
+            "recipient": ticket.recipient,
+            "displayName": ticket.display_name,
+            "mimeType": ticket.mime_type,
+            "size": ticket.size,
+            "sha256": ticket.sha256,
+            "expiresInSeconds": body.ttl_seconds,
+        }
+    except Exception as exc:
+        raise _browser_upload_http_error(exc) from exc
+
+
+@app.post("/api/browser/upload-sources/revoke")
+async def revoke_browser_upload_source_grants(
+    body: BrowserUploadSourceRevokeRequest, request: Request
+):
+    identity = _http_auth_identity(request)
+    try:
+        profile = _require_browser_gateway_profile(request.app, body.profile)
+        scope = _browser_upload_scope(body.scope, profile, str(identity["principal"]))
+        _authenticate_browser_upload_scope(request, scope)
+        revoked = _browser_upload_source_authority(request.app).revoke_grants(scope, body.opaque_refs)
+        return {"ok": True, "revoked": revoked}
+    except Exception as exc:
+        raise _browser_upload_http_error(exc) from exc
+
+
+async def _browser_upload_source_body(read):
+    try:
+        for chunk in read.chunks():
+            yield chunk
+            # StreamingResponse applies socket flow control between iterations;
+            # the held descriptor is read only as the consumer advances.
+            await asyncio.sleep(0)
+    finally:
+        read.close()
+
+
+@app.get("/api/browser/upload-sources/{ref}")
+async def deliver_browser_upload_source(ref: str, request: Request):
+    # Main-only delivery requires normal Desktop auth plus the one-use ticket.
+    identity = _http_auth_identity(request)
+    try:
+        scope_values = {
+            "connection_id": request.headers.get("x-hermes-browser-connection", ""),
+            "transport_id": request.headers.get("x-hermes-browser-transport", ""),
+            "browser_sid": request.headers.get("x-hermes-browser-sid", ""),
+            "capability_generation": request.headers.get("x-hermes-browser-capability-generation", ""),
+            "task_id": request.headers.get("x-hermes-browser-task", ""),
+            "task_generation": request.headers.get("x-hermes-browser-task-generation", ""),
+            "tab_id": request.headers.get("x-hermes-browser-tab", ""),
+            "tab_incarnation": request.headers.get("x-hermes-browser-tab-incarnation", ""),
+            "binding_generation": request.headers.get("x-hermes-browser-binding-generation", ""),
+            "document_generation": request.headers.get("x-hermes-browser-document-generation", ""),
+            "frame_id": request.headers.get("x-hermes-browser-frame", ""),
+            "origin": request.headers.get("x-hermes-browser-origin", ""),
+            "chooser_id": request.headers.get("x-hermes-browser-chooser", ""),
+            "backend_node_id": request.headers.get("x-hermes-browser-backend-node", ""),
+            "form_fingerprint": request.headers.get("x-hermes-browser-form-fingerprint", ""),
+            "chooser_mode": request.headers.get("x-hermes-browser-chooser-mode", ""),
+            "source_session_id": request.headers.get("x-hermes-browser-source-session", ""),
+        }
+        profile = _require_browser_gateway_profile(
+            request.app, request.headers.get("x-hermes-browser-profile", "")
+        )
+        scope = _browser_upload_scope(
+            BrowserUploadSourceScopeRequest(**scope_values), profile, str(identity["principal"])
+        )
+        _authenticate_browser_upload_scope(request, scope)
+        read = _browser_upload_source_authority(request.app).claim(
+            ref,
+            request.headers.get("x-hermes-browser-grant", ""),
+            scope,
+            request.headers.get("x-hermes-browser-source-record-revision", ""),
+        )
+        return StreamingResponse(
+            _browser_upload_source_body(read),
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": "attachment",
+                "Content-Length": str(read.size),
+                "Content-Type": "application/octet-stream",
+                "X-Content-Type-Options": "nosniff",
+                "X-Hermes-Upload-SHA256": read.sha256,
+            },
+        )
+    except Exception as exc:
+        raise _browser_upload_http_error(exc) from exc
+
+
+async def _browser_artifact_body(read):
+    remaining = max(0, read.end - read.start + 1)
+    with read.path.open("rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if (
+            opened.st_dev != read.device
+            or opened.st_ino != read.inode
+            or opened.st_size != read.size
+            or opened.st_mtime_ns != read.modified_ns
+        ):
+            return
+        handle.seek(read.start)
+        while remaining:
+            chunk = await asyncio.to_thread(handle.read, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+@app.api_route("/api/browser/artifacts/{ref}", methods=["GET", "HEAD"])
+async def deliver_browser_artifact(ref: str, request: Request):
+    try:
+        read = _authorize_browser_grant_delivery(request)
+        headers = _browser_artifact_headers(read)
+        if request.method == "HEAD":
+            return Response(status_code=read.status_code, headers=headers)
+        return StreamingResponse(_browser_artifact_body(read), status_code=read.status_code, headers=headers)
+    except Exception as exc:
+        raise _browser_grant_http_error(exc) from exc
+
+
+_PREVIEW_PROXY_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
+_PREVIEW_REQUEST_HEADERS = ("accept", "accept-encoding", "if-modified-since", "if-none-match", "range")
+_PREVIEW_RESPONSE_HEADERS = (
+    "accept-ranges",
+    "cache-control",
+    "content-encoding",
+    "content-length",
+    "content-range",
+    "content-type",
+    "etag",
+    "last-modified",
+)
+
+
+async def _close_preview_response(response, client):
+    await response.aclose()
+    await client.aclose()
+
+
+async def _preview_response_body(response, client):
+    received = 0
+    try:
+        # Preserve Content-Encoding/Content-Length exactly. aiter_bytes()
+        # transparently decompresses, which would make forwarded headers lie.
+        async for chunk in response.aiter_raw():
+            received += len(chunk)
+            if received > _PREVIEW_PROXY_RESPONSE_MAX_BYTES:
+                return
+            yield chunk
+    finally:
+        await _close_preview_response(response, client)
+
+
+async def _deliver_browser_preview(ref: str, tail: str, request: Request):
+    import httpx
+
+    client = None
+    upstream = None
+    try:
+        grant = _authorize_browser_grant_delivery(request)
+        authority = _browser_resource_grant_authority(request.app)
+        target = authority.preview_target(grant, tail, request.url.query)
+        headers = {
+            name: request.headers[name]
+            for name in _PREVIEW_REQUEST_HEADERS
+            if name in request.headers
+        }
+        client = httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            trust_env=False,
+        )
+        upstream = await client.send(
+            client.build_request(request.method, target, headers=headers), stream=True
+        )
+        content_length = upstream.headers.get("content-length")
+        if content_length and int(content_length) > _PREVIEW_PROXY_RESPONSE_MAX_BYTES:
+            raise HTTPException(status_code=413, detail={"code": "preview_response_too_large"})
+        outgoing = {
+            name: upstream.headers[name]
+            for name in _PREVIEW_RESPONSE_HEADERS
+            if name in upstream.headers
+        }
+        outgoing.update(
+            {
+                "Content-Security-Policy": "object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+                "Cross-Origin-Opener-Policy": "same-origin",
+                "Cross-Origin-Resource-Policy": "same-origin",
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+            }
+        )
+        if "location" in upstream.headers:
+            try:
+                outgoing["Location"] = authority.rewrite_preview_redirect(
+                    grant, target, upstream.headers["location"]
+                )
+            except Exception:
+                raise
+        if request.method == "HEAD" or upstream.status_code in {204, 304}:
+            await _close_preview_response(upstream, client)
+            return Response(status_code=upstream.status_code, headers=outgoing)
+        return StreamingResponse(
+            _preview_response_body(upstream, client),
+            status_code=upstream.status_code,
+            headers=outgoing,
+        )
+    except HTTPException:
+        if upstream is not None and client is not None:
+            await _close_preview_response(upstream, client)
+        elif client is not None:
+            await client.aclose()
+        raise
+    except Exception as exc:
+        if upstream is not None and client is not None:
+            await _close_preview_response(upstream, client)
+        elif client is not None:
+            await client.aclose()
+        try:
+            raise _browser_grant_http_error(exc) from exc
+        except HTTPException as mapped:
+            if mapped.status_code == 500:
+                mapped.status_code = 502
+            raise mapped
+
+
+@app.api_route("/api/browser/preview/{ref}", methods=["GET", "HEAD"])
+async def deliver_browser_preview_root(ref: str, request: Request):
+    return await _deliver_browser_preview(ref, "", request)
+
+
+@app.api_route("/api/browser/preview/{ref}/{tail:path}", methods=["GET", "HEAD"])
+async def deliver_browser_preview(ref: str, tail: str, request: Request):
+    return await _deliver_browser_preview(ref, tail, request)
+
+
+@app.websocket("/api/browser/preview/{ref}/{tail:path}")
+async def proxy_browser_preview_websocket(ref: str, tail: str, ws: WebSocket):
+    import websockets
+    from hermes_cli.browser_resource_grants import scope_from_headers
+
+    upstream = None
+    try:
+        scope = scope_from_headers(ws.headers)
+        _require_browser_gateway_profile(ws.app, scope.profile)
+        authority = _browser_resource_grant_authority(ws.app)
+        grant = authority.authorize_preview(
+            ref, ws.headers.get("x-hermes-browser-grant", ""), scope
+        )
+        target = authority.preview_target(grant, tail, ws.url.query)
+        parsed = urllib.parse.urlsplit(target)
+        target = urllib.parse.urlunsplit(
+            ("wss" if parsed.scheme == "https" else "ws", parsed.netloc, parsed.path, parsed.query, "")
+        )
+        requested_protocols = [
+            value.strip()
+            for value in ws.headers.get("sec-websocket-protocol", "").split(",")
+            if value.strip()
+        ]
+        upstream = await websockets.connect(
+            target,
+            origin=grant.origin,
+            subprotocols=requested_protocols or None,
+            max_size=16 * 1024 * 1024,
+            compression=None,
+            open_timeout=5,
+            close_timeout=2,
+        )
+        await ws.accept(subprotocol=upstream.subprotocol)
+
+        async def client_to_upstream():
+            while True:
+                message = await ws.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                payload = message.get("bytes")
+                if payload is None:
+                    payload = message.get("text")
+                if payload is None:
+                    continue
+                if len(payload) > 16 * 1024 * 1024:
+                    await ws.close(code=1009)
+                    return
+                await upstream.send(payload)
+
+        async def upstream_to_client():
+            async for payload in upstream:
+                if isinstance(payload, bytes):
+                    await ws.send_bytes(payload)
+                else:
+                    await ws.send_text(payload)
+
+        tasks = [asyncio.create_task(client_to_upstream()), asyncio.create_task(upstream_to_client())]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*done, *pending, return_exceptions=True)
+    except Exception:
+        with suppress(Exception):
+            await ws.close(code=4403)
+    finally:
+        if upstream is not None:
+            with suppress(Exception):
+                await upstream.close()
+
+
+def _browser_annotation_repository(request: Request, profile: str):
+    """Select annotations only from authenticated, process-frozen authority."""
+
+    _http_auth_identity(request)
+    try:
+        selected = _require_browser_gateway_profile(request.app, profile)
+    except Exception as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    home = getattr(request.app.state, "browser_active_home", None)
+    if not isinstance(home, str):
+        _capture_browser_active_profile(request.app)
+        home = request.app.state.browser_active_home
+    from hermes_cli.browser_annotations_db import AnnotationRepository
+
+    return AnnotationRepository(profile_id=selected, profile_home=Path(home))
+
+
+def _start_browser_annotation_rpc(target_app: FastAPI):
+    """Start durable queue recovery without creating a generic chat session."""
+
+    existing = getattr(target_app.state, "browser_annotation_rpc", None)
+    if existing is not None:
+        return existing
+    with _BROWSER_ANNOTATION_RPC_LOCK:
+        existing = getattr(target_app.state, "browser_annotation_rpc", None)
+        if existing is not None:
+            return existing
+        selected = _browser_active_profile(target_app)
+        home = getattr(target_app.state, "browser_active_home", None)
+        if not isinstance(home, str):
+            _capture_browser_active_profile(target_app)
+            home = target_app.state.browser_active_home
+        try:
+            from hermes_cli.browser_annotation_lineage import AnnotationLineageRepository
+            from hermes_cli.browser_annotation_bundle import AnnotationBundleCoordinator
+            from hermes_cli.browser_annotation_rpc import (
+                AnnotationRpcFacade,
+                production_annotation_registry,
+                production_annotation_snapshot_factory,
+            )
+            from hermes_cli.browser_annotations_db import AnnotationRepository
+
+            annotations = AnnotationRepository(
+                profile_id=selected, profile_home=Path(home)
+            )
+            lineage = AnnotationLineageRepository(
+                profile_id=selected, profile_home=Path(home)
+            )
+            registry = production_annotation_registry(
+                profile_id=selected,
+                profile_home=Path(home),
+                lineage_repository=lineage,
+                annotation_repository=annotations,
+            )
+            bundle = AnnotationBundleCoordinator(
+                profile_id=selected,
+                annotations=annotations,
+                lineage=lineage,
+                registry=registry,
+                snapshot_factory=production_annotation_snapshot_factory(
+                    profile_home=Path(home), lineage=lineage
+                ),
+            )
+            facade = AnnotationRpcFacade(
+                profile_id=selected,
+                annotation_repository=annotations,
+                lineage_repository=lineage,
+                worker_registry=registry,
+                bundle_coordinator=bundle,
+            )
+            bundle.recover()
+            registry.recover_and_start()
+        except FileNotFoundError:
+            # A brand-new profile may not have initialized state.db yet. The
+            # first authenticated thread request retries this exact startup.
+            return None
+        except Exception:
+            _log.exception("dedicated annotation RPC startup failed")
+            return None
+        target_app.state.browser_annotation_rpc = facade
+        return facade
+
+
+def _browser_annotation_rpc(request: Request, profile: str):
+    """Return only the authenticated process-active profile's dedicated facade."""
+
+    _http_auth_identity(request)
+    try:
+        selected = _require_browser_gateway_profile(request.app, profile)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=403, detail={"code": "profile_mismatch"}
+        ) from exc
+    facade = _start_browser_annotation_rpc(request.app)
+    if facade is None:
+        raise HTTPException(status_code=503, detail={"code": "backend_offline"})
+    if facade.profile_id != selected:
+        raise HTTPException(status_code=403, detail={"code": "profile_mismatch"})
+    return facade
+
+
+def _annotation_rpc_http_error(exc: Exception) -> HTTPException:
+    from hermes_cli.browser_annotation_rpc import AnnotationRpcError
+
+    if isinstance(exc, AnnotationRpcError):
+        return HTTPException(
+            status_code=exc.status_code, detail={"code": exc.code}
+        )
+    _log.exception("dedicated annotation RPC failed")
+    return HTTPException(status_code=500, detail={"code": "backend_offline"})
+
+
+def _browser_annotation_author(request: Request, profile: str):
+    """Build immutable audit identity from validated server credentials."""
+
+    from hermes_cli.browser_annotations_models import AuthorRef
+
+    identity = _http_auth_identity(request)
+    principal = str(identity["principal"])
+    return AuthorRef(
+        kind="system" if identity.get("provider") == "dashboard-token" else "human",
+        actor_id=principal,
+        profile_id=profile,
+        display_name=principal,
+    )
+
+
+def _annotation_api_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, KeyError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, RuntimeError) and "conflict" in str(exc).lower():
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/browser/annotations", status_code=201)
+async def create_browser_annotation(body: BrowserAnnotationCreateRequest, request: Request):
+    from hermes_cli.browser_annotations_models import AnnotationRecordV1, AnchorRevision
+
+    facade = _browser_annotation_rpc(request, body.profile)
+    try:
+        now = datetime.now(timezone.utc)
+        author = _browser_annotation_author(request, body.profile)
+        record = AnnotationRecordV1.model_validate(body.record).model_copy(
+            update={"author": author, "created_at": now, "updated_at": now}
+        )
+        first_revision = AnchorRevision.model_validate(body.first_revision).model_copy(
+            update={"changed_by": author, "changed_at": now}
+        )
+        record = facade.create_annotation(
+            record,
+            first_revision,
+            source_message_id=body.source_message_id,
+        )
+        return record.model_dump(mode="json", by_alias=True)
+    except Exception as exc:
+        if getattr(exc, "code", None):
+            raise _annotation_rpc_http_error(exc) from exc
+        raise _annotation_api_error(exc) from exc
+
+
+@app.get("/api/browser/annotations")
+async def list_browser_annotations(profile: str, workspace_id: str, request: Request):
+    repo = _browser_annotation_repository(request, profile)
+    return [item.model_dump(mode="json", by_alias=True)
+            for item in repo.list_for_workspace(workspace_id)]
+
+
+@app.get("/api/browser/annotations/{annotation_id}")
+async def get_browser_annotation(annotation_id: str, profile: str, request: Request):
+    record = _browser_annotation_repository(request, profile).get(annotation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="annotation not found")
+    return record.model_dump(mode="json", by_alias=True)
+
+
+@app.post("/api/browser/annotations/{annotation_id}/thread/messages", status_code=202)
+async def submit_browser_annotation_thread_message(
+    annotation_id: str,
+    body: BrowserAnnotationThreadMessageRequest,
+    request: Request,
+):
+    identity = _http_auth_identity(request)
+    facade = _browser_annotation_rpc(request, body.profile)
+    try:
+        return facade.submit_message(
+            annotation_id=annotation_id,
+            thread_generation=body.thread_generation,
+            body=body.body,
+            intent=body.intent,
+            anchor_revision_id=body.anchor_revision_id,
+            reply_to_message_id=body.reply_to_message_id,
+            client_request_id=body.client_request_id,
+            actor_id=str(identity["principal"]),
+            anchor_stale_at_submit=body.anchor_stale_at_submit,
+        )
+    except Exception as exc:
+        raise _annotation_rpc_http_error(exc) from exc
+
+
+@app.get("/api/browser/annotations/{annotation_id}/thread")
+async def get_browser_annotation_thread(
+    annotation_id: str,
+    profile: str,
+    request: Request,
+    thread_generation: int = 1,
+):
+    facade = _browser_annotation_rpc(request, profile)
+    try:
+        return facade.thread(
+            annotation_id=annotation_id, thread_generation=thread_generation
+        )
+    except Exception as exc:
+        raise _annotation_rpc_http_error(exc) from exc
+
+
+@app.get("/api/browser/annotations/{annotation_id}/thread/turns/{turn_id}")
+async def get_browser_annotation_turn(
+    annotation_id: str,
+    turn_id: str,
+    profile: str,
+    request: Request,
+    thread_generation: int = 1,
+):
+    facade = _browser_annotation_rpc(request, profile)
+    try:
+        return facade.turn(
+            annotation_id=annotation_id,
+            thread_generation=thread_generation,
+            turn_id=turn_id,
+        )
+    except Exception as exc:
+        raise _annotation_rpc_http_error(exc) from exc
+
+
+@app.post("/api/browser/annotations/{annotation_id}/thread/turns/{turn_id}/cancel")
+async def cancel_browser_annotation_turn(
+    annotation_id: str,
+    turn_id: str,
+    body: BrowserAnnotationTurnRequest,
+    request: Request,
+):
+    facade = _browser_annotation_rpc(request, body.profile)
+    try:
+        return facade.cancel(
+            annotation_id=annotation_id,
+            thread_generation=body.thread_generation,
+            turn_id=turn_id,
+        )
+    except Exception as exc:
+        raise _annotation_rpc_http_error(exc) from exc
+
+
+@app.post("/api/browser/annotations/{annotation_id}/thread/turns/{turn_id}/retry")
+async def retry_browser_annotation_turn(
+    annotation_id: str,
+    turn_id: str,
+    body: BrowserAnnotationTurnRequest,
+    request: Request,
+):
+    facade = _browser_annotation_rpc(request, body.profile)
+    try:
+        return facade.retry(
+            annotation_id=annotation_id,
+            thread_generation=body.thread_generation,
+            turn_id=turn_id,
+        )
+    except Exception as exc:
+        raise _annotation_rpc_http_error(exc) from exc
+
+
+@app.patch("/api/browser/annotations/{annotation_id}/status")
+async def set_browser_annotation_status(
+    annotation_id: str, body: BrowserAnnotationStatusRequest, request: Request
+):
+    repo = _browser_annotation_repository(request, body.profile)
+    try:
+        record = repo.set_status(annotation_id, status=body.status,
+                                 expected_revision=body.expected_revision,
+                                 changed_at=datetime.now(timezone.utc))
+        return record.model_dump(mode="json", by_alias=True)
+    except Exception as exc:
+        raise _annotation_api_error(exc) from exc
+
+
+@app.post("/api/browser/annotations/{annotation_id}/reattach")
+async def reattach_browser_annotation(
+    annotation_id: str, body: BrowserAnnotationReattachRequest, request: Request
+):
+    from hermes_cli.browser_annotations_models import AnnotationScope, AnchorRevision
+
+    repo = _browser_annotation_repository(request, body.profile)
+    try:
+        revision = AnchorRevision.model_validate(body.revision).model_copy(
+            update={
+                "changed_by": _browser_annotation_author(request, body.profile),
+                "changed_at": datetime.now(timezone.utc),
+            }
+        )
+        record = repo.reattach(
+            annotation_id, revision,
+            new_scope=AnnotationScope.model_validate(body.new_scope),
+            expected_record_revision=body.expected_record_revision,
+        )
+        return record.model_dump(mode="json", by_alias=True)
+    except Exception as exc:
+        raise _annotation_api_error(exc) from exc
+
+
+@app.get("/api/browser/annotations/{annotation_id}/export")
+async def export_browser_annotation(
+    annotation_id: str,
+    profile: str,
+    request: Request,
+    include_screenshot_bytes: bool = False,
+):
+    facade = _browser_annotation_rpc(request, profile)
+    try:
+        content = facade.export_bundle(
+            annotation_id, include_screenshot_bytes=include_screenshot_bytes
+        )
+        return Response(content=content, media_type="application/json")
+    except Exception as exc:
+        raise _annotation_api_error(exc) from exc
+
+
+@app.put("/api/browser/annotations/captures/{capture_id}")
+async def retain_browser_annotation_capture(
+    capture_id: str, body: BrowserAnnotationCaptureRequest, request: Request
+):
+    from hermes_cli.browser_annotations_models import BlobRef
+
+    repo = _browser_annotation_repository(request, body.profile)
+    try:
+        content = base64.b64decode(body.content_base64, validate=True)
+        retained = repo.retain_capture_blob(
+            capture_id,
+            BlobRef.model_validate(body.blob),
+            content,
+            purpose=body.purpose,
+            created_at=datetime.now(timezone.utc),
+        )
+        return retained.model_dump(mode="json", by_alias=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _annotation_api_error(exc) from exc
+
+
+@app.post("/api/browser/annotations/import", status_code=201)
+async def import_browser_annotation(body: BrowserAnnotationImportRequest, request: Request):
+    repo = _browser_annotation_repository(request, body.profile)
+    try:
+        result = repo.import_annotation(body.manifest)
+        return result.model_dump(mode="json", by_alias=True)
+    except Exception as exc:
+        raise _annotation_api_error(exc) from exc
+
+
+@app.delete("/api/browser/annotations/{annotation_id}")
+async def delete_browser_annotation(
+    annotation_id: str, body: BrowserAnnotationDeleteRequest, request: Request
+):
+    facade = _browser_annotation_rpc(request, body.profile)
+    try:
+        return facade.delete_bundle(annotation_id)
+    except Exception as exc:
+        raise _annotation_api_error(exc) from exc
+
+
+@app.post("/api/auth/browser-ticket")
+async def mint_browser_ws_ticket(body: BrowserTicketRequest, request: Request):
+    """Mint a fresh, route-only ticket for one asserted Desktop association."""
+
+    from hermes_cli.browser_transport import (
+        BrowserProtocolError,
+        BrowserTransportManager,
+    )
+    from hermes_cli.dashboard_auth.ws_tickets import TTL_SECONDS, mint_browser_ticket
+
+    identity = _http_auth_identity(request)
+    try:
+        profile = _require_browser_gateway_profile(request.app, body.profile)
+        connection_id = BrowserTransportManager.validate_connection_id(body.connection_id)
+        if not _browser_in_app_enabled(request.app):
+            raise BrowserProtocolError("browser_disabled", "in-app browser is disabled")
+    except BrowserProtocolError as exc:
+        status = 409 if exc.code in {"browser_wrong_profile", "browser_disabled"} else 400
+        raise HTTPException(status_code=status, detail=exc.code) from exc
+    ticket = mint_browser_ticket(
+        user_id=identity["user_id"],
+        provider=identity["provider"],
+        profile=profile,
+        connection_id=connection_id,
+    )
+    return {"ticket": ticket, "ttl_seconds": TTL_SECONDS}
+
+
+@app.post("/api/browser/kill")
+async def kill_browser_transport(body: BrowserControlRequest, request: Request):
+    """Browser-only kill switch; chat and provider transports are untouched."""
+
+    from hermes_cli.browser_transport import (
+        BrowserProtocolError,
+        get_browser_transport_manager,
+    )
+
+    identity = _http_auth_identity(request)
+    try:
+        profile = _require_browser_gateway_profile(request.app, body.profile)
+    except BrowserProtocolError as exc:
+        status = 409 if exc.code == "browser_wrong_profile" else 400
+        raise HTTPException(status_code=status, detail=exc.code) from exc
+    killed = await get_browser_transport_manager(request.app).kill(
+        principal=identity["principal"], profile=profile
+    )
+    return {"ok": True, "status": "browser_killed", "closed": killed}
+
+
+@app.websocket("/api/ws/browser")
+async def browser_ws(ws: WebSocket) -> None:
+    """Dedicated ticketed browser transport on the existing gateway listener."""
+
+    from hermes_cli.browser_transport import (
+        BrowserProtocolError,
+        get_browser_transport_manager,
+        validate_application_message_size,
+    )
+    from hermes_cli.dashboard_auth.ws_tickets import TicketInvalid, consume_browser_ticket
+
+    # This privileged route accepts only its short-lived single-use audience.
+    # Long-lived ?token= and process-lifetime ?internal= credentials are never
+    # valid here, even on loopback.
+    ticket = ws.query_params.get("ticket", "")
+    if not ticket or ws.query_params.get("token") or ws.query_params.get("internal"):
+        await ws.close(code=4401, reason="browser ticket required")
+        return
+    if not _ws_request_is_allowed(ws):
+        await ws.close(code=4403, reason="host/origin/peer rejected")
+        return
+    try:
+        ticket_info = consume_browser_ticket(ticket)
+        ticket_info = {
+            **ticket_info,
+            "principal": _principal_from_identity(ticket_info),
+        }
+    except TicketInvalid:
+        await ws.close(code=4401, reason="browser ticket invalid")
+        return
+
+    manager = get_browser_transport_manager(ws.app)
+    try:
+        context = manager.new_browser_context(transport=ws, ticket=ticket_info)
+    except BrowserProtocolError:
+        await ws.close(code=4401, reason="browser ticket claims invalid")
+        return
+
+    await ws.accept()
+    try:
+        negotiation_deadline = asyncio.get_running_loop().time() + 10.0
+        try:
+            raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+            validate_application_message_size(raw)
+            hello = json.loads(raw)
+        except BrowserProtocolError as error:
+            await ws.send_json(error.outcome())
+            await ws.close(code=1009, reason=error.code)
+            return
+        except (asyncio.TimeoutError, json.JSONDecodeError, KeyError, RuntimeError, TypeError):
+            error = BrowserProtocolError("browser_invalid_hello", "valid hello required within 10s")
+            await ws.send_json(error.outcome())
+            await ws.close(code=4400, reason=error.code)
+            return
+
+        try:
+            _require_browser_gateway_profile(ws.app, context.ticket_profile)
+            manager.validate_hello_claims(context, hello)
+            await manager.wait_for_chat(
+                context,
+                timeout=negotiation_deadline - asyncio.get_running_loop().time(),
+            )
+            outcome = manager.negotiate(
+                context,
+                hello,
+                server_enabled=_browser_in_app_enabled(ws.app),
+            )
+        except BrowserProtocolError as exc:
+            await ws.send_json(exc.outcome(generation=context.capability_generation))
+            await ws.close(code=4409, reason=exc.code)
+            return
+        await ws.send_json(outcome)
+        if outcome["status"] != "ready":
+            await ws.close(code=4409, reason=outcome["status"])
+            return
+
+        async def pump_outbound() -> None:
+            # Serve at most one frame per live relay in a pass. Relay-local FIFO
+            # is preserved by ``write_next``, while a producer that continuously
+            # refills one relay can no longer monopolize the browser connection
+            # and starve sibling tabs/tasks or inbound lifecycle frames.
+            for relay in tuple(context.relays):
+                if relay.state == "closed":
+                    continue
+
+                async def writer(serialized: bytes, *, _relay=relay) -> bool:
+                    await ws.send_json(
+                        manager.outbound_envelope_for_serialized(_relay, serialized)
+                    )
+                    return True
+
+                try:
+                    await manager.write_next(relay, writer)
+                except BrowserProtocolError:
+                    continue
+
+        async def expire_deadlines() -> None:
+            for operation in manager.due_operations(context):
+                relay = operation.relay
+
+                async def writer(serialized: bytes, *, _relay=relay) -> bool:
+                    await ws.send_json(
+                        manager.outbound_envelope_for_serialized(_relay, serialized)
+                    )
+                    return True
+
+                await manager.timeout_operation(operation, writer=writer)
+
+        while True:
+            # Re-read config while quiet so Studio disable is an immediate
+            # transition, not something delayed until the next browser frame.
+            if not _browser_in_app_enabled(ws.app):
+                await manager.disable(profile=context.ticket_profile)
+                return
+            await expire_deadlines()
+            await pump_outbound()
+            try:
+                raw = await asyncio.wait_for(ws.receive_text(), timeout=0.025)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                validate_application_message_size(raw)
+            except BrowserProtocolError as error:
+                await ws.send_json(error.outcome(generation=context.capability_generation))
+                await ws.close(code=1009, reason=error.code)
+                return
+            message = json.loads(raw)
+            if isinstance(message, dict) and message.get("type") == "client.hello":
+                manager.close_context_adapters(context, status="browser_stale_generation")
+                outcome = manager.negotiate(
+                    context,
+                    message,
+                    server_enabled=_browser_in_app_enabled(ws.app),
+                )
+                await ws.send_json(outcome)
+                if outcome["status"] != "ready":
+                    await ws.close(code=4409, reason=outcome["status"])
+                    return
+                continue
+            if isinstance(message, dict) and message.get("type") == "client.task.bind":
+                try:
+                    adapter = manager.bind_tool_adapter(
+                        context,
+                        chat_transport=manager.chat_transport_for(context),
+                        task_id=message.get("task_id"),
+                        tab_id=message.get("tab_id"),
+                        guest_generation=message.get("guest_generation"),
+                        task_generation=message.get("task_generation"),
+                    )
+                except BrowserProtocolError as error:
+                    await ws.send_json(error.outcome(generation=context.capability_generation))
+                    continue
+                await ws.send_json(
+                    {
+                        "type": "server.task.bound",
+                        "task_id": adapter.binding.task_id,
+                        "tab_id": adapter.binding.tab_id,
+                        "guest_generation": adapter.binding.guest_generation,
+                        "task_generation": adapter.binding.task_generation,
+                    }
+                )
+                continue
+            if isinstance(message, dict) and message.get("type") == "client.task.unbind":
+                closed = manager.unbind_tool_adapter(
+                    context,
+                    task_id=message.get("task_id"),
+                    tab_id=message.get("tab_id"),
+                    guest_generation=message.get("guest_generation"),
+                    task_generation=message.get("task_generation"),
+                )
+                await ws.send_json(
+                    {
+                        "type": "server.task.unbound",
+                        "task_id": message.get("task_id"),
+                        "tab_id": message.get("tab_id"),
+                        "guest_generation": message.get("guest_generation"),
+                        "task_generation": message.get("task_generation"),
+                        "closed": closed,
+                    }
+                )
+                continue
+            if isinstance(message, dict) and message.get("type") == "client.disable":
+                await manager.disable_context(context)
+                return
+            if isinstance(message, dict) and message.get("type") == "browser.cdp.frame":
+                try:
+                    manager.accept_inbound_frame(
+                        context,
+                        message,
+                        chat_transport=manager.chat_transport_for(context),
+                    )
+                except BrowserProtocolError as error:
+                    await ws.send_json(error.outcome(generation=context.capability_generation))
+                continue
+            error = BrowserProtocolError("browser_invalid_frame", "unsupported browser transport frame")
+            await ws.send_json(error.outcome(generation=context.capability_generation))
+    except (WebSocketDisconnect, json.JSONDecodeError, KeyError, RuntimeError, TypeError):
+        pass
+    finally:
+        manager.disconnect(context)
+
+
 @app.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         await ws.close(code=4403)
         return
 
-    if not _ws_auth_ok(ws):
+    auth_reason, _credential, identity = _ws_auth_context(ws)
+    if auth_reason is not None or identity is None:
         await ws.close(code=4401)
         return
 
@@ -18241,9 +19718,50 @@ async def gateway_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
 
-    from tui_gateway.ws import handle_ws
+    from tui_gateway.ws import WSTransport, handle_ws
+    from hermes_cli.browser_transport import (
+        BrowserProtocolError,
+        get_browser_transport_manager,
+    )
 
-    await handle_ws(ws)
+    manager = get_browser_transport_manager(ws.app)
+    # Construct the exact chat WSTransport before registration so the
+    # credential-derived identity and association are attached to the same
+    # object that owns every chat session. handle_ws accepts this prebuilt
+    # transport and retains its normal accept/dispatch/teardown lifecycle.
+    chat_transport = WSTransport(
+        ws,
+        asyncio.get_running_loop(),
+        peer=(ws.client.host if ws.client else "unknown"),
+        identity=identity,
+    )
+    associated = False
+    connection_id = ws.query_params.get("connection_id", "")
+    profile = ws.query_params.get("profile", "")
+    if connection_id or profile:
+        try:
+            if not connection_id or not profile:
+                raise BrowserProtocolError(
+                    "browser_invalid_association", "connection_id and profile must be paired"
+                )
+            asserted_profile = _require_browser_gateway_profile(ws.app, profile)
+            manager.register_chat(
+                transport=chat_transport,
+                principal=identity["principal"],
+                profile=asserted_profile,
+                connection_id=connection_id,
+            )
+            associated = True
+        except BrowserProtocolError as exc:
+            code = 4409 if exc.code == "browser_wrong_profile" else 4400
+            await ws.close(code=code, reason=exc.code)
+            return
+
+    try:
+        await handle_ws(ws, transport=chat_transport)
+    finally:
+        if associated:
+            manager.unregister_chat(chat_transport)
 
 
 # ---------------------------------------------------------------------------
@@ -19878,6 +21396,8 @@ def start_server(
     # ping at 20/20 to detect it promptly and stay under the tunnel's idle
     # window.
     _is_loopback = host in ("127.0.0.1", "localhost", "::1")
+    from hermes_cli.browser_transport import WEBSOCKET_MAX_MESSAGE_BYTES
+
     config = uvicorn.Config(
         app, host=host, port=port, log_level="warning",
         # proxy_headers defaults to False so _ws_client_is_allowed sees
@@ -19894,6 +21414,10 @@ def start_server(
         # reaped via the WebSocketDisconnect → disconnect/reap path.
         ws_ping_interval=None if _is_loopback else 20.0,
         ws_ping_timeout=None if _is_loopback else 20.0,
+        # One server/listener still serves every route. Browser traffic has its
+        # own socket, while this server-wide ceiling leaves headroom above the
+        # later relay's 50 MiB application cap.
+        ws_max_size=WEBSOCKET_MAX_MESSAGE_BYTES,
     )
     server = uvicorn.Server(config)
 

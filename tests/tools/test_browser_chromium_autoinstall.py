@@ -60,7 +60,7 @@ class TestInstall:
     def test_npx_form_is_binary_only(self, monkeypatch):
         monkeypatch.setattr(bt, "_running_in_docker", lambda: False)
         monkeypatch.setattr("tools.lazy_deps._allow_lazy_installs", lambda: True)
-        monkeypatch.setattr(bt, "_find_agent_browser", lambda: "npx agent-browser")
+        monkeypatch.setattr(bt, "_find_agent_browser", lambda: "npx -y agent-browser@0.32.0")
         monkeypatch.setattr(bt, "_build_browser_env", lambda: {})
         monkeypatch.setattr(bt, "_chromium_installed", lambda: True)
         monkeypatch.setattr(bt.shutil, "which", lambda _: "/usr/bin/npx")
@@ -72,7 +72,7 @@ class TestInstall:
         )
 
         assert bt._maybe_autoinstall_chromium() is True
-        assert captured["cmd"] == ["/usr/bin/npx", "-y", "agent-browser", "install"]
+        assert captured["cmd"] == ["/usr/bin/npx", "-y", "agent-browser@0.32.0", "install"]
         assert "--with-deps" not in captured["cmd"]
 
     def test_nonzero_exit_returns_false(self, monkeypatch):

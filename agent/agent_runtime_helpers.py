@@ -2530,7 +2530,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     try:
         from hermes_cli.middleware import apply_tool_request_middleware
 
-        if not skip_tool_request_middleware:
+        if not skip_tool_request_middleware and not getattr(agent, "_annotation_isolated", False):
             _tool_request_mw = apply_tool_request_middleware(
                 function_name,
                 function_args,
@@ -2547,7 +2547,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
 
     # Check plugin hooks for a block or approval directive before executing.
     block_message: Optional[str] = None
-    if not pre_tool_block_checked:
+    if not pre_tool_block_checked and not getattr(agent, "_annotation_isolated", False):
         try:
             from hermes_cli.plugins import resolve_pre_tool_block
             block_message = resolve_pre_tool_block(
@@ -2587,6 +2587,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     tool_start_time = time.monotonic()
 
     def _finish_agent_tool(result: Any, observed_args: Optional[dict] = None) -> Any:
+        if getattr(agent, "_annotation_isolated", False):
+            return result
         hook_args = observed_args if isinstance(observed_args, dict) else function_args
         try:
             from model_tools import _emit_post_tool_call_hook
@@ -2697,19 +2699,26 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             return _finish_agent_tool(agent._dispatch_delegate_task(next_args), next_args)
     else:
         def _execute(next_args: dict) -> Any:
+            dispatch_kwargs = {
+                "tool_call_id": tool_call_id,
+                "session_id": agent.session_id or "",
+                "turn_id": getattr(agent, "_current_turn_id", "") or "",
+                "api_request_id": getattr(agent, "_current_api_request_id", "") or "",
+                "enabled_tools": list(agent.valid_tool_names) if agent.valid_tool_names else None,
+                "skip_pre_tool_call_hook": True,
+                "skip_tool_request_middleware": True,
+                "enabled_toolsets": getattr(agent, "enabled_toolsets", None),
+                "disabled_toolsets": getattr(agent, "disabled_toolsets", None),
+                "tool_request_middleware_trace": list(_tool_middleware_trace),
+            }
+            if getattr(agent, "_annotation_isolated", False):
+                dispatch_kwargs["annotation_isolated"] = True
             return _ra().handle_function_call(
-                function_name, next_args, effective_task_id,
-                tool_call_id=tool_call_id,
-                session_id=agent.session_id or "",
-                turn_id=getattr(agent, "_current_turn_id", "") or "",
-                api_request_id=getattr(agent, "_current_api_request_id", "") or "",
-                enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-                skip_pre_tool_call_hook=True,
-                skip_tool_request_middleware=True,
-                enabled_toolsets=getattr(agent, "enabled_toolsets", None),
-                disabled_toolsets=getattr(agent, "disabled_toolsets", None),
-                tool_request_middleware_trace=list(_tool_middleware_trace),
+                function_name, next_args, effective_task_id, **dispatch_kwargs
             )
+
+    if getattr(agent, "_annotation_isolated", False):
+        return _execute(function_args)
 
     from hermes_cli.middleware import run_tool_execution_middleware
 

@@ -29,7 +29,7 @@ import json
 import logging
 import socket
 import threading
-from typing import Any
+from typing import Any, Mapping
 
 from tui_gateway import server
 
@@ -89,10 +89,13 @@ class WSTransport:
         loop: asyncio.AbstractEventLoop,
         *,
         peer: str = "unknown",
+        identity: Mapping[str, Any] | None = None,
     ) -> None:
         self._ws = ws
         self._loop = loop
         self._peer = peer
+        self.identity = dict(identity or {})
+        self.principal = str(self.identity.get("principal") or "")
         self._closed = False
         # Token-coalescing buffer (CF-2). Streamed token frames land here and a
         # short timer flushes the batch. The lock guards the buffer + the
@@ -280,10 +283,10 @@ def _disable_nagle(ws: Any) -> None:
         _log.debug("ws TCP_NODELAY skip: %s", exc)
 
 
-async def handle_ws(ws: Any) -> None:
+async def handle_ws(ws: Any, *, transport: WSTransport | None = None) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``."""
     peer = _ws_peer_label(ws)
-    transport: WSTransport | None = None
+    active_transport = transport
     messages = 0
     parse_errors = 0
     dispatch_crashes = 0
@@ -298,7 +301,8 @@ async def handle_ws(ws: Any) -> None:
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
 
-        transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer)
+        if active_transport is None:
+            active_transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer)
 
         # The desktop app and dashboard chat reach the agent through this WS
         # sidecar, NOT through tui_gateway.entry.main() (the stdio TUI path that
@@ -316,7 +320,7 @@ async def handle_ws(ws: Any) -> None:
             thread_name="tui-ws-mcp-discovery",
         )
 
-        ready_ok = await transport.write_async(
+        ready_ok = await active_transport.write_async(
             {
                 "jsonrpc": "2.0",
                 "method": "event",
@@ -363,7 +367,7 @@ async def handle_ws(ws: Any) -> None:
                     exc,
                     line[:_WS_LOG_PAYLOAD_PREVIEW],
                 )
-                ok = await transport.write_async(
+                ok = await active_transport.write_async(
                     {
                         "jsonrpc": "2.0",
                         "error": {"code": -32700, "message": "parse error"},
@@ -385,7 +389,7 @@ async def handle_ws(ws: Any) -> None:
             req_id = req.get("id") if isinstance(req, dict) else None
             req_method = req.get("method") if isinstance(req, dict) else None
             try:
-                resp = await asyncio.to_thread(server.dispatch, req, transport)
+                resp = await asyncio.to_thread(server.dispatch, req, active_transport)
             except Exception:
                 dispatch_crashes += 1
                 _log.exception(
@@ -394,7 +398,7 @@ async def handle_ws(ws: Any) -> None:
                     req_id,
                     req_method,
                 )
-                ok = await transport.write_async(
+                ok = await active_transport.write_async(
                     {
                         "jsonrpc": "2.0",
                         "error": {"code": -32603, "message": "internal error"},
@@ -412,7 +416,7 @@ async def handle_ws(ws: Any) -> None:
                     )
                     break
                 continue
-            if resp is not None and not await transport.write_async(resp):
+            if resp is not None and not await active_transport.write_async(resp):
                 disconnect_reason = "send_failed_after_response"
                 send_failures += 1
                 _log.warning(
@@ -425,8 +429,8 @@ async def handle_ws(ws: Any) -> None:
     finally:
         reaped_sessions = 0
         detached_sessions = 0
-        if transport is not None:
-            transport.close()
+        if active_transport is not None:
+            active_transport.close()
 
             # Reap sessions this transport owned (close_on_disconnect sidecar
             # sessions) or detach the rest to the drop sentinel so later emits
@@ -443,7 +447,7 @@ async def handle_ws(ws: Any) -> None:
             try:
                 reaped_sessions, detached_sessions = await asyncio.to_thread(
                     server._close_sessions_for_transport,
-                    transport,
+                    active_transport,
                     end_reason="ws_disconnect",
                 )
             except Exception:

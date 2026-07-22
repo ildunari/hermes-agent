@@ -16,6 +16,7 @@ resolved through :func:`_ra` so those patches keep working.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -487,16 +488,17 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # Plugin hook: on_session_start — fired once when a brand-new
     # session is created (not on continuation).  Plugins can use this
     # to initialise session-scoped state (e.g. warm a memory cache).
-    try:
-        from hermes_cli.plugins import invoke_hook as _invoke_hook
-        _invoke_hook(
-            "on_session_start",
-            session_id=agent.session_id,
-            model=agent.model,
-            platform=getattr(agent, "platform", None) or "",
-        )
-    except Exception as exc:
-        logger.warning("on_session_start hook failed: %s", exc)
+    if not getattr(agent, "_annotation_isolated", False):
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _invoke_hook(
+                "on_session_start",
+                session_id=agent.session_id,
+                model=agent.model,
+                platform=getattr(agent, "platform", None) or "",
+            )
+        except Exception as exc:
+            logger.warning("on_session_start hook failed: %s", exc)
 
     # Cold-start credits seed (L3) — fallback for the first-turn path. The TUI/
     # desktop build seeds at session OPEN (see seed_credits_at_session_start in
@@ -504,12 +506,13 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # _credits_state already exists). For the plain CLI / any path that didn't seed
     # at build, it primes credits state from /api/oauth/account (or a fixture) on the
     # first turn so depletion / usage-band warnings fire. Fail-open inside the helper.
-    try:
-        from agent.credits_tracker import seed_credits_at_session_start
+    if not getattr(agent, "_annotation_isolated", False):
+        try:
+            from agent.credits_tracker import seed_credits_at_session_start
 
-        seed_credits_at_session_start(agent)
-    except Exception:
-        logger.debug("cold-start credits seed failed (fail-open)", exc_info=True)
+            seed_credits_at_session_start(agent)
+        except Exception:
+            logger.debug("cold-start credits seed failed (fail-open)", exc_info=True)
 
     # Persist the system prompt snapshot in SQLite.  Failure here used
     # to log at DEBUG, which silently broke prefix-cache reuse on the
@@ -1399,6 +1402,17 @@ def run_conversation(
                 # unless the active provider needs it) so the fallback request
                 # isn't sent with stale, primary-shaped reasoning fields.
                 agent._reapply_reasoning_echo_for_provider(api_messages)
+                if getattr(agent, "_annotation_isolated", False):
+                    # The annotation worker authenticates this provider-neutral
+                    # request against its successful response/tool ledger at
+                    # the final network boundary. No request middleware runs
+                    # between this snapshot and provider conversion.
+                    agent._annotation_canonical_request_messages = copy.deepcopy(
+                        api_messages
+                    )
+                    agent._annotation_canonical_request_tools = copy.deepcopy(
+                        agent.tools or []
+                    )
                 api_kwargs = agent._build_api_kwargs(api_messages)
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)
@@ -1416,35 +1430,50 @@ def run_conversation(
                     _xh["x-initiator"] = "user"
                     api_kwargs["extra_headers"] = _xh
                     agent._is_user_initiated_turn = False
-                try:
-                    from hermes_cli.middleware import apply_llm_request_middleware
-
-                    _llm_request_mw = apply_llm_request_middleware(
-                        api_kwargs,
-                        task_id=effective_task_id,
-                        turn_id=turn_id,
-                        api_request_id=api_request_id,
-                        session_id=agent.session_id or "",
-                        platform=agent.platform or "",
-                        model=agent.model,
-                        provider=agent.provider,
-                        base_url=agent.base_url,
-                        api_mode=agent.api_mode,
-                        api_call_count=api_call_count,
+                if getattr(agent, "_annotation_isolated", False):
+                    # Freeze the exact provider-native payload after all core
+                    # conversion/preflight/header shaping. The worker compares
+                    # the object received at the network callback to this copy,
+                    # so a wire-only mutation cannot hide behind an unchanged
+                    # provider-neutral ledger.
+                    agent._annotation_wire_request_snapshot = copy.deepcopy(
+                        api_kwargs
                     )
-                    api_kwargs = _llm_request_mw.payload
-                    _original_api_kwargs = _llm_request_mw.original_payload
-                    _llm_middleware_trace = _llm_request_mw.trace
-                except Exception:
                     _original_api_kwargs = dict(api_kwargs)
                     _llm_middleware_trace = []
+                else:
+                    try:
+                        from hermes_cli.middleware import apply_llm_request_middleware
+
+                        _llm_request_mw = apply_llm_request_middleware(
+                            api_kwargs,
+                            task_id=effective_task_id,
+                            turn_id=turn_id,
+                            api_request_id=api_request_id,
+                            session_id=agent.session_id or "",
+                            platform=agent.platform or "",
+                            model=agent.model,
+                            provider=agent.provider,
+                            base_url=agent.base_url,
+                            api_mode=agent.api_mode,
+                            api_call_count=api_call_count,
+                        )
+                        api_kwargs = _llm_request_mw.payload
+                        _original_api_kwargs = _llm_request_mw.original_payload
+                        _llm_middleware_trace = _llm_request_mw.trace
+                    except Exception:
+                        _original_api_kwargs = dict(api_kwargs)
+                        _llm_middleware_trace = []
 
                 try:
                     from hermes_cli.plugins import (
                         has_hook,
                         invoke_hook as _invoke_hook,
                     )
-                    if has_hook("pre_api_request"):
+                    if (
+                        not getattr(agent, "_annotation_isolated", False)
+                        and has_hook("pre_api_request")
+                    ):
                         request_messages = api_kwargs.get("messages")
                         if not isinstance(request_messages, list):
                             request_messages = api_kwargs.get("input")
@@ -1496,7 +1525,10 @@ def run_conversation(
                 except Exception:
                     pass
 
-                if env_var_enabled("HERMES_DUMP_REQUESTS"):
+                if (
+                    env_var_enabled("HERMES_DUMP_REQUESTS")
+                    and not getattr(agent, "_annotation_isolated", False)
+                ):
                     agent._dump_api_request_debug(api_kwargs, reason="preflight")
 
                 # Always prefer the streaming path — even without stream
@@ -1560,30 +1592,38 @@ def run_conversation(
                             allow_stream=False,
                             is_github_responses=agent._is_copilot_url(),
                         )
+                    before_dispatch = getattr(
+                        agent, "pre_provider_dispatch_callback", None
+                    )
+                    if before_dispatch is not None:
+                        before_dispatch(next_api_kwargs)
                     if _use_streaming:
                         return agent._interruptible_streaming_api_call(
                             next_api_kwargs, on_first_delta=_stop_spinner
                         )
                     return agent._interruptible_api_call(next_api_kwargs)
 
-                from hermes_cli.middleware import run_llm_execution_middleware
+                if getattr(agent, "_annotation_isolated", False):
+                    response = _perform_api_call(api_kwargs)
+                else:
+                    from hermes_cli.middleware import run_llm_execution_middleware
 
-                response = run_llm_execution_middleware(
-                    api_kwargs,
-                    _perform_api_call,
-                    original_request=_original_api_kwargs,
-                    task_id=effective_task_id,
-                    turn_id=turn_id,
-                    api_request_id=api_request_id,
-                    session_id=agent.session_id or "",
-                    platform=agent.platform or "",
-                    model=agent.model,
-                    provider=agent.provider,
-                    base_url=agent.base_url,
-                    api_mode=agent.api_mode,
-                    api_call_count=api_call_count,
-                    middleware_trace=list(_llm_middleware_trace),
-                )
+                    response = run_llm_execution_middleware(
+                        api_kwargs,
+                        _perform_api_call,
+                        original_request=_original_api_kwargs,
+                        task_id=effective_task_id,
+                        turn_id=turn_id,
+                        api_request_id=api_request_id,
+                        session_id=agent.session_id or "",
+                        platform=agent.platform or "",
+                        model=agent.model,
+                        provider=agent.provider,
+                        base_url=agent.base_url,
+                        api_mode=agent.api_mode,
+                        api_call_count=api_call_count,
+                        middleware_trace=list(_llm_middleware_trace),
+                    )
                 
                 api_duration = time.time() - api_start_time
                 
@@ -2617,6 +2657,21 @@ def run_conversation(
                     thinking_spinner = None
                 if agent.thinking_callback:
                     agent.thinking_callback("")
+
+                if getattr(agent, "_annotation_isolated", False):
+                    # Dedicated annotation dispatch is one-shot. Once the
+                    # exact provider boundary has been crossed, any exception
+                    # is outcome-uncertain: do not refresh credentials, mutate
+                    # payloads, compress, fall back, or enter transport retry.
+                    return {
+                        "final_response": "Annotation provider request failed.",
+                        "messages": messages,
+                        "api_calls": api_call_count,
+                        "completed": False,
+                        "failed": True,
+                        "error": "annotation_provider_error",
+                        "failure_reason": "provider_error",
+                    }
 
                 # -----------------------------------------------------------
                 # UnicodeEncodeError recovery.  Two common causes:
@@ -4648,12 +4703,36 @@ def run_conversation(
                 else:
                     assistant_message.content = str(raw)
 
+            if getattr(agent, "_annotation_isolated", False):
+                response_callback = getattr(
+                    agent, "_annotation_provider_response_callback", None
+                )
+                if response_callback is not None:
+                    response_callback(
+                        agent._build_assistant_message(
+                            assistant_message, finish_reason
+                        )
+                    )
+                agent._annotation_provider_rounds_completed = (
+                    int(
+                        getattr(
+                            agent,
+                            "_annotation_provider_rounds_completed",
+                            0,
+                        )
+                    )
+                    + 1
+                )
+
             try:
                 from hermes_cli.plugins import (
                     has_hook,
                     invoke_hook as _invoke_hook,
                 )
-                if has_hook("post_api_request"):
+                if (
+                    not getattr(agent, "_annotation_isolated", False)
+                    and has_hook("post_api_request")
+                ):
                     _assistant_tool_calls = (
                         getattr(assistant_message, "tool_calls", None) or []
                     )
@@ -4895,16 +4974,26 @@ def run_conversation(
                 # Repair mismatched tool names before validating
                 from agent.request_scoped_tools import get_effective_tool_names
                 _effective_tool_names = get_effective_tool_names(agent)
-                for tc in assistant_message.tool_calls:
-                    if tc.function.name not in _effective_tool_names:
-                        repaired = agent._repair_tool_call(tc.function.name)
-                        if repaired:
-                            print(f"{agent.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'")
-                            tc.function.name = repaired
+                if not getattr(agent, "_annotation_isolated", False):
+                    for tc in assistant_message.tool_calls:
+                        if tc.function.name not in _effective_tool_names:
+                            repaired = agent._repair_tool_call(tc.function.name)
+                            if repaired:
+                                print(f"{agent.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'")
+                                tc.function.name = repaired
                 invalid_tool_calls = [
                     tc.function.name for tc in assistant_message.tool_calls
                     if tc.function.name not in _effective_tool_names
                 ]
+                if invalid_tool_calls and getattr(agent, "_annotation_isolated", False):
+                    return {
+                        "final_response": "Annotation provider returned an invalid tool call.",
+                        "messages": messages,
+                        "api_calls": api_call_count,
+                        "completed": False,
+                        "failed": True,
+                        "error": "annotation_invalid_tool_call",
+                    }
                 # Mixed batch: at least one valid call alongside the invalid
                 # one(s). Degrading models (observed with gpt-5.6 at very
                 # large context) emit batches like 6 named calls + 1
@@ -5007,6 +5096,15 @@ def run_conversation(
                         invalid_json_args.append((tc.function.name, str(e)))
                 
                 if invalid_json_args:
+                    if getattr(agent, "_annotation_isolated", False):
+                        return {
+                            "final_response": "Annotation provider returned invalid tool arguments.",
+                            "messages": messages,
+                            "api_calls": api_call_count,
+                            "completed": False,
+                            "failed": True,
+                            "error": "annotation_invalid_tool_arguments",
+                        }
                     # Check if the invalid JSON is due to truncation rather
                     # than a model formatting mistake.  Routers sometimes
                     # rewrite finish_reason from "length" to "tool_calls",
@@ -5080,12 +5178,13 @@ def run_conversation(
                 agent._invalid_json_retries = 0
 
                 # ── Post-call guardrails ──────────────────────────
-                assistant_message.tool_calls = agent._cap_delegate_task_calls(
-                    assistant_message.tool_calls
-                )
-                assistant_message.tool_calls = agent._deduplicate_tool_calls(
-                    assistant_message.tool_calls
-                )
+                if not getattr(agent, "_annotation_isolated", False):
+                    assistant_message.tool_calls = agent._cap_delegate_task_calls(
+                        assistant_message.tool_calls
+                    )
+                    assistant_message.tool_calls = agent._deduplicate_tool_calls(
+                        assistant_message.tool_calls
+                    )
 
                 # Mixed-batch invalid-name handling: collect the invalid
                 # calls now so the assistant message (built below) keeps
@@ -5238,6 +5337,18 @@ def run_conversation(
                         pass
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+
+                if getattr(agent, "_annotation_isolated", False):
+                    round_callback = getattr(
+                        agent, "_annotation_tool_round_callback", None
+                    )
+                    if round_callback is not None:
+                        round_callback(
+                            assistant_msg,
+                            copy.deepcopy(
+                                messages[-len(assistant_message.tool_calls) :]
+                            ),
+                        )
 
                 if agent._tool_guardrail_halt_decision is not None:
                     decision = agent._tool_guardrail_halt_decision
@@ -5754,7 +5865,12 @@ def run_conversation(
                     from agent.verify_hooks import max_verify_nudges
                     from hermes_cli.plugins import get_pre_verify_continue_message, has_hook
 
-                    if _edited and has_hook("pre_verify") and _attempt < max_verify_nudges():
+                    if (
+                        _edited
+                        and not getattr(agent, "_annotation_isolated", False)
+                        and has_hook("pre_verify")
+                        and _attempt < max_verify_nudges()
+                    ):
                         # Posture is fixed for the session — resolve once + cache.
                         coding = getattr(agent, "_resolved_is_coding", None)
                         if coding is None:

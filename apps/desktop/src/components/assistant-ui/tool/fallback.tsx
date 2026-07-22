@@ -201,6 +201,7 @@ function SearchResultsList({ hits }: { hits: SearchResultRow[] }) {
                 className={cn(TOOL_HEADER_TITLE_CLASS, 'block max-w-full')}
                 fallbackLabel={trimmedTitle || urlSlugTitleLabel(hit.url)}
                 href={hit.url}
+                inAppBrowser
                 label={trimmedTitle || undefined}
               />
             ) : (
@@ -215,7 +216,7 @@ function SearchResultsList({ hits }: { hits: SearchResultRow[] }) {
 }
 
 function LinkifiedText({ className, text }: { className?: string; text: string }) {
-  return <SharedLinkifiedText className={className} pretty text={cleanVisibleText(text)} />
+  return <SharedLinkifiedText className={className} inAppBrowser pretty text={cleanVisibleText(text)} />
 }
 
 function ToolTitle({

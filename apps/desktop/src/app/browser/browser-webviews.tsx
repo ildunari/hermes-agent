@@ -8,6 +8,8 @@ import { completeExplicitBrowserResourceIntent, failExplicitBrowserResourceInten
 import { browserPartitionForProfile } from './browser-partition'
 import { BrowserPersistenceCoordinator } from './browser-persistence'
 import {
+  $browserPaneGeometry,
+  $browserPaneOpen,
   $browserTabs,
   $foregroundBrowserTabId,
   $taskTabBindings,
@@ -23,7 +25,52 @@ import { hydrateBrowserTimeline } from './browser-supervision'
 import { completeBrowserHandBack, isBrowserHandBackPending } from './browser-supervision'
 
 type BrowserWebviewElement = HTMLElement & {
+  canGoBack?: () => boolean
+  canGoForward?: () => boolean
   getURL?: () => string
+  goBack?: () => void
+  goForward?: () => void
+  reload?: () => void
+}
+
+export type BrowserNavigationAction = 'back' | 'forward' | 'reload'
+
+export function runBrowserNavigation(tabId: BrowserTab['id'], action: BrowserNavigationAction): boolean {
+  const webview = Array.from(document.querySelectorAll<BrowserWebviewElement>('[data-browser-tab-id]')).find(
+    candidate => candidate.dataset.browserTabId === tabId
+  )
+
+  if (!webview) {
+    return false
+  }
+
+  if (action === 'back') {
+    if (webview.canGoBack?.() === false || !webview.goBack) {
+      return false
+    }
+
+    webview.goBack()
+
+    return true
+  }
+
+  if (action === 'forward') {
+    if (webview.canGoForward?.() === false || !webview.goForward) {
+      return false
+    }
+
+    webview.goForward()
+
+    return true
+  }
+
+  if (!webview.reload) {
+    return false
+  }
+
+  webview.reload()
+
+  return true
 }
 
 interface BrowserWebviewProps {
@@ -119,8 +166,11 @@ function BrowserWebview({ foreground, tab }: BrowserWebviewProps) {
         }
 
         reconstructionRequested = true
-        if (reason === 'profile-deleted' || reason === 'workspace-reset') {closeBrowserTab(tab.id)}
-        else {reconstructBrowserTab(tab.id)}
+        if (reason === 'profile-deleted' || reason === 'workspace-reset') {
+          closeBrowserTab(tab.id)
+        } else {
+          reconstructBrowserTab(tab.id)
+        }
       }
 
       const offRetired = window.hermesDesktop.browserGuest.onRetired(event => {
@@ -141,7 +191,9 @@ function BrowserWebview({ foreground, tab }: BrowserWebviewProps) {
 
       const onTitle = (event: Event) => {
         const title = (event as Event & { title?: string }).title
-        if (typeof title === 'string') {setBrowserTabTitle(tab.id, title)}
+        if (typeof title === 'string') {
+          setBrowserTabTitle(tab.id, title)
+        }
       }
 
       const onGuestFailure: EventListener = () => onGuestRetired()
@@ -180,7 +232,9 @@ function BrowserWebview({ foreground, tab }: BrowserWebviewProps) {
 
         if (!minted.ok || !minted.guestUrl || disposed) {
           cleanupMountListeners()
-          if (!disposed) {failExplicitBrowserResourceIntent(tab, 'resource-grant-failed')}
+          if (!disposed) {
+            failExplicitBrowserResourceIntent(tab, 'resource-grant-failed')
+          }
 
           return
         }
@@ -269,13 +323,14 @@ function BrowserWebview({ foreground, tab }: BrowserWebviewProps) {
       generationRef.current = null
       const automation = automationBindingRef.current
       automationBindingRef.current = null
+      const browserGuest = window.hermesDesktop?.browserGuest
 
-      if (automation) {
-        void window.hermesDesktop.browserGuest.unbindAutomation({ ...automation, tabId: tab.id })
+      if (automation && browserGuest) {
+        void browserGuest.unbindAutomation({ ...automation, tabId: tab.id })
       }
 
-      if (generation) {
-        void window.hermesDesktop.browserGuest.release({ generation, tabId: tab.id })
+      if (generation && browserGuest) {
+        void browserGuest.release({ generation, tabId: tab.id })
       }
     }
   }, [tab.id, tab.private, tab.privatePartition, tab.profile, tab.surfaceEpoch, tab.workspaceId])
@@ -286,9 +341,7 @@ function BrowserWebview({ foreground, tab }: BrowserWebviewProps) {
 
     if (
       previous &&
-      (!taskBinding ||
-        previous.taskId !== taskBinding.taskId ||
-        previous.taskGeneration !== taskBinding.generation)
+      (!taskBinding || previous.taskId !== taskBinding.taskId || previous.taskGeneration !== taskBinding.generation)
     ) {
       automationBindingRef.current = null
       void window.hermesDesktop.browserGuest.unbindAutomation({ ...previous, tabId: tab.id })
@@ -368,6 +421,9 @@ function BrowserWebview({ foreground, tab }: BrowserWebviewProps) {
 export function BrowserWebviewLayer() {
   const tabs = useStore($browserTabs)
   const foregroundTabId = useStore($foregroundBrowserTabId)
+  const paneGeometry = useStore($browserPaneGeometry)
+  const paneOpen = useStore($browserPaneOpen)
+  const paneVisible = paneOpen && paneGeometry.width > 0 && paneGeometry.height > 0
 
   return (
     <>
@@ -375,7 +431,7 @@ export function BrowserWebviewLayer() {
       {tabs.length > 0 && (
         <div className="pointer-events-none absolute inset-0 z-10" data-browser-webview-layer>
           {tabs.map(tab => (
-            <BrowserWebview foreground={tab.id === foregroundTabId} key={tab.id} tab={tab} />
+            <BrowserWebview foreground={paneVisible && tab.id === foregroundTabId} key={tab.id} tab={tab} />
           ))}
         </div>
       )}

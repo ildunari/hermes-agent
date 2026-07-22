@@ -38,7 +38,7 @@
     "@message-ui/components": "^0.1.0",
     "@message-ui/render": "^0.1.0",
     "@streamdown/math": "^1.0.2",
-    "agent-browser": "^0.26.0",
+    "agent-browser": "0.32.0",
     "react": "^19.2.6"
   },
   "overrides": {
@@ -46,6 +46,6 @@
     "yauzl": "^3.3.1"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=24.0.0"
   }
 }

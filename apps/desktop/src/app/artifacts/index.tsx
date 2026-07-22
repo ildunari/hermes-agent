@@ -2,6 +2,12 @@ import type * as React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
+import {
+  authorizeExplicitSystemPreviewIntent,
+  captureBrowserIntentScope,
+  openExplicitBrowserIntent,
+  openExplicitBrowserResourceIntent
+} from '@/app/browser/browser-intent-production'
 import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { PageLoader } from '@/components/page-loader'
 import { Button } from '@/components/ui/button'
@@ -21,7 +27,7 @@ import { getSessionMessages, listAllProfileSessions } from '@/hermes'
 import { type Translations, useI18n } from '@/i18n'
 import { ExternalLink, ExternalLinkIcon, hostPathLabel, urlSlugTitleLabel, useLinkTitle } from '@/lib/external-link'
 import { FileImage, FileText, FolderOpen, Link2, Loader2, RefreshCw } from '@/lib/icons'
-import { downloadGatewayMediaFile, isRemoteGateway } from '@/lib/media'
+import { isRemoteGateway } from '@/lib/media'
 import { normalize } from '@/lib/text'
 import { fmtDayTime } from '@/lib/time'
 import { cn } from '@/lib/utils'
@@ -83,7 +89,7 @@ function paginationItems(page: number, pageCount: number): Array<number | 'ellip
 }
 
 type CellCtx = {
-  onOpen: (href: string) => void | Promise<void>
+  onOpen: (artifact: ArtifactRecord) => void | Promise<void>
   onOpenChat: (sessionId: string) => void
 }
 
@@ -100,6 +106,45 @@ const itemsLabel = (f: ArtifactFilter, a: Translations['artifacts']) =>
 
 interface ArtifactsViewProps extends React.ComponentProps<'section'> {
   setStatusbarItemGroup?: SetStatusbarItemGroup
+}
+
+export async function openArtifactFromUserIntent(artifact: ArtifactRecord): Promise<void> {
+  const scopeSnapshot = captureBrowserIntentScope()
+  const remoteGatewayArtifact = isRemoteGateway() && !/^(?:https?|data):/i.test(artifact.value)
+  const localFileArtifact = /^file:/i.test(artifact.href)
+
+  if (remoteGatewayArtifact || localFileArtifact || artifact.kind === 'file') {
+    openExplicitBrowserResourceIntent({
+      kind: 'artifact',
+      scopeSnapshot,
+      sourceSessionId: artifact.sessionId,
+      target: artifact.value
+    })
+
+    return
+  }
+
+  if (/^https?:/i.test(artifact.href)) {
+    openExplicitBrowserIntent({
+      scopeSnapshot,
+      source: 'transcript-link',
+      targetRef: artifact.href
+    })
+
+    return
+  }
+
+  const resolution = authorizeExplicitSystemPreviewIntent(scopeSnapshot, artifact.href)
+
+  if (resolution.kind !== 'external-offer') {
+    return
+  }
+
+  if (!window.hermesDesktop?.openPreviewInBrowser) {
+    throw new Error('Preview browser capability is unavailable')
+  }
+
+  await window.hermesDesktop.openPreviewInBrowser(artifact.href)
 }
 
 export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, ...props }: ArtifactsViewProps) {
@@ -236,23 +281,9 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
   }, [artifacts])
 
   const openArtifact = useCallback(
-    async (href: string) => {
+    async (artifact: ArtifactRecord) => {
       try {
-        // A gateway-local file resolves to file:// in remote mode (the file
-        // lives on the gateway, not this disk). Opening that locally fails —
-        // and an OAuth remote connection has no query token to build a download
-        // URL. Fetch the bytes over the authenticated fs bridge instead.
-        if (isRemoteGateway() && /^file:/i.test(href)) {
-          await downloadGatewayMediaFile(href)
-
-          return
-        }
-
-        if (window.hermesDesktop?.openExternal) {
-          await window.hermesDesktop.openExternal(href)
-        } else {
-          window.open(href, '_blank', 'noopener,noreferrer')
-        }
+        await openArtifactFromUserIntent(artifact)
       } catch (err) {
         notifyError(err, a.openFailed)
       }
@@ -523,6 +554,7 @@ function ArtifactCellAction({
       <ExternalLink
         className="flex h-full w-full min-w-0 items-center gap-2 px-2.5 py-1.5 text-left text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) font-normal text-(--ui-text-secondary) no-underline underline-offset-4 decoration-current/20 transition-colors hover:text-foreground hover:underline"
         href={href}
+        inAppBrowser
         showExternalIcon={false}
         title={title}
       >
@@ -550,7 +582,7 @@ function PrimaryCell({ artifact, ctx }: { artifact: ArtifactRecord; ctx: CellCtx
   return (
     <ArtifactCellAction
       href={isLink ? artifact.href : undefined}
-      onClick={isLink ? undefined : () => void ctx.onOpen(artifact.href)}
+      onClick={isLink ? undefined : () => void ctx.onOpen(artifact)}
       title={label}
     >
       <span className="mt-0.5 grid size-6 shrink-0 place-items-center self-start rounded-md bg-(--ui-bg-tertiary) text-(--ui-text-tertiary)">

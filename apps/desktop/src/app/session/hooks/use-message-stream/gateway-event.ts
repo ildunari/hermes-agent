@@ -1,6 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
+import { applyBrowserToolLifecycle } from '@/app/browser/browser-lifecycle'
 import { writeAgentTerminalChunk } from '@/app/right-sidebar/terminal/agent-terminal-stream'
 import { readActiveTerminal } from '@/app/right-sidebar/terminal/buffer'
 import { closeAgentTerminalByProc } from '@/app/right-sidebar/terminal/terminals'
@@ -156,6 +157,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
     (event: RpcEvent) => {
       const payload = event.payload as GatewayEventPayload | undefined
       const explicitSid = event.session_id || ''
+      const sourceProfile = normalizeProfileKey(event.profile || $activeGatewayProfile.get())
 
       const route = resolveGatewayEventSessionId({
         activeSessionId: activeSessionIdRef.current,
@@ -546,6 +548,11 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
 
         flushQueuedDeltas(sessionId)
+
+        if (event.type === 'tool.start') {
+          applyBrowserToolLifecycle('start', sessionId, sourceProfile, payload)
+        }
+
         upsertToolCall(sessionId, toTodoPayload(payload) ?? payload, 'running', event.type)
 
         if (isActiveEvent) {
@@ -554,6 +561,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       } else if (event.type === 'tool.complete') {
         if (sessionId) {
           flushQueuedDeltas(sessionId)
+          applyBrowserToolLifecycle('complete', sessionId, sourceProfile, payload)
           upsertToolCall(sessionId, toTodoPayload(payload) ?? payload, 'complete', event.type)
 
           if (isActiveEvent) {

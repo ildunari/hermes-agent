@@ -11,11 +11,14 @@ import {
   resolveBrowserIntent
 } from './browser-intent-resolver'
 import {
+  $browserPaneGeometry,
+  $foregroundBrowserTabId,
   type BrowserGeometry,
   type BrowserTab,
   closeBrowserTab,
   createBrowserTab,
-  currentBrowserFocusIntentRevision
+  currentBrowserFocusIntentRevision,
+  openBrowserPane
 } from './browser-store'
 
 export interface BrowserIntentScopeSnapshot {
@@ -50,6 +53,12 @@ export function captureBrowserIntentScope(): BrowserIntentScopeSnapshot {
 }
 
 function currentGeometry(): BrowserGeometry {
+  const paneGeometry = $browserPaneGeometry.get()
+
+  if (paneGeometry.width > 0 && paneGeometry.height > 0) {
+    return paneGeometry
+  }
+
   return {
     height: Math.max(0, window.innerHeight),
     width: Math.max(0, window.innerWidth),
@@ -60,15 +69,20 @@ function currentGeometry(): BrowserGeometry {
 
 export function browserTargetLocation(targetRef: string): 'internet' | 'macbook-loopback' | 'studio-loopback' {
   try {
-    const hostname = new URL(targetRef).hostname.toLowerCase().replace(/\.$/, '').replace(/^\[|\]$/g, '')
+    const hostname = new URL(targetRef).hostname
+      .toLowerCase()
+      .replace(/\.$/, '')
+      .replace(/^\[|\]$/g, '')
     const mappedIpv4 = hostname.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/)?.[1]
     const mappedHex = hostname.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
-    const mappedHexLoopback = mappedHex ? (Number.parseInt(mappedHex[1], 16) >> 8) === 127 : false
+    const mappedHexLoopback = mappedHex ? Number.parseInt(mappedHex[1], 16) >> 8 === 127 : false
     const ipv4 = mappedIpv4 ?? hostname
     const octets = ipv4.split('.').map(value => Number(value))
 
     const ipv4Loopback =
-      octets.length === 4 && octets.every(value => Number.isInteger(value) && value >= 0 && value <= 255) && octets[0] === 127
+      octets.length === 4 &&
+      octets.every(value => Number.isInteger(value) && value >= 0 && value <= 255) &&
+      octets[0] === 127
 
     const loopback =
       hostname === '::' ||
@@ -125,11 +139,15 @@ export function openExplicitBrowserIntent(input: OpenExplicitBrowserIntentInput)
 
   const execution = executeBrowserIntent({ geometry: input.geometry ?? currentGeometry(), resolution })
 
+  if (execution.applied) {
+    openBrowserPane()
+  }
+
   if (!execution.applied) {
     const isOffer =
       resolution.kind === 'external-offer' ||
       resolution.kind === 'download-offer' ||
-      (('activation' in resolution) && resolution.activation === 'offer')
+      ('activation' in resolution && resolution.activation === 'offer')
 
     notify({
       detail:
@@ -193,7 +211,10 @@ export function openExplicitBrowserResourceIntent(input: OpenExplicitBrowserReso
   })
 }
 
-export function completeExplicitBrowserResourceIntent(tab: BrowserTab, guestUrl: string): OpenExplicitBrowserIntentResult {
+export function completeExplicitBrowserResourceIntent(
+  tab: BrowserTab,
+  guestUrl: string
+): OpenExplicitBrowserIntentResult {
   const currentScope = captureBrowserIntentScope()
   const token = globalThis.crypto.randomUUID()
   const resource = tab.resource
@@ -224,6 +245,10 @@ export function completeExplicitBrowserResourceIntent(tab: BrowserTab, guestUrl:
     geometry: tab.geometry,
     resolution
   })
+
+  if (execution.applied && $foregroundBrowserTabId.get() === tab.id) {
+    openBrowserPane()
+  }
 
   if (!execution.applied) {
     failExplicitBrowserResourceIntent(tab, resolution.kind === 'blocked' ? resolution.reason : resolution.kind)

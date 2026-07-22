@@ -2,6 +2,8 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
+
 
 class _FakeProc:
     def __init__(self, stdout_fd):
@@ -18,6 +20,15 @@ class _FakeProc:
 def _reset_profile_cache(browser_tool):
     browser_tool._cached_agent_browser_profile = None
     browser_tool._agent_browser_profile_resolved = False
+
+
+@pytest.fixture(autouse=True)
+def _isolate_profile_cache():
+    from tools import browser_tool
+
+    _reset_profile_cache(browser_tool)
+    yield
+    _reset_profile_cache(browser_tool)
 
 
 def test_agent_browser_profile_prefers_profile_config(monkeypatch):

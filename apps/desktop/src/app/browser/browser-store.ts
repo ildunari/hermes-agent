@@ -70,6 +70,8 @@ export type TaskTabResolution =
 const browserTabs = atom<readonly BrowserTab[]>([])
 const foregroundBrowserTabId = atom<BrowserTabId | null>(null)
 const taskTabBindings = atom<Readonly<Record<string, TaskTabBinding>>>({})
+const browserPaneOpen = atom(false)
+const browserPaneGeometry = atom<BrowserGeometry>({ height: 0, width: 0, x: 0, y: 0 })
 const latestTaskGenerations = new Map<string, number>()
 let browserSurfaceEpoch = randomUuid()
 let browserFocusIntentRevision = 0
@@ -79,6 +81,8 @@ export const BROWSER_RECOVERY_STABLE_MS = 30_000
 export const $browserTabs = browserTabs
 export const $foregroundBrowserTabId = foregroundBrowserTabId
 export const $taskTabBindings = taskTabBindings
+export const $browserPaneOpen = browserPaneOpen
+export const $browserPaneGeometry = browserPaneGeometry
 export const $foregroundBrowserTab = computed(
   [$browserTabs, $foregroundBrowserTabId],
   (tabs, id) => tabs.find(tab => tab.id === id) ?? null
@@ -97,6 +101,39 @@ function validGeometry(geometry: BrowserGeometry): boolean {
     Number.isFinite(geometry.height) &&
     geometry.height >= 0
   )
+}
+
+export function setBrowserPaneOpen(open: boolean): void {
+  if ($browserPaneOpen.get() !== open) {
+    $browserPaneOpen.set(open)
+  }
+}
+
+export function openBrowserPane(): void {
+  setBrowserPaneOpen(true)
+}
+
+export function closeBrowserPane(): void {
+  setBrowserPaneOpen(false)
+}
+
+export function setBrowserPaneGeometry(geometry: BrowserGeometry): void {
+  if (!validGeometry(geometry)) {
+    throw new Error('Browser pane geometry must contain finite, non-negative dimensions')
+  }
+
+  const current = $browserPaneGeometry.get()
+
+  if (
+    current.x === geometry.x &&
+    current.y === geometry.y &&
+    current.width === geometry.width &&
+    current.height === geometry.height
+  ) {
+    return
+  }
+
+  $browserPaneGeometry.set({ ...geometry })
 }
 
 function requireTab(tabId: BrowserTabId): BrowserTab {
@@ -188,9 +225,13 @@ export function setBrowserTabGeometry(tabId: BrowserTabId, geometry: BrowserGeom
 export function setBrowserTabTitle(tabId: BrowserTabId, title: string): void {
   const current = $browserTabs.get()
   const index = current.findIndex(tab => tab.id === tabId)
-  if (index === -1) {throw new Error(`Unknown browser tab: ${tabId}`)}
+  if (index === -1) {
+    throw new Error(`Unknown browser tab: ${tabId}`)
+  }
   const nextTitle = String(title || '').slice(0, 256)
-  if (current[index].title === nextTitle) {return}
+  if (current[index].title === nextTitle) {
+    return
+  }
   const next = [...current]
   next[index] = { ...current[index], title: nextTitle }
   $browserTabs.set(next)
@@ -425,12 +466,18 @@ export function restoreBrowserTabs(
   const existing = $browserTabs.get()
   const knownRestoreIds = new Set(existing.map(tab => tab.restoreId).filter(Boolean))
   const restored = descriptors.flatMap(descriptor => {
-    if (knownRestoreIds.has(descriptor.restoreId)) {return []}
+    if (knownRestoreIds.has(descriptor.restoreId)) {
+      return []
+    }
 
     try {
       const parsed = new URL(descriptor.url)
-      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {return []}
-    } catch {return []}
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+        return []
+      }
+    } catch {
+      return []
+    }
 
     knownRestoreIds.add(descriptor.restoreId)
     const tab: BrowserTab = {
@@ -442,7 +489,7 @@ export function restoreBrowserTabs(
       recovery: { attempts: 0, state: 'stable', windowStartedAt: Date.now() },
       restoreId: descriptor.restoreId,
       restoredFromTabId: descriptor.restoredFromTabId?.startsWith('browser:')
-        ? descriptor.restoredFromTabId as BrowserTabId
+        ? (descriptor.restoredFromTabId as BrowserTabId)
         : undefined,
       surfaceEpoch: browserSurfaceEpoch,
       title: descriptor.title,
@@ -453,23 +500,31 @@ export function restoreBrowserTabs(
     return [tab]
   })
 
-  if (restored.length === 0) {return []}
+  if (restored.length === 0) {
+    return []
+  }
   $browserTabs.set([...existing, ...restored])
   const selected = restored.find(tab => tab.restoreId === selectedRestoreId)
-  if (selected) {$foregroundBrowserTabId.set(selected.id)}
+  if (selected) {
+    $foregroundBrowserTabId.set(selected.id)
+  }
   return restored
 }
 
 export function clearBrowserTabsForProfile(profile: string): void {
   const normalized = normalizeProfileKey(profile)
   for (const tab of [...$browserTabs.get()]) {
-    if (tab.profile === normalized) {closeBrowserTab(tab.id)}
+    if (tab.profile === normalized) {
+      closeBrowserTab(tab.id)
+    }
   }
 }
 
 export function clearBrowserWorkspace(profile: string, workspaceId: string): void {
   const normalized = normalizeProfileKey(profile)
   for (const tab of [...$browserTabs.get()]) {
-    if (tab.profile === normalized && tab.workspaceId === workspaceId) {closeBrowserTab(tab.id)}
+    if (tab.profile === normalized && tab.workspaceId === workspaceId) {
+      closeBrowserTab(tab.id)
+    }
   }
 }

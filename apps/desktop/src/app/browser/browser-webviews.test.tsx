@@ -10,9 +10,12 @@ import {
   $foregroundBrowserTabId,
   bindAutomationTask,
   clearBrowserTabs,
+  closeBrowserPane,
   closeBrowserTab,
   createBrowserTab,
+  openBrowserPane,
   selectBrowserTab,
+  setBrowserPaneGeometry,
   setBrowserTabGeometry
 } from './browser-store'
 import { BrowserWebviewLayer } from './browser-webviews'
@@ -40,17 +43,20 @@ const mintResource = vi.fn(async request => ({
 const unbindAutomation = vi.fn(async () => ({ ok: true }))
 let retiredListener: ((event: { guestGeneration: string; reason: string; tabId: string }) => void) | undefined
 
-let freshSnapshotListener: ((event: {
-  guestGeneration: string
-  surfaceEpoch: string
-  tabId: string
-  taskGeneration: number
-  taskId: string
-}) => void) | undefined
+let freshSnapshotListener:
+  | ((event: {
+      guestGeneration: string
+      surfaceEpoch: string
+      tabId: string
+      taskGeneration: number
+      taskId: string
+    }) => void)
+  | undefined
 
 describe('browser webview layer', () => {
   beforeEach(() => {
     clearBrowserTabs()
+    closeBrowserPane()
     clearNotifications()
     __resetBrowserPersistenceForTests()
     prepare.mockClear()
@@ -93,7 +99,13 @@ describe('browser webview layer', () => {
           remove: vi.fn(async () => ({ ok: true })),
           resetWorkspace: vi.fn(async () => ({ epoch: 'epoch-reset', ok: true })),
           select: vi.fn(async () => ({ ok: true })),
-          snapshot: vi.fn(async () => ({ degraded: false, descriptors: [], epoch: 'epoch-one', restoreEnabled: true, selectedRestoreId: null })),
+          snapshot: vi.fn(async () => ({
+            degraded: false,
+            descriptors: [],
+            epoch: 'epoch-one',
+            restoreEnabled: true,
+            selectedRestoreId: null
+          })),
           upsert: vi.fn(async request => ({ ok: true, persisted: request.descriptor }))
         }
       }
@@ -101,6 +113,7 @@ describe('browser webview layer', () => {
   })
   afterEach(() => {
     clearBrowserTabs()
+    closeBrowserPane()
     Reflect.deleteProperty(window, 'hermesDesktop')
   })
 
@@ -116,7 +129,9 @@ describe('browser webview layer', () => {
     await expect(browserPartitionForProfile('Default')).resolves.toBe(await browserPartitionForProfile('default'))
     await expect(browserPartitionForProfile(' CODING ')).resolves.toBe(await browserPartitionForProfile('coding'))
     await expect(browserPartitionForProfile('Team-Alpha')).resolves.toBe(await browserPartitionForProfile('team-alpha'))
-    await expect(browserPartitionForProfile('team-alpha')).resolves.not.toBe(await browserPartitionForProfile('team-beta'))
+    await expect(browserPartitionForProfile('team-alpha')).resolves.not.toBe(
+      await browserPartitionForProfile('team-beta')
+    )
   })
 
   it('closes a failed resource tab with a visible localized notification', async () => {
@@ -146,6 +161,8 @@ describe('browser webview layer', () => {
     let second!: ReturnType<typeof createBrowserTab>
 
     act(() => {
+      openBrowserPane()
+      setBrowserPaneGeometry(geometry)
       first = createBrowserTab({
         foreground: true,
         geometry,
@@ -167,7 +184,11 @@ describe('browser webview layer', () => {
     expect(firstWebview?.getAttribute('src')).toMatch(/^about:blank#hermes-browser-attach=/)
     expect(firstWebview?.hasAttribute('preload')).toBe(false)
     await waitFor(() => {
-      expect(activate).toHaveBeenCalledWith({ generation: `generation:${first.id}`, tabId: first.id, url: 'https://one.test' })
+      expect(activate).toHaveBeenCalledWith({
+        generation: `generation:${first.id}`,
+        tabId: first.id,
+        url: 'https://one.test'
+      })
       expect(activate).toHaveBeenCalledWith({
         generation: `generation:${second.id}`,
         tabId: second.id,
@@ -178,7 +199,14 @@ describe('browser webview layer', () => {
     expect(secondHost.style.visibility).toBe('hidden')
     expect(secondHost.style.display).toBe('')
 
+    act(() => closeBrowserPane())
+
+    expect(firstHost.style.visibility).toBe('hidden')
+    expect(firstWebview?.isConnected).toBe(true)
+    expect(secondWebview?.isConnected).toBe(true)
+
     act(() => {
+      openBrowserPane()
       selectBrowserTab(second.id)
       setBrowserTabGeometry(second.id, { ...geometry, height: 512, width: 768 })
     })
@@ -194,9 +222,7 @@ describe('browser webview layer', () => {
 
     expect(firstWebview?.isConnected).toBe(false)
     expect(rendered.container.querySelectorAll('webview')).toHaveLength(1)
-    await waitFor(() =>
-      expect(release).toHaveBeenCalledWith({ generation: `generation:${first.id}`, tabId: first.id })
-    )
+    await waitFor(() => expect(release).toHaveBeenCalledWith({ generation: `generation:${first.id}`, tabId: first.id }))
     rendered.unmount()
   })
 

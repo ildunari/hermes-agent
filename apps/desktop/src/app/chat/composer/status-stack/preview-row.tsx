@@ -1,6 +1,12 @@
 import { useStore } from '@nanostores/react'
 import { memo, useState } from 'react'
 
+import {
+  browserTargetLocation,
+  captureBrowserIntentScope,
+  openExplicitBrowserIntent,
+  openExplicitBrowserResourceIntent
+} from '@/app/browser/browser-intent-production'
 import { StatusRow } from '@/components/chat/status-row'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -60,14 +66,39 @@ export const PreviewStatusRow = memo(function PreviewStatusRow({ item, onDismiss
   }
 
   const openInBrowser = async () => {
-    try {
-      const bridge = window.hermesDesktop?.openPreviewInBrowser
+    const scopeSnapshot = captureBrowserIntentScope()
 
-      if (!bridge) {
-        throw new Error('Desktop preview browser bridge is unavailable')
+    try {
+      const target = await resolveTarget()
+
+      if (target.kind === 'file') {
+        openExplicitBrowserResourceIntent({
+          kind: 'artifact',
+          scopeSnapshot,
+          sourceSessionId: scopeSnapshot.workspaceId,
+          target: target.path || item.target
+        })
+
+        return
       }
 
-      await bridge((await resolveTarget()).url)
+      if (browserTargetLocation(target.url) === 'studio-loopback') {
+        openExplicitBrowserResourceIntent({
+          kind: 'preview',
+          scopeSnapshot,
+          sourceSessionId: scopeSnapshot.workspaceId,
+          target: target.url
+        })
+
+        return
+      }
+
+      openExplicitBrowserIntent({
+        scopeSnapshot,
+        source: 'transcript-link',
+        target: 'preview',
+        targetRef: target.url
+      })
     } catch (error) {
       notifyError(error, t.preview.unavailable)
     }

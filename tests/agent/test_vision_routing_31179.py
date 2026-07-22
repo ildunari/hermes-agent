@@ -26,6 +26,7 @@ The three fixes covered here:
 from __future__ import annotations
 
 import os
+import importlib
 import shutil
 import sys
 import tempfile
@@ -66,7 +67,10 @@ def _fresh_modules():
         if mod.startswith(("agent.auxiliary_client", "agent.image_routing",
                            "tools.vision_tools", "tools.browser_tool",
                            "hermes_cli.config")):
-            del sys.modules[mod]
+            if mod == "tools.browser_tool":
+                importlib.reload(sys.modules[mod])
+            else:
+                del sys.modules[mod]
 
 
 # ---------------------------------------------------------------------------

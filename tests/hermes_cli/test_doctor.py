@@ -694,7 +694,7 @@ def test_run_doctor_termux_does_not_mark_browser_available_without_agent_browser
     assert "browser" in out
     assert "system dependency not met" in out
     assert "agent-browser is not installed (expected in the tested Termux path)" in out
-    assert "npm install -g agent-browser && agent-browser install" in out
+    assert "npm install -g agent-browser@0.32.0 && agent-browser install" in out
 
 
 def test_run_doctor_kimi_cn_env_is_detected_and_probe_is_null_safe(monkeypatch, tmp_path):

@@ -80,7 +80,15 @@ _EXCLUDED_SUFFIXES = (
     ".db-wal",
     ".db-shm",
     ".db-journal",
+    ".sqlite-wal",
+    ".sqlite-shm",
+    ".sqlite-journal",
+    ".sqlite3-wal",
+    ".sqlite3-shm",
+    ".sqlite3-journal",
 )
+
+_SQLITE_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
 
 # File names to skip (runtime state that's meaningless on another machine)
 _EXCLUDED_NAMES = {
@@ -392,7 +400,7 @@ def run_backup(args) -> None:
         for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
             try:
                 # Safe copy for SQLite databases (handles WAL mode)
-                if abs_path.suffix == ".db":
+                if abs_path.suffix.lower() in _SQLITE_SUFFIXES:
                     # Stage the snapshot alongside the output zip so that the
                     # temp file lives on the same filesystem.  The system
                     # default (/tmp) may be a small tmpfs that cannot hold
@@ -653,6 +661,19 @@ def run_import(args) -> None:
 
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
+                rel_parts = Path(rel).parts
+                for index in range(len(rel_parts) - 1):
+                    if rel_parts[index:index + 2] == ("browser", "annotations"):
+                        annotation_root = hermes_root.joinpath(*rel_parts[:index + 2])
+                        for private_dir in (
+                            annotation_root, target.parent, *target.parent.parents
+                        ):
+                            try:
+                                private_dir.relative_to(annotation_root)
+                            except ValueError:
+                                continue
+                            os.chmod(private_dir, 0o700)
+                        break
                 with zf.open(member) as src, open(target, "wb") as dst:
                     dst.write(src.read())
                 if target.name in _SECRET_FILE_NAMES:
@@ -788,6 +809,9 @@ _QUICK_STATE_FILES = (
     "verification_evidence.db",         # agent verification audit trail
     "kanban.db",                        # default board (back-compat <root>/kanban.db)
     "kanban/boards",                    # non-default boards: each <slug>/kanban.db + board metadata (workspaces/ + attachments/ are skipped as regenerable)
+    # Durable annotation metadata and retained screenshot payloads must be
+    # restored together, so snapshot their enclosing directory.
+    "browser/annotations",
     # Pairing stores (generic + per-platform JSONs outside state.db)
     "pairing",                          # legacy location (gateway/pairing.py)
     "platforms/pairing",                # new location (gateway/pairing.py)
@@ -872,6 +896,8 @@ def create_quick_snapshot(
                 if not sub.is_file():
                     continue
                 sub_rel = sub.relative_to(home).as_posix()
+                if sub.name.endswith(_EXCLUDED_SUFFIXES):
+                    continue
                 # Skip heavy, regenerable per-board subtrees (scratch
                 # workspaces and task attachments can be large); we only need
                 # the board databases + their metadata to restore a board.
@@ -885,7 +911,7 @@ def create_quick_snapshot(
                     # Route SQLite DBs through the WAL-safe backup() path so a
                     # board DB with an open WAL (the gateway may hold it at
                     # snapshot time) is captured consistently.
-                    if sub.suffix == ".db":
+                    if sub.suffix.lower() in _SQLITE_SUFFIXES:
                         if not _safe_copy_db(sub, dst):
                             continue
                     else:
@@ -1237,7 +1263,7 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             for abs_path, rel_path in files_to_add:
                 try:
-                    if abs_path.suffix == ".db":
+                    if abs_path.suffix.lower() in _SQLITE_SUFFIXES:
                         # Stage the snapshot alongside the output zip so that the
                         # temp file lives on the same filesystem.  The system
                         # default (/tmp) may be a small tmpfs that cannot hold

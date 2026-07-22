@@ -205,6 +205,8 @@ def _emit_terminal_post_tool_call(
     error_message: str | None = None,
     middleware_trace: Optional[list[dict[str, Any]]] = None,
 ) -> None:
+    if getattr(agent, "_annotation_isolated", False):
+        return
     try:
         from model_tools import _emit_post_tool_call_hook
         _emit_post_tool_call_hook(
@@ -322,6 +324,8 @@ def _apply_tool_request_middleware_for_agent(
     effective_task_id: str,
     tool_call_id: str,
 ) -> tuple[dict, list[dict[str, Any]]]:
+    if getattr(agent, "_annotation_isolated", False):
+        return function_args, []
     try:
         from hermes_cli.middleware import apply_tool_request_middleware
 
@@ -350,6 +354,8 @@ def _run_agent_tool_execution_middleware(
     tool_call_id: str,
     execute,
 ) -> tuple[Any, dict]:
+    if getattr(agent, "_annotation_isolated", False):
+        return execute(function_args), function_args
     observed_args = function_args
 
     def _execute(next_args: dict) -> Any:
@@ -668,7 +674,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             if i in tool_scope_blocks:
                 block_message = tool_scope_blocks[i]
                 block_error_type = "tool_scope_block"
-            else:
+            elif not getattr(agent, "_annotation_isolated", False):
                 try:
                     from hermes_cli.plugins import resolve_pre_tool_block
                     block_message = resolve_pre_tool_block(
@@ -1243,7 +1249,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         if _ts_scope_block is not None:
             _block_msg = _ts_scope_block
             _block_error_type = "tool_scope_block"
-        else:
+        elif not getattr(agent, "_annotation_isolated", False):
             try:
                 from hermes_cli.plugins import resolve_pre_tool_block
                 _block_msg = resolve_pre_tool_block(
@@ -1646,6 +1652,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                     tool_request_middleware_trace=list(middleware_trace),
+                    annotation_isolated=getattr(agent, "_annotation_isolated", False),
                 )
                 _spinner_result = function_result
             except KeyboardInterrupt:
@@ -1688,6 +1695,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                     disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                     tool_request_middleware_trace=list(middleware_trace),
+                    annotation_isolated=getattr(agent, "_annotation_isolated", False),
                 )
             except KeyboardInterrupt:
                 _emit_cancelled_terminal_post_tool_call(

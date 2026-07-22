@@ -56,6 +56,8 @@ import { $currentCwd, $selectedStoredSessionId, $sessions, sessionMatchesStoredI
 import { $sessionColorById, sessionColorFor } from '@/store/session-color'
 
 import type { SessionDragPayload } from '../chat/composer/inline-refs'
+import { BrowserPane, BROWSER_PANE_ID } from '../browser/browser-pane'
+import { $browserPaneOpen, closeBrowserPane, openBrowserPane } from '../browser/browser-store'
 import { watchRouteTiles } from '../chat/route-tile'
 import { startSessionDrag } from '../chat/session-drag'
 import {
@@ -161,6 +163,20 @@ registry.registerMany([
       uncloseable: true
     },
     render: renderWorkspacePane
+  },
+  {
+    id: BROWSER_PANE_ID,
+    area: 'panes',
+    title: 'browser',
+    data: {
+      placement: 'right',
+      collapsible: true,
+      dock: { pane: 'workspace', pos: 'right' },
+      width: 'clamp(24rem, 42vw, 52rem)',
+      minWidth: '22rem',
+      maxWidth: '70vw'
+    },
+    render: () => idle(<BrowserPane />)
   },
   {
     id: 'terminal',
@@ -327,6 +343,7 @@ const DEFAULT_TREE = split(
   [
     group(['sessions'], { id: 'grp-sessions' }),
     group(['workspace'], { id: 'grp-main' }),
+    group([BROWSER_PANE_ID], { id: 'grp-browser' }),
     split(
       'column',
       [
@@ -346,20 +363,24 @@ const DEFAULT_TREE = split(
       'spl-right'
     )
   ],
-  [1, 3.4, 1.25],
+  [1, 3.4, 2.4, 1.25],
   'spl-root'
 )
 
 const FOCUS_TREE = split(
   'row',
-  [group(['sessions']), group(['workspace', 'files', 'preview', 'review', 'terminal'])],
-  [1, 4.6]
+  [group(['sessions']), group(['workspace', 'files', 'preview', 'review', 'terminal']), group([BROWSER_PANE_ID])],
+  [1, 4.6, 2.4]
 )
 
 const TERMINAL_TREE = split(
   'column',
   [
-    split('row', [group(['sessions']), group(['workspace']), group(['files', 'preview', 'review'])], [1, 3.2, 1.2]),
+    split(
+      'row',
+      [group(['sessions']), group(['workspace']), group([BROWSER_PANE_ID]), group(['files', 'preview', 'review'])],
+      [1, 3.2, 2.4, 1.2]
+    ),
     group(['terminal'])
   ],
   [3, 1]
@@ -368,7 +389,7 @@ const TERMINAL_TREE = split(
 const QUAD_TREE = split(
   'column',
   [
-    split('row', [group(['sessions', 'files']), group(['workspace'])], [1, 3]),
+    split('row', [group(['sessions', 'files']), group(['workspace']), group([BROWSER_PANE_ID])], [1, 3, 2.2]),
     split('row', [group(['terminal']), group(['preview', 'review', 'logs'])], [1.4, 1])
   ],
   [3, 1]
@@ -520,6 +541,18 @@ $panesFlipped.listen(flipped => {
 // that side hides together, whatever panes have been rearranged there.
 bindTreeSideVisibility('left', $sidebarOpen, setSidebarOpen)
 bindTreeSideVisibility('right', $fileBrowserOpen, setFileBrowserOpen)
+
+// The browser owns an app-global pane toggle. It is intentionally independent
+// of profile/workspace state; opening it docks beside chat through the same
+// layout-tree primitive used by preview and opens whichever root side owns it.
+bindPaneVisibility(BROWSER_PANE_ID, $browserPaneOpen, closeBrowserPane, openBrowserPane)
+
+$browserPaneOpen.listen(open => {
+  if (open) {
+    dockPaneBeside(BROWSER_PANE_ID, 'workspace')
+    revealTreePane(BROWSER_PANE_ID)
+  }
+})
 
 // Workspace-scoped surfaces: the file tree and git diff only mean something
 // inside a project. A detached chat (no cwd) hides them — their zones
@@ -678,7 +711,7 @@ export function ContribController() {
               className="pointer-events-auto absolute z-10 flex w-max items-center gap-2 [-webkit-app-region:no-drag]"
               style={{
                 right:
-                  'max(calc(var(--workspace-right, 0px) + 0.5rem), calc(var(--titlebar-tools-right, 0.75rem) + 4 * (var(--titlebar-control-size, 1.25rem) + 0.25rem) + 0.5rem))'
+                  'max(calc(var(--workspace-right, 0px) + 0.5rem), calc(var(--titlebar-tools-right, 0.75rem) + 5 * (var(--titlebar-control-size, 1.25rem) + 0.25rem) + 0.5rem))'
               }}
             />
           </div>

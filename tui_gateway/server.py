@@ -1554,12 +1554,113 @@ def _normalize_request(req: Any) -> tuple[Any, str, dict] | dict:
     return rid, method, params
 
 
+def _browser_annotation_row_kind(db: Any, row: dict | None) -> bool | None:
+    """Classify a durable row without exposing annotation lineage as chat."""
+    if not isinstance(row, dict):
+        return False
+    if str(row.get("source") or "").strip().lower() == "browser_annotation":
+        return True
+    session_id = str(row.get("id") or "")
+    db_path = getattr(db, "db_path", None)
+    if session_id and db_path:
+        import sqlite3
+
+        try:
+            with sqlite3.connect(db_path) as conn:
+                found = conn.execute(
+                    """WITH RECURSIVE ancestors(id, parent_session_id) AS (
+                           SELECT id, parent_session_id FROM sessions WHERE id=?
+                           UNION ALL
+                           SELECT s.id, s.parent_session_id FROM sessions s
+                           JOIN ancestors a ON a.parent_session_id=s.id
+                       )
+                       SELECT 1 FROM ancestors a
+                       JOIN annotation_thread_route r
+                         ON r.annotation_lineage_root_id=a.id LIMIT 1""",
+                    (session_id,),
+                ).fetchone()
+            if found:
+                return True
+        except sqlite3.Error:
+            pass
+    config = row.get("model_config")
+    if session_id and db_path:
+        import sqlite3
+
+        try:
+            with sqlite3.connect(db_path) as conn:
+                raw_config = conn.execute(
+                    "SELECT model_config FROM sessions WHERE id=?", (session_id,)
+                ).fetchone()
+            if raw_config is not None:
+                config = raw_config[0]
+        except sqlite3.Error:
+            return None
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except (TypeError, ValueError):
+            return None
+    if config is not None and not isinstance(config, dict):
+        return None
+    if isinstance(config, dict) and config.get("_session_kind") == "browser_annotation":
+        return True
+
+    return False
+
+
+def _live_session_browser_annotation_error(session: dict, rid: Any) -> dict | None:
+    root_source = str(session.get("root_source") or "").strip().lower()
+    if root_source:
+        return (
+            _err(rid, 4026, "browser_annotation_session_requires_dedicated_rpc")
+            if root_source == "browser_annotation"
+            else None
+        )
+    source = str(session.get("source") or "").strip().lower()
+    if source == "browser_annotation":
+        session["root_source"] = "browser_annotation"
+        return _err(rid, 4026, "browser_annotation_session_requires_dedicated_rpc")
+    db = _get_db()
+    if db is None:
+        return _err(rid, 5027, "session_lineage_classification_unavailable")
+    try:
+        row = db.get_session(session.get("session_key"))
+        kind = _browser_annotation_row_kind(db, row)
+    except Exception:
+        kind = None
+    if kind is None:
+        return _err(rid, 5027, "session_lineage_classification_unavailable")
+    session["root_source"] = "browser_annotation" if kind else (source or "tui")
+    if kind:
+        return _err(rid, 4026, "browser_annotation_session_requires_dedicated_rpc")
+    return None
+
+
 def handle_request(req: dict) -> dict | None:
     normalized = _normalize_request(req)
     if isinstance(normalized, dict):
         return normalized
 
     rid, method, params = normalized
+    sid = params.get("session_id")
+    if (
+        isinstance(sid, str)
+        and sid in _sessions
+        and method not in {"session.close", "terminal.resize", "session.active_list"}
+    ):
+        refusal = _live_session_browser_annotation_error(_sessions[sid], rid)
+        if refusal is not None:
+            return refusal
+    if method == "session.delete" and isinstance(sid, str) and sid:
+        db = _get_db()
+        if db is None:
+            return _err(rid, 5027, "session_lineage_classification_unavailable")
+        kind = _browser_annotation_row_kind(db, db.get_session(sid))
+        if kind is not False:
+            if kind:
+                return _err(rid, 4026, "browser_annotation_session_requires_dedicated_rpc")
+            return _err(rid, 5027, "session_lineage_classification_unavailable")
     fn = _methods.get(method)
     if not fn:
         return _err(rid, -32601, f"unknown method: {method}")
@@ -5943,6 +6044,7 @@ def _(rid, params: dict) -> dict:
             if branch_db is None:
                 return _db_unavailable_error(rid, code=5008)
             parent = branch_db.get_session(parent_session_id)
+            parent_annotation_kind = _browser_annotation_row_kind(branch_db, parent)
         except Exception as exc:
             return _err(rid, 5008, f"profile state.db unavailable: {exc}")
         finally:
@@ -5953,6 +6055,10 @@ def _(rid, params: dict) -> dict:
                     pass
         if not parent:
             return _err(rid, 4007, "parent session not found")
+        if parent_annotation_kind is not False:
+            if parent_annotation_kind:
+                return _err(rid, 4026, "browser_annotation_session_requires_dedicated_rpc")
+            return _err(rid, 5027, "session_lineage_classification_unavailable")
 
     sid = uuid.uuid4().hex[:8]
     key = _new_session_key()
@@ -6099,11 +6205,22 @@ def _(rid, params: dict) -> dict:
         # short; the compression-tip projection in ``list_sessions_rich``
         # can also merge rows.
         fetch_limit = max(limit * 2, 200)
-        rows = [
-            s
-            for s in db.list_sessions_rich(source=None, limit=fetch_limit, order_by_last_active=True, compact_rows=True)
-            if (s.get("source") or "").strip().lower() not in deny
-        ][:limit]
+        rows = []
+        for s in db.list_sessions_rich(
+            source=None,
+            limit=fetch_limit,
+            order_by_last_active=True,
+            compact_rows=True,
+        ):
+            if (s.get("source") or "").strip().lower() in deny:
+                continue
+            kind = _browser_annotation_row_kind(db, db.get_session(s.get("id")) or s)
+            if kind is None:
+                raise ValueError("session lineage classification unavailable")
+            if not kind:
+                rows.append(s)
+            if len(rows) >= limit:
+                break
         return _ok(
             rid,
             {
@@ -6152,6 +6269,8 @@ def _(rid, params: dict) -> dict:
         for row in rows:
             src = (row.get("source") or "").strip().lower()
             if src in deny:
+                continue
+            if _browser_annotation_row_kind(db, db.get_session(row.get("id")) or row) is not False:
                 continue
             return _ok(
                 rid,
@@ -6361,6 +6480,14 @@ def _(rid, params: dict) -> dict:
         else:
             return _err(rid, 4007, "session not found")
 
+    annotation_kind = _browser_annotation_row_kind(db, found)
+    if annotation_kind is not False:
+        if profile_home is not None:
+            db.close()
+        if annotation_kind:
+            return _err(rid, 4026, "browser_annotation_session_requires_dedicated_rpc")
+        return _err(rid, 5027, "session_lineage_classification_unavailable")
+
     # Follow the compression-continuation chain to the live tip so a resume on
     # a rotated-out parent id binds to the descendant that actually holds the
     # post-compression turns. Auto-compression ends the session and forks a
@@ -6380,6 +6507,13 @@ def _(rid, params: dict) -> dict:
         if tip and tip != target:
             target = tip
             found = db.get_session(target) or found
+            annotation_kind = _browser_annotation_row_kind(db, found)
+            if annotation_kind is not False:
+                if profile_home is not None:
+                    db.close()
+                if annotation_kind:
+                    return _err(rid, 4026, "browser_annotation_session_requires_dedicated_rpc")
+                return _err(rid, 5027, "session_lineage_classification_unavailable")
 
     profile_resume_cwd = str(found.get("cwd") or "").strip() or _profile_configured_cwd(
         profile_home
@@ -6888,11 +7022,13 @@ def _(rid, params: dict) -> dict:
     # Keep the natural creation/insertion order from ``_sessions``.  The
     # frontend marks the focused session with ``current``; it should not jump to
     # the top just because the user switched to it.
-    rows = [
-        _session_live_item(sid, session, current)
-        for sid, session in snapshot
-        if not session.get("_finalized")
-    ]
+    rows = []
+    for sid, session in snapshot:
+        if session.get("_finalized"):
+            continue
+        if _live_session_browser_annotation_error(session, rid) is not None:
+            continue
+        rows.append(_session_live_item(sid, session, current))
     return _ok(rid, {"sessions": rows})
 
 

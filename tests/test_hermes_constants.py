@@ -943,7 +943,7 @@ class TestAgentBrowserRunnable:
         assert agent_browser_runnable(str(link)) is False
 
     def test_runnable_binary_accepted(self, tmp_path):
-        good = self._stub(tmp_path, "agent-browser", "#!/bin/sh\necho 'agent-browser 0.27.1'\nexit 0\n")
+        good = self._stub(tmp_path, "agent-browser", "#!/bin/sh\necho 'agent-browser 0.32.0'\nexit 0\n")
         assert agent_browser_runnable(str(good)) is True
 
     def test_nonzero_exit_rejected(self, tmp_path):
@@ -957,8 +957,8 @@ class TestAgentBrowserRunnable:
     def test_npx_fallback_form_accepted(self):
         # The "npx agent-browser" command form is not a real file; npx resolves
         # the package at run time, so the validator trusts it without stat.
-        assert agent_browser_runnable("npx agent-browser") is True
-        assert agent_browser_runnable("/usr/local/bin/npx agent-browser") is True
+        assert agent_browser_runnable("npx -y agent-browser@0.32.0") is True
+        assert agent_browser_runnable("/usr/local/bin/npx -y agent-browser@0.32.0") is True
 
     def test_version_probe_uses_windows_hide_flags(self, tmp_path, monkeypatch):
         good = self._stub(tmp_path, "agent-browser", "#!/bin/sh\necho hi\n")
@@ -966,13 +966,14 @@ class TestAgentBrowserRunnable:
 
         def fake_run(cmd, **kwargs):
             captured.append((cmd, kwargs))
-            return SimpleNamespace(returncode=0)
+            return SimpleNamespace(returncode=0, stdout="agent-browser 0.32.0")
 
         import hermes_cli._subprocess_compat as subprocess_compat
         import subprocess as subprocess_mod
 
         monkeypatch.setattr(subprocess_compat, "windows_hide_flags", lambda: 0x08000000)
         monkeypatch.setattr(subprocess_mod, "run", fake_run)
+        monkeypatch.setattr("hermes_constants.node_version_supported", lambda _path: True)
 
         assert agent_browser_runnable(str(good)) is True
         assert captured[0][0] == [str(good), "--version"]
@@ -985,7 +986,7 @@ class TestAgentBrowserRunnable:
 
         def fake_run(cmd, **kwargs):
             captured.append((cmd, kwargs))
-            return SimpleNamespace(returncode=0)
+            return SimpleNamespace(returncode=0, stdout="v24.0.0")
 
         import hermes_cli._subprocess_compat as subprocess_compat
         import subprocess as subprocess_mod

@@ -739,6 +739,23 @@
   --tw-ring-offset-shadow: 0 0 #0000 !important;
 }
 
+/* Trusted browser safety controls are an intentional exception to the app's
+   otherwise ring-free chrome. Keyboard users must always be able to identify
+   the control that can pause, take over, deny, or stop browser automation. */
+[data-browser-controller] :is(button, [role='button']):focus-visible,
+[data-browser-consent] :is(button, [role='button']):focus-visible {
+  outline: 0.1875rem solid var(--ui-text-primary);
+  outline-offset: 0.125rem;
+}
+
+@media (forced-colors: active) {
+  [data-browser-controller] :is(button, [role='button']):focus-visible,
+  [data-browser-consent] :is(button, [role='button']):focus-visible {
+    outline-color: Highlight;
+    forced-color-adjust: auto;
+  }
+}
+
 button {
   -webkit-app-region: no-drag;
 }

@@ -75,7 +75,7 @@ class TestTimeoutErrorFormatting:
         monkeypatch.setattr(bt, "_is_local_mode", lambda: True)
         monkeypatch.setattr(bt, "_running_in_docker", lambda: False)
         err = bt._format_browser_timeout_error("open", 60, "", "")
-        assert "agent-browser install --with-deps" in err
+        assert "agent-browser@0.32.0 install --with-deps" in err
 
 
 class TestReadCommandOutputFiles:
