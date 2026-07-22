@@ -132,6 +132,7 @@ interface BrowserGuestBinding extends BrowserGuestIdentity {
   documentGeneration: number
   frameSessions: Map<string, string>
   guest: WebContents
+  loadingAdmissionOperationId: string | null
   nextAnnotationLabel: number
   reportInFlight: number
   reportWindowCount: number
@@ -881,8 +882,16 @@ export class BrowserGuestSecurityController {
     }
 
     const activationSequence = ++binding.activationSequence
+    const admissionOperationId = `trusted-activation-${activationSequence}-${crypto.randomBytes(16).toString('base64url')}`
 
-    if (!(await this.#isResolvedDestinationAllowed(binding.partition, request.url, 'trusted-activation', binding.guest.id))) {
+    if (!(await this.#isResolvedDestinationAllowed(
+      binding.partition,
+      request.url,
+      'trusted-activation',
+      binding.guest.id,
+      true,
+      admissionOperationId
+    ))) {
       return activationSequence !== binding.activationSequence
         ? { ok: true, superseded: true }
         : { error: 'browser-navigation-denied', ok: false }
@@ -1129,20 +1138,41 @@ export class BrowserGuestSecurityController {
     }
   }
 
+  #admissionScopeCovers(
+    admission: BrowserNavigationAdmission | undefined,
+    guest: BrowserGuestBinding,
+    classification: BrowserNavigationDecision
+  ): admission is BrowserNavigationAdmission {
+    if (!admission || admission.expiresAt < Date.now() || admission.profile !== guest.profile ||
+      admission.tabId !== guest.tabId || admission.guestGeneration !== guest.generation ||
+      classification.siteKey !== admission.destinationSite) {return false}
+    if (classification.classification === 'sensitive' && admission.classification !== 'sensitive') {return false}
+    return classification.classification !== 'sensitive' ||
+      classification.reasonCodes.every(reason => admission.reasonCodes.includes(reason))
+  }
+
   #admissionCovers(
     admission: BrowserNavigationAdmission | undefined,
     guest: BrowserGuestBinding,
     target: string,
     classification: BrowserNavigationDecision
   ) {
-    if (!admission || admission.expiresAt < Date.now() || admission.profile !== guest.profile ||
-      admission.tabId !== guest.tabId || admission.guestGeneration !== guest.generation ||
-      classification.siteKey !== admission.destinationSite) {return false}
-    if (classification.classification === 'sensitive' && admission.classification !== 'sensitive') {return false}
-    if (classification.classification === 'sensitive' &&
-      classification.reasonCodes.some(reason => !admission.reasonCodes.includes(reason))) {return false}
+    if (!this.#admissionScopeCovers(admission, guest, classification)) {return false}
     const parsed = browserNavigationPolicy.canonicalize(target)
-    return Boolean(parsed && classification.siteKey)
+    return Boolean(parsed && parsed.href === admission.url)
+  }
+
+  #advanceAdmissionForRedirect(
+    admission: BrowserNavigationAdmission | undefined,
+    guest: BrowserGuestBinding,
+    target: string,
+    classification: BrowserNavigationDecision
+  ): boolean {
+    if (!this.#admissionScopeCovers(admission, guest, classification)) {return false}
+    const parsed = browserNavigationPolicy.canonicalize(target)
+    if (!parsed) {return false}
+    this.#navigationAdmissions.set(guest.guest.id, { ...admission, url: parsed.href })
+    return true
   }
 
   #taskForGuest(guest: BrowserGuestBinding): BrowserAutomationBinding | null {
@@ -2492,7 +2522,7 @@ export class BrowserGuestSecurityController {
           denyEvent(event)
         }
       })
-      guest.on('will-redirect', (event, url) => {
+      guest.on('will-redirect', (event, url, _isInPlace, isMainFrame) => {
         const live = this.#bindings.get(key)
         const task = live ? this.#taskForGuest(live) : null
         const lexical = browserNavigationPolicy.lexicalDecision(
@@ -2511,7 +2541,7 @@ export class BrowserGuestSecurityController {
         }
 
         const admission = this.#navigationAdmissions.get(guest.id)
-        if (this.#admissionCovers(admission, live, url, lexical)) {return}
+        if (isMainFrame === true && this.#advanceAdmissionForRedirect(admission, live, url, lexical)) {return}
         if (!task) {
           denyEvent(event)
 
@@ -2532,6 +2562,16 @@ export class BrowserGuestSecurityController {
       })
       guest.on('did-start-navigation', (_event, url) => {
         const uploadBinding = this.#bindings.get(key)
+        const admission = this.#navigationAdmissions.get(guest.id)
+        const parsed = browserNavigationPolicy.canonicalize(url)
+
+        if (
+          uploadBinding?.generation === claim.generation &&
+          admission?.guestGeneration === claim.generation &&
+          parsed?.href === admission.url
+        ) {
+          uploadBinding.loadingAdmissionOperationId = admission.operationId
+        }
 
         if (uploadBinding?.generation === claim.generation) {
           this.#invalidateAssignedUploads({
@@ -2562,9 +2602,16 @@ export class BrowserGuestSecurityController {
           this.#advanceDocumentGeneration(claim, guest)
         }
 
-        void this.#enforceNavigationPostcondition(claim, guest, url).finally(() => {
-          if (isMainFrame === true) {this.#navigationAdmissions.delete(guest.id)}
-        })
+        void this.#enforceNavigationPostcondition(claim, guest, url)
+      })
+      guest.on('did-stop-loading', () => {
+        const current = this.#bindings.get(key)
+        const admission = this.#navigationAdmissions.get(guest.id)
+        if (!current || current.guest !== guest || guest.isLoading()) {return}
+        if (admission && current.loadingAdmissionOperationId === admission.operationId) {
+          this.#navigationAdmissions.delete(guest.id)
+          current.loadingAdmissionOperationId = null
+        }
       })
       guest.on('ipc-message', () => safeDestroy(guest))
 
@@ -2772,6 +2819,7 @@ export class BrowserGuestSecurityController {
         documentGeneration: 1,
         frameSessions,
         guest,
+        loadingAdmissionOperationId: null,
         nextAnnotationLabel: 1,
         reportInFlight: 0,
         reportWindowCount: 0,
@@ -2957,7 +3005,8 @@ export class BrowserGuestSecurityController {
     rawUrl: string,
     source: BrowserNavigationSource,
     webContentsId?: number,
-    topLevel = true
+    topLevel = true,
+    trustedActivationOperationId?: string
   ): Promise<boolean> {
     if (this.#deps.authorizeResourceRequest?.(partition, webContentsId, rawUrl, source === 'network-request')) {
       return true
@@ -2998,7 +3047,7 @@ export class BrowserGuestSecurityController {
         destinationSite: result.siteKey,
         expiresAt: Date.now() + 10_000,
         guestGeneration: guest.generation,
-        operationId: 'trusted-activation',
+        operationId: trustedActivationOperationId ?? `trusted-activation-${crypto.randomBytes(16).toString('base64url')}`,
         profile: guest.profile,
         reasonCodes: result.reasonCodes,
         sourceSite: this.#siteForUrl(guest.guest.getURL()),

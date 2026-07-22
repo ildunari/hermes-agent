@@ -158,6 +158,8 @@ features:
       - apps/desktop/electron/fixtures/browser-sqlite-smoke/package.json
       - apps/desktop/scripts/generate-browser-public-suffix-asset.mjs
       - apps/desktop/src/app/browser/browser-activity-copy.test.ts
+      - apps/desktop/src/app/browser/browser-annotations-layout.test.ts
+      - apps/desktop/src/app/browser/browser-annotations-layout.ts
       - apps/desktop/src/app/browser/browser-annotations-panel.test.tsx
       - apps/desktop/src/app/browser/browser-annotations-panel.tsx
       - apps/desktop/src/app/browser/browser-consent-dialog.test.tsx
@@ -250,6 +252,7 @@ features:
       - tools/browser_tool.py
     tests:
       - apps/desktop/electron/browser-guest-security.test.ts
+      - apps/desktop/src/app/browser/browser-annotations-layout.test.ts
     checks:
       - id: browser-guest-security-contract
         path: apps/desktop/electron/browser-guest-security.ts

@@ -138,6 +138,9 @@ export interface Translations {
     health: Record<'ambiguous' | 'resolved' | 'shifted' | 'stale' | 'unsupported', string>
     kinds: Record<'agent-marker' | 'comment' | 'drawing' | 'element' | 'region' | 'text', string>
     panelLabel: string
+    hideLabel: string
+    resizeLabel: string
+    showLabel: string
     refreshLabel: string
     stale: string
     statuses: Record<'dismissed' | 'open' | 'resolved', string>

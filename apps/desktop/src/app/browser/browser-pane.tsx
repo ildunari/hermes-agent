@@ -5,26 +5,27 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
-import { Activity, ChevronLeft, ChevronRight, Plus, RefreshCw, X } from '@/lib/icons'
+import { Activity, ChevronLeft, ChevronRight, PanelLeftIcon, Plus, RefreshCw, X } from '@/lib/icons'
 import { $activeProfile, normalizeProfileKey } from '@/store/profile'
 import { $activeSessionId, $currentCwd, $selectedStoredSessionId } from '@/store/session'
 
-import { runBrowserNavigation } from './browser-webviews'
+import { $browserAnnotationsOpen, toggleBrowserAnnotations } from './browser-annotations-layout'
 import {
   $browserPaneGeometry,
   $browserPaneOpen,
   $browserTabs,
   $foregroundBrowserTabId,
+  type BrowserTab,
   closeBrowserTab,
   createBrowserTab,
   openBrowserPane,
   selectBrowserTab,
   setBrowserPaneGeometry,
   setBrowserTabGeometry,
-  setBrowserTabUrl,
-  type BrowserTab
+  setBrowserTabUrl
 } from './browser-store'
 import { $browserSupervision } from './browser-supervision'
+import { runBrowserNavigation } from './browser-webviews'
 
 export const BROWSER_PANE_ID = 'browser'
 
@@ -77,6 +78,7 @@ export function BrowserPane() {
   const tabs = useStore($browserTabs)
   const foregroundTabId = useStore($foregroundBrowserTabId)
   const paneOpen = useStore($browserPaneOpen)
+  const annotationsOpen = useStore($browserAnnotationsOpen)
   const supervision = useStore($browserSupervision)
   const foregroundTab = tabs.find(tab => tab.id === foregroundTabId) ?? null
   const control = foregroundTab
@@ -280,6 +282,19 @@ export function BrowserPane() {
             value={address}
           />
         </form>
+        <Tip label={annotationsOpen ? t.browserAnnotations.hideLabel : t.browserAnnotations.showLabel}>
+          <Button
+            aria-label={annotationsOpen ? t.browserAnnotations.hideLabel : t.browserAnnotations.showLabel}
+            aria-pressed={annotationsOpen}
+            data-browser-annotations-toggle
+            disabled={!foregroundTab || foregroundTab.private}
+            onClick={toggleBrowserAnnotations}
+            size="icon-xs"
+            variant={annotationsOpen ? 'secondary' : 'ghost'}
+          >
+            <PanelLeftIcon aria-hidden />
+          </Button>
+        </Tip>
         <div className="flex shrink-0 items-center gap-1 px-1 text-[0.625rem] text-(--ui-text-tertiary)" role="status">
           <Activity aria-hidden className={control?.state === 'agent' ? 'text-(--ui-accent)' : undefined} />
           <span>{control ? t.browserSupervision.states[STATE_COPY[control.state]] : t.browserPane.ready}</span>

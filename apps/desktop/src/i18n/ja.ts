@@ -272,6 +272,9 @@ export const ja = defineLocale({
       text: 'テキスト'
     },
     panelLabel: 'ページの注釈',
+    hideLabel: '注釈を非表示',
+    resizeLabel: '注釈パネルの幅を変更',
+    showLabel: '注釈を表示',
     refreshLabel: '注釈を更新',
     stale: 'ページが変更されました。操作する前に更新してください。',
     statuses: { dismissed: '非表示', open: '未解決', resolved: '解決済み' },

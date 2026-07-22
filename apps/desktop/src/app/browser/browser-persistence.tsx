@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 
 import { $activeProfile, normalizeProfileKey } from '@/store/profile'
 
+import { hydrateBrowserAnnotationsLayout } from './browser-annotations-layout'
 import {
   $browserTabs,
   $foregroundBrowserTabId,
@@ -197,6 +198,10 @@ export function BrowserPersistenceCoordinator() {
   const activeProfile = useStore($activeProfile)
   const tabs = useStore($browserTabs)
   const foregroundId = useStore($foregroundBrowserTabId)
+
+  useEffect(() => {
+    hydrateBrowserAnnotationsLayout()
+  }, [])
 
   useEffect(() => {
     void hydrateBrowserProfile(activeProfile)

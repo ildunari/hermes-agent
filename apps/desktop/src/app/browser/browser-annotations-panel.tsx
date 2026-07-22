@@ -1,9 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useStore } from '@nanostores/react'
+import { type KeyboardEvent, type PointerEvent, useCallback, useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { useI18n } from '@/i18n'
-import { Download, RefreshCw } from '@/lib/icons'
+import { Download, RefreshCw, X } from '@/lib/icons'
 
+import {
+  $browserAnnotationsOpen,
+  $browserAnnotationsWidth,
+  BROWSER_ANNOTATIONS_MAX_WIDTH,
+  BROWSER_ANNOTATIONS_MIN_WIDTH,
+  setBrowserAnnotationsOpen,
+  setBrowserAnnotationsWidth
+} from './browser-annotations-layout'
 import type { BrowserTab } from './browser-store'
 
 type ProjectionHealth = 'ambiguous' | 'resolved' | 'shifted' | 'stale' | 'unsupported'
@@ -64,6 +73,15 @@ export function isAnnotationActionCurrent(
 export function BrowserAnnotationsPanel({ guestGeneration, tab }: BrowserAnnotationsPanelProps) {
   const { t } = useI18n()
   const copy = t.browserAnnotations
+  const open = useStore($browserAnnotationsOpen)
+  const width = useStore($browserAnnotationsWidth)
+  const panelRef = useRef<HTMLElement | null>(null)
+  const resizeCleanupRef = useRef<(() => void) | null>(null)
+  const maximumWidth = Math.min(
+    BROWSER_ANNOTATIONS_MAX_WIDTH,
+    Math.max(BROWSER_ANNOTATIONS_MIN_WIDTH, tab.geometry.width - 160)
+  )
+  const effectiveWidth = Math.min(width, maximumWidth)
   const [rows, setRows] = useState<AnnotationRow[]>([])
   const [state, setState] = useState<'error' | 'idle' | 'loading' | 'stale'>('idle')
   const requestRef = useRef(0)
@@ -74,7 +92,7 @@ export function BrowserAnnotationsPanel({ guestGeneration, tab }: BrowserAnnotat
   const refresh = useCallback(async () => {
     const request = ++requestRef.current
 
-    if (!guestGeneration || tab.private) {
+    if (!open || !guestGeneration || tab.private) {
       recordsRef.current = []
       setRows([])
       setState('idle')
@@ -156,7 +174,7 @@ export function BrowserAnnotationsPanel({ guestGeneration, tab }: BrowserAnnotat
         setState('error')
       }
     }
-  }, [guestGeneration, tab.id, tab.private, tab.profile, tab.workspaceId])
+  }, [guestGeneration, open, tab.id, tab.private, tab.profile, tab.workspaceId])
 
   useEffect(() => {
     void refresh()
@@ -217,13 +235,65 @@ export function BrowserAnnotationsPanel({ guestGeneration, tab }: BrowserAnnotat
     }
   }
 
-  if (tab.private) {return null}
+  const beginResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const panel = panelRef.current
+    if (!panel) {return}
+    event.preventDefault()
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    resizeCleanupRef.current?.()
+    const left = panel.getBoundingClientRect().left
+    const resize = (move: globalThis.PointerEvent) =>
+      setBrowserAnnotationsWidth(Math.min(maximumWidth, move.clientX - left))
+    const finish = () => {
+      window.removeEventListener('pointermove', resize)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', finish)
+      window.removeEventListener('blur', finish)
+      if (resizeCleanupRef.current === finish) {resizeCleanupRef.current = null}
+    }
+
+    resizeCleanupRef.current = finish
+    window.addEventListener('pointermove', resize)
+    window.addEventListener('pointerup', finish, { once: true })
+    window.addEventListener('pointercancel', finish, { once: true })
+    window.addEventListener('blur', finish, { once: true })
+  }, [maximumWidth])
+
+  useEffect(() => () => resizeCleanupRef.current?.(), [])
+
+  const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
+    const delta = event.shiftKey ? 48 : 16
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault()
+      setBrowserAnnotationsWidth(effectiveWidth - delta)
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault()
+      setBrowserAnnotationsWidth(Math.min(maximumWidth, effectiveWidth + delta))
+    } else if (event.key === 'Home') {
+      event.preventDefault()
+      setBrowserAnnotationsWidth(BROWSER_ANNOTATIONS_MIN_WIDTH)
+    } else if (event.key === 'End') {
+      event.preventDefault()
+      setBrowserAnnotationsWidth(maximumWidth)
+    }
+  }
+
+  const hidePanel = () => {
+    setBrowserAnnotationsOpen(false)
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLButtonElement>('[data-browser-annotations-toggle]')?.focus()
+    })
+  }
+
+  if (tab.private || !open) {return null}
 
   return (
     <aside
       aria-label={copy.panelLabel}
-      className="pointer-events-auto order-first flex h-full w-72 shrink-0 flex-col border-r border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) text-(--ui-text-primary) [-webkit-app-region:no-drag]"
+      className="pointer-events-auto relative order-first flex h-full shrink-0 flex-col border-r border-(--ui-stroke-tertiary) bg-(--ui-bg-elevated) text-(--ui-text-primary) [-webkit-app-region:no-drag]"
       data-browser-annotations={tab.id}
+      ref={panelRef}
+      style={{ width: effectiveWidth }}
     >
       <div className="flex items-center justify-between border-b border-(--ui-stroke-tertiary) px-3 py-2">
         <div><h2 className="text-xs font-semibold">{copy.title}</h2><p className="text-[0.625rem] text-(--ui-text-tertiary)">{copy.subtitle}</p></div>
@@ -233,6 +303,9 @@ export function BrowserAnnotationsPanel({ guestGeneration, tab }: BrowserAnnotat
           </Button>
           <Button aria-label={copy.refreshLabel} disabled={state === 'loading'} onClick={() => void refresh()} size="icon-sm" variant="ghost">
             <RefreshCw aria-hidden className={state === 'loading' ? 'animate-spin' : ''} />
+          </Button>
+          <Button aria-label={copy.hideLabel} onClick={hidePanel} size="icon-sm" variant="ghost">
+            <X aria-hidden />
           </Button>
         </div>
       </div>
@@ -259,6 +332,19 @@ export function BrowserAnnotationsPanel({ guestGeneration, tab }: BrowserAnnotat
           </li>
         ))}
       </ol>
+      <div
+        aria-label={copy.resizeLabel}
+        aria-orientation="vertical"
+        aria-valuemax={maximumWidth}
+        aria-valuemin={BROWSER_ANNOTATIONS_MIN_WIDTH}
+        aria-valuenow={effectiveWidth}
+        className="absolute inset-y-0 -right-1 z-30 w-2 cursor-col-resize touch-none bg-transparent hover:bg-(--ui-accent)/30 focus-visible:bg-(--ui-accent)/30 focus-visible:outline-none"
+        data-browser-annotations-resizer
+        onKeyDown={resizeWithKeyboard}
+        onPointerDown={beginResize}
+        role="separator"
+        tabIndex={0}
+      />
     </aside>
   )
 }

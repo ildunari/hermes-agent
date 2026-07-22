@@ -264,6 +264,9 @@ export const zhHant = defineLocale({
       text: '文字'
     },
     panelLabel: '頁面註解',
+    hideLabel: '隱藏註解',
+    resizeLabel: '調整註解面板寬度',
+    showLabel: '顯示註解',
     refreshLabel: '重新整理註解',
     stale: '頁面已變更。請先重新整理再操作。',
     statuses: { dismissed: '已忽略', open: '未解決', resolved: '已解決' },

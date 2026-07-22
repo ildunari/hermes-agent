@@ -360,6 +360,9 @@ export const zh: Translations = {
       text: '文本'
     },
     panelLabel: '页面注释',
+    hideLabel: '隐藏注释',
+    resizeLabel: '调整注释面板宽度',
+    showLabel: '显示注释',
     refreshLabel: '刷新注释',
     stale: '页面已更改。请刷新后再操作。',
     statuses: { dismissed: '已忽略', open: '未解决', resolved: '已解决' },

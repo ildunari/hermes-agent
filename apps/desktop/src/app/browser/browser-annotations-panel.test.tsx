@@ -1,6 +1,10 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import {
+  __resetBrowserAnnotationsLayoutForTests,
+  setBrowserAnnotationsOpen
+} from './browser-annotations-layout'
 import { BrowserAnnotationsPanel, isAnnotationActionCurrent } from './browser-annotations-panel'
 import type { BrowserTab } from './browser-store'
 
@@ -30,7 +34,15 @@ const record = {
 }
 
 describe('browser annotations side panel', () => {
-  afterEach(() => Reflect.deleteProperty(window, 'hermesDesktop'))
+  beforeEach(() => {
+    __resetBrowserAnnotationsLayoutForTests()
+    setBrowserAnnotationsOpen(true)
+  })
+
+  afterEach(() => {
+    __resetBrowserAnnotationsLayoutForTests()
+    Reflect.deleteProperty(window, 'hermesDesktop')
+  })
 
   it('fetches backend authority and paints only the main-safe projection', async () => {
     const api = vi.fn(async () => [record])
@@ -123,6 +135,38 @@ describe('browser annotations side panel', () => {
     }))
     await vi.waitFor(() => expect((exportButton as HTMLButtonElement).disabled).toBe(false))
     expect(await exportAnnotationScreenshot.mock.results[0].value).toEqual({ canceled: false, ok: true })
+  })
+
+  it('resizes with the accessible separator and closes from the panel header', async () => {
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: {
+        api: vi.fn(async () => []),
+        browserGuest: {
+          report: vi.fn(async () => ({ documentGeneration: 7, ok: true, value: {} })),
+          resolveAnnotations: vi.fn(async () => ({ documentGeneration: 7, ok: true, projections: [] }))
+        }
+      }
+    })
+
+    const toolbarToggle = document.createElement('button')
+    toolbarToggle.dataset.browserAnnotationsToggle = ''
+    document.body.append(toolbarToggle)
+    render(<BrowserAnnotationsPanel guestGeneration="guest-1" tab={tab} />)
+    const panel = await screen.findByRole('complementary', { name: 'Page annotations' })
+    const separator = screen.getByRole('separator', { name: 'Resize annotations panel' })
+
+    expect(panel.getAttribute('style')).toContain('width: 288px')
+    fireEvent.keyDown(separator, { key: 'ArrowRight' })
+    expect(panel.getAttribute('style')).toContain('width: 304px')
+    fireEvent.pointerDown(separator, { clientX: 304 })
+    fireEvent.pointerMove(window, { clientX: 420 })
+    fireEvent.blur(window)
+    fireEvent.pointerMove(window, { clientX: 500 })
+    expect(panel.getAttribute('style')).toContain('width: 420px')
+    fireEvent.click(screen.getByRole('button', { name: 'Hide annotations' }))
+    expect(screen.queryByRole('complementary', { name: 'Page annotations' })).toBeNull()
+    await vi.waitFor(() => expect(document.activeElement).toBe(toolbarToggle))
   })
 
   it('requires both current generation and actionable health', () => {

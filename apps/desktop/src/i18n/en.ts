@@ -107,6 +107,9 @@ export const en: Translations = {
       text: 'Text'
     },
     panelLabel: 'Page annotations',
+    hideLabel: 'Hide annotations',
+    resizeLabel: 'Resize annotations panel',
+    showLabel: 'Show annotations',
     refreshLabel: 'Refresh annotations',
     stale: 'The page changed. Refresh before acting.',
     statuses: { dismissed: 'Dismissed', open: 'Open', resolved: 'Resolved' },

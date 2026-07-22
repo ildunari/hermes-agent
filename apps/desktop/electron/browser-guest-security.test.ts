@@ -20,6 +20,7 @@ class FakeContents extends EventEmitter {
   }
   session: FakeSession
   closed = false
+  loading = false
   loaded: string[] = []
   popupHandler: null | ((details?: { url?: string }) => { action: 'deny' }) = null
   url = 'about:blank'
@@ -71,6 +72,10 @@ class FakeContents extends EventEmitter {
 
   isCrashed() {
     return false
+  }
+
+  isLoading() {
+    return this.loading
   }
 
   async loadURL(url: string) {
@@ -676,7 +681,7 @@ describe('browser guest security', () => {
     guest.emit('will-navigate', activationEvent, 'https://example.test/')
     expect(activationEvent.preventDefault).not.toHaveBeenCalled()
     const activationRedirect = { preventDefault: vi.fn() }
-    guest.emit('will-redirect', activationRedirect, 'https://sub.example.test/continued')
+    guest.emit('will-redirect', activationRedirect, 'https://sub.example.test/continued', false, true)
     expect(activationRedirect.preventDefault).not.toHaveBeenCalled()
     expect(
       await activate(
@@ -699,7 +704,7 @@ describe('browser guest security', () => {
     const redirectEvent = { preventDefault: vi.fn() }
     guest.emit('will-navigate', mainEvent, 'data:text/html,blocked')
     guest.emit('will-frame-navigate', frameEvent)
-    guest.emit('will-redirect', redirectEvent, 'https://user:pass@example.test/')
+    guest.emit('will-redirect', redirectEvent, 'https://user:pass@example.test/', false, true)
     expect(mainEvent.preventDefault).toHaveBeenCalledOnce()
     expect(frameEvent.preventDefault).toHaveBeenCalledOnce()
     expect(redirectEvent.preventDefault).toHaveBeenCalledOnce()
@@ -1201,7 +1206,7 @@ describe('browser guest security', () => {
     })
 
     frameSink.mockClear()
-    const navigationEvent = { frame: { id: 'frame-safe', url: 'https://example.test/committed' } }
+    const navigationEvent = { frame: { id: 'frame-safe', url: 'https://example.test/allowed' } }
 
     guest.debugger.emit('message', {}, 'Page.frameNavigated', navigationEvent)
     await vi.waitFor(() => expect(frameSink).toHaveBeenCalledWith({
@@ -1228,19 +1233,19 @@ describe('browser guest security', () => {
     expect(navigation).toMatchObject({ result: {} })
 
     const sameSite = { preventDefault: vi.fn() }
-    fixture.guest.emit('will-redirect', sameSite, 'https://checkout.example.test/continue')
+    fixture.guest.emit('will-redirect', sameSite, 'https://checkout.example.test/continue', false, true)
     expect(sameSite.preventDefault).not.toHaveBeenCalled()
 
     const hardEscalation = { preventDefault: vi.fn() }
-    fixture.guest.emit('will-redirect', hardEscalation, 'https://user:secret@checkout.example.test/continue')
+    fixture.guest.emit('will-redirect', hardEscalation, 'https://user:secret@checkout.example.test/continue', false, true)
     expect(hardEscalation.preventDefault).toHaveBeenCalledOnce()
 
     const crossSite = { preventDefault: vi.fn() }
-    fixture.guest.emit('will-redirect', crossSite, 'https://other.example/continue')
+    fixture.guest.emit('will-redirect', crossSite, 'https://other.example/continue', false, true)
     expect(crossSite.preventDefault).toHaveBeenCalledOnce()
 
     const changedScheme = { preventDefault: vi.fn() }
-    fixture.guest.emit('will-redirect', changedScheme, 'http://checkout.example.test/continue')
+    fixture.guest.emit('will-redirect', changedScheme, 'http://checkout.example.test/continue', false, true)
     expect(changedScheme.preventDefault).toHaveBeenCalledOnce()
   })
 
@@ -1514,6 +1519,99 @@ describe('browser guest security', () => {
       await fixture.handlers.get('hermes:browser-guest:stop-and-close')!({ sender: fixture.host }, next)
     ).toEqual({ ok: true, retired: true })
     expect(fixture.guest.closed).toBe(true)
+  })
+
+  it('keeps a trusted activation admission through duplicate commit events until loading stops', async () => {
+    const { handlers, host, sessionFromPartition } = setup()
+    const partition = BROWSER_PARTITION
+    const tabId = 'tab-redirect-chain'
+    const prepared = (await handlers.get('hermes:browser-guest:prepare')!(
+      { sender: host },
+      { partition, private: false, profile: 'default', surfaceEpoch: 'surface-redirect', tabId }
+    )) as { attachmentUrl: string; generation: string }
+
+    host.emit(
+      'will-attach-webview',
+      { preventDefault: vi.fn() },
+      {},
+      { partition, src: prepared.attachmentUrl }
+    )
+    const browserSession = sessionFromPartition(partition)
+    const guest = new FakeContents(98, browserSession)
+    guest.url = prepared.attachmentUrl
+    host.emit('did-attach-webview', {}, guest)
+    await vi.waitFor(() =>
+      expect(guest.debugger.sendCommand).toHaveBeenCalledWith('Page.setInterceptFileChooserDialog', { cancel: true, enabled: true })
+    )
+
+    await expect(handlers.get('hermes:browser-guest:activate')!(
+      { sender: host },
+      { generation: prepared.generation, tabId, url: 'https://google.com' }
+    )).resolves.toEqual({ ok: true })
+
+    const unrelated = { preventDefault: vi.fn() }
+    guest.emit('will-navigate', unrelated, 'https://google.com/unrelated')
+    expect(unrelated.preventDefault).toHaveBeenCalledOnce()
+
+    const subframeRedirect = { preventDefault: vi.fn() }
+    guest.emit('will-redirect', subframeRedirect, 'https://google.com/subframe-target', false, false)
+    const poisonedTopFrame = { preventDefault: vi.fn() }
+    guest.emit('will-navigate', poisonedTopFrame, 'https://google.com/subframe-target')
+    expect(poisonedTopFrame.preventDefault).toHaveBeenCalledOnce()
+
+    guest.url = 'https://www.google.com/'
+    const redirect = { preventDefault: vi.fn() }
+    guest.emit('will-redirect', redirect, guest.url, false, true)
+    expect(redirect.preventDefault).not.toHaveBeenCalled()
+    guest.emit('did-start-navigation', {}, guest.url)
+    guest.emit('did-frame-navigate', {}, guest.url, 200, 'OK', true)
+    await vi.waitFor(() => expect(browserSession.resolveHost.mock.calls.some(([host]) => host === 'www.google.com')).toBe(true))
+    expect(guest.closed).toBe(false)
+
+    guest.debugger.emit('message', {}, 'Page.frameNavigated', { frame: { id: 'main', url: guest.url } })
+    await new Promise(resolve => setTimeout(resolve, 25))
+    expect(guest.closed).toBe(false)
+
+    guest.emit('did-stop-loading')
+    guest.debugger.emit('message', {}, 'Page.frameNavigated', { frame: { id: 'main', url: guest.url } })
+    await vi.waitFor(() => expect(guest.closed).toBe(true))
+  })
+
+  it('does not let a stale stop event delete a newer trusted activation admission', async () => {
+    const { handlers, host, sessionFromPartition } = setup()
+    const partition = BROWSER_PARTITION
+    const tabId = 'tab-overlapping-loads'
+    const prepared = (await handlers.get('hermes:browser-guest:prepare')!(
+      { sender: host },
+      { partition, private: false, profile: 'default', surfaceEpoch: 'surface-overlap', tabId }
+    )) as { attachmentUrl: string; generation: string }
+
+    host.emit('will-attach-webview', { preventDefault: vi.fn() }, {}, { partition, src: prepared.attachmentUrl })
+    const guest = new FakeContents(99, sessionFromPartition(partition))
+    guest.url = prepared.attachmentUrl
+    host.emit('did-attach-webview', {}, guest)
+    await vi.waitFor(() => expect(guest.debugger.sendCommand).toHaveBeenCalledWith('Page.enable'))
+
+    const activate = handlers.get('hermes:browser-guest:activate')!
+    await activate({ sender: host }, { generation: prepared.generation, tabId, url: 'https://google.com/' })
+    guest.url = 'https://google.com/'
+    guest.emit('did-start-navigation', {}, guest.url)
+
+    await activate({ sender: host }, { generation: prepared.generation, tabId, url: 'https://example.com/' })
+    guest.url = 'https://example.com/'
+    guest.loading = true
+    guest.emit('did-stop-loading')
+
+    const newerStillAllowed = { preventDefault: vi.fn() }
+    guest.emit('will-navigate', newerStillAllowed, guest.url)
+    expect(newerStillAllowed.preventDefault).not.toHaveBeenCalled()
+
+    guest.emit('did-start-navigation', {}, guest.url)
+    guest.loading = false
+    guest.emit('did-stop-loading')
+    const afterCurrentStop = { preventDefault: vi.fn() }
+    guest.emit('will-navigate', afterCurrentStop, guest.url)
+    expect(afterCurrentStop.preventDefault).toHaveBeenCalledOnce()
   })
 
   it.each([
