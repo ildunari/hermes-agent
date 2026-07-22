@@ -82,16 +82,8 @@ def grant_client(monkeypatch, tmp_path):
 
     monkeypatch.setattr(browser_transport, "get_browser_transport_manager", lambda _app: UploadLease())
 
-    def freeze(target_app):
-        target_app.state.browser_active_profile = "coding"
-        target_app.state.browser_active_home = str(tmp_path)
-        target_app.state.browser_resource_grants = authority
-        target_app.state.browser_upload_sources = upload_authority
-        return "coding"
-
-    monkeypatch.setattr(web_server, "_capture_browser_active_profile", freeze)
-    monkeypatch.setattr(web_server, "_start_browser_annotation_rpc", lambda _app: None)
-    freeze(web_server.app)
+    web_server.app.state.browser_resource_grants = authority
+    web_server.app.state.browser_upload_sources = upload_authority
     with TestClient(web_server.app) as client:
         yield client, workspace, authority, web_server
 
@@ -311,23 +303,33 @@ def test_revoke_endpoint_is_exact_scope_and_profile_bound(grant_client, preview_
     assert after.status_code == 401
 
 
-def test_workspace_root_comes_from_active_profile_session_database(tmp_path):
+def test_workspace_root_comes_from_each_requested_profile_session_database(
+    monkeypatch, tmp_path
+):
     from hermes_cli import web_server
     from hermes_state import SessionDB
 
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    db = SessionDB(db_path=tmp_path / "state.db")
-    try:
-        db.create_session("session-1", "desktop", cwd=str(workspace))
-    finally:
-        db.close()
-    web_server.app.state.browser_active_profile = "coding"
-    web_server.app.state.browser_active_home = str(tmp_path)
+    homes = {profile: tmp_path / profile for profile in ("coding", "other")}
+    workspaces = {profile: tmp_path / f"workspace-{profile}" for profile in homes}
+    for profile, home in homes.items():
+        home.mkdir()
+        workspaces[profile].mkdir()
+        db = SessionDB(db_path=home / "state.db")
+        try:
+            db.create_session("session-1", "desktop", cwd=str(workspaces[profile]))
+        finally:
+            db.close()
+    monkeypatch.setattr(web_server, "_browser_profile_home", homes.__getitem__)
 
-    assert web_server._browser_workspace_root(web_server.app, "coding", "session-1") == workspace
+    assert (
+        web_server._browser_workspace_root(web_server.app, "coding", "session-1")
+        == workspaces["coding"]
+    )
+    assert (
+        web_server._browser_workspace_root(web_server.app, "other", "session-1")
+        == workspaces["other"]
+    )
     assert web_server._browser_workspace_root(web_server.app, "coding", "missing") is None
-    assert web_server._browser_workspace_root(web_server.app, "other", "session-1") is None
 
 
 def test_preview_websocket_relays_frames_with_no_gateway_cookie_or_bearer_forwarding(

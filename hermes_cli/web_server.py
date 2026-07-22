@@ -181,7 +181,6 @@ def _resolve_restart_drain_timeout() -> float:
 
 @asynccontextmanager
 async def _lifespan(app: "FastAPI"):
-    _capture_browser_active_profile(app)
     app.state.event_channels = {}  # dict[str, set]
     app.state.event_lock = asyncio.Lock()
     app.state.pty_active_session_files = {}  # dict[str, Path]
@@ -190,7 +189,7 @@ async def _lifespan(app: "FastAPI"):
     # On app.state (not a module global) so the Lock binds to the running
     # event loop during lifespan startup — see _get_event_state's docstring.
     app.state.chat_argv_lock = asyncio.Lock()
-    _start_browser_annotation_rpc(app)
+    app.state.browser_annotation_rpcs = {}
 
     # Fire hermes_cli.gateway import into a background thread so the event
     # loop is not blocked and HERMES_DASHBOARD_READY fires without delay.
@@ -234,9 +233,10 @@ async def _lifespan(app: "FastAPI"):
         upload_sources = getattr(app.state, "browser_upload_sources", None)
         if upload_sources is not None:
             upload_sources.revoke_all()
-        annotation_rpc = getattr(app.state, "browser_annotation_rpc", None)
-        if annotation_rpc is not None:
+        annotation_rpcs = getattr(app.state, "browser_annotation_rpcs", {})
+        for annotation_rpc in set(annotation_rpcs.values()):
             annotation_rpc.registry.close()
+        app.state.browser_annotation_rpcs = {}
         if cron_stop is not None:
             cron_stop.set()
 
@@ -703,14 +703,10 @@ async def auth_middleware(request: Request, call_next):
 def _browser_workspace_root(target_app: FastAPI, profile: str, source_session_id: str) -> Path | None:
     """Resolve a source session's server-authoritative workspace root."""
     try:
-        _require_browser_gateway_profile(target_app, profile)
-        home = getattr(target_app.state, "browser_active_home", None)
-        if not isinstance(home, str):
-            _capture_browser_active_profile(target_app)
-            home = target_app.state.browser_active_home
+        home = _browser_profile_home(profile)
         from hermes_state import SessionDB, workspace_key
 
-        db_path = Path(home) / "state.db"
+        db_path = home / "state.db"
         if not db_path.is_file():
             return None
         db = SessionDB(db_path=db_path, read_only=True)
@@ -769,7 +765,7 @@ def _authorize_browser_grant_delivery(request: Request):
     ref, kind = _browser_grant_ref_and_kind(request.url.path)
     credential = request.headers.get("x-hermes-browser-grant", "")
     scope = scope_from_headers(request.headers)
-    _require_browser_gateway_profile(request.app, scope.profile)
+    _validate_browser_profile(scope.profile)
     authority = _browser_resource_grant_authority(request.app)
     if kind == "artifact":
         return authority.authorize_artifact(ref, credential, scope, request.headers.get("range"))
@@ -7224,8 +7220,13 @@ def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
 @app.put("/api/config")
 async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
     try:
-        target_profile = body.profile or profile or "default"
-        with _profile_scope(body.profile or profile):
+        requested_profile = body.profile or profile
+        target_profile = (
+            _browser_process_profile()
+            if not requested_profile or requested_profile.strip().lower() == "current"
+            else _validate_browser_profile(requested_profile)
+        )
+        with _profile_scope(requested_profile):
             # The dashboard form is schema-driven (see CONFIG_SCHEMA). Any root
             # key absent from the schema — most visibly ``custom_providers``, but
             # also ``agent.personalities``, ``terminal.lifetime_seconds``, etc. —
@@ -7235,8 +7236,8 @@ async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
             existing = read_raw_config()
             incoming = _denormalize_config_from_web(body.config)
             save_config(_deep_merge(existing, incoming))
-            target_enabled = _browser_in_app_enabled(app)
-        if target_profile == _browser_active_profile(app) and not target_enabled:
+            target_enabled = _browser_in_app_enabled(app, target_profile)
+        if not target_enabled:
             from hermes_cli.browser_transport import get_browser_transport_manager
 
             await get_browser_transport_manager(app).disable(profile=target_profile)
@@ -18504,8 +18505,8 @@ class BrowserAnnotationTurnRequest(BrowserAnnotationRpcRequest):
     thread_generation: int = 1
 
 
-def _infer_browser_active_profile() -> str:
-    """Infer the gateway process profile from its startup HERMES_HOME."""
+def _browser_process_profile() -> str:
+    """Resolve the profile represented by the dashboard process home."""
 
     from hermes_cli.profiles import get_active_profile_name
 
@@ -18520,43 +18521,35 @@ def _infer_browser_active_profile() -> str:
         return "default"
 
 
-def _capture_browser_active_profile(target_app: FastAPI) -> str:
-    """Freeze browser profile/config authority for this server process."""
+def _validate_browser_profile(profile: str) -> str:
+    """Validate an app-global browser route's requested profile id."""
 
-    selected = _infer_browser_active_profile()
-    target_app.state.browser_active_profile = selected
-    target_app.state.browser_active_home = str(get_hermes_home())
-    return selected
+    from hermes_cli.browser_transport import validate_profile
 
-
-def _browser_active_profile(target_app: FastAPI) -> str:
-    selected = getattr(target_app.state, "browser_active_profile", None)
-    return selected if isinstance(selected, str) else _capture_browser_active_profile(target_app)
+    return validate_profile(profile)
 
 
-def _require_browser_gateway_profile(target_app: FastAPI, profile: str) -> str:
-    """Reject assertions that do not match trusted process profile authority."""
+def _browser_profile_home(profile: str) -> Path:
+    """Resolve one validated browser profile to its profile-specific home."""
 
-    from hermes_cli.browser_transport import BrowserProtocolError, validate_profile
+    selected = _validate_browser_profile(profile)
+    # A custom HERMES_HOME has no entry in the managed profiles tree. Preserve
+    # that deployment's own profile while routing default/named profiles
+    # through the canonical app-global profile resolver.
+    if selected == "custom" and _browser_process_profile() == "custom":
+        return Path(get_hermes_home())
+    from hermes_cli import profiles as profiles_mod
 
-    asserted = validate_profile(profile)
-    if asserted != _browser_active_profile(target_app):
-        raise BrowserProtocolError(
-            "browser_wrong_profile", "asserted profile is not this gateway's selected profile"
-        )
-    return asserted
+    return Path(profiles_mod.get_profile_dir(selected))
 
 
-def _browser_in_app_enabled(target_app: FastAPI) -> bool:
-    """Read only the config home frozen as authority at process startup."""
+def _browser_in_app_enabled(target_app: FastAPI, profile: str) -> bool:
+    """Read in-app-browser enablement from the requested profile's config."""
 
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
-    home = getattr(target_app.state, "browser_active_home", None)
-    if not isinstance(home, str):
-        _capture_browser_active_profile(target_app)
-        home = target_app.state.browser_active_home
-    token = set_hermes_home_override(home)
+    del target_app  # kept in the signature for the existing app-scoped callers
+    token = set_hermes_home_override(str(_browser_profile_home(profile)))
     try:
         cfg = load_config() or {}
         browser = cfg.get("browser") if isinstance(cfg, dict) else None
@@ -18595,9 +18588,12 @@ def _browser_grant_scope(body_scope: BrowserGrantScopeRequest, profile: str, rec
 
 def _browser_grant_http_error(exc: Exception) -> HTTPException:
     from hermes_cli.browser_resource_grants import BrowserGrantError
+    from hermes_cli.browser_transport import BrowserProtocolError
 
     if isinstance(exc, BrowserGrantError):
         return HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    if isinstance(exc, BrowserProtocolError):
+        return HTTPException(status_code=400, detail={"code": exc.code})
     _log.exception("browser resource grant failure")
     return HTTPException(status_code=500, detail={"code": "grant_unavailable"})
 
@@ -18670,7 +18666,7 @@ def _browser_artifact_headers(read) -> dict[str, str]:
 async def mint_browser_artifact_grant(body: BrowserArtifactGrantRequest, request: Request):
     identity = _http_auth_identity(request)
     try:
-        profile = _require_browser_gateway_profile(request.app, body.profile)
+        profile = _validate_browser_profile(body.profile)
         scope = _browser_grant_scope(body.scope, profile, str(identity["principal"]))
         grant = _browser_resource_grant_authority(request.app).mint_artifact(
             scope, body.path, ttl_seconds=body.ttl_seconds
@@ -18696,7 +18692,7 @@ async def mint_browser_artifact_grant(body: BrowserArtifactGrantRequest, request
 async def mint_browser_preview_grant(body: BrowserPreviewGrantRequest, request: Request):
     identity = _http_auth_identity(request)
     try:
-        profile = _require_browser_gateway_profile(request.app, body.profile)
+        profile = _validate_browser_profile(body.profile)
         scope = _browser_grant_scope(body.scope, profile, str(identity["principal"]))
         grant = _browser_resource_grant_authority(request.app).mint_preview(
             scope, body.upstream_url, ttl_seconds=body.ttl_seconds
@@ -18720,7 +18716,7 @@ async def mint_browser_preview_grant(body: BrowserPreviewGrantRequest, request: 
 async def revoke_browser_resource_grants(body: BrowserGrantRevokeRequest, request: Request):
     identity = _http_auth_identity(request)
     try:
-        profile = _require_browser_gateway_profile(request.app, body.profile)
+        profile = _validate_browser_profile(body.profile)
         scope = _browser_grant_scope(body.scope, profile, str(identity["principal"]))
         revoked = _browser_resource_grant_authority(request.app).revoke_scope(scope)
         return {"ok": True, "revoked": revoked}
@@ -18734,7 +18730,7 @@ async def list_browser_upload_source_candidates(
 ):
     identity = _http_auth_identity(request)
     try:
-        profile = _require_browser_gateway_profile(request.app, body.profile)
+        profile = _validate_browser_profile(body.profile)
         scope = _browser_upload_scope(body.scope, profile, str(identity["principal"]))
         _authenticate_browser_upload_scope(request, scope)
         candidates = _browser_upload_source_authority(request.app).list_candidates(scope)
@@ -18761,7 +18757,7 @@ async def mint_browser_upload_source_grant(
 ):
     identity = _http_auth_identity(request)
     try:
-        profile = _require_browser_gateway_profile(request.app, body.profile)
+        profile = _validate_browser_profile(body.profile)
         scope = _browser_upload_scope(body.scope, profile, str(identity["principal"]))
         _authenticate_browser_upload_scope(request, scope)
         ticket = _browser_upload_source_authority(request.app).mint(
@@ -18792,7 +18788,7 @@ async def revoke_browser_upload_source_grants(
 ):
     identity = _http_auth_identity(request)
     try:
-        profile = _require_browser_gateway_profile(request.app, body.profile)
+        profile = _validate_browser_profile(body.profile)
         scope = _browser_upload_scope(body.scope, profile, str(identity["principal"]))
         _authenticate_browser_upload_scope(request, scope)
         revoked = _browser_upload_source_authority(request.app).revoke_grants(scope, body.opaque_refs)
@@ -18836,8 +18832,8 @@ async def deliver_browser_upload_source(ref: str, request: Request):
             "chooser_mode": request.headers.get("x-hermes-browser-chooser-mode", ""),
             "source_session_id": request.headers.get("x-hermes-browser-source-session", ""),
         }
-        profile = _require_browser_gateway_profile(
-            request.app, request.headers.get("x-hermes-browser-profile", "")
+        profile = _validate_browser_profile(
+            request.headers.get("x-hermes-browser-profile", "")
         )
         scope = _browser_upload_scope(
             BrowserUploadSourceScopeRequest(**scope_values), profile, str(identity["principal"])
@@ -19020,7 +19016,7 @@ async def proxy_browser_preview_websocket(ref: str, tail: str, ws: WebSocket):
     upstream = None
     try:
         scope = scope_from_headers(ws.headers)
-        _require_browser_gateway_profile(ws.app, scope.profile)
+        _validate_browser_profile(scope.profile)
         authority = _browser_resource_grant_authority(ws.app)
         grant = authority.authorize_preview(
             ref, ws.headers.get("x-hermes-browser-grant", ""), scope
@@ -19083,37 +19079,36 @@ async def proxy_browser_preview_websocket(ref: str, tail: str, ws: WebSocket):
 
 
 def _browser_annotation_repository(request: Request, profile: str):
-    """Select annotations only from authenticated, process-frozen authority."""
+    """Select annotations from the authenticated requested profile."""
 
     _http_auth_identity(request)
     try:
-        selected = _require_browser_gateway_profile(request.app, profile)
+        selected = _validate_browser_profile(profile)
     except Exception as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    home = getattr(request.app.state, "browser_active_home", None)
-    if not isinstance(home, str):
-        _capture_browser_active_profile(request.app)
-        home = request.app.state.browser_active_home
+        code = getattr(exc, "code", "browser_invalid_profile")
+        raise HTTPException(status_code=400, detail={"code": code}) from exc
+    home = _browser_profile_home(selected)
     from hermes_cli.browser_annotations_db import AnnotationRepository
 
-    return AnnotationRepository(profile_id=selected, profile_home=Path(home))
+    return AnnotationRepository(profile_id=selected, profile_home=home)
 
 
-def _start_browser_annotation_rpc(target_app: FastAPI):
-    """Start durable queue recovery without creating a generic chat session."""
+def _start_browser_annotation_rpc(target_app: FastAPI, profile: str):
+    """Start and cache one durable annotation RPC facade per profile."""
 
-    existing = getattr(target_app.state, "browser_annotation_rpc", None)
+    selected = _validate_browser_profile(profile)
+    facades = getattr(target_app.state, "browser_annotation_rpcs", None)
+    if not isinstance(facades, dict):
+        facades = {}
+        target_app.state.browser_annotation_rpcs = facades
+    existing = facades.get(selected)
     if existing is not None:
         return existing
     with _BROWSER_ANNOTATION_RPC_LOCK:
-        existing = getattr(target_app.state, "browser_annotation_rpc", None)
+        existing = facades.get(selected)
         if existing is not None:
             return existing
-        selected = _browser_active_profile(target_app)
-        home = getattr(target_app.state, "browser_active_home", None)
-        if not isinstance(home, str):
-            _capture_browser_active_profile(target_app)
-            home = target_app.state.browser_active_home
+        home = _browser_profile_home(selected)
         try:
             from hermes_cli.browser_annotation_lineage import AnnotationLineageRepository
             from hermes_cli.browser_annotation_bundle import AnnotationBundleCoordinator
@@ -19125,14 +19120,14 @@ def _start_browser_annotation_rpc(target_app: FastAPI):
             from hermes_cli.browser_annotations_db import AnnotationRepository
 
             annotations = AnnotationRepository(
-                profile_id=selected, profile_home=Path(home)
+                profile_id=selected, profile_home=home
             )
             lineage = AnnotationLineageRepository(
-                profile_id=selected, profile_home=Path(home)
+                profile_id=selected, profile_home=home
             )
             registry = production_annotation_registry(
                 profile_id=selected,
-                profile_home=Path(home),
+                profile_home=home,
                 lineage_repository=lineage,
                 annotation_repository=annotations,
             )
@@ -19142,7 +19137,7 @@ def _start_browser_annotation_rpc(target_app: FastAPI):
                 lineage=lineage,
                 registry=registry,
                 snapshot_factory=production_annotation_snapshot_factory(
-                    profile_home=Path(home), lineage=lineage
+                    profile_home=home, lineage=lineage
                 ),
             )
             facade = AnnotationRpcFacade(
@@ -19161,25 +19156,22 @@ def _start_browser_annotation_rpc(target_app: FastAPI):
         except Exception:
             _log.exception("dedicated annotation RPC startup failed")
             return None
-        target_app.state.browser_annotation_rpc = facade
+        facades[selected] = facade
         return facade
 
 
 def _browser_annotation_rpc(request: Request, profile: str):
-    """Return only the authenticated process-active profile's dedicated facade."""
+    """Return the authenticated requested profile's dedicated facade."""
 
     _http_auth_identity(request)
     try:
-        selected = _require_browser_gateway_profile(request.app, profile)
+        selected = _validate_browser_profile(profile)
     except Exception as exc:
-        raise HTTPException(
-            status_code=403, detail={"code": "profile_mismatch"}
-        ) from exc
-    facade = _start_browser_annotation_rpc(request.app)
+        code = getattr(exc, "code", "browser_invalid_profile")
+        raise HTTPException(status_code=400, detail={"code": code}) from exc
+    facade = _start_browser_annotation_rpc(request.app, selected)
     if facade is None:
         raise HTTPException(status_code=503, detail={"code": "backend_offline"})
-    if facade.profile_id != selected:
-        raise HTTPException(status_code=403, detail={"code": "profile_mismatch"})
     return facade
 
 
@@ -19204,7 +19196,7 @@ def _browser_annotation_author(request: Request, profile: str):
     return AuthorRef(
         kind="system" if identity.get("provider") == "dashboard-token" else "human",
         actor_id=principal,
-        profile_id=profile,
+        profile_id=_validate_browser_profile(profile),
         display_name=principal,
     )
 
@@ -19464,12 +19456,12 @@ async def mint_browser_ws_ticket(body: BrowserTicketRequest, request: Request):
 
     identity = _http_auth_identity(request)
     try:
-        profile = _require_browser_gateway_profile(request.app, body.profile)
+        profile = _validate_browser_profile(body.profile)
         connection_id = BrowserTransportManager.validate_connection_id(body.connection_id)
-        if not _browser_in_app_enabled(request.app):
+        if not _browser_in_app_enabled(request.app, profile):
             raise BrowserProtocolError("browser_disabled", "in-app browser is disabled")
     except BrowserProtocolError as exc:
-        status = 409 if exc.code in {"browser_wrong_profile", "browser_disabled"} else 400
+        status = 409 if exc.code == "browser_disabled" else 400
         raise HTTPException(status_code=status, detail=exc.code) from exc
     ticket = mint_browser_ticket(
         user_id=identity["user_id"],
@@ -19491,10 +19483,9 @@ async def kill_browser_transport(body: BrowserControlRequest, request: Request):
 
     identity = _http_auth_identity(request)
     try:
-        profile = _require_browser_gateway_profile(request.app, body.profile)
+        profile = _validate_browser_profile(body.profile)
     except BrowserProtocolError as exc:
-        status = 409 if exc.code == "browser_wrong_profile" else 400
-        raise HTTPException(status_code=status, detail=exc.code) from exc
+        raise HTTPException(status_code=400, detail=exc.code) from exc
     killed = await get_browser_transport_manager(request.app).kill(
         principal=identity["principal"], profile=profile
     )
@@ -19557,7 +19548,6 @@ async def browser_ws(ws: WebSocket) -> None:
             return
 
         try:
-            _require_browser_gateway_profile(ws.app, context.ticket_profile)
             manager.validate_hello_claims(context, hello)
             await manager.wait_for_chat(
                 context,
@@ -19566,7 +19556,7 @@ async def browser_ws(ws: WebSocket) -> None:
             outcome = manager.negotiate(
                 context,
                 hello,
-                server_enabled=_browser_in_app_enabled(ws.app),
+                server_enabled=_browser_in_app_enabled(ws.app, context.ticket_profile),
             )
         except BrowserProtocolError as exc:
             await ws.send_json(exc.outcome(generation=context.capability_generation))
@@ -19612,7 +19602,7 @@ async def browser_ws(ws: WebSocket) -> None:
         while True:
             # Re-read config while quiet so Studio disable is an immediate
             # transition, not something delayed until the next browser frame.
-            if not _browser_in_app_enabled(ws.app):
+            if not _browser_in_app_enabled(ws.app, context.ticket_profile):
                 await manager.disable(profile=context.ticket_profile)
                 return
             await expire_deadlines()
@@ -19633,7 +19623,7 @@ async def browser_ws(ws: WebSocket) -> None:
                 outcome = manager.negotiate(
                     context,
                     message,
-                    server_enabled=_browser_in_app_enabled(ws.app),
+                    server_enabled=_browser_in_app_enabled(ws.app, context.ticket_profile),
                 )
                 await ws.send_json(outcome)
                 if outcome["status"] != "ready":
@@ -19744,7 +19734,7 @@ async def gateway_ws(ws: WebSocket) -> None:
                 raise BrowserProtocolError(
                     "browser_invalid_association", "connection_id and profile must be paired"
                 )
-            asserted_profile = _require_browser_gateway_profile(ws.app, profile)
+            asserted_profile = _validate_browser_profile(profile)
             manager.register_chat(
                 transport=chat_transport,
                 principal=identity["principal"],
@@ -19753,8 +19743,7 @@ async def gateway_ws(ws: WebSocket) -> None:
             )
             associated = True
         except BrowserProtocolError as exc:
-            code = 4409 if exc.code == "browser_wrong_profile" else 4400
-            await ws.close(code=code, reason=exc.code)
+            await ws.close(code=4400, reason=exc.code)
             return
 
     try:

@@ -1,17 +1,12 @@
-"""Authenticated active-profile boundary for browser annotation API routes."""
+"""Authenticated app-global profile routing for browser annotation API routes."""
 
 from types import SimpleNamespace
 
 import pytest
 
 
-def _request(tmp_path, profile="coding"):
-    app = SimpleNamespace(
-        state=SimpleNamespace(
-            browser_active_profile=profile,
-            browser_active_home=str(tmp_path),
-        )
-    )
+def _request():
+    app = SimpleNamespace(state=SimpleNamespace(browser_annotation_rpcs={}))
     return SimpleNamespace(app=app, state=SimpleNamespace(), headers={})
 
 
@@ -48,32 +43,36 @@ def test_annotation_routes_are_registered():
     assert ("/api/browser/annotations/{annotation_id}", "DELETE") in methods_by_path
 
 
-def test_repository_uses_frozen_active_profile_home(monkeypatch, tmp_path):
+def test_repository_uses_requested_profile_home(monkeypatch, tmp_path):
     from hermes_cli import web_server
 
-    request = _request(tmp_path)
+    request = _request()
+    home = tmp_path / "coding"
     monkeypatch.setattr(web_server, "_http_auth_identity", lambda request: {"principal": "test"})
+    monkeypatch.setattr(web_server, "_browser_profile_home", lambda profile: tmp_path / profile)
 
     repository = web_server._browser_annotation_repository(request, "coding")
 
     assert repository.profile_id == "coding"
     assert repository.db_path == (
-        tmp_path / "browser" / "annotations" / "v1" / "annotations.v1.sqlite3"
+        home / "browser" / "annotations" / "v1" / "annotations.v1.sqlite3"
     )
     assert repository.list_for_workspace("ws-1") == []
 
 
-def test_repository_rejects_cross_profile_assertion(monkeypatch, tmp_path):
-    from fastapi import HTTPException
+def test_repository_routes_cross_profile_assertions_to_separate_homes(monkeypatch, tmp_path):
     from hermes_cli import web_server
 
-    request = _request(tmp_path)
+    request = _request()
     monkeypatch.setattr(web_server, "_http_auth_identity", lambda request: {"principal": "test"})
+    monkeypatch.setattr(web_server, "_browser_profile_home", lambda profile: tmp_path / profile)
 
-    with pytest.raises(HTTPException) as exc_info:
-        web_server._browser_annotation_repository(request, "other")
+    coding = web_server._browser_annotation_repository(request, "coding")
+    other = web_server._browser_annotation_repository(request, "other")
 
-    assert exc_info.value.status_code == 403
+    assert coding.profile_id == "coding"
+    assert other.profile_id == "other"
+    assert coding.db_path != other.db_path
 
 
 def test_repository_requires_http_authentication(tmp_path):
@@ -81,42 +80,55 @@ def test_repository_requires_http_authentication(tmp_path):
     from hermes_cli import web_server
 
     with pytest.raises(HTTPException) as exc_info:
-        web_server._browser_annotation_repository(_request(tmp_path), "coding")
+        web_server._browser_annotation_repository(_request(), "coding")
 
     assert exc_info.value.status_code == 401
 
 
-def test_dedicated_rpc_singleton_is_authenticated_and_profile_frozen(
+def test_dedicated_rpc_facades_are_cached_per_authenticated_profile(
     monkeypatch, tmp_path
 ):
     from hermes_cli import web_server
     from hermes_state import SessionDB
 
-    SessionDB(db_path=tmp_path / "state.db").close()
-    request = _request(tmp_path)
+    for profile in ("coding", "other"):
+        home = tmp_path / profile
+        home.mkdir()
+        SessionDB(db_path=home / "state.db").close()
+    request = _request()
     monkeypatch.setattr(
         web_server,
         "_http_auth_identity",
         lambda _request: {"principal": "dashboard:test"},
     )
+    monkeypatch.setattr(web_server, "_browser_profile_home", lambda profile: tmp_path / profile)
 
     first = web_server._browser_annotation_rpc(request, "coding")
     second = web_server._browser_annotation_rpc(request, "coding")
+    other = web_server._browser_annotation_rpc(request, "other")
 
     try:
         assert first is second
+        assert first is not other
         assert first.profile_id == "coding"
-        assert first.lineage.db_path == tmp_path / "state.db"
+        assert other.profile_id == "other"
+        assert first.lineage.db_path == tmp_path / "coding" / "state.db"
+        assert other.lineage.db_path == tmp_path / "other" / "state.db"
         assert first.registry.repository is first.lineage
+        assert request.app.state.browser_annotation_rpcs == {
+            "coding": first,
+            "other": other,
+        }
     finally:
         first.registry.close()
+        other.registry.close()
 
 
-def test_dedicated_rpc_rejects_cross_profile_before_startup(monkeypatch, tmp_path):
+def test_dedicated_rpc_rejects_invalid_profile_syntax_before_startup(monkeypatch):
     from fastapi import HTTPException
     from hermes_cli import web_server
 
-    request = _request(tmp_path)
+    request = _request()
     monkeypatch.setattr(
         web_server,
         "_http_auth_identity",
@@ -125,14 +137,14 @@ def test_dedicated_rpc_rejects_cross_profile_before_startup(monkeypatch, tmp_pat
     monkeypatch.setattr(
         web_server,
         "_start_browser_annotation_rpc",
-        lambda _app: pytest.fail("cross-profile assertion reached RPC startup"),
+        lambda _app, _profile: pytest.fail("invalid profile reached RPC startup"),
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        web_server._browser_annotation_rpc(request, "other")
+        web_server._browser_annotation_rpc(request, "../other")
 
-    assert exc_info.value.status_code == 403
-    assert exc_info.value.detail == {"code": "profile_mismatch"}
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == {"code": "browser_invalid_profile"}
 
 
 def test_thread_message_http_route_requires_auth_and_uses_dedicated_facade(monkeypatch):
@@ -155,16 +167,9 @@ def test_thread_message_http_route_requires_auth_and_uses_dedicated_facade(monke
 
     facade = Facade()
 
-    def freeze_profile(target_app):
-        target_app.state.browser_active_profile = "coding"
-        target_app.state.browser_active_home = "/tmp/active-coding"
-        return "coding"
-
-    monkeypatch.setattr(web_server, "_capture_browser_active_profile", freeze_profile)
-    web_server.app.state.browser_active_profile = "coding"
-    web_server.app.state.browser_active_home = "/tmp/active-coding"
-    web_server.app.state.browser_annotation_rpc = facade
-    monkeypatch.setattr(web_server, "_start_browser_annotation_rpc", lambda _app: facade)
+    monkeypatch.setattr(
+        web_server, "_start_browser_annotation_rpc", lambda _app, _profile: facade
+    )
     payload = {
         "profile": "coding",
         "thread_generation": 1,
@@ -175,28 +180,24 @@ def test_thread_message_http_route_requires_auth_and_uses_dedicated_facade(monke
         "anchor_stale_at_submit": False,
     }
 
-    try:
-        with TestClient(web_server.app) as client:
-            unauthenticated = client.post(
-                "/api/browser/annotations/ann-1/thread/messages", json=payload
-            )
-            authenticated = client.post(
-                "/api/browser/annotations/ann-1/thread/messages",
-                json=payload,
-                headers={
-                    "X-Hermes-Session-Token": web_server._SESSION_TOKEN,
-                },
-            )
-            malformed = client.post(
-                "/api/browser/annotations/ann-1/thread/messages",
-                json={**payload, "thread_generation": True},
-                headers={
-                    "X-Hermes-Session-Token": web_server._SESSION_TOKEN,
-                },
-            )
-    finally:
-        if getattr(web_server.app.state, "browser_annotation_rpc", None) is facade:
-            del web_server.app.state.browser_annotation_rpc
+    with TestClient(web_server.app) as client:
+        unauthenticated = client.post(
+            "/api/browser/annotations/ann-1/thread/messages", json=payload
+        )
+        authenticated = client.post(
+            "/api/browser/annotations/ann-1/thread/messages",
+            json=payload,
+            headers={
+                "X-Hermes-Session-Token": web_server._SESSION_TOKEN,
+            },
+        )
+        malformed = client.post(
+            "/api/browser/annotations/ann-1/thread/messages",
+            json={**payload, "thread_generation": True},
+            headers={
+                "X-Hermes-Session-Token": web_server._SESSION_TOKEN,
+            },
+        )
 
     assert unauthenticated.status_code == 401
     assert authenticated.status_code == 202
@@ -258,46 +259,35 @@ def test_create_export_delete_http_wrappers_use_one_dedicated_bundle_facade(
 
     facade = Facade()
 
-    def freeze_profile(target_app):
-        target_app.state.browser_active_profile = "coding"
-        target_app.state.browser_active_home = "/tmp/active-coding"
-        return "coding"
-
-    monkeypatch.setattr(web_server, "_capture_browser_active_profile", freeze_profile)
-    web_server.app.state.browser_active_profile = "coding"
-    web_server.app.state.browser_active_home = "/tmp/active-coding"
-    web_server.app.state.browser_annotation_rpc = facade
-    monkeypatch.setattr(web_server, "_start_browser_annotation_rpc", lambda _app: facade)
+    monkeypatch.setattr(
+        web_server, "_start_browser_annotation_rpc", lambda _app, _profile: facade
+    )
     headers = {"X-Hermes-Session-Token": web_server._SESSION_TOKEN}
-    try:
-        with TestClient(web_server.app) as client:
-            created = client.post(
-                "/api/browser/annotations",
-                json={
-                    "profile": "coding",
-                    "record": {},
-                    "first_revision": {},
-                    "source_message_id": 42,
-                },
-                headers=headers,
-            )
-            exported = client.get(
-                "/api/browser/annotations/ann-bundle/export",
-                params={
-                    "profile": "coding",
-                    "include_screenshot_bytes": True,
-                },
-                headers=headers,
-            )
-            deleted = client.request(
-                "DELETE",
-                "/api/browser/annotations/ann-bundle",
-                json={"profile": "coding"},
-                headers=headers,
-            )
-    finally:
-        if getattr(web_server.app.state, "browser_annotation_rpc", None) is facade:
-            del web_server.app.state.browser_annotation_rpc
+    with TestClient(web_server.app) as client:
+        created = client.post(
+            "/api/browser/annotations",
+            json={
+                "profile": "coding",
+                "record": {},
+                "first_revision": {},
+                "source_message_id": 42,
+            },
+            headers=headers,
+        )
+        exported = client.get(
+            "/api/browser/annotations/ann-bundle/export",
+            params={
+                "profile": "coding",
+                "include_screenshot_bytes": True,
+            },
+            headers=headers,
+        )
+        deleted = client.request(
+            "DELETE",
+            "/api/browser/annotations/ann-bundle",
+            json={"profile": "coding"},
+            headers=headers,
+        )
 
     assert created.status_code == 201
     assert exported.status_code == 200

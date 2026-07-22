@@ -81,7 +81,7 @@ def test_false_default_and_existing_browser_tool_config_are_independent(_isolate
     assert config["browser"]["engine"] == "auto"
 
 
-def test_studio_flag_uses_trusted_process_profile_not_an_asserted_sibling(_isolate_hermes_home):
+def test_studio_flag_resolves_each_requested_profile_config(_isolate_hermes_home):
     from hermes_cli.profiles import get_profile_dir
 
     config = load_config()
@@ -93,12 +93,11 @@ def test_studio_flag_uses_trusted_process_profile_not_an_asserted_sibling(_isola
         "browser:\n  in_app:\n    enabled: true\n",
         encoding="utf-8",
     )
-    web_server._capture_browser_active_profile(web_server.app)
-    assert web_server._browser_active_profile(web_server.app) == "default"
-    assert web_server._browser_in_app_enabled(web_server.app) is False
+    assert web_server._browser_in_app_enabled(web_server.app, "default") is False
+    assert web_server._browser_in_app_enabled(web_server.app, "gpt") is True
 
 
-def test_real_routes_reject_enabled_sibling_when_selected_default_is_disabled(
+def test_real_routes_accept_enabled_sibling_when_process_default_is_disabled(
     _isolate_hermes_home, monkeypatch
 ):
     from hermes_cli.profiles import get_profile_dir
@@ -119,13 +118,12 @@ def test_real_routes_reject_enabled_sibling_when_selected_default_is_disabled(
     connection_id = _connection_id()
 
     with TestClient(web_server.app) as client:
-        wrong = client.post(
+        enabled = client.post(
             "/api/auth/browser-ticket",
             headers={"X-Hermes-Session-Token": web_server._SESSION_TOKEN},
             json={"profile": "gpt", "connection_id": connection_id},
         )
-        assert wrong.status_code == 409
-        assert wrong.json()["detail"] == "browser_wrong_profile"
+        assert enabled.status_code == 200
 
         disabled = client.post(
             "/api/auth/browser-ticket",
@@ -135,24 +133,13 @@ def test_real_routes_reject_enabled_sibling_when_selected_default_is_disabled(
         assert disabled.status_code == 409
         assert disabled.json()["detail"] == "browser_disabled"
 
-        with pytest.raises(WebSocketDisconnect) as chat_exc:
-            with client.websocket_connect(_chat_url(connection_id, "gpt")):
-                pass
-        assert chat_exc.value.code == 4409
-        assert chat_exc.value.reason == "browser_wrong_profile"
-
-        # Even a ticket placed directly in the process-local store cannot use
-        # a sibling assertion to select configuration authority at hello time.
-        identity = web_server._local_token_identity()
-        forged = mint_browser_ticket(
-            user_id=identity["user_id"],
-            provider=identity["provider"],
-            profile="gpt",
-            connection_id=connection_id,
-        )
-        with client.websocket_connect(f"/api/ws/browser?ticket={forged}") as browser:
-            browser.send_json(_hello(connection_id, "gpt"))
-            assert browser.receive_json()["status"] == "browser_wrong_profile"
+        with client.websocket_connect(_chat_url(connection_id, "gpt")) as chat:
+            assert chat.receive_json()["params"]["type"] == "gateway.ready"
+            with client.websocket_connect(
+                f"/api/ws/browser?ticket={enabled.json()['ticket']}"
+            ) as browser:
+                browser.send_json(_hello(connection_id, "gpt"))
+                assert browser.receive_json()["status"] == "ready"
 
     assert web_server.app.state.browser_transport_manager.ready_count == 0
 
@@ -173,7 +160,6 @@ def test_named_process_profile_is_the_positive_route_authority(tmp_path, monkeyp
     connection_id = _connection_id()
 
     with TestClient(web_server.app) as client:
-        assert web_server._browser_active_profile(web_server.app) == "gpt"
         ticket = _mint(client, connection_id, "gpt")
         with client.websocket_connect(_chat_url(connection_id, "gpt")) as chat:
             chat.receive_json()
