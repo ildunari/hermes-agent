@@ -27,6 +27,8 @@ import {
 import type { SnpObservation, SnpScope } from './browser-sensitive-navigation-policy'
 
 const ATTACH_PREFIX = 'about:blank#hermes-browser-attach='
+const ATTACH_URL_RESOLUTION_TIMEOUT_MS = 1_000
+const ATTACH_URL_POLL_INTERVAL_MS = 10
 export const BROWSER_PARTITION = 'persist:hermes-browser'
 const PRIVATE_PARTITION_PREFIX = 'hermes-browser-private:v1:'
 const REPORTER_WORLD_ID = 1004
@@ -2323,29 +2325,59 @@ export class BrowserGuestSecurityController {
     })
 
     contents.on('did-attach-webview', (_event, guest) => {
-      const accepted = this.#acceptedClaimsByHost.get(contents.id) ?? []
-      const token = attachmentTokenFromUrl(guest.getURL())
+      void this.#consumeAcceptedClaimForGuest(contents.id, guest).then(consumed => {
+        if (!consumed || consumed.hostId !== contents.id) {
+          if (this.#isInstalledBrowserSession(guest.session)) {
+            safeDestroy(guest)
+          }
 
-      const acceptedIndex = accepted.findIndex(
-        claim => claim.token === token && guest.session === this.#deps.sessionFromPartition(claim.partition)
-      )
+          return
+        }
 
-      const consumed = acceptedIndex >= 0 ? accepted.splice(acceptedIndex, 1)[0] : undefined
-
-      if (accepted.length === 0) {
-        this.#acceptedClaimsByHost.delete(contents.id)
-      }
-
-      if (!consumed || consumed.hostId !== contents.id) {
+        void this.#bindGuest(consumed, guest)
+      }).catch(() => {
         if (this.#isInstalledBrowserSession(guest.session)) {
           safeDestroy(guest)
         }
+      })
+    })
+  }
 
-        return
+  async #consumeAcceptedClaimForGuest(hostId: number, guest: WebContents): Promise<BrowserGuestClaim | undefined> {
+    const deadline = Date.now() + ATTACH_URL_RESOLUTION_TIMEOUT_MS
+
+    while (!guest.isDestroyed()) {
+      const guestUrl = guest.getURL()
+      const token = attachmentTokenFromUrl(guestUrl)
+
+      if (token) {
+        const accepted = this.#acceptedClaimsByHost.get(hostId) ?? []
+        const acceptedIndex = accepted.findIndex(
+          claim => claim.token === token && guest.session === this.#deps.sessionFromPartition(claim.partition)
+        )
+        const consumed = acceptedIndex >= 0 ? accepted.splice(acceptedIndex, 1)[0] : undefined
+
+        if (accepted.length === 0) {
+          this.#acceptedClaimsByHost.delete(hostId)
+        }
+
+        return consumed
       }
 
-      void this.#bindGuest(consumed, guest)
-    })
+      // Electron 40 emits did-attach-webview before the initial about:blank URL
+      // (and therefore its attachment token) is observable on WebContents.
+      // Wait only for that transient blank state; any other URL is unclaimed.
+      if (guestUrl !== '' && guestUrl !== 'about:blank') {
+        return undefined
+      }
+      if (Date.now() >= deadline) {
+        return undefined
+      }
+
+      await new Promise(resolve => setTimeout(resolve, ATTACH_URL_POLL_INTERVAL_MS))
+    }
+
+    return undefined
   }
 
   #isInstalledBrowserSession(candidate: Session): boolean {
@@ -2746,7 +2778,13 @@ export class BrowserGuestSecurityController {
         reportWindowStartedAt: 0,
         uploadGeneration: 1
       })
-    } catch {
+    } catch (error) {
+      console.error('[browser-guest] setup failed', {
+        error,
+        generation: claim.generation,
+        guestId: guest.id,
+        tabId: claim.tabId
+      })
       if (this.#bindingSetups.get(key) === claim.generation) {this.#bindingSetups.delete(key)}
       notifySetupRetired('setup-failed')
       safeDestroy(guest)

@@ -478,6 +478,93 @@ describe('browser guest security', () => {
     expect(replacement).toMatchObject({ ok: true })
   })
 
+  it('waits for Electron 40 to expose the attachment URL before binding the guest', async () => {
+    const { handlers, host, sessionFromPartition } = setup()
+    const partition = BROWSER_PARTITION
+    const tabId = 'tab-delayed-url'
+    const prepared = (await handlers.get('hermes:browser-guest:prepare')!(
+      { sender: host },
+      { partition, private: false, profile: 'default', surfaceEpoch: 'surface-delayed', tabId }
+    )) as { attachmentUrl: string; generation: string }
+
+    host.emit(
+      'will-attach-webview',
+      { preventDefault: vi.fn() },
+      {},
+      { partition, src: prepared.attachmentUrl }
+    )
+
+    const guest = new FakeContents(40, sessionFromPartition(partition))
+    guest.url = ''
+    host.emit('did-attach-webview', {}, guest)
+
+    expect(guest.closed).toBe(false)
+    guest.url = prepared.attachmentUrl
+
+    await vi.waitFor(() => expect(guest.debugger.sendCommand).toHaveBeenCalledWith('Page.enable'))
+    const activated = await handlers.get('hermes:browser-guest:activate')!(
+      { sender: host },
+      { generation: prepared.generation, tabId, url: 'https://example.test' }
+    )
+
+    expect(activated).toEqual({ ok: true })
+    expect(guest.loaded).toEqual(['https://example.test'])
+  })
+
+  it('destroys a delayed guest whose initial URL becomes unclaimed', async () => {
+    const { handlers, host, sessionFromPartition } = setup()
+    const partition = BROWSER_PARTITION
+    const prepared = (await handlers.get('hermes:browser-guest:prepare')!(
+      { sender: host },
+      { partition, private: false, profile: 'default', surfaceEpoch: 'surface-unclaimed', tabId: 'tab-unclaimed' }
+    )) as { attachmentUrl: string }
+
+    host.emit(
+      'will-attach-webview',
+      { preventDefault: vi.fn() },
+      {},
+      { partition, src: prepared.attachmentUrl }
+    )
+
+    const guest = new FakeContents(43, sessionFromPartition(partition))
+    guest.url = ''
+    host.emit('did-attach-webview', {}, guest)
+    guest.url = 'https://unclaimed.example.test'
+
+    await vi.waitFor(() => expect(guest.closed).toBe(true))
+    expect(guest.debugger.sendCommand).not.toHaveBeenCalled()
+  })
+
+  it('destroys a guest when Electron never exposes its attachment URL', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const { handlers, host, sessionFromPartition } = setup()
+      const partition = BROWSER_PARTITION
+      const prepared = (await handlers.get('hermes:browser-guest:prepare')!(
+        { sender: host },
+        { partition, private: false, profile: 'default', surfaceEpoch: 'surface-timeout', tabId: 'tab-timeout' }
+      )) as { attachmentUrl: string }
+
+      host.emit(
+        'will-attach-webview',
+        { preventDefault: vi.fn() },
+        {},
+        { partition, src: prepared.attachmentUrl }
+      )
+
+      const guest = new FakeContents(44, sessionFromPartition(partition))
+      guest.url = ''
+      host.emit('did-attach-webview', {}, guest)
+      await vi.advanceTimersByTimeAsync(1_010)
+
+      expect(guest.closed).toBe(true)
+      expect(guest.debugger.sendCommand).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('correlates out-of-order same-profile guests by exact attachment token', async () => {
     const { handlers, host, sessionFromPartition } = setup()
     const partition = BROWSER_PARTITION
