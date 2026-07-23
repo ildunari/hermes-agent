@@ -1,7 +1,7 @@
 {
   "branch": "local/studio-slim",
-  "head": "ad12d50127c6ccdd2e6c5f7b17b2e4d376e09408",
-  "hotspot_count": 395,
+  "head": "52def61f186f24646979101acfa7ed8b707379bb",
+  "hotspot_count": 393,
   "hotspots": [
     {
       "local_changed_lines": 2722,
@@ -144,20 +144,6 @@
       "upstream_commits": 3
     },
     {
-      "local_changed_lines": 913,
-      "path": "gateway/platforms/bluebubbles.py",
-      "prior_conflicts": 0,
-      "score": 913,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 845,
-      "path": "tests/gateway/test_bluebubbles.py",
-      "prior_conflicts": 0,
-      "score": 845,
-      "upstream_commits": 0
-    },
-    {
       "local_changed_lines": 391,
       "path": "agent/anthropic_adapter.py",
       "prior_conflicts": 0,
@@ -235,18 +221,18 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 253,
-      "path": "tools/send_message_tool.py",
-      "prior_conflicts": 0,
-      "score": 506,
-      "upstream_commits": 1
-    },
-    {
       "local_changed_lines": 476,
       "path": "package-lock.json",
       "prior_conflicts": 0,
       "score": 476,
       "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 236,
+      "path": "tools/send_message_tool.py",
+      "prior_conflicts": 0,
+      "score": 472,
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 468,
@@ -2773,5 +2759,5 @@
   "upstream": "origin/main",
   "upstream_sha": "4c9628eab5393e7561bbd2c1faaa1765fb14a5f9",
   "version": 1,
-  "weighted_score": 112490
+  "weighted_score": 110698
 }

@@ -82,3 +82,34 @@ items name their commit; open items are the work queue.
    the worktree *before* `request start` when the merge is conflict-heavy;
    reading `drain-audit.jsonl` at the first sign of a slow RESTARTED phase;
    and never re-fixing in a doomed run — abort, fix pre-merge, rerun.
+
+## Evening addendum (BlueBubbles de-carry stage 2, 2026-07-23 ~18:00-19:00)
+
+10. **BlueBubbles carry retired** (`52def61f1`): adapter + tests reverted to
+    pristine upstream; send_message carry replaced by a ~30-line
+    registry-first hook. Enhancements live in the `bluebubbles` platform
+    plugin (hermes-kosta-plugins `d9bd1cc`). Verified live: single webhook
+    (id 214, `new-message` only), plugin adapter identity, round-trip,
+    media, single-turn processing.
+11. **Multiplex plugin-enable gotcha**: enabling a user plugin per served
+    profile does NOT load it in the multiplex gateway — the gateway process
+    reads `~/.hermes/config.yaml` `plugins.enabled`. First cutover restart
+    ran pristine-upstream BlueBubbles for ~3 min until the root-config
+    enable + second restart. Cutover docs updated; remember for future
+    platform plugins.
+12. **Drain-aware restart wedged by phantom `active_agents=1`**
+    (gateway_state.json frozen 18:03:15; no messages/cron/dashboard work).
+    Two queued restart helpers (one stale scope-hermes from 16:20) waited
+    indefinitely; killed both, restarted via `hermes gateway restart`
+    (bounded 60s drain). Open: root-cause the leaked slot (likely
+    api-server run accounting) and give the external helper a
+    stale-counter escape hatch (cross-check a live gateway endpoint
+    instead of trusting the file alone).
+13. **BB private-api threaded sends hang server-side** (reply-to-tapback
+    120s ReadTimeout; plain text + media instant; server accepted but never
+    answered). Known stale Messages.app-injection class on the Mac Mini —
+    pre-existing, not a cutover regression (send code byte-identical to
+    carry). Remediation queued: refresh Messages/helper injection on the
+    Mini. Also noted: standalone sends to a raw phone number take the slow
+    create-chat fallback and can false-timeout while still delivering —
+    normal GUID flows unaffected.

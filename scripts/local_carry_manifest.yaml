@@ -35,8 +35,8 @@ checks:
     description: subscription usage API client
   - id: rich-card-bluebubbles
     path: tools/send_message_tool.py
-    needles: [rich_card, bluebubbles]
-    description: rich-card and BlueBubbles delivery
+    needles: [rich_card, "platform_registry.get(\"bluebubbles\")"]
+    description: rich-card delivery and BlueBubbles plugin registry hook (adapter carry retired to hermes-kosta-plugins 2026-07-23)
   - id: closed-session-mcp-refresh
     path: tools/mcp_tool.py
     needles: [session is None, skipping dynamic tool refresh; session is closed]
