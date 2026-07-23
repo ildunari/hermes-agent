@@ -88,6 +88,16 @@ npm run pack         # unpacked app under release/ (no installer)
 
 Installers are built and uploaded to GitHub Releases manually. macOS/Windows signing & notarization happen automatically when the relevant credentials are present in the environment (`CSC_LINK` / `CSC_KEY_PASSWORD` / `APPLE_*` for macOS, `WIN_CSC_*` for Windows).
 
+> **Local macOS builds on this machine: do NOT set `CSC_NAME`.** `mac.identity`
+> is null and `scripts/after-pack.mjs` does all signing by pinned certificate
+> SHA-1 hash, which stays unambiguous even though two same-named
+> "Developer ID Application" certs exist in the keychain search list
+> (`hermes-developer-id-signing` and the AccessibleOffice `build-a11y`
+> keychain — the latter belongs to another project; leave it alone). Setting
+> `CSC_NAME` re-enables electron-builder's *name-based* resolver (which fails
+> on the duplicate) and makes after-pack skip its own signing. Plain
+> `npm run dist:mac` is the correct local invocation (2026-07-23).
+
 ### How it works
 
 The packaged app ships the Electron shell and a native React chat surface. On

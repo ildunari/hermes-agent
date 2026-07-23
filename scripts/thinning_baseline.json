@@ -1,6 +1,6 @@
 {
   "branch": "local/studio-slim",
-  "head": "95a9328e03b0b2eb30f89154fde4004bd80fd884",
+  "head": "ad12d50127c6ccdd2e6c5f7b17b2e4d376e09408",
   "hotspot_count": 395,
   "hotspots": [
     {
@@ -1076,6 +1076,13 @@
     },
     {
       "local_changed_lines": 67,
+      "path": "apps/desktop/src/app/session/hooks/use-session-actions/utils.test.ts",
+      "prior_conflicts": 0,
+      "score": 67,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 67,
       "path": "hermes_cli/dashboard_auth/ws_tickets.py",
       "prior_conflicts": 0,
       "score": 67,
@@ -1412,6 +1419,13 @@
     },
     {
       "local_changed_lines": 42,
+      "path": "apps/desktop/src/app/session/hooks/use-session-actions/utils.ts",
+      "prior_conflicts": 0,
+      "score": 42,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 42,
       "path": "cron/jobs.py",
       "prior_conflicts": 0,
       "score": 42,
@@ -1448,13 +1462,6 @@
     {
       "local_changed_lines": 39,
       "path": "apps/desktop/src/app/chat/composer/status-stack/preview-row.tsx",
-      "prior_conflicts": 0,
-      "score": 39,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 39,
-      "path": "apps/desktop/src/app/session/hooks/use-session-actions/utils.test.ts",
       "prior_conflicts": 0,
       "score": 39,
       "upstream_commits": 0
@@ -1838,13 +1845,6 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 21,
-      "path": "apps/desktop/src/app/session/hooks/use-session-actions/utils.ts",
-      "prior_conflicts": 0,
-      "score": 21,
-      "upstream_commits": 0
-    },
-    {
       "local_changed_lines": 7,
       "path": "apps/desktop/src/lib/chat-messages.ts",
       "prior_conflicts": 0,
@@ -2176,6 +2176,13 @@
     {
       "local_changed_lines": 13,
       "path": "Dockerfile",
+      "prior_conflicts": 0,
+      "score": 13,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 13,
+      "path": "apps/desktop/README.md",
       "prior_conflicts": 0,
       "score": 13,
       "upstream_commits": 0
@@ -2553,13 +2560,6 @@
     },
     {
       "local_changed_lines": 3,
-      "path": "apps/desktop/README.md",
-      "prior_conflicts": 0,
-      "score": 3,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 3,
       "path": "apps/desktop/src/app/session/hooks/use-hermes-config.test.ts",
       "prior_conflicts": 0,
       "score": 3,
@@ -2773,5 +2773,5 @@
   "upstream": "origin/main",
   "upstream_sha": "4c9628eab5393e7561bbd2c1faaa1765fb14a5f9",
   "version": 1,
-  "weighted_score": 112431
+  "weighted_score": 112490
 }

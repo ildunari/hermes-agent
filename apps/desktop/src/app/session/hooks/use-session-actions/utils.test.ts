@@ -357,6 +357,34 @@ describe('reconcileResumeMessages', () => {
 })
 
 describe('preserveLocalPendingTurnMessages', () => {
+  it('drops an optimistic user turn when compression replaced it with a summary row', () => {
+    const summary = msg(
+      '9-user',
+      'user',
+      '[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.'
+    )
+    const next = [summary, msg('10-assistant', 'assistant', 'post-compaction answer')]
+
+    const previous = [
+      msg('1-user', 'user', 'first'),
+      msg('2-assistant', 'assistant', 'first answer'),
+      msg('user-optimistic', 'user', 'the original question')
+    ]
+
+    expect(preserveLocalPendingTurnMessages(next, previous).map(message => message.id)).toEqual([
+      '9-user',
+      '10-assistant'
+    ])
+  })
+
+  it('drops the optimistic user turn for LCM-style recent-summary rows too', () => {
+    const summary = msg('9-user', 'user', '[Recent Summary (d0, node 66)] ## User requests verbatim ...')
+    const next = [summary]
+    const previous = [msg('user-optimistic', 'user', 'the original question')]
+
+    expect(preserveLocalPendingTurnMessages(next, previous).map(message => message.id)).toEqual(['9-user'])
+  })
+
   it('keeps an optimistic user turn and pending assistant when the server projection is behind', () => {
     const next = [msg('1-user', 'user', 'first'), msg('2-assistant', 'assistant', 'first answer')]
 

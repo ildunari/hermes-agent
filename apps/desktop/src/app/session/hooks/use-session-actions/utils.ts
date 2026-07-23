@@ -252,6 +252,24 @@ export function reconcileResumeMessages(nextMessages: ChatMessage[], previousMes
 const isGatewaySystemMarker = (message: ChatMessage): boolean =>
   message.role === 'user' && chatMessageText(message).trimStart().startsWith('[System:')
 
+// Context compaction replaces the transcript's user turn with a synthetic
+// summary row (agent/context_compressor.py SUMMARY_PREFIX / legacy prefixes;
+// the LCM engine emits "[Recent Summary (...)]"). When that row is the latest
+// authoritative user message, the real user turn was consumed by compression —
+// an optimistic copy that no longer text-matches must be dropped, not
+// resurrected as a duplicate bubble.
+const COMPRESSION_SUMMARY_PREFIXES = [
+  '[CONTEXT COMPACTION',
+  '[CONTEXT SUMMARY]',
+  '[Recent Summary',
+  '[Session Arc Summary'
+] as const
+
+const isCompressionSummaryMessage = (message: ChatMessage): boolean => {
+  const text = chatMessageText(message).trimStart()
+  return COMPRESSION_SUMMARY_PREFIXES.some(prefix => text.startsWith(prefix))
+}
+
 export function preserveLocalPendingTurnMessages(
   nextMessages: ChatMessage[],
   previousMessages: ChatMessage[]
@@ -307,7 +325,8 @@ export function preserveLocalPendingTurnMessages(
     if (
       isOptimisticUser &&
       latestAuthoritativeUser &&
-      chatMessageText(latestAuthoritativeUser).trim() === chatMessageText(message).trim()
+      (chatMessageText(latestAuthoritativeUser).trim() === chatMessageText(message).trim() ||
+        isCompressionSummaryMessage(latestAuthoritativeUser))
     ) {
       continue
     }
