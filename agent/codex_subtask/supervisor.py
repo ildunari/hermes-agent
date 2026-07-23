@@ -40,7 +40,7 @@ class Worker:
         if not rec: return
         self.registry.update(self.job_id, status='starting', started_at=now_ms())
         try:
-            self.session=CodexAppServerSession(cwd=rec.cwd, codex_profile=None, codex_config_overrides=_overrides(self.opts.get('model'), self.opts.get('reasoning_effort'), self.opts.get('sandbox_mode'), self.opts.get('allow_plugins'), self.opts.get('deny_plugins'), self.opts.get('skills')), request_routing=_ServerRequestRouting(auto_approve_exec=True, auto_approve_apply_patch=True), on_event=self._event, startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS)
+            self.session=CodexAppServerSession(cwd=rec.cwd, codex_profile=None, codex_config_overrides=_overrides(self.opts.get('model'), self.opts.get('reasoning_effort'), self.opts.get('sandbox_mode'), self.opts.get('allow_plugins'), self.opts.get('deny_plugins'), self.opts.get('skills')), request_routing=_ServerRequestRouting(auto_approve_exec=True, auto_approve_apply_patch=True), on_event=self._event, startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS, ephemeral=self.opts.get('ephemeral', True))
             tid=self.session.ensure_started(); self.registry.update(self.job_id, status='running', codex_thread_id=tid); self.registry.append_transcript(self.job_id, {'status':'running','codex_thread_id':tid})
             result=self.session.run_turn(rec.prompt, turn_timeout=float(rec.timeout_seconds or ASYNC_TIMEOUT_CAP))
             status='completed'
@@ -108,7 +108,12 @@ class Supervisor:
                 original=int(timeout); timeout=max(1,min(original,ASYNC_TIMEOUT_CAP))
                 if timeout!=original: message=f'timeout clamped from {original} to {ASYNC_TIMEOUT_CAP} seconds'
         rec=self.registry.create_job(prompt=_build_prompt(prompt, req.get('context_files'), cwd), cwd=cwd, profile=profile, model=req.get('model'), reasoning_effort=req.get('reasoning_effort'), sandbox_mode=req.get('sandbox_mode'), timeout_seconds=timeout, hermes_session_id=req.get('hermes_session_id') or 'default')
-        w=Worker(self.registry, rec.job_id, model=req.get('model'), reasoning_effort=req.get('reasoning_effort'), sandbox_mode=req.get('sandbox_mode'), allow_plugins=req.get('allow_plugins'), deny_plugins=req.get('deny_plugins'), skills=req.get('skills'))
+        # Ephemeral by default: subtask threads stay in-memory in the codex
+        # app-server subprocess and never hit ~/.codex/sessions, so they do
+        # not clutter the Codex Desktop sidebar. Callers can opt back into a
+        # durable on-disk session with persist_session=true.
+        ephemeral=not bool(req.get('persist_session'))
+        w=Worker(self.registry, rec.job_id, model=req.get('model'), reasoning_effort=req.get('reasoning_effort'), sandbox_mode=req.get('sandbox_mode'), allow_plugins=req.get('allow_plugins'), deny_plugins=req.get('deny_plugins'), skills=req.get('skills'), ephemeral=ephemeral)
         with self.lock: self.workers[rec.job_id]=w
         w.start()
         if mode=='async': return {'status':'queued','job_id':rec.job_id,'codex_thread_id':None,'created_at':utc_iso(rec.created_at),'timeout_seconds':timeout,'supervisor_socket':str(DEFAULT_SOCKET),'message':message or ('started with no soft timeout' if timeout is None else f'started with {timeout}s timeout')}

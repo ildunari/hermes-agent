@@ -136,6 +136,16 @@ CODEX_SUBTASK_SCHEMA = {
             "reasoning_effort": {"type": "string", "enum": ["minimal", "low", "medium", "high"]},
             "timeout_seconds": {"type": "integer", "minimum": 1, "description": _TIMEOUT},
             "sandbox_mode": {"type": "string"},
+            "persist_session": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "For action=create. Subtask threads are ephemeral by default "
+                    "(in-memory only; not written to ~/.codex/sessions, so they do "
+                    "not appear in the Codex Desktop sidebar). Set true to keep a "
+                    "durable on-disk Codex session for this job."
+                ),
+            },
             "allow_plugins": {"type": "array", "items": {"type": "string"}},
             "deny_plugins": {"type": "array", "items": {"type": "string"}},
             "skills": {"type": "array", "items": {"type": "string"}},

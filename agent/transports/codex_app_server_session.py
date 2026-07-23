@@ -224,6 +224,7 @@ class CodexAppServerSession:
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
         startup_timeout_seconds: float = _CODEX_APP_SERVER_STARTUP_TIMEOUT_SECONDS,
+        ephemeral: bool = False,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
@@ -232,6 +233,12 @@ class CodexAppServerSession:
         self._codex_profile = codex_profile
         self._codex_config_overrides = list(codex_config_overrides or [])
         self._codex_extra_args = list(codex_extra_args or [])
+        # When True, ask codex to keep the thread in-memory only ("not
+        # materialized on disk"): no rollout file is written, so the session
+        # never shows up in the Codex Desktop sidebar. Live-verified against
+        # codex 0.144.6: multi-turn follow-ups still work on ephemeral
+        # threads because the app-server subprocess holds the thread state.
+        self._ephemeral = bool(ephemeral)
         self._model = model
         self._model_provider = model_provider
         self._permission_profile = (
@@ -307,6 +314,8 @@ class CodexAppServerSession:
         # Users who want a write-capable profile configure it in their
         # ~/.codex/config.toml the same way they would for any codex usage.
         params: dict[str, Any] = {"cwd": self._cwd}
+        if self._ephemeral:
+            params["ephemeral"] = True
         if self._model:
             params["model"] = self._model
         if self._model_provider:
