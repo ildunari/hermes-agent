@@ -11,7 +11,21 @@ import { $activeProfile, normalizeProfileKey } from '@/store/profile'
 
 import { reseedBrowserPersistence, resetBrowserWorkspaceDetailed, setBrowserRestoreEnabled } from '../browser/browser-persistence'
 
-import { ListRow, LoadingState, SectionHeading, SettingsContent } from './primitives'
+import { PageLoader } from '@/components/page-loader'
+
+import { ListRow, SectionHeading, SettingsContent } from './primitives'
+
+// Self-contained full-panel loader (was primitives.LoadingState, a local
+// export upstream removed when it migrated its settings screens to
+// skeletons). Cancels the titlebar pad so the loader centers in the card.
+function LoadingState({ label }: { label: string }) {
+  return (
+    <PageLoader
+      className="-mt-[calc(var(--titlebar-height)+1rem)] h-[calc(100%+var(--titlebar-height)+1rem)]"
+      label={label}
+    />
+  )
+}
 
 interface BrowserSettingsState {
   degraded: boolean
