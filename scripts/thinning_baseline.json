@@ -1,20 +1,34 @@
 {
   "branch": "local/studio-slim",
-  "head": "cc33f4f2343a39ec21728cb5255842508c1ac8a2",
-  "hotspot_count": 389,
+  "head": "07ba2670f0ce328be9b7fedca35f7e041da129f9",
+  "hotspot_count": 392,
   "hotspots": [
     {
       "local_changed_lines": 2722,
       "path": "gateway/run.py",
       "prior_conflicts": 0,
-      "score": 2722,
-      "upstream_commits": 0
+      "score": 5444,
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 2202,
       "path": "hermes_cli/web_server.py",
       "prior_conflicts": 0,
-      "score": 2202,
+      "score": 4404,
+      "upstream_commits": 1
+    },
+    {
+      "local_changed_lines": 694,
+      "path": "hermes_cli/main.py",
+      "prior_conflicts": 0,
+      "score": 1388,
+      "upstream_commits": 1
+    },
+    {
+      "local_changed_lines": 1228,
+      "path": "gateway/platforms/api_server.py",
+      "prior_conflicts": 0,
+      "score": 1228,
       "upstream_commits": 0
     },
     {
@@ -22,13 +36,6 @@
       "path": "tools/browser_tool.py",
       "prior_conflicts": 0,
       "score": 1131,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 1130,
-      "path": "gateway/platforms/api_server.py",
-      "prior_conflicts": 0,
-      "score": 1130,
       "upstream_commits": 0
     },
     {
@@ -92,13 +99,6 @@
       "path": "agent/tool_executor.py",
       "prior_conflicts": 0,
       "score": 750,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 694,
-      "path": "hermes_cli/main.py",
-      "prior_conflicts": 0,
-      "score": 694,
       "upstream_commits": 0
     },
     {
@@ -551,6 +551,13 @@
     },
     {
       "local_changed_lines": 138,
+      "path": "gateway/status.py",
+      "prior_conflicts": 0,
+      "score": 138,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 138,
       "path": "tests/hermes_cli/test_codex_models.py",
       "prior_conflicts": 0,
       "score": 138,
@@ -944,6 +951,13 @@
     {
       "local_changed_lines": 72,
       "path": "tests/gateway/test_api_server.py",
+      "prior_conflicts": 0,
+      "score": 72,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 72,
+      "path": "tests/gateway/test_api_server_bind_guard.py",
       "prior_conflicts": 0,
       "score": 72,
       "upstream_commits": 0
@@ -1384,16 +1398,16 @@
     },
     {
       "local_changed_lines": 39,
-      "path": "tests/tools/test_vision_tools.py",
+      "path": "tests/gateway/test_shutdown_watchdog.py",
       "prior_conflicts": 0,
       "score": 39,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 38,
-      "path": "gateway/status.py",
+      "local_changed_lines": 39,
+      "path": "tests/tools/test_vision_tools.py",
       "prior_conflicts": 0,
-      "score": 38,
+      "score": 39,
       "upstream_commits": 0
     },
     {
@@ -1437,6 +1451,13 @@
       "prior_conflicts": 0,
       "score": 36,
       "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 18,
+      "path": "hermes_cli/gateway.py",
+      "prior_conflicts": 0,
+      "score": 36,
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 36,
@@ -1776,6 +1797,13 @@
     },
     {
       "local_changed_lines": 21,
+      "path": "gateway/shutdown_watchdog.py",
+      "prior_conflicts": 0,
+      "score": 21,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 21,
       "path": "hermes_cli/model_setup_flows.py",
       "prior_conflicts": 0,
       "score": 21,
@@ -1875,13 +1903,6 @@
     {
       "local_changed_lines": 18,
       "path": "apps/desktop/src/lib/model-status-label.test.ts",
-      "prior_conflicts": 0,
-      "score": 18,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 18,
-      "path": "hermes_cli/gateway.py",
       "prior_conflicts": 0,
       "score": 18,
       "upstream_commits": 0
@@ -2729,7 +2750,7 @@
   ],
   "merge_base": "65d42e35d4eab5a49f95d3ca2747554f7cc47ce1",
   "upstream": "origin/main",
-  "upstream_sha": "d9165d7a678d4105f42921a7fc1886df3804531b",
+  "upstream_sha": "0dbf639bc8d622efefea495636f38f4a449350a3",
   "version": 1,
-  "weighted_score": 47405
+  "weighted_score": 53371
 }
