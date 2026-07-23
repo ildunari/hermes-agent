@@ -10,6 +10,8 @@ depend on the registry being populated should use it explicitly or via
 
 from unittest.mock import patch
 
+import sys
+
 import pytest
 
 
@@ -67,3 +69,22 @@ def disable_lazy_stt_install():
     """
     with patch("tools.transcription_tools._try_lazy_install_stt", return_value=False):
         yield
+
+
+# Upstream gates the gnome-shell helper-skip behind ``sys.platform ==
+# "linux"`` in cua_backend but ships the covering test without a platform
+# marker; their CI is Linux, this machine is macOS. Skip those tests locally
+# until upstream adds the skipif.
+_LINUX_ONLY_UPSTREAM_TESTS = {
+    "test_linux_default_capture_skips_gnome_shell_helper",
+}
+
+
+def pytest_collection_modifyitems(config, items):
+    if sys.platform == "linux":
+        return
+    for item in items:
+        if item.name in _LINUX_ONLY_UPSTREAM_TESTS:
+            item.add_marker(
+                pytest.mark.skip(reason="linux-only upstream code path")
+            )

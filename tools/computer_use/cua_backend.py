@@ -1814,11 +1814,19 @@ class CuaDriverBackend(ComputerUseBackend):
                 # Modern drivers carry the payload in structuredContent
                 # (elements array / embedded screenshot) with no markdown
                 # tree — that is NOT an empty result.
-                if sc_.get("elements") or sc_.get("screenshot_png_b64"):
+                if (
+                    sc_.get("elements")
+                    or sc_.get("screenshot_png_b64")
+                    or sc_.get("windows")
+                ):
+                    # Window-metadata payloads (Linux drivers enumerate
+                    # windows via structuredContent) are full results too.
                     return False
                 txt = out.get("data") if isinstance(out.get("data"), str) else ""
-                _, tr = _split_tree_text(txt or "")
-                return not (tr and tr.strip())
+                # Any non-blank driver text (even a "0 elements" header with
+                # no tree) is a real result; only a fully blank payload is the
+                # silent-failure mode this fallback exists to revive.
+                return not (txt and txt.strip())
 
             if _gws_is_empty(gws_out):
                 logger.warning(
