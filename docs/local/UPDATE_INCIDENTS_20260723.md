@@ -77,9 +77,26 @@ items name their commit; open items are the work queue.
    suspect — both run-5 poisons came from exactly that (Phase 0 recovery of
    `ec8970978b22`). Recovery procedure: record, then treat the first
    subsequent validated merge as the trust gate.
-6. **Evaluate upstream's borrowed-provider routing config** — it may express
-   the vibeproxy short-alias routing natively and let that code carry retire
-   (tests at `tests/test_tui_gateway_server.py:2478,2497` guard it).
+6. **Evaluate upstream's borrowed-provider routing config** — ~~it may express
+   the vibeproxy short-alias routing natively and let that code carry retire~~
+   **REFUTED 2026-07-23 (do not re-attempt):** `_BORROWED_MODEL_PROVIDERS`
+   only wins the alias race when the provider is already the configured
+   current provider; vibeproxy's contract is winning by *default* under
+   `provider: auto`. Verified by in-process execution — enrolling vibeproxy
+   flips bare `sonnet` to native metered anthropic. The actual mechanism is
+   `_PROVIDER_MODELS` dict position (vibeproxy ahead of anthropic), now
+   commented in code and protected by six new carry-manifest entries
+   (vibeproxy-alias-priority et al.). Guard tests moved to
+   `tests/test_tui_gateway_server.py:2788,2807`. Completed instead:
+   vibeproxy-provider plugin enabled in ALL profiles (was only gpt/design —
+   bookie/coding/mini/poke/scientist/guest ran standalone vibeproxy traffic
+   without the OAuth cloak); plugins-repo model-catalog test seam fixed
+   (open_credentialed_url, un-xfailed). Remaining follow-up: the
+   `chat_completions.py` vibeproxy reasoning fallback MIGHT be retirable now
+   that the plugin loads everywhere, but requires a runtime-path trace first
+   (the finalize_api_kwargs call and mcp__ reverse cloak in the same carry
+   are load-bearing plugin seams and must stay); MacBook needs
+   vibeproxy-provider enabled in its profiles during its plugin migration.
 7. **Carry-weight ratchet vs upstream churn.** ~~The pre-push baseline inflates
    as origin/main moves (37,950 → 261,618 with zero local change), blocking
    pushes until after a merge.~~ FIXED 2026-07-23: `thinning.py check` now
