@@ -965,8 +965,15 @@ def test_restart_scope_dry_run_does_not_call_launchctl(monkeypatch, tmp_path):
 
 
 def test_scope_aliases():
+    assert normalize_scope("restart-webui") == "webui"
+    assert normalize_scope("restart_webui") == "webui"
     assert normalize_scope("restart-gateways") == "gateways"
     assert normalize_scope("all") == "hermes"
+
+
+def test_webui_scope_targets_and_verifies_only_webui():
+    assert [target.label for target in targets_for_scope("webui")] == ["ai.hermes.webui"]
+    assert verification_ports_for_scope("webui") == (8787,)
 
 
 def test_system_restart_sudoers_content_is_narrow():

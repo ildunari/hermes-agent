@@ -65,6 +65,16 @@ class RestartVerification(enum.Enum):
     UNVERIFIABLE = "unverifiable"
 
 
+WEBUI_TARGETS: tuple[RestartTarget, ...] = (
+    RestartTarget(
+        "user/{uid}",
+        "ai.hermes.webui",
+        description="Hermes WebUI/dashboard",
+        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
+    ),
+)
+
+
 GATEWAY_TARGETS: tuple[RestartTarget, ...] = (
     RestartTarget(
         "user/{uid}",
@@ -90,12 +100,7 @@ GATEWAY_TARGETS: tuple[RestartTarget, ...] = (
     # The WebUI/dashboard LaunchAgent owns the local dashboard backend on 9119.
     # It must move with /restart-gateways after smart updates; otherwise the
     # gateways can restart on new code while the dashboard keeps an old process.
-    RestartTarget(
-        "user/{uid}",
-        "ai.hermes.webui",
-        description="Hermes WebUI/dashboard",
-        bootstrap_policy=BootstrapPolicy.MULTIPLEX_CONFIGURED,
-    ),
+    *WEBUI_TARGETS,
     RestartTarget(
         "system",
         "com.kosta.hermes-dashboard-system",
@@ -148,12 +153,14 @@ FULL_HERMES_TARGETS: tuple[RestartTarget, ...] = (
 )
 
 VERIFY_PORTS: dict[str, tuple[int, ...]] = {
+    "webui": (8787,),
     "gateways": (8642, 8643, 8644, 8787, 9119, 9120),
     "hermes": (8642, 8643, 8644, 8776, 8787, 9119, 9120, 9192, 3192, 3100),
 }
 
 _NAMED_GATEWAY_LABEL_PREFIX = "ai.hermes.gateway-"
 _MULTIPLEX_SURFACE_PORTS: dict[str, tuple[int, ...]] = {
+    "webui": (8787,),
     "gateways": (8787, 9119, 9120),
     "hermes": (8776, 8787, 9119, 9120, 9192, 3192, 3100),
 }
@@ -251,6 +258,8 @@ class RestartError(RuntimeError):
 
 def normalize_scope(scope: str) -> str:
     raw = (scope or "").strip().lower().replace("_", "-")
+    if raw in {"webui", "web-ui", "restart-webui"}:
+        return "webui"
     if raw in {"gateway", "gateways", "restart-gateways"}:
         return "gateways"
     if raw in {"hermes", "all", "surface", "surfaces", "restart-hermes"}:
@@ -305,7 +314,12 @@ def _targets_for_scope(
     multiplex_config: Any | None,
 ) -> tuple[RestartTarget, ...]:
     normalized = normalize_scope(scope)
-    targets = GATEWAY_TARGETS if normalized == "gateways" else FULL_HERMES_TARGETS
+    if normalized == "webui":
+        targets = WEBUI_TARGETS
+    elif normalized == "gateways":
+        targets = GATEWAY_TARGETS
+    else:
+        targets = FULL_HERMES_TARGETS
     if multiplex_config is not None:
         targets = tuple(
             target
@@ -381,6 +395,8 @@ def _verification_ports_for_scope(
     multiplex_config: Any | None,
 ) -> tuple[int, ...]:
     normalized = normalize_scope(scope)
+    if normalized == "webui":
+        return VERIFY_PORTS[normalized]
     if multiplex_config is None:
         return VERIFY_PORTS.get(normalized, ())
     return tuple(
@@ -407,14 +423,18 @@ def _describe_plan(
     multiplex_config: Any | None,
 ) -> str:
     normalized = normalize_scope(scope)
-    command = "/restart-gateways" if normalized == "gateways" else "/restart-hermes"
-    if normalized == "gateways":
+    if normalized == "webui":
+        command = "/restart-webui"
+        includes = "Hermes WebUI only"
+    elif normalized == "gateways":
+        command = "/restart-gateways"
         includes = (
             "single root multiplex gateway, WebUI/dashboard"
             if multiplex_config is not None
             else "default + GPT profile gateways, optional profile gateways, WebUI/dashboard"
         )
     else:
+        command = "/restart-hermes"
         includes = "gateway restart scope plus Workspace, watchdog, Codex supervisor, proxies, voice bridge, and Claude-Hermes surfaces"
     lines = [
         f"Restart scope: {normalized}",
@@ -834,7 +854,12 @@ def _wait_for_desktop_safe_restart(
 
 def _completion_message(scope: str, exit_code: int) -> str:
     normalized = normalize_scope(scope)
-    label = "Hermes gateways" if normalized == "gateways" else "Hermes surfaces"
+    if normalized == "webui":
+        label = "Hermes WebUI"
+    elif normalized == "gateways":
+        label = "Hermes gateways"
+    else:
+        label = "Hermes surfaces"
     if exit_code == 0:
         return f"Done — {label} restart finished."
     return f"{label} restart finished with errors. Check {LOG_PATH}"
@@ -1292,12 +1317,14 @@ def _verify_scope_health_split(
     # HTTP probes, tagged with the port they exercise so each lands in the
     # correct bucket (dashboard 9119/9120 are best-effort; 8787 is required).
     probes: list[tuple[int, str]] = []
-    if scope in {"gateways", "hermes"}:
+    if scope in {"webui", "gateways", "hermes"}:
         probes.append((8787, "http://127.0.0.1:8787/health"))
-    probes.append((9119, "http://127.0.0.1:9119/"))
+    if 9119 in ports:
+        probes.append((9119, "http://127.0.0.1:9119/"))
     if 9120 in ports:
         probes.append((9120, "http://127.0.0.1:9120/"))
-    probes.append((9119, "https://macstudio.tailf7342a.ts.net:9119/"))
+    if 9119 in ports:
+        probes.append((9119, "https://macstudio.tailf7342a.ts.net:9119/"))
     for port, url in probes:
         failure = _verify_http_url(url)
         if failure:
@@ -1569,7 +1596,11 @@ def enqueue_detached_restart(
             close_fds=True,
         )
     notify_note = " I'll send a follow-up here when it finishes." if (notify_origin or notify_tty) else ""
-    drain_note = "active gateway tasks and live WebUI chat turns"
+    drain_note = (
+        "live WebUI chat turns"
+        if normalized == "webui"
+        else "active gateway tasks and live WebUI chat turns"
+    )
     return (
         f"Queued detached Hermes {normalized} restart. "
         f"It will wait for {drain_note} to finish before restarting."
@@ -1579,7 +1610,7 @@ def enqueue_detached_restart(
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Restart Hermes launchd surfaces from a detached helper")
-    parser.add_argument("--scope", default="gateways", choices=("gateways", "hermes"))
+    parser.add_argument("--scope", default="gateways", choices=("webui", "gateways", "hermes"))
     parser.add_argument("--delay", type=float, default=1.0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--describe", action="store_true")

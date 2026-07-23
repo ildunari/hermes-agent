@@ -97,15 +97,19 @@ class TestCommandRegistry:
 
     def test_detached_restart_commands_are_cross_surface(self):
         restart = resolve_command("restart")
+        restart_webui = resolve_command("restart-webui")
         restart_gateways = resolve_command("restart-gateways")
         restart_hermes = resolve_command("restart-hermes")
         assert restart is not None
+        assert restart_webui is not None
         assert restart_gateways is not None
         assert restart_hermes is not None
         assert restart.gateway_only and not restart.advertise_in_gateway
+        assert restart_webui.cli_only and not restart_webui.gateway_only
         assert not restart_gateways.cli_only and not restart_gateways.gateway_only
         assert not restart_hermes.cli_only and not restart_hermes.gateway_only
         assert resolve_command("restart_gateways").name == "restart-gateways"
+        assert resolve_command("restart_webui").name == "restart-webui"
         assert resolve_command("restart_hermes").name == "restart-hermes"
         telegram_names = {name for name, _desc in telegram_bot_commands()}
         assert "restart" not in telegram_names

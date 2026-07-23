@@ -258,6 +258,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("help", "Show available commands", "Info"),
     CommandDef("restart", "Gracefully restart only this gateway after draining active runs", "Session",
                gateway_only=True, advertise_in_gateway=False),
+    CommandDef("restart-webui", "Queue one detached restart of Hermes WebUI", "Session",
+               aliases=("restart_webui",), cli_only=True, args_hint="[--dry-run]"),
     CommandDef("restart-gateways", "Queue one detached restart of the canonical Hermes gateway set", "Session",
                aliases=("restart_gateways",), args_hint="[--dry-run]"),
     CommandDef("restart-hermes", "Queue one detached restart of gateways plus local Hermes surfaces", "Session",
