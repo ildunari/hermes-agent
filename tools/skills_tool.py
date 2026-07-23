@@ -1252,9 +1252,9 @@ def skill_view(
                     _record(found_skill_md.parent, found_skill_md)
 
             # Strategy 3: legacy flat <name>.md files anywhere under the dir.
-            # Exclude skill support docs: references/templates/assets/scripts
-            # are loaded through skill_view(skill, file_path=...) and must not
-            # shadow or collide with real skills that share the same basename.
+            # Exclude skill support docs: reference/references/templates/assets/
+            # scripts are loaded through skill_view(skill, file_path=...) and
+            # must not shadow or collide with real skills sharing the basename.
             for found_md in search_dir.rglob(f"{name}.md"):
                 if found_md.name != "SKILL.md" and not _is_skill_support_path(
                     found_md

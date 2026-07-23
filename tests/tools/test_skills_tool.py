@@ -1267,6 +1267,21 @@ class TestSkillViewCollisionDetection:
             ),
         )
 
+    def test_singular_reference_doc_does_not_collide_with_real_skill(self, tmp_path):
+        """A support file under reference/ is not a legacy flat skill."""
+        impeccable = _make_skill(tmp_path, "impeccable")
+        reference_dir = impeccable / "reference"
+        reference_dir.mkdir()
+        (reference_dir / "codex.md").write_text("Impeccable Codex guide.\n")
+        _make_skill(tmp_path, "codex", body="REAL CODEX SKILL")
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            raw = skill_view("codex")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert "REAL CODEX SKILL" in result["content"]
+
     def test_nested_local_collides_with_top_level_external(self, tmp_path):
         """The original bug scenario: nested local + top-level external,
         same name. Now refuses with both paths surfaced."""

@@ -474,10 +474,21 @@ features:
         description: prevents local preview cleanup from erasing explicit fenced localhost endpoints
 
   - id: skills.generated-view-alias-resolution
-    title: Resolve flattened generated-view skill aliases without changing canonical names
+    title: Resolve generated-view skills without treating support files as standalone skills
+    owner_paths:
+      - agent/skill_utils.py
+      - tools/skills_tool.py
     tests:
+      - tests/agent/test_skill_utils.py
       - tests/tools/test_skills_tool.py
     checks:
+      - id: generated-view-skill-support-dirs
+        path: agent/skill_utils.py
+        needles:
+          - '"reference"'
+          - '"references"'
+          - is_skill_support_path
+        description: singular and plural support directories stay outside active skill discovery
       - id: generated-view-skill-alias-resolver
         path: tools/skills_tool.py
         needles:

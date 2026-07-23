@@ -211,6 +211,12 @@ def test_iter_skill_index_files_prunes_skill_support_dirs(tmp_path):
     script_package.mkdir(parents=True)
     (script_package / "SKILL.md").write_text("---\nname: helper\n---\n", encoding="utf-8")
 
+    singular_reference_package = real / "reference" / "archived-skill-package"
+    singular_reference_package.mkdir(parents=True)
+    (singular_reference_package / "SKILL.md").write_text(
+        "---\nname: singular-reference-skill\n---\n", encoding="utf-8"
+    )
+
     found = list(iter_skill_index_files(tmp_path, "SKILL.md"))
     desc_found = list(iter_skill_index_files(tmp_path, "DESCRIPTION.md"))
 
@@ -218,6 +224,8 @@ def test_iter_skill_index_files_prunes_skill_support_dirs(tmp_path):
     assert desc_found == []
     assert is_skill_support_path(package / "SKILL.md") is True
     assert is_excluded_skill_path(package / "SKILL.md") is True
+    assert is_skill_support_path(singular_reference_package / "SKILL.md") is True
+    assert is_excluded_skill_path(singular_reference_package / "SKILL.md") is True
 
 
 def test_iter_skill_index_files_keeps_support_named_categories(tmp_path):

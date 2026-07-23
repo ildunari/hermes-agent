@@ -46,8 +46,11 @@ EXCLUDED_SKILL_DIRS = frozenset(
 # Supporting files live inside a skill package and are loaded explicitly via
 # skill_view(skill, file_path=...). They are not standalone skills and must not
 # be scanned for active SKILL.md/DESCRIPTION.md entries, even if a Curator or
-# archive workflow preserves a complete old skill package under references/.
-SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
+# archive workflow preserves a complete old skill package under reference/ or
+# references/.
+SKILL_SUPPORT_DIRS = frozenset(
+    ("reference", "references", "templates", "assets", "scripts")
+)
 
 
 def is_excluded_skill_path(path) -> bool:
@@ -73,11 +76,11 @@ def is_excluded_skill_path(path) -> bool:
 def is_skill_support_path(path) -> bool:
     """True if *path* is under a support dir of an actual skill root.
 
-    ``references/``, ``templates/``, ``assets/``, and ``scripts/`` are
+    ``reference/``, ``references/``, ``templates/``, ``assets/``, and ``scripts/`` are
     progressive-disclosure support areas when they sit directly inside a skill
     directory containing ``SKILL.md``. They are not active discovery roots for
     standalone skills. A preserved package such as
-    ``some-skill/references/old-skill-package/SKILL.md`` is documentation data
+    ``some-skill/reference/old-skill-package/SKILL.md`` is documentation data
     unless the caller explicitly loads it via ``file_path``.
 
     Legitimate categories or skill names such as ``skills/scripts/foo`` remain
@@ -798,8 +801,8 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
     """Walk skills_dir yielding sorted paths matching *filename*.
 
     Excludes Hermes metadata, VCS, virtualenv/dependency, cache, and skill
-    support directories. Support directories (references/templates/assets/
-    scripts) can contain arbitrary markdown and even archived package
+    support directories. Support directories (reference/references/templates/
+    assets/scripts) can contain arbitrary markdown and even archived package
     ``SKILL.md`` files, but they are progressive-disclosure data loaded through
     ``skill_view(..., file_path=...)`` rather than active skill roots.
     """
