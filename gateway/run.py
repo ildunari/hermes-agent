@@ -6846,13 +6846,48 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         self._enqueue_fifo(session_key, event, adapter)
 
+    def _bluebubbles_registry_authorizes(self, source: "SessionSource") -> bool:
+        """Busy-path authorization via the BlueBubbles contact registry.
+
+        The busy handler sees the RAW adapter event — guest routing in
+        ``_handle_message`` has not yet stamped ``user_id_alt`` with
+        ``guest:``/``owner:`` markers, so ``_is_user_authorized`` (env
+        allowlist + markers) denies approved guest contacts and their
+        mid-turn follow-ups get silently dropped.  Consult the same
+        registry the cold path uses; OWNER/GUEST routes are authorized.
+        Fail closed on any error.
+        """
+        if getattr(source, "platform", None) != Platform.BLUEBUBBLES:
+            return False
+        try:
+            platform_cfg = getattr(getattr(self, "config", None), "platforms", {}).get(Platform.BLUEBUBBLES)
+            extra = getattr(platform_cfg, "extra", {}) if platform_cfg else {}
+            registry_path = (
+                extra.get("guest_contacts_file")
+                or extra.get("contact_registry")
+                or os.getenv("HERMES_BLUEBUBBLES_GUEST_CONTACTS")
+            )
+            if not (registry_path or extra.get("guest_routing_enabled")):
+                return False
+            from gateway.guest_access import (
+                GuestRoute,
+                classify_bluebubbles_route,
+                load_contact_registry,
+            )
+            registry = load_contact_registry(registry_path)
+            decision = classify_bluebubbles_route(source, None, registry)
+            return decision.route in {GuestRoute.OWNER, GuestRoute.GUEST}
+        except Exception:
+            logger.debug("BlueBubbles busy-path registry authorization failed closed", exc_info=True)
+            return False
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
         # creating a session.  The busy path must enforce the same check;
         # otherwise unauthorized users in shared threads (Slack/Telegram/Discord)
         # can inject messages into an active session they don't own.
-        if not self._is_user_authorized(event.source):
+        if not self._is_user_authorized(event.source) and not self._bluebubbles_registry_authorizes(event.source):
             logger.warning(
                 "Dropping message from unauthorized user in active session: "
                 "user=%s (%s), platform=%s, session=%s",

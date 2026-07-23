@@ -3991,12 +3991,14 @@ def _pool_codex_access_token() -> str:
     the original AuthError).
     """
     try:
-        with _auth_store_lock():
-            auth_store = _load_auth_store()
-        pool = auth_store.get("credential_pool")
-        if not isinstance(pool, dict):
-            return ""
-        entries = pool.get("openai-codex")
+        # read_credential_pool applies the profile->global-root fallback:
+        # in profile mode (HERMES_HOME=~/.hermes/profiles/<p>) the profile's
+        # auth.json usually has no openai-codex pool, but the global root
+        # does. Reading the raw active store here (the previous behavior)
+        # made every profile-scoped gateway turn fail with
+        # "No Codex credentials stored" and drop to the fallback provider
+        # even though usable pool credentials existed at global scope.
+        entries = read_credential_pool("openai-codex")
         if not isinstance(entries, list):
             return ""
 
