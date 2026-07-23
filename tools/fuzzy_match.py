@@ -146,9 +146,16 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
                 effective_new = _preserve_unicode_in_replacement(
                     content, matches, old_string, effective_new,
                 )
+            exact_indent_adjusted = strategy_name == "exact" and any(
+                end - start != len(old_string) for start, end in matches
+            )
             new_content = _apply_replacements(
                 content, matches, effective_new,
-                old_string=old_string if strategy_name != "exact" else None,
+                old_string=(
+                    old_string
+                    if strategy_name != "exact" or exact_indent_adjusted
+                    else None
+                ),
             )
             return new_content, len(matches), strategy_name, None
 
@@ -428,7 +435,25 @@ def _strategy_exact(content: str, pattern: str) -> List[Tuple[int, int]]:
         pos = content.find(pattern, start)
         if pos == -1:
             break
-        matches.append((pos, pos + len(pattern)))
+        # A whitespace-prefixed pattern that starts partway through a line's
+        # indentation must replace the complete indentation prefix.  For example,
+        # ``"  - x_search\n"`` is a substring of a four-space-indented YAML
+        # item.  Replacing that substring with an empty string leaves the two
+        # unmatched leading spaces attached to the following line, silently
+        # nesting the next sequence item.  Expand the match back to the line
+        # boundary; the caller will re-indent a non-empty replacement against
+        # this actual file region.  Expanding here also keeps exact and deeper-
+        # indented occurrences in one match set, preserving replace_all and
+        # uniqueness semantics.
+        line_start = max(content.rfind("\n", 0, pos), content.rfind("\r", 0, pos)) + 1
+        starts_inside_indent = (
+            bool(pattern.strip())
+            and pattern[0] in (" ", "\t")
+            and pos > line_start
+            and not content[line_start:pos].strip(" \t")
+        )
+        match_start = line_start if starts_inside_indent else pos
+        matches.append((match_start, pos + len(pattern)))
         # Advance past the whole match, not just one char, so self-overlapping
         # patterns (e.g. "aa" in "aaaa") produce non-overlapping spans matching
         # str.replace() semantics. Advancing by 1 yielded overlapping matches

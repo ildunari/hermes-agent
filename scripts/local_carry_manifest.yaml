@@ -663,3 +663,22 @@ features:
         path: tools/computer_use/cua_backend.py
         needles: [_is_ended_logical_session_result, "start_session", "reviving once"]
         description: ended logical driver sessions are revived before one bounded action retry
+
+  - id: tools.fuzzy-match-indentation-boundary
+    title: Preserve full line indentation in fuzzy replacements
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - tools/fuzzy_match.py
+      - tests/tools/test_fuzzy_match.py
+    collision_paths:
+      - tools/fuzzy_match.py
+    tests:
+      - tests/tools/test_fuzzy_match.py
+      - tests/tools/test_file_operations.py
+      - tests/tools/test_file_operations_edge_cases.py
+    checks:
+      - id: fuzzy-match-indentation-boundary
+        path: tools/fuzzy_match.py
+        needles: [exact_indent_adjusted, starts_inside_indent, match_start]
+        description: whitespace-prefixed exact matches consume the complete indentation prefix without weakening replace-all or ambiguity semantics

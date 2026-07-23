@@ -35,6 +35,94 @@ class TestExactMatch:
         assert count == 1
         assert new == "replaced\nline3"
 
+    def test_whitespace_prefixed_line_does_not_match_inside_deeper_indent(self):
+        """Deleting a less-indented line pattern must not orphan its prefix.
+
+        Regression: the exact strategy found ``"  - x_search\\n"`` starting
+        two characters into a four-space-indented YAML item.  Deleting that
+        substring left those two spaces attached to the next item, changing
+        two sibling sequence entries into a nested sequence.
+        """
+        content = (
+            "platform_toolsets:\n"
+            "  cli:\n"
+            "    - x\n"
+            "    - x_search\n"
+            "    - video\n"
+        )
+        new, count, strategy, err = fuzzy_find_and_replace(
+            content, "  - x_search\n", "", replace_all=True
+        )
+        assert err is None
+        assert count == 1
+        assert strategy == "exact"
+        assert new == (
+            "platform_toolsets:\n"
+            "  cli:\n"
+            "    - x\n"
+            "    - video\n"
+        )
+
+    def test_indentation_adjustment_preserves_replace_all_across_mixed_depths(self):
+        content = "  - x_search\n    - x_search\n    - video\n"
+        new, count, strategy, err = fuzzy_find_and_replace(
+            content, "  - x_search\n", "", replace_all=True
+        )
+        assert err is None
+        assert count == 2
+        assert strategy == "exact"
+        assert new == "    - video\n"
+
+    def test_indentation_adjustment_preserves_ambiguity_detection(self):
+        content = "  - x_search\n    - x_search\n"
+        new, count, strategy, err = fuzzy_find_and_replace(
+            content, "  - x_search\n", "", replace_all=False
+        )
+        assert count == 0
+        assert strategy is None
+        assert err is not None
+        assert "Found 2 matches" in err
+        assert new == content
+
+    def test_repeated_deeper_indented_lines_are_all_deleted(self):
+        content = "    - x_search\n    - x_search\n"
+        new, count, strategy, err = fuzzy_find_and_replace(
+            content, "  - x_search\n", "", replace_all=True
+        )
+        assert err is None
+        assert count == 2
+        assert strategy == "exact"
+        assert new == ""
+
+    def test_nonempty_replacement_is_reindented_to_deeper_file_line(self):
+        content = "    - x_search\n"
+        new, count, strategy, err = fuzzy_find_and_replace(
+            content, "  - x_search\n", "  - web\n"
+        )
+        assert err is None
+        assert count == 1
+        assert strategy == "exact"
+        assert new == "    - web\n"
+
+    def test_inline_whitespace_prefixed_exact_match_remains_supported(self):
+        content = "key: old value\n"
+        new, count, strategy, err = fuzzy_find_and_replace(
+            content, " old", " new"
+        )
+        assert err is None
+        assert count == 1
+        assert strategy == "exact"
+        assert new == "key: new value\n"
+
+    def test_whitespace_only_pattern_does_not_expand_to_line_boundary(self):
+        new, count, strategy, err = fuzzy_find_and_replace(
+            "    x\n", "  ", "", replace_all=True
+        )
+        assert err is None
+        assert count == 2
+        assert strategy == "exact"
+        assert new == "x\n"
+
 
 class TestWhitespaceDifference:
     def test_extra_spaces_match(self):
