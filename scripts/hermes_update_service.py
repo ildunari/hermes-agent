@@ -61,6 +61,13 @@ LISTENER_ONLY_PORTS = (8644, 8647)
 # port between the two tuples is a deliberate policy change, not a tweak.
 BEST_EFFORT_PORTS: tuple[int, ...] = ()
 RESTART_WAIT_SECONDS = 7200
+# Extras this machine's live venv is built with (matrix is deliberately
+# excluded: python-olm does not build here). Keep in sync with the venv.
+UV_SYNC_EXTRA_ARGS = (
+    "--extra", "dev", "--extra", "messaging", "--extra", "anthropic",
+    "--extra", "exa", "--extra", "firecrawl", "--extra", "fal",
+    "--extra", "edge-tts", "--extra", "slack", "--extra", "wecom",
+)
 DEP_MANIFEST_NAMES = {
     "pyproject.toml",
     "uv.lock",
@@ -1592,6 +1599,48 @@ def deploy(
         lambda: abort_before_activation(root, run_id),
     )
     advance(root, run_id, "STUDIO_ACTIVATED")
+    ledger_now = read_json(ledger_path(root, run_id))
+    if ledger_now.get("dependency_sensitive_paths"):
+        # The worktree got its own npm ci during validation, but activation
+        # fast-forwards the LIVE checkout, whose node_modules and .venv still
+        # match the old lockfiles. Refresh them before the restart so the
+        # relaunched services never pair new code with stale dependencies
+        # (run 20260723T162811Z failed deployed carry-verify on exactly this).
+        refresh_key = hashlib.sha256(
+            f"{run_id}:{result_commit}:live-deps".encode()
+        ).hexdigest()
+
+        receipt = prepare_receipt(
+            root,
+            run_id,
+            "live_dependency_refresh",
+            refresh_key,
+            {"commit": result_commit},
+        )
+        if receipt.get("state") != "COMPLETED":
+            worker_command(
+                root,
+                run_id,
+                ["npm", "ci"],
+                repo,
+                "live-npm-ci",
+                3600,
+                honor_abort=False,
+                child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
+            )
+            worker_command(
+                root,
+                run_id,
+                ["uv", "sync", *UV_SYNC_EXTRA_ARGS],
+                repo,
+                "live-uv-sync",
+                3600,
+                honor_abort=False,
+                child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
+            )
+            complete_receipt(
+                root, run_id, "live_dependency_refresh", {"refreshed": True}
+            )
     install_key = hashlib.sha256(f"{run_id}:{result_commit}:artifact".encode()).hexdigest()
     expected_identity = desktop_artifact_identity or {}
     prior = Path(f"/Applications/.Hermes.update-prior-{run_id}.app")
