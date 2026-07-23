@@ -207,6 +207,8 @@ features:
       - tools/in_app_browser_refs.py
       - tools/in_app_browser_relay.py
       - tools/browser_session_state.py
+      - apps/desktop/README.md
+      - apps/desktop/scripts/browser-dev.mjs
       - apps/desktop/scripts/bundle-electron-main.mjs
       - apps/desktop/src/app/artifacts/index.tsx
       - apps/desktop/src/app/chat/composer/status-stack/preview-row.tsx

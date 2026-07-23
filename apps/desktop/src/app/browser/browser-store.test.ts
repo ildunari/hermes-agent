@@ -16,10 +16,19 @@ import {
   retryBrowserTabRecovery,
   selectBrowserTab,
   setBrowserTabGeometry,
+  shouldInitiallyOpenBrowserPane,
   unbindAutomationTask
 } from './browser-store'
 
 const geometry = { height: 600, width: 900, x: 10, y: 20 }
+
+describe('Browser Dev bootstrap', () => {
+  it('opens the pane only for the explicit development target', () => {
+    expect(shouldInitiallyOpenBrowserPane(true, '1')).toBe(true)
+    expect(shouldInitiallyOpenBrowserPane(true, undefined)).toBe(false)
+    expect(shouldInitiallyOpenBrowserPane(false, '1')).toBe(false)
+  })
+})
 
 describe('browser tab registry', () => {
   beforeEach(() => clearBrowserTabs())

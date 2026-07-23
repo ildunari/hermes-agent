@@ -70,7 +70,17 @@ export type TaskTabResolution =
 const browserTabs = atom<readonly BrowserTab[]>([])
 const foregroundBrowserTabId = atom<BrowserTabId | null>(null)
 const taskTabBindings = atom<Readonly<Record<string, TaskTabBinding>>>({})
-const browserPaneOpen = atom(false)
+
+export function shouldInitiallyOpenBrowserPane(dev: boolean, browserDev: string | undefined): boolean {
+  return dev && browserDev === '1'
+}
+
+// Browser Dev is a disposable Electron shell used only for focused pane
+// iteration. Open the real browser pane immediately there; normal Desktop keeps
+// its existing closed-by-default behavior.
+const browserPaneOpen = atom(
+  shouldInitiallyOpenBrowserPane(import.meta.env.DEV, import.meta.env.VITE_HERMES_BROWSER_DEV)
+)
 const browserPaneGeometry = atom<BrowserGeometry>({ height: 0, width: 0, x: 0, y: 0 })
 const latestTaskGenerations = new Map<string, number>()
 let browserSurfaceEpoch = randomUuid()
