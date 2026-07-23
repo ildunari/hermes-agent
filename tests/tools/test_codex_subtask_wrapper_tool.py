@@ -55,3 +55,23 @@ def test_codex_toolset_exposes_single_visible_codex_tool_but_aliases_dispatch(mo
     result = json.loads(registry.dispatch("codex_subtask_await", {"job_id": "job_1", "timeout_seconds": 1}))
     assert result == {"status": "ok", "action": "await"}
     assert calls[-1] == ("await", {"job_id": "job_1", "timeout_seconds": 1})
+
+
+def test_codex_subtask_schema_exposes_persist_session_default_false(monkeypatch):
+    props = tool.CODEX_SUBTASK_SCHEMA["parameters"]["properties"]
+    assert props["persist_session"]["type"] == "boolean"
+    assert props["persist_session"]["default"] is False
+    assert "persist_session" not in tool.CODEX_SUBTASK_SCHEMA["parameters"]["required"]
+
+    # The create path must forward the flag verbatim to the supervisor.
+    calls = []
+
+    def fake_request(action, **params):
+        calls.append((action, params))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(tool.client, "request", fake_request)
+    tool._call({"prompt": "do work", "persist_session": True})
+    action, params = calls[-1]
+    assert action == "submit"
+    assert params["persist_session"] is True

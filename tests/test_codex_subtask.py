@@ -243,3 +243,31 @@ def test_empty_prompt_and_bad_job_id(tmp_path):
     s = sup.Supervisor(tmp_path / "jobs.db")
     assert s.dispatch({"action": "submit", "prompt": ""})["status"] == "error"
     assert s.dispatch({"action": "status", "job_id": "missing"})["status"] == "error"
+
+
+def test_submit_defaults_to_ephemeral_session(monkeypatch, tmp_path):
+    """a70243d3d: subtask workers are ephemeral unless persist_session=true,
+    so their codex threads never write rollout files to ~/.codex/sessions."""
+    monkeypatch.setattr(sup, "CodexAppServerSession", FakeSession)
+    FakeSession.sleep_seconds = 0
+    FakeSession.result = FakeTurnResult(final_text="ok")
+    s = sup.Supervisor(tmp_path / "jobs.db")
+
+    resp = s.dispatch({"action": "submit", "mode": "sync", "prompt": "work", "cwd": str(tmp_path)})
+    assert resp["status"] == "completed"
+    assert FakeSession.instances[-1].kwargs["ephemeral"] is True
+
+    resp = s.dispatch({"action": "submit", "mode": "sync", "prompt": "work", "cwd": str(tmp_path), "persist_session": False})
+    assert resp["status"] == "completed"
+    assert FakeSession.instances[-1].kwargs["ephemeral"] is True
+
+
+def test_submit_persist_session_opts_into_durable_session(monkeypatch, tmp_path):
+    monkeypatch.setattr(sup, "CodexAppServerSession", FakeSession)
+    FakeSession.sleep_seconds = 0
+    FakeSession.result = FakeTurnResult(final_text="ok")
+    s = sup.Supervisor(tmp_path / "jobs.db")
+
+    resp = s.dispatch({"action": "submit", "mode": "sync", "prompt": "work", "cwd": str(tmp_path), "persist_session": True})
+    assert resp["status"] == "completed"
+    assert FakeSession.instances[-1].kwargs["ephemeral"] is False
