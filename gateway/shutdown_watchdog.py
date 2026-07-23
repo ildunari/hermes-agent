@@ -93,6 +93,25 @@ def write_loop_heartbeat(
     return path
 
 
+def _refresh_runtime_status_identity() -> None:
+    """Re-stamp gateway identity in ``gateway_state.json`` (owner path only).
+
+    ``gateway_state.json`` normally rewrites only on turns/transitions, so a
+    foreign process clobbering its ``pid``/``argv``/``start_time`` (see the
+    ownership guard in ``gateway.status.write_runtime_status``) would otherwise
+    persist until the next turn. Calling the owner-path writer with no payload
+    changes from the heartbeat cadence makes such a clobber self-heal within
+    about a minute. Best-effort: a status-write failure must never kill the
+    heartbeat loop.
+    """
+    try:
+        from gateway.status import write_runtime_status
+
+        write_runtime_status()
+    except Exception:
+        logger.debug("Failed to refresh gateway runtime status identity", exc_info=True)
+
+
 def resolve_shutdown_watchdog_delay(
     drain_timeout: float,
     *,
@@ -263,6 +282,7 @@ async def loop_heartbeat_forever(
     # Immediate first write so monitors see a fresh file as soon as the
     # gateway is running, not after the first interval.
     write_loop_heartbeat(start_time=start_time, home=home)
+    _refresh_runtime_status_identity()
     while True:
         if should_continue is not None and not should_continue():
             return
@@ -270,3 +290,4 @@ async def loop_heartbeat_forever(
         if should_continue is not None and not should_continue():
             return
         write_loop_heartbeat(start_time=start_time, home=home)
+        _refresh_runtime_status_identity()

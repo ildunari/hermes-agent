@@ -136,6 +136,45 @@ async def test_loop_heartbeat_rewrites_until_cancelled(tmp_path):
             await task
 
 
+@pytest.mark.asyncio
+async def test_loop_heartbeat_refreshes_runtime_status_identity_and_survives_errors(
+    tmp_path,
+):
+    """Each heartbeat cycle re-stamps runtime-status identity (self-healing a
+    foreign clobber of gateway_state.json), and a status-write failure must
+    never kill the heartbeat loop."""
+    calls = []
+
+    def fake_write_runtime_status(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RuntimeError("status write failed")
+
+    path = get_loop_heartbeat_path(tmp_path)
+    with patch(
+        "gateway.status.write_runtime_status",
+        side_effect=fake_write_runtime_status,
+    ):
+        task = asyncio.create_task(
+            loop_heartbeat_forever(interval_s=0.05, home=tmp_path)
+        )
+        try:
+            # interval_s clamps to 1s; wait long enough for a post-failure cycle.
+            for _ in range(300):
+                if len(calls) >= 2:
+                    break
+                await asyncio.sleep(0.02)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert len(calls) >= 2, "heartbeat loop died after a status-write failure"
+    # The refresh is a no-payload owner-path write: identity only.
+    assert all(kwargs == {} for kwargs in calls)
+    assert path.is_file()
+
+
 def test_gateway_runner_exposes_shutdown_watchdog_state():
     """Attrs used by stop()/start() exist after normal construction hooks."""
     from gateway.run import GatewayRunner

@@ -69,6 +69,10 @@ checks:
     path: hermes_cli/restart_surfaces.py
     needles: [_resolve_loaded_service, restarted_services, _wait_for_scope_health]
     description: launchd domain dedupe and readiness polling
+  - id: gateway-identity-restamp
+    path: gateway/shutdown_watchdog.py
+    needles: [_refresh_runtime_status_identity]
+    description: heartbeat loop re-stamps runtime-status identity so foreign clobbers self-heal
   - id: desktop-build-hooks
     path: apps/desktop/package.json
     needles: ['"afterPack"', '"entitlements"']

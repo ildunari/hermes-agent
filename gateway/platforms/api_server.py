@@ -163,6 +163,14 @@ def _hermes_version() -> str:
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8642
 MAX_STORED_RESPONSES = 100
+# EADDRINUSE during a restart handoff is usually transient: the draining old
+# gateway can hold the listener for a few seconds after launchd starts its
+# replacement. Retry the bind with exponential backoff inside this window
+# before declaring the non-retryable fatal (#52132 stays the terminal behavior
+# for real config collisions where another process owns the port for good).
+BIND_RETRY_WINDOW_S = 60.0
+BIND_RETRY_INITIAL_BACKOFF_S = 0.5
+BIND_RETRY_MAX_BACKOFF_S = 5.0
 MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversations with tool calls
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 TELEGRAM_MINIAPP_PUBLIC_KEY_HEX = "e7bf03a2fa4602af4580703d88dda5bb59f32ed8b02a56c187fe7d34caed242d"
@@ -6622,8 +6630,6 @@ class APIServerAdapter(BasePlatformAdapter):
                         self.name, self._host,
                     )
 
-            self._runner = web.AppRunner(self._app)
-            await self._runner.setup()
             # Bind directly instead of probing 127.0.0.1 first — the old
             # single-family pre-probe raced the real bind and reported a
             # TIME_WAIT socket as "in use" (#10297), failing gateway
@@ -6636,30 +6642,58 @@ class APIServerAdapter(BasePlatformAdapter):
             #   - Linux: SO_REUSEADDR only permits rebinding past TIME_WAIT
             #     (a second live listener needs SO_REUSEPORT, never set), so
             #     keep the default (enabled) for instant restart rebinds.
-            self._site = web.TCPSite(
-                self._runner,
-                self._host,
-                self._port,
-                reuse_address=False if sys.platform == "darwin" else None,
-            )
-            try:
-                await self._site.start()
-            except OSError as exc:
-                await self._runner.cleanup()
-                self._runner = None
-                self._site = None
-                if getattr(exc, "errno", None) == errno.EADDRINUSE:
-                    # A port conflict is a configuration error, not a
-                    # transient blip — another process holds the port for
-                    # its lifetime. A bare ``return False`` makes the
-                    # reconnect watcher in gateway.run treat it as retryable
-                    # and loop forever at the backoff cap (observed: 1568+
-                    # retries over 5 days across multi-profile setups all
-                    # defaulting to the same port, #52132), filling
-                    # errors.log and leaking the adapter's ResponseStore
-                    # fds each retry. Non-retryable drops it from the
-                    # reconnect queue; the operator recovers with
-                    # ``/platform resume api_server`` after changing the port.
+            #
+            # EADDRINUSE retries with backoff inside BIND_RETRY_WINDOW_S:
+            # during a restart handoff the draining old gateway can hold the
+            # port for a few seconds, and a failed ``site.start()`` poisons
+            # the runner/site pair, so each attempt rebuilds both.
+            bind_deadline = time.monotonic() + BIND_RETRY_WINDOW_S
+            bind_wait = BIND_RETRY_INITIAL_BACKOFF_S
+            while True:
+                self._runner = web.AppRunner(self._app)
+                await self._runner.setup()
+                self._site = web.TCPSite(
+                    self._runner,
+                    self._host,
+                    self._port,
+                    reuse_address=False if sys.platform == "darwin" else None,
+                )
+                try:
+                    await self._site.start()
+                    break
+                except OSError as exc:
+                    await self._runner.cleanup()
+                    self._runner = None
+                    self._site = None
+                    if getattr(exc, "errno", None) != errno.EADDRINUSE:
+                        logger.error(
+                            "[%s] Could not bind %s:%d: %s. Set a different "
+                            "port in config.yaml: platforms.api_server.port",
+                            self.name, self._host, self._port, exc,
+                        )
+                        return False
+                    if time.monotonic() < bind_deadline:
+                        logger.warning(
+                            "[%s] Port %s:%d in use (likely a restart "
+                            "handoff still releasing the listener); "
+                            "retrying bind in %.1fs",
+                            self.name, self._host, self._port, bind_wait,
+                        )
+                        await asyncio.sleep(bind_wait)
+                        bind_wait = min(bind_wait * 2, BIND_RETRY_MAX_BACKOFF_S)
+                        continue
+                    # A port conflict that outlives the retry window is a
+                    # configuration error, not a transient blip — another
+                    # process holds the port for its lifetime. A bare
+                    # ``return False`` makes the reconnect watcher in
+                    # gateway.run treat it as retryable and loop forever at
+                    # the backoff cap (observed: 1568+ retries over 5 days
+                    # across multi-profile setups all defaulting to the same
+                    # port, #52132), filling errors.log and leaking the
+                    # adapter's ResponseStore fds each retry. Non-retryable
+                    # drops it from the reconnect queue; the operator
+                    # recovers with ``/platform resume api_server`` after
+                    # changing the port.
                     self._set_fatal_error(
                         "api_server_port_in_use",
                         f"Port {self._port} already in use. Set "
@@ -6667,12 +6701,12 @@ class APIServerAdapter(BasePlatformAdapter):
                         f"different value, then `/platform resume api_server`.",
                         retryable=False,
                     )
-                logger.error(
-                    "[%s] Could not bind %s:%d: %s. Set a different port in "
-                    "config.yaml: platforms.api_server.port",
-                    self.name, self._host, self._port, exc,
-                )
-                return False
+                    logger.error(
+                        "[%s] Could not bind %s:%d: %s. Set a different port in "
+                        "config.yaml: platforms.api_server.port",
+                        self.name, self._host, self._port, exc,
+                    )
+                    return False
 
             self._mark_connected()
             logger.info(

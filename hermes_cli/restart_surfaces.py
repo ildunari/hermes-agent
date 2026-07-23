@@ -197,6 +197,15 @@ GATEWAY_STATUS_PATHS: dict[str, Path] = {
     "ai.hermes.gateway-scientist": Path.home() / ".hermes" / "profiles" / "scientist" / "gateway_state.json",
     "ai.hermes.gateway-poke": Path.home() / ".hermes" / "profiles" / "poke" / "gateway_state.json",
 }
+# The gateway's loop heartbeat (written by gateway.shutdown_watchdog) lives at
+# <HERMES_HOME>/state/gateway.heartbeat, i.e. next to each target's
+# gateway_state.json. It refreshes every ~30s while the loop is alive, so a
+# record older than three intervals cannot vouch for the launchd PID.
+_HEARTBEAT_RELATIVE = ("state", "gateway.heartbeat")
+HEARTBEAT_FRESH_WINDOW_S = 90.0
+# Listener port owned by the root gateway's API server. Used as a second
+# liveness fallback when both gateway_state.json and the heartbeat are unusable.
+GATEWAY_LISTENER_PORT = 8642
 # A queued restart should behave like a staged operation: if another Hermes
 # session is still running, wait for it to drain instead of forcing Kosta to
 # rerun the command manually.  Twenty-four hours keeps a stuck gateway from
@@ -1043,6 +1052,64 @@ def _launchctl_pid(result: subprocess.CompletedProcess[str]) -> int | None:
     return pid if pid > 0 else None
 
 
+def _heartbeat_path_for_target(target: RestartTarget) -> Path | None:
+    """Return the loop-heartbeat path for a gateway target's HERMES_HOME."""
+    status_path = _gateway_status_path_for_target(target)
+    if status_path is None:
+        return None
+    return status_path.parent.joinpath(*_HEARTBEAT_RELATIVE)
+
+
+def _heartbeat_confirms_pid(target: RestartTarget, launchd_pid: int) -> bool:
+    """Return True when a fresh loop heartbeat vouches for the launchd PID.
+
+    ``gateway_state.json`` only rewrites on turns/transitions and can be
+    clobbered by a foreign writer; the heartbeat is rewritten every ~30s by the
+    gateway's own event loop, so pid agreement plus a fresh ``updated_at`` is
+    strong evidence the launchd PID really is the live gateway.
+    """
+    path = _heartbeat_path_for_target(target)
+    if path is None:
+        return False
+    payload = _read_json(path)
+    if not payload:
+        return False
+    try:
+        heartbeat_pid = int(payload.get("pid"))
+    except (TypeError, ValueError):
+        return False
+    if heartbeat_pid != launchd_pid:
+        return False
+    updated_at = payload.get("updated_at")
+    if not isinstance(updated_at, str):
+        return False
+    raw = updated_at.strip()
+    if raw.endswith(("Z", "z")):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - parsed).total_seconds()
+    # A future-dated heartbeat (clock rollback, forged timestamp) must not be
+    # trusted indefinitely; allow only small skew.
+    return -HEARTBEAT_FRESH_WINDOW_S <= age <= HEARTBEAT_FRESH_WINDOW_S
+
+
+def _port_listener_pids(port: int) -> set[int]:
+    """Return PIDs holding a LISTEN socket on ``port`` (empty on failure)."""
+    result = _run(["bash", "-lc", f"lsof -nP -iTCP:{port} -sTCP:LISTEN -t"], timeout=10)
+    pids: set[int] = set()
+    for token in (result.stdout or "").split():
+        try:
+            pids.add(int(token))
+        except ValueError:
+            continue
+    return pids
+
+
 def _gateway_pid(target: RestartTarget, launchctl_result: subprocess.CompletedProcess[str]) -> int | None:
     launchd_pid = _launchctl_pid(launchctl_result)
     if launchd_pid is None:
@@ -1057,6 +1124,26 @@ def _gateway_pid(target: RestartTarget, launchctl_result: subprocess.CompletedPr
             expected_home=status_path.parent,
         )
         if runtime_pid == launchd_pid:
+            return launchd_pid
+        # gateway_state.json disagrees with launchd (stale, dead PID, or
+        # clobbered by a foreign writer). It only rewrites on turns/transitions,
+        # so it never self-heals; refusing here on the status file alone would
+        # block graceful restarts forever. Fall back to independent evidence
+        # that launchd's PID really is the live gateway.
+        if _heartbeat_confirms_pid(target, launchd_pid):
+            _append_log(
+                f"{target.label}: status file {status_path} pid="
+                f"{payload.get('pid')!r} does not match launchd pid {launchd_pid}; "
+                "trusting launchd via fresh loop heartbeat (stale/foreign state file)"
+            )
+            return launchd_pid
+        if _pid_is_alive(launchd_pid) and launchd_pid in _port_listener_pids(GATEWAY_LISTENER_PORT):
+            _append_log(
+                f"{target.label}: status file {status_path} pid="
+                f"{payload.get('pid')!r} does not match launchd pid {launchd_pid} "
+                f"and no fresh heartbeat; trusting launchd because pid {launchd_pid} "
+                f"is alive and owns listener port {GATEWAY_LISTENER_PORT}"
+            )
             return launchd_pid
     return None
 

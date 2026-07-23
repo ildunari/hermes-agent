@@ -485,10 +485,167 @@ def test_gateway_pid_requires_validated_status_and_launchd_agreement(monkeypatch
     )
     monkeypatch.setattr(restart_surfaces, "_read_json", lambda _path: {"pid": 111})
     monkeypatch.setattr(gateway_status, "get_runtime_status_running_pid", lambda *_a, **_k: 111)
+    # Neither fallback may vouch for the launchd PID in this test.
+    monkeypatch.setattr(restart_surfaces, "_heartbeat_confirms_pid", lambda *_a: False)
+    monkeypatch.setattr(restart_surfaces, "_pid_is_alive", lambda _pid: False)
     assert real_gateway_pid(target, before) is None
 
     monkeypatch.setattr(gateway_status, "get_runtime_status_running_pid", lambda *_a, **_k: 222)
     assert real_gateway_pid(target, before) == 222
+
+
+def _write_status_and_heartbeat(tmp_path, *, status_pid, heartbeat_pid, heartbeat_age_s):
+    """Build a profile-home dir with a stale status file and a heartbeat."""
+    from datetime import datetime, timedelta, timezone
+
+    home = tmp_path / "hermes-home"
+    home.mkdir(parents=True, exist_ok=True)
+    status_path = home / "gateway_state.json"
+    status_path.write_text(
+        json.dumps({"pid": status_pid, "gateway_state": "running"}), encoding="utf-8"
+    )
+    heartbeat_path = home / "state" / "gateway.heartbeat"
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    updated_at = datetime.now(timezone.utc) - timedelta(seconds=heartbeat_age_s)
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "pid": heartbeat_pid,
+                "updated_at": updated_at.isoformat(),
+                "monotonic": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return status_path
+
+
+def test_gateway_pid_trusts_launchd_via_fresh_heartbeat_when_status_stale(
+    monkeypatch, tmp_path
+):
+    """A poisoned/stale gateway_state.json must not block a graceful restart
+    while the loop heartbeat proves launchd's PID is the live gateway."""
+    from gateway import status as gateway_status
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway", required=True)
+    before = subprocess.CompletedProcess(
+        ["launchctl", "print"], 0, stdout="\tpid = 222\n", stderr=""
+    )
+    status_path = _write_status_and_heartbeat(
+        tmp_path, status_pid=145, heartbeat_pid=222, heartbeat_age_s=5
+    )
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(
+        restart_surfaces,
+        "GATEWAY_STATUS_PATHS",
+        {"ai.hermes.gateway": status_path},
+    )
+    monkeypatch.setattr(
+        gateway_status, "get_runtime_status_running_pid", lambda *_a, **_k: None
+    )
+
+    assert real_gateway_pid(target, before) == 222
+    log = (tmp_path / "restart.log").read_text()
+    assert str(status_path) in log
+    assert "fresh loop heartbeat" in log
+
+
+def test_gateway_pid_rejects_future_dated_heartbeat(monkeypatch, tmp_path):
+    """A heartbeat dated in the future (clock rollback, forged timestamp) is
+    not trusted — only bounded skew around now counts as fresh."""
+    from gateway import status as gateway_status
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway", required=True)
+    before = subprocess.CompletedProcess(
+        ["launchctl", "print"], 0, stdout="\tpid = 222\n", stderr=""
+    )
+    status_path = _write_status_and_heartbeat(
+        tmp_path, status_pid=145, heartbeat_pid=222, heartbeat_age_s=-3600
+    )
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(
+        restart_surfaces,
+        "GATEWAY_STATUS_PATHS",
+        {"ai.hermes.gateway": status_path},
+    )
+    monkeypatch.setattr(
+        gateway_status, "get_runtime_status_running_pid", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(restart_surfaces, "_pid_is_alive", lambda _pid: False)
+
+    assert real_gateway_pid(target, before) is None
+
+
+def test_gateway_pid_stale_heartbeat_falls_back_to_port_owner(monkeypatch, tmp_path):
+    """With a stale heartbeat, a live launchd PID that owns the gateway
+    listener port is still trusted (mocked lsof)."""
+    from gateway import status as gateway_status
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway", required=True)
+    before = subprocess.CompletedProcess(
+        ["launchctl", "print"], 0, stdout="\tpid = 222\n", stderr=""
+    )
+    status_path = _write_status_and_heartbeat(
+        tmp_path, status_pid=145, heartbeat_pid=222, heartbeat_age_s=600
+    )
+    lsof_calls = []
+
+    def fake_run(cmd, **_kwargs):
+        lsof_calls.append(cmd)
+        assert "lsof" in cmd[-1]
+        assert str(restart_surfaces.GATEWAY_LISTENER_PORT) in cmd[-1]
+        return subprocess.CompletedProcess(cmd, 0, stdout="222\n", stderr="")
+
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(
+        restart_surfaces,
+        "GATEWAY_STATUS_PATHS",
+        {"ai.hermes.gateway": status_path},
+    )
+    monkeypatch.setattr(
+        gateway_status, "get_runtime_status_running_pid", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(restart_surfaces, "_pid_is_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(restart_surfaces, "_run", fake_run)
+
+    assert real_gateway_pid(target, before) == 222
+    assert lsof_calls
+    log = (tmp_path / "restart.log").read_text()
+    assert f"owns listener port {restart_surfaces.GATEWAY_LISTENER_PORT}" in log
+
+
+def test_gateway_pid_refuses_when_no_fallback_confirms(monkeypatch, tmp_path):
+    """Stale status + stale heartbeat + no listener ownership still refuses."""
+    from gateway import status as gateway_status
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway", required=True)
+    before = subprocess.CompletedProcess(
+        ["launchctl", "print"], 0, stdout="\tpid = 222\n", stderr=""
+    )
+    status_path = _write_status_and_heartbeat(
+        tmp_path, status_pid=145, heartbeat_pid=999, heartbeat_age_s=5
+    )
+    monkeypatch.setattr(restart_surfaces, "LOG_PATH", tmp_path / "restart.log")
+    monkeypatch.setattr(
+        restart_surfaces,
+        "GATEWAY_STATUS_PATHS",
+        {"ai.hermes.gateway": status_path},
+    )
+    monkeypatch.setattr(
+        gateway_status, "get_runtime_status_running_pid", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(restart_surfaces, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+    )
+
+    assert real_gateway_pid(target, before) is None
 
 
 def test_graceful_gateway_restart_signals_and_waits_for_launchd_replacement(monkeypatch):

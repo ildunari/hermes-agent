@@ -197,9 +197,19 @@ class TestBindMechanics:
         finally:
             await second.disconnect()
 
+    @staticmethod
+    def _shrink_bind_retry_window(monkeypatch, *, window_s: float = 0.2) -> None:
+        """Shrink the EADDRINUSE retry window so conflict tests stay fast."""
+        from gateway.platforms import api_server as api_server_module
+
+        monkeypatch.setattr(api_server_module, "BIND_RETRY_WINDOW_S", window_s)
+        monkeypatch.setattr(api_server_module, "BIND_RETRY_INITIAL_BACKOFF_S", 0.05)
+        monkeypatch.setattr(api_server_module, "BIND_RETRY_MAX_BACKOFF_S", 0.05)
+
     @pytest.mark.asyncio
-    async def test_live_listener_conflict_returns_false_and_cleans_up(self):
+    async def test_live_listener_conflict_returns_false_and_cleans_up(self, monkeypatch):
         """A second adapter on an occupied port fails cleanly, not with a raise."""
+        self._shrink_bind_retry_window(monkeypatch)
         port = self._free_port()
         first = self._make_adapter(port)
         assert await first.connect() is True
@@ -214,12 +224,69 @@ class TestBindMechanics:
             await first.disconnect()
             await second.disconnect()
 
+    @pytest.mark.asyncio
+    async def test_bind_retry_succeeds_after_transient_conflict(self, monkeypatch, caplog):
+        """EADDRINUSE during a restart handoff is retried with backoff: once
+        the old listener releases the port, connect() succeeds without any
+        fatal error."""
+        import asyncio
+        import logging
+
+        from gateway.platforms import api_server as api_server_module
+
+        monkeypatch.setattr(api_server_module, "BIND_RETRY_WINDOW_S", 5.0)
+        monkeypatch.setattr(api_server_module, "BIND_RETRY_INITIAL_BACKOFF_S", 0.05)
+        monkeypatch.setattr(api_server_module, "BIND_RETRY_MAX_BACKOFF_S", 0.1)
+
+        port = self._free_port()
+        blocker = socket.socket()
+        blocker.bind(("127.0.0.1", port))
+        blocker.listen(1)
+        adapter = self._make_adapter(port)
+        try:
+            with caplog.at_level(logging.WARNING, logger=api_server_module.logger.name):
+                task = asyncio.create_task(adapter.connect())
+                await asyncio.sleep(0.2)
+                blocker.close()
+                assert await task is True
+            assert adapter.has_fatal_error is False
+            assert adapter.is_connected is True
+            assert any("retrying bind" in rec.getMessage() for rec in caplog.records)
+        finally:
+            try:
+                blocker.close()
+            except OSError:
+                pass
+            await adapter.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_bind_retry_exhausts_to_non_retryable_fatal(self, monkeypatch):
+        """A conflict that outlives the retry window still lands on today's
+        terminal behavior: non-retryable api_server_port_in_use fatal."""
+        self._shrink_bind_retry_window(monkeypatch, window_s=0.3)
+        port = self._free_port()
+        blocker = socket.socket()
+        blocker.bind(("127.0.0.1", port))
+        blocker.listen(1)
+        adapter = self._make_adapter(port)
+        try:
+            result = await adapter.connect()
+            assert result is False
+            assert adapter._runner is None
+            assert adapter._site is None
+            assert adapter.has_fatal_error is True
+            assert adapter.fatal_error_retryable is False
+            assert adapter.fatal_error_code == "api_server_port_in_use"
+        finally:
+            blocker.close()
+            await adapter.disconnect()
+
     def test_pre_probe_helper_removed(self):
         """The racy single-family pre-probe must not come back."""
         assert not hasattr(APIServerAdapter, "_port_is_available")
 
     @pytest.mark.asyncio
-    async def test_port_conflict_sets_non_retryable_fatal_error(self):
+    async def test_port_conflict_sets_non_retryable_fatal_error(self, monkeypatch):
         """A real port conflict (EADDRINUSE) must set a non-retryable fatal
         error so the reconnect watcher drops the platform from the retry
         queue instead of looping indefinitely.
@@ -229,6 +296,7 @@ class TestBindMechanics:
         filling errors.log and leaking 2 fds per retry (#52132: 1568+
         retries over 5 days in a multi-profile setup).
         """
+        self._shrink_bind_retry_window(monkeypatch)
         port = self._free_port()
         first = self._make_adapter(port)
         assert await first.connect() is True
