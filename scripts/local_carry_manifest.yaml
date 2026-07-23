@@ -218,6 +218,7 @@ features:
       - apps/desktop/src/app/settings/types.ts
       - apps/desktop/src/app/shell/titlebar-controls.tsx
       - apps/desktop/src/components/assistant-ui/embeds/url-embed.tsx
+      - apps/desktop/src/components/assistant-ui/tool/fallback-preview-status.test.tsx
       - apps/desktop/src/components/assistant-ui/tool/fallback.tsx
       - apps/desktop/src/components/chat/generated-image-result.tsx
       - apps/desktop/src/lib/external-link.tsx
@@ -259,6 +260,7 @@ features:
     tests:
       - apps/desktop/electron/browser-guest-security.test.ts
       - apps/desktop/src/app/browser/browser-annotations-layout.test.ts
+      - apps/desktop/src/components/assistant-ui/tool/fallback-preview-status.test.tsx
     checks:
       - id: browser-guest-security-contract
         path: apps/desktop/electron/browser-guest-security.ts

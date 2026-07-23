@@ -16,6 +16,7 @@ import {
   useState
 } from 'react'
 
+import { useSessionView } from '@/app/chat/session-view'
 import { AnsiText } from '@/components/assistant-ui/ansi-text'
 import { useElapsedSeconds } from '@/components/chat/activity-timer'
 import { ActivityTimerText } from '@/components/chat/activity-timer-text'
@@ -38,7 +39,6 @@ import { normalize } from '@/lib/text'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
 import { recordPreviewArtifact } from '@/store/preview-status'
-import { $activeSessionId, $currentCwd } from '@/store/session'
 import { $toolInlineDiff } from '@/store/tool-diffs'
 import { $toolRowDismissed, dismissToolRow } from '@/store/tool-dismiss'
 import { $toolDisclosureOpen, $toolViewMode, setToolDisclosureOpen } from '@/store/tool-view'
@@ -281,6 +281,8 @@ function ToolEntry({ part }: ToolEntryProps) {
   const { t } = useI18n()
   const copy = t.assistant.tool
   const statusCopy = t.statusStack
+  const sessionView = useSessionView()
+  const ownerRuntimeId = useStore(sessionView.$runtimeId)
   const messageId = useAuiState(s => s.message.id)
   const messageRunning = useAuiState(selectMessageRunning)
   const embedded = useContext(ToolEmbedContext)
@@ -326,8 +328,8 @@ function ToolEntry({ part }: ToolEntryProps) {
 
   // Surface a previewable artifact (HTML file / localhost URL) as a compact link
   // in the composer status stack rather than a bulky inline card. Uses the same
-  // detected target the old inline card did, keyed to the active session the
-  // stack reads from. Idempotent + dedup'd, so re-renders don't churn.
+  // detected target the old inline card did, keyed to the runtime that owns this
+  // rendered row. Idempotent + dedup'd, so re-renders don't churn.
   const previewTarget = view.previewTarget
 
   useEffect(() => {
@@ -335,15 +337,13 @@ function ToolEntry({ part }: ToolEntryProps) {
       return
     }
 
-    // Read (don't subscribe) session/cwd: this only fires when a previewable
-    // target appears, and subscribing re-rendered every tool row on any session
-    // or cwd change.
-    const activeSessionId = $activeSessionId.get()
-
-    if (activeSessionId) {
-      recordPreviewArtifact(activeSessionId, previewTarget, $currentCwd.get() || '')
+    if (ownerRuntimeId) {
+      // The view is already scoped to the primary chat or this specific tile.
+      // Read cwd at detection time; unlike the global active-session atoms, it
+      // cannot be retargeted by the user selecting another chat.
+      recordPreviewArtifact(ownerRuntimeId, previewTarget, sessionView.$cwd.get() || '')
     }
-  }, [isPending, previewTarget])
+  }, [isPending, ownerRuntimeId, previewTarget, sessionView])
 
   const detailSections = useMemo(() => {
     if (!view.detail) {
