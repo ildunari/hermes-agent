@@ -29,7 +29,10 @@ from typing import Any, Callable
 DESCRIPTION = "Detached, resource-bounded Hermes slim update service."
 RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$")
 CONFLICT_MARKER_RE = re.compile(r"^(?:<<<<<<< |=======|>>>>>>> )", re.MULTILINE)
-TERMINAL = {"COMPLETED", "FAILED", "ABORTED", "NEEDS_RESOLUTION"}
+TERMINAL = {"COMPLETED", "FAILED", "ABORTED"}
+# Parked, not terminal: conflicts wait for resolution in the run's integration
+# worktree, then the run resumes via the `resume` verb (or a service restart).
+PARKED = "NEEDS_RESOLUTION"
 PHASES = (
     "CREATED",
     "PREFLIGHT",
@@ -50,6 +53,18 @@ DESKTOP_BUILD_FD_LIMIT = 2048
 DESCENDANT_LIMIT = 64
 WORKER_LIMIT = 2
 REQUIRED_PORTS = (8642, 8787, 9119, 9120)
+# Best-effort surfaces are probed and recorded but never gate readiness or
+# fail the run. Keep the required/best-effort split explicit here; moving a
+# port between the two tuples is a deliberate policy change, not a tweak.
+BEST_EFFORT_PORTS: tuple[int, ...] = ()
+RESTART_WAIT_SECONDS = 7200
+DEP_MANIFEST_NAMES = {
+    "pyproject.toml",
+    "uv.lock",
+    "package.json",
+    "package-lock.json",
+    "requirements.txt",
+}
 HTTP_PROBES = {
     8642: "/health",
     8787: "/health",
@@ -128,6 +143,13 @@ def ledger_path(root: Path, run_id: str) -> Path:
     return run_dir(root, run_id) / "ledger.json"
 
 
+def phase_rank(name: str) -> float:
+    # PARKED sits between PREFLIGHT (merge attempted) and MERGED (resolved).
+    if name == PARKED:
+        return PHASES.index("MERGED") - 0.5
+    return float(PHASES.index(name))
+
+
 def transition(root: Path, run_id: str, phase: str, **updates: Any) -> dict[str, Any]:
     path = ledger_path(root, run_id)
     lock_path = path.with_suffix(".lock")
@@ -136,15 +158,15 @@ def transition(root: Path, run_id: str, phase: str, **updates: Any) -> dict[str,
         fcntl.flock(lock, fcntl.LOCK_EX)
         ledger = read_json(path)
         current = str(ledger["phase"])
-        if phase not in PHASES and phase not in TERMINAL:
+        if phase not in PHASES and phase not in TERMINAL and phase != PARKED:
             raise ValueError(f"unknown phase: {phase}")
         if current in TERMINAL:
             raise RuntimeError(f"terminal run cannot transition: {current}")
-        if phase in PHASES and PHASES.index(phase) < PHASES.index(current):
+        if phase not in TERMINAL and phase_rank(phase) < phase_rank(current):
             raise RuntimeError(f"phase regression: {current} -> {phase}")
         ledger.update(updates)
         ledger["phase"] = phase
-        ledger["status"] = phase if phase in TERMINAL else "RUNNING"
+        ledger["status"] = phase if (phase in TERMINAL or phase == PARKED) else "RUNNING"
         ledger.setdefault("phase_history", []).append({"phase": phase, "at": utc_now()})
         atomic_json(path, ledger)
         return ledger
@@ -154,7 +176,7 @@ def phase_before(ledger: dict[str, Any], phase: str) -> bool:
     current = str(ledger["phase"])
     if current in TERMINAL:
         return False
-    return PHASES.index(current) < PHASES.index(phase)
+    return phase_rank(current) < phase_rank(phase)
 
 
 def advance(root: Path, run_id: str, phase: str, **updates: Any) -> dict[str, Any]:
@@ -323,7 +345,9 @@ def surface_inventory(
     old_pids: dict[int, int] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     current = listener_pids()
-    ready = {port: http_ready(port) for port in REQUIRED_PORTS}
+    ready = {
+        port: http_ready(port) for port in (*REQUIRED_PORTS, *BEST_EFFORT_PORTS)
+    }
     replaced = {
         port: (
             port in current
@@ -331,11 +355,58 @@ def surface_inventory(
         )
         for port in REQUIRED_PORTS
     }
-    return all(ready.values()) and all(replaced.values()), {
+    healthy = all(ready[port] for port in REQUIRED_PORTS) and all(replaced.values())
+    return healthy, {
         "listener_pids": current,
         "http_ready": ready,
         "replaced": replaced,
     }
+
+
+def wait_for_surfaces(
+    root: Path,
+    run_id: str,
+    probe: Callable[[], tuple[bool, dict[str, Any]]],
+    wait_seconds: float,
+    poll_seconds: float = 5,
+    audit_seconds: float = 60,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> None:
+    """Poll readiness with an observable drain audit.
+
+    While waiting, append a per-interval snapshot (listener PIDs, readiness,
+    replacement state) to evidence/drain-audit.jsonl so a long drain is
+    diagnosable instead of a silent hang. On timeout, name the blocked ports.
+    """
+    audit_path = run_dir(root, run_id) / "evidence" / "drain-audit.jsonl"
+    audit_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    deadline = time.monotonic() + wait_seconds
+    last_audit = float("-inf")
+    details: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        matched, details = probe()
+        if matched:
+            return
+        if time.monotonic() - last_audit >= audit_seconds:
+            last_audit = time.monotonic()
+            with audit_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps({"at": utc_now(), **details}, sort_keys=True) + "\n"
+                )
+        sleeper(poll_seconds)
+    blocked = sorted(
+        {
+            str(port)
+            for port, ok in details.get("http_ready", {}).items()
+            if not ok and port in REQUIRED_PORTS
+        }
+        | {str(port) for port, ok in details.get("replaced", {}).items() if not ok}
+    )
+    raise RuntimeError(
+        "Hermes readiness did not return; blocked ports: "
+        + (", ".join(blocked) or "unknown")
+        + f"; drain audit: {audit_path}"
+    )
 
 
 def enforce_budget(pid: int, origin_pid: int | None, origin_fd_limit: int) -> dict[str, int]:
@@ -558,6 +629,9 @@ def redacted_status(root: Path, run_id: str) -> dict[str, Any]:
         "created_at",
         "completed_at",
         "error",
+        "conflict_files",
+        "worktree",
+        "dependency_sensitive_paths",
     }
     return {key: ledger[key] for key in allowed if key in ledger}
 
@@ -591,7 +665,7 @@ def handle_request(repo: Path, root: Path, payload: dict[str, Any], peer_pid: in
     if set(payload) - {"verb", "mode", "run_id", "nonce", "timestamp"}:
         raise ValueError("unknown request field")
     verb = payload.get("verb")
-    if verb not in {"start", "status", "abort"}:
+    if verb not in {"start", "status", "abort", "resume"}:
         raise ValueError("invalid verb")
     nonce = payload.get("nonce")
     timestamp = payload.get("timestamp")
@@ -616,6 +690,19 @@ def handle_request(repo: Path, root: Path, payload: dict[str, Any], peer_pid: in
         raise ValueError("valid run_id required")
     if verb == "status":
         return {"ok": True, "run": redacted_status(root, run_id)}
+    if verb == "resume":
+        ledger = read_json(ledger_path(root, run_id))
+        status = str(ledger.get("status"))
+        if status in TERMINAL:
+            raise RuntimeError(f"run is terminal: {status}")
+        lease = current_lease(root)
+        if lease:
+            pid = int(lease.get("pid") or 0)
+            expected_start = float(lease.get("start_time") or 0)
+            if pid > 0 and pid != os.getpid() and ps_start_time(pid) == expected_start:
+                raise RuntimeError(f"worker already live: pid {pid}")
+        spawn_worker(repo, root, run_id)
+        return {"ok": True, "run_id": run_id, "resumed": True}
     abort = run_dir(root, run_id) / "abort.request"
     abort.touch(mode=0o600, exist_ok=True)
     return {"ok": True, "run_id": run_id, "abort_requested": True}
@@ -989,47 +1076,50 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
             )
             if merge_rc and not conflicts and not merge_in_progress:
                 raise RuntimeError("merge failed without resolvable file conflicts")
-            resolver = shutil.which("hermes")
-            if resolver and conflicts:
-                prompt = (
-                    "Resolve only the listed Git merge conflicts in the supplied worktree. "
-                    "Preserve upstream behavior and registered local carry. Do not run tests, "
-                    "spawn subagents, background work, stage, commit, push, or restart anything. "
-                    f"Worktree: {worktree}. Conflicts: {', '.join(conflicts)}. "
-                    "Remove all conflict markers from those files and stop."
-                )
-                worker_command(
-                    root,
-                    run_id,
-                    [
-                        resolver,
-                        "--profile",
-                        "coding",
-                        "--safe-mode",
-                        "-t",
-                        "file",
-                        "-z",
-                        prompt,
-                    ],
-                    worktree,
-                    "conflict-worker",
-                    3600,
-                )
-                marked = [
+            if conflicts:
+                resolver = shutil.which("hermes")
+                ledger = read_json(ledger_path(root, run_id))
+                if resolver and not ledger.get("resolver_attempted"):
+                    transition(root, run_id, "PREFLIGHT", resolver_attempted=True)
+                    prompt = (
+                        "Resolve only the listed Git merge conflicts in the supplied worktree. "
+                        "Preserve upstream behavior and registered local carry. Do not run tests, "
+                        "spawn subagents, background work, stage, commit, push, or restart anything. "
+                        f"Worktree: {worktree}. Conflicts: {', '.join(conflicts)}. "
+                        "Remove all conflict markers from those files and stop."
+                    )
+                    worker_command(
+                        root,
+                        run_id,
+                        [
+                            resolver,
+                            "--profile",
+                            "coding",
+                            "--safe-mode",
+                            "-t",
+                            "file",
+                            "-z",
+                            prompt,
+                        ],
+                        worktree,
+                        "conflict-worker",
+                        3600,
+                    )
+                resolved = [
                     path
                     for path in conflicts
-                    if CONFLICT_MARKER_RE.search(
+                    if not CONFLICT_MARKER_RE.search(
                         (worktree / path).read_text(
                             encoding="utf-8",
                             errors="replace",
                         )
                     )
                 ]
-                if not marked:
+                if resolved:
                     worker_command(
                         root,
                         run_id,
-                        ["git", "add", "--", *conflicts],
+                        ["git", "add", "--", *resolved],
                         worktree,
                         "conflict-stage",
                         120,
@@ -1044,9 +1134,13 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 transition(
                     root,
                     run_id,
-                    "NEEDS_RESOLUTION",
-                    error="service-owned conflict worker did not resolve every file",
+                    PARKED,
+                    error=(
+                        "conflicts await resolution in the integration worktree; "
+                        "resolve there, then issue the resume verb"
+                    ),
                     conflict_files=remaining,
+                    worktree=str(worktree),
                 )
                 return
             if git(
@@ -1120,7 +1214,19 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 7200,
                 validation_env,
             )
-            transition(root, run_id, "VERIFIED", changed_paths=changed)
+            dependency_sensitive = [
+                path
+                for path in changed
+                if Path(path).name in DEP_MANIFEST_NAMES
+                or Path(path).name.endswith(".lock")
+            ]
+            transition(
+                root,
+                run_id,
+                "VERIFIED",
+                changed_paths=changed,
+                dependency_sensitive_paths=dependency_sensitive,
+            )
         ledger = read_json(ledger_path(root, run_id))
         desktop_changed = bool(
             ledger.get("desktop_changed")
@@ -1202,7 +1308,24 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
     except Exception as exc:
         current = read_json(ledger_path(root, run_id))
         if current.get("status") not in TERMINAL:
-            transition(root, run_id, "FAILED", error=f"{type(exc).__name__}: {str(exc)[:500]}")
+            note = ""
+            try:
+                activated = phase_rank(str(current.get("phase", "CREATED"))) >= phase_rank(
+                    "STUDIO_ACTIVATED"
+                )
+            except ValueError:
+                activated = False
+            if activated and current.get("dependency_sensitive_paths"):
+                note = (
+                    " | rollback requires dependency review (git alone is insufficient): "
+                    + ", ".join(current["dependency_sensitive_paths"][:10])
+                )
+            transition(
+                root,
+                run_id,
+                "FAILED",
+                error=f"{type(exc).__name__}: {str(exc)[:500]}{note}",
+            )
     finally:
         release_lease(lease_handle)
 
@@ -1417,13 +1540,7 @@ def deploy(
             120,
             honor_abort=False,
         )
-        deadline = time.monotonic() + 900
-        while time.monotonic() < deadline:
-            matched, _ = restart_probe()
-            if matched:
-                return
-            time.sleep(5)
-        raise RuntimeError("Hermes readiness did not return")
+        wait_for_surfaces(root, run_id, restart_probe, RESTART_WAIT_SECONDS)
 
     receipted(
         root,
@@ -1542,7 +1659,7 @@ def parser() -> argparse.ArgumentParser:
     serving = sub.add_parser("serve")
     serving.set_defaults(func=serve)
     requesting = sub.add_parser("request")
-    requesting.add_argument("verb", choices=("start", "status", "abort"))
+    requesting.add_argument("verb", choices=("start", "status", "abort", "resume"))
     requesting.add_argument("--mode", choices=("rehearse", "update"), default="rehearse")
     requesting.add_argument("--run-id")
     requesting.set_defaults(func=request)

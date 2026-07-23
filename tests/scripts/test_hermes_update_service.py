@@ -248,6 +248,160 @@ def test_surface_inventory_requires_every_runtime_port(monkeypatch) -> None:
     assert details["http_ready"][9120] is False
 
 
+def test_parked_run_is_active_and_blocks_second_start(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-555555555555"
+    make_ledger(tmp_path, run_id)
+    SERVICE.transition(tmp_path, run_id, "PREFLIGHT")
+    ledger = SERVICE.transition(
+        tmp_path, run_id, SERVICE.PARKED, conflict_files=["a.py"]
+    )
+
+    assert ledger["status"] == "NEEDS_RESOLUTION"
+    assert SERVICE.active_run(tmp_path) == run_id
+
+
+def test_parked_run_resumes_forward_and_can_repark(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-666666666666"
+    make_ledger(tmp_path, run_id)
+    SERVICE.transition(tmp_path, run_id, "PREFLIGHT")
+    SERVICE.transition(tmp_path, run_id, SERVICE.PARKED)
+
+    ledger = SERVICE.read_json(SERVICE.ledger_path(tmp_path, run_id))
+    assert SERVICE.phase_before(ledger, "MERGED")
+    assert not SERVICE.phase_before(ledger, "PREFLIGHT")
+
+    SERVICE.transition(tmp_path, run_id, SERVICE.PARKED)
+    SERVICE.transition(tmp_path, run_id, "MERGED")
+    with pytest.raises(RuntimeError, match="phase regression"):
+        SERVICE.transition(tmp_path, run_id, SERVICE.PARKED)
+
+
+def test_parked_run_can_still_fail_or_abort(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-777777777777"
+    make_ledger(tmp_path, run_id)
+    SERVICE.transition(tmp_path, run_id, "PREFLIGHT")
+    SERVICE.transition(tmp_path, run_id, SERVICE.PARKED)
+    SERVICE.transition(tmp_path, run_id, "FAILED", error="boom")
+    with pytest.raises(RuntimeError, match="terminal run"):
+        SERVICE.transition(tmp_path, run_id, "MERGED")
+
+
+def test_resume_verb_spawns_worker_for_parked_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "20260723T120000Z-888888888888"
+    make_ledger(tmp_path, run_id)
+    SERVICE.transition(tmp_path, run_id, "PREFLIGHT")
+    SERVICE.transition(tmp_path, run_id, SERVICE.PARKED)
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        SERVICE, "spawn_worker", lambda repo, root, rid: spawned.append(rid)
+    )
+
+    payload = {
+        "verb": "resume",
+        "run_id": run_id,
+        "nonce": "c" * 32,
+        "timestamp": int(time.time()),
+    }
+    response = SERVICE.handle_request(tmp_path, tmp_path, payload, None)
+
+    assert response == {"ok": True, "run_id": run_id, "resumed": True}
+    assert spawned == [run_id]
+
+
+def test_resume_verb_rejects_terminal_run(tmp_path: Path, monkeypatch) -> None:
+    run_id = "20260723T120000Z-999999999999"
+    make_ledger(tmp_path, run_id)
+    SERVICE.transition(tmp_path, run_id, "FAILED", error="boom")
+    monkeypatch.setattr(
+        SERVICE,
+        "spawn_worker",
+        lambda repo, root, rid: pytest.fail("must not spawn"),
+    )
+
+    payload = {
+        "verb": "resume",
+        "run_id": run_id,
+        "nonce": "d" * 32,
+        "timestamp": int(time.time()),
+    }
+    with pytest.raises(RuntimeError, match="terminal"):
+        SERVICE.handle_request(tmp_path, tmp_path, payload, None)
+
+
+def test_surface_inventory_best_effort_port_does_not_gate(monkeypatch) -> None:
+    monkeypatch.setattr(SERVICE, "BEST_EFFORT_PORTS", (9999,))
+    monkeypatch.setattr(
+        SERVICE,
+        "listener_pids",
+        lambda: {port: port + 10000 for port in SERVICE.REQUIRED_PORTS},
+    )
+    monkeypatch.setattr(SERVICE, "http_ready", lambda port: port != 9999)
+
+    ready, details = SERVICE.surface_inventory()
+
+    assert ready
+    assert details["http_ready"][9999] is False
+
+
+def test_wait_for_surfaces_times_out_naming_blocked_ports(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-aaaaaaaaaaab"
+    make_ledger(tmp_path, run_id)
+
+    def probe() -> tuple[bool, dict[str, object]]:
+        return False, {
+            "http_ready": {9119: False, 8642: True},
+            "replaced": {9120: False},
+        }
+
+    with pytest.raises(RuntimeError, match="9119, 9120"):
+        SERVICE.wait_for_surfaces(
+            tmp_path,
+            run_id,
+            probe,
+            wait_seconds=0.2,
+            poll_seconds=0.05,
+            audit_seconds=0,
+            sleeper=lambda _: None,
+        )
+
+    audit = (
+        SERVICE.run_dir(tmp_path, run_id) / "evidence" / "drain-audit.jsonl"
+    )
+    lines = audit.read_text(encoding="utf-8").strip().splitlines()
+    assert lines
+    record = json.loads(lines[0])
+    assert record["http_ready"]["9119"] is False
+
+
+def test_failed_after_activation_flags_dependency_rollback(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-bbbbbbbbbbbc"
+    make_ledger(tmp_path, run_id)
+    for phase in (
+        "PREFLIGHT",
+        "MERGED",
+        "VERIFIED",
+        "BUILT",
+        "MACBOOK_STAGED",
+        "STUDIO_ACTIVATED",
+    ):
+        SERVICE.transition(tmp_path, run_id, phase)
+    SERVICE.transition(
+        tmp_path,
+        run_id,
+        "STUDIO_ACTIVATED",
+        dependency_sensitive_paths=["pyproject.toml", "uv.lock"],
+    )
+    (SERVICE.run_dir(tmp_path, run_id) / "bundle").mkdir(parents=True)
+
+    SERVICE.execute_worker(tmp_path, tmp_path, run_id)
+
+    ledger = SERVICE.read_json(SERVICE.ledger_path(tmp_path, run_id))
+    assert ledger["status"] == "FAILED"
+    assert "rollback requires dependency review" in ledger["error"]
+
+
 def test_desktop_identity_match_is_exact() -> None:
     expected = {
         "CDHash": "abc",

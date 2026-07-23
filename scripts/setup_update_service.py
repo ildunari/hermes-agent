@@ -35,7 +35,9 @@ def active_run(state: Path) -> str | None:
             payload = json.loads(ledger.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if payload.get("status") not in {"COMPLETED", "FAILED", "ABORTED", "NEEDS_RESOLUTION"}:
+        # NEEDS_RESOLUTION is parked, not terminal: a parked run must block
+        # updater reinstalls the same way a running one does.
+        if payload.get("status") not in {"COMPLETED", "FAILED", "ABORTED"}:
             return str(payload.get("run_id"))
     return None
 
