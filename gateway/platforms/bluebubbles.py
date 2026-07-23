@@ -9,16 +9,14 @@ downloading from PR #4588 (YuhangLin).
 """
 
 import asyncio
-from collections import OrderedDict
-import hashlib
 import json
 import logging
 import os
-import random
 import re
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional
+from collections import OrderedDict
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import httpx
@@ -26,8 +24,6 @@ import httpx
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
-    CommunicationIngressAttachment,
-    CommunicationIngressEnvelope,
     MessageEvent,
     MessageType,
     SendResult,
@@ -64,15 +60,15 @@ DEFAULT_MENTION_PATTERNS = [
 # Tapback reaction codes (BlueBubbles associatedMessageType values)
 _TAPBACK_ADDED = {
     2000: "love", 2001: "like", 2002: "dislike",
-    2003: "laugh", 2004: "emphasis", 2005: "question",
+    2003: "laugh", 2004: "emphasize", 2005: "question",
 }
 _TAPBACK_REMOVED = {
     3000: "love", 3001: "like", 3002: "dislike",
-    3003: "laugh", 3004: "emphasis", 3005: "question",
+    3003: "laugh", 3004: "emphasize", 3005: "question",
 }
 
 # Webhook event types that carry user messages
-_MESSAGE_EVENTS = {"new-message"}
+_MESSAGE_EVENTS = {"new-message", "message", "updated-message"}
 
 # Log redaction patterns
 _PHONE_RE = re.compile(r"\+?\d{7,15}")
@@ -144,44 +140,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         )
         if not str(self.webhook_path).startswith("/"):
             self.webhook_path = f"/{self.webhook_path}"
-        self.webhook_public_url = _normalize_server_url(
-            extra.get("webhook_public_url")
-            or extra.get("webhook_url")
-            or os.getenv("BLUEBUBBLES_WEBHOOK_PUBLIC_URL", "")
-            or os.getenv("BLUEBUBBLES_WEBHOOK_URL", "")
-        )
         self.send_read_receipts = bool(extra.get("send_read_receipts", True))
-        self.split_outbound_paragraphs = self._coerce_bool(
-            extra.get("split_outbound_paragraphs", os.getenv("BLUEBUBBLES_SPLIT_OUTBOUND_PARAGRAPHS")),
-            default=False,
-        )
-        self.bubble_delay_min_ms = max(0, int(extra.get("bubble_delay_min_ms", 0) or 0))
-        self.bubble_delay_max_ms = max(
-            self.bubble_delay_min_ms,
-            int(extra.get("bubble_delay_max_ms", self.bubble_delay_min_ms) or self.bubble_delay_min_ms),
-        )
-        self.bubble_typing_chars_per_second = max(
-            1.0, float(extra.get("bubble_typing_chars_per_second", 18.0) or 18.0)
-        )
-        self.webhook_register = self._coerce_bool(
-            extra.get("webhook_register", os.getenv("BLUEBUBBLES_WEBHOOK_REGISTER", "true")),
-            default=True,
-        )
-        _group_require_mention = extra.get("group_require_mention")
-        if _group_require_mention is None:
-            _group_require_mention = os.getenv("BLUEBUBBLES_GROUP_REQUIRE_MENTION")
-        if _group_require_mention is None:
-            _group_require_mention = extra.get("require_mention")
-        if _group_require_mention is None:
-            _group_require_mention = os.getenv("BLUEBUBBLES_REQUIRE_MENTION")
-        self.group_require_mention = self._coerce_bool(
-            _group_require_mention,
-            default=True,
-        )
-        self.require_mention = self.group_require_mention
-        self.mention_patterns = self._load_mention_patterns(
-            extra.get("mention_patterns") or os.getenv("BLUEBUBBLES_MENTION_PATTERNS", "")
-        )
+        _require_mention = extra.get("require_mention")
+        if _require_mention is None:
+            _require_mention = os.getenv("BLUEBUBBLES_REQUIRE_MENTION")
+        self.require_mention = str(_require_mention).strip().lower() in {"true", "1", "yes", "on"}
         self._mention_patterns = self._compile_mention_patterns(
             extra["mention_patterns"]
             if "mention_patterns" in extra
@@ -189,24 +152,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         )
         self.client: Optional[httpx.AsyncClient] = None
         self._runner = None
-        self._registered_webhook = False
         self._private_api_enabled: Optional[bool] = None
         self._helper_connected: bool = False
         self._guid_cache: OrderedDict[str, str] = OrderedDict()
-        self._outbound_message_guids: OrderedDict[str, None] = OrderedDict()
-        self._outbound_message_guid_limit = int(extra.get("outbound_message_guid_limit", 512) or 512)
-        self._seen_message_guids: OrderedDict[str, None] = OrderedDict()
-        self._seen_message_guid_limit = int(extra.get("message_dedupe_limit", 2048) or 2048)
-        _text_batch_delay = extra.get("text_batch_delay_seconds")
-        if _text_batch_delay is None:
-            _text_batch_delay = os.getenv("BLUEBUBBLES_TEXT_BATCH_DELAY_SECONDS", "0.8")
-        _text_batch_link_delay = extra.get("text_batch_link_delay_seconds")
-        if _text_batch_link_delay is None:
-            _text_batch_link_delay = os.getenv("BLUEBUBBLES_TEXT_BATCH_LINK_DELAY_SECONDS", "1.5")
-        self._text_batch_delay_seconds = float(_text_batch_delay)
-        self._text_batch_link_delay_seconds = float(_text_batch_link_delay)
-        self._pending_text_batches: Dict[str, MessageEvent] = {}
-        self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # API helpers
@@ -284,25 +232,6 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         res.raise_for_status()
         return res.json()
 
-    async def _refresh_private_api_status(self) -> None:
-        """Refresh Private API/helper state without requiring gateway restart."""
-        if not self.client:
-            return
-        try:
-            info = await self._api_get("/api/v1/server/info")
-            server_data = (info or {}).get("data", {})
-            self._private_api_enabled = bool(server_data.get("private_api"))
-            self._helper_connected = bool(server_data.get("helper_connected"))
-        except Exception:
-            pass
-
-    async def _private_api_helper_ready(self) -> bool:
-        if not self.client:
-            return False
-        if not self._private_api_enabled or not self._helper_connected:
-            await self._refresh_private_api_status()
-        return bool(self._private_api_enabled and self._helper_connected)
-
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -339,19 +268,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 self.client = None
             return False
 
-        if not self.webhook_register:
-            self._mark_connected()
-            logger.info(
-                "[bluebubbles] send-only mode enabled; webhook listener/registration disabled because external router owns BlueBubbles ingress"
-            )
-            return True
-
         # Explicit body cap: BlueBubbles webhook events are small JSON (or
         # form-encoded) payloads. client_max_size makes aiohttp enforce the
         # cap on every read path — including chunked requests that carry no
         # Content-Length (same pattern as webhook.py / raft, #58536/#58902).
         app = web.Application(client_max_size=_WEBHOOK_MAX_BODY_BYTES)
-
         app.router.add_get("/health", lambda _: web.Response(text="ok"))
         app.router.add_post(self.webhook_path, self._handle_webhook)
         # The webhook auth value is carried in the query string because the
@@ -369,30 +290,15 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             self.webhook_path,
         )
 
-        # Register webhook with BlueBubbles server.  Guest/profile router
-        # deployments can set webhook_register=false so exactly one ingress
-        # owner registers with BlueBubbles and profile-local adapters only send.
-        if self.webhook_register:
-            self._registered_webhook = await self._register_webhook()
-        else:
-            logger.info(
-                "[bluebubbles] webhook registration disabled by config; assuming external router owns BlueBubbles ingress"
-            )
+        # Register webhook with BlueBubbles server
+        # This is required for the server to know where to send events
+        await self._register_webhook()
 
         return True
 
     async def disconnect(self) -> None:
-        # Unregister webhook before cleaning up, but only if this adapter was
-        # the ingress owner that registered it.
-        if self.webhook_register and self._registered_webhook:
-            await self._unregister_webhook()
-            self._registered_webhook = False
-
-        for task in self._pending_text_batch_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._pending_text_batch_tasks.clear()
-        self._pending_text_batches.clear()
+        # Unregister webhook before cleaning up
+        await self._unregister_webhook()
 
         if self.client:
             await self.client.aclose()
@@ -408,8 +314,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         host = self.webhook_host
         if host in {"0.0.0.0", "127.0.0.1", "localhost", "::"}:
             host = "localhost"
-        local_url = f"http://{host}:{self.webhook_port}{self.webhook_path}"
-        return self.webhook_public_url or local_url
+        return f"http://{host}:{self.webhook_port}{self.webhook_path}"
 
     @property
     def _webhook_register_url(self) -> str:
@@ -457,25 +362,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         webhook_url = self._webhook_register_url
 
-        # Crash resilience — reuse an existing registration if present, and
-        # collapse duplicates so a future profile/router does not receive the
-        # same iMessage event multiple times after crashy restarts.
+        # Crash resilience — reuse an existing registration if present
         existing = await self._find_registered_webhooks(webhook_url)
         if existing:
-            for duplicate in existing[1:]:
-                wh_id = duplicate.get("id")
-                if wh_id:
-                    try:
-                        res = await self.client.delete(
-                            self._api_url(f"/api/v1/webhook/{wh_id}")
-                        )
-                        res.raise_for_status()
-                    except Exception:
-                        logger.debug(
-                            "[bluebubbles] failed to remove duplicate webhook id=%s",
-                            wh_id,
-                            exc_info=True,
-                        )
             logger.info(
                 "[bluebubbles] webhook already registered: %s",
                 self._webhook_register_url_for_log,
@@ -484,7 +373,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         payload = {
             "url": webhook_url,
-            "events": ["new-message"],
+            "events": ["new-message", "updated-message"],
         }
 
         try:
@@ -589,41 +478,6 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             pass
         return None
 
-    async def resolve_authenticated_existing_dm(
-        self, chat_guid: str, expected_participant: object
-    ) -> tuple[str, str] | None:
-        from gateway.guest_access import normalize_identity
-
-        if isinstance(expected_participant, (set, frozenset, list, tuple)):
-            expected = {normalize_identity(item) for item in expected_participant}
-        else:
-            expected = {normalize_identity(expected_participant)}
-        expected.discard("")
-        if not chat_guid or not expected:
-            return None
-        payload = await self._api_post("/api/v1/chat/query", {"limit": 500, "offset": 0})
-        for chat in payload.get("data", []) or []:
-            guid = str(chat.get("guid") or chat.get("chatGuid") or "")
-            if guid != chat_guid:
-                continue
-            raw_participants = chat.get("participants") or chat.get("handles") or []
-            participants = {
-                normalize_identity(
-                    item.get("address") or item.get("handle") or item.get("id")
-                    if isinstance(item, Mapping) else item
-                )
-                for item in raw_participants
-            }
-            participants.discard("")
-            if len(participants) != 1 or not participants <= expected:
-                return None
-            participant = next(iter(participants))
-            fingerprint = hashlib.sha256(
-                f"{guid}\0{participant}".encode("utf-8")
-            ).hexdigest()
-            return guid, fingerprint
-        return None
-
     async def _create_chat_for_handle(
         self, address: str, message: str
     ) -> SendResult:
@@ -641,57 +495,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         except Exception as exc:
             return SendResult(success=False, error=str(exc))
 
-    @staticmethod
-    def _canonical_session_chat_id(
-        chat_guid: Optional[str],
-        chat_identifier: Optional[str],
-        sender: Optional[str],
-        *,
-        is_group: bool,
-    ) -> Optional[str]:
-        """Return a stable session/send target for BlueBubbles events.
-
-        BlueBubbles can deliver the same one-to-one iMessage alternately as a
-        raw chat GUID (``any;-;+1555...``) and as a bare handle
-        (``+1555...``). Use the human handle for DMs so one contact maps to one
-        Hermes session. Keep group GUIDs because the participant handle alone
-        would collapse unrelated group chats.
-        """
-        if is_group:
-            return chat_guid or chat_identifier or sender
-        guid = (chat_guid or "").strip()
-        if ";" in guid:
-            tail = guid.rsplit(";", 1)[-1].strip()
-            if tail:
-                return tail.lower() if "@" in tail else tail
-        for value in (chat_identifier, sender):
-            value = (value or "").strip()
-            if value:
-                return value.lower() if "@" in value else value
-        if not guid:
-            return None
-        return guid.lower() if "@" in guid else guid
-
     # ------------------------------------------------------------------
     # Text sending
     # ------------------------------------------------------------------
-
-    def _remember_outbound_message_guid(self, message_id: Optional[str]) -> None:
-        if not message_id:
-            return
-        self._outbound_message_guids[str(message_id)] = None
-        self._outbound_message_guids.move_to_end(str(message_id))
-        while len(self._outbound_message_guids) > max(1, self._outbound_message_guid_limit):
-            self._outbound_message_guids.popitem(last=False)
-
-    def _is_recent_outbound_message_guid(self, message_id: Optional[str]) -> bool:
-        if not message_id:
-            return False
-        key = str(message_id)
-        if key not in self._outbound_message_guids:
-            return False
-        self._outbound_message_guids.move_to_end(key)
-        return True
 
     @staticmethod
     def truncate_message(content: str, max_length: int = MAX_TEXT_LENGTH) -> List[str]:
@@ -710,32 +516,18 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         text = self.format_message(content)
         if not text:
             return SendResult(success=False, error="BlueBubbles send requires text")
-        # iMessage users get a notification per delivered bubble. Keep one
-        # assistant response in one bubble by default; only split paragraph
-        # breaks when a profile/operator explicitly opts back into that older
-        # behavior. Over-length messages still chunk at the platform limit.
-        paragraphs = [text]
-        if self.split_outbound_paragraphs:
-            paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()] or [text]
+        # Split on paragraph breaks first (double newlines) so each thought
+        # becomes its own iMessage bubble, then truncate any that are still
+        # too long.
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
         chunks: List[str] = []
-        for para in paragraphs:
+        for para in (paragraphs or [text]):
             if len(para) <= self.MAX_MESSAGE_LENGTH:
                 chunks.append(para)
             else:
                 chunks.extend(self.truncate_message(para, max_length=self.MAX_MESSAGE_LENGTH))
         last = SendResult(success=True)
-        delivered_chunks = 0
         for chunk in chunks:
-            if delivered_chunks > 0 and self.bubble_delay_max_ms > 0:
-                # A burst should feel typed, not atomically dumped. The delay is
-                # bounded by profile config and scales gently with bubble length.
-                try:
-                    await self.send_typing(chat_id)
-                except Exception:
-                    pass
-                jitter = random.uniform(self.bubble_delay_min_ms, self.bubble_delay_max_ms) / 1000.0
-                typed = min(2.5, len(chunk) / self.bubble_typing_chars_per_second)
-                await asyncio.sleep(jitter + typed)
             guid = await self._resolve_chat_guid(chat_id)
             if not guid:
                 # If the target looks like an address, try creating a new chat
@@ -746,7 +538,6 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 return SendResult(
                     success=False,
                     error=f"BlueBubbles chat not found for target: {chat_id}",
-                    raw_response={"skip_plaintext_fallback": True},
                 )
             payload: Dict[str, Any] = {
                 "chatGuid": guid,
@@ -758,60 +549,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 payload["selectedMessageGuid"] = reply_to
                 payload["partIndex"] = 0
             try:
-                assert self.client is not None
-                response = await self.client.post(
-                    self._api_url("/api/v1/message/text"),
-                    json=payload,
-                    timeout=120,
-                )
-                response.raise_for_status()
-                res = response.json()
+                res = await self._api_post("/api/v1/message/text", payload)
                 data = res.get("data") or {}
                 msg_id = data.get("guid") or data.get("messageGuid") or "ok"
                 last = SendResult(
                     success=True, message_id=str(msg_id), raw_response=res
                 )
-                self._remember_outbound_message_guid(last.message_id)
-                delivered_chunks += 1
-            except httpx.ConnectError as exc:
-                return SendResult(
-                    success=False,
-                    error=repr(exc),
-                    retryable=delivered_chunks == 0,
-                    raw_response={
-                        "partial_delivery": delivered_chunks > 0,
-                        "skip_plaintext_fallback": True,
-                    },
-                )
-            except httpx.TimeoutException as exc:
-                return SendResult(
-                    success=False,
-                    error=repr(exc),
-                    retryable=False,
-                    raw_response={
-                        "partial_delivery": delivered_chunks > 0,
-                        "skip_plaintext_fallback": True,
-                    },
-                )
-            except httpx.TransportError as exc:
-                return SendResult(
-                    success=False,
-                    error=repr(exc),
-                    retryable=False,
-                    raw_response={
-                        "partial_delivery": delivered_chunks > 0,
-                        "skip_plaintext_fallback": True,
-                    },
-                )
             except Exception as exc:
-                return SendResult(
-                    success=False,
-                    error=repr(exc),
-                    raw_response={
-                        "partial_delivery": delivered_chunks > 0,
-                        "skip_plaintext_fallback": True,
-                    },
-                )
+                return SendResult(success=False, error=str(exc))
         return last
 
     # ------------------------------------------------------------------
@@ -824,7 +569,6 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         file_path: str,
         filename: Optional[str] = None,
         caption: Optional[str] = None,
-        reply_to: Optional[str] = None,
         is_audio_message: bool = False,
     ) -> SendResult:
         """Send a file attachment via BlueBubbles multipart upload."""
@@ -848,14 +592,6 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 }
                 if is_audio_message:
                     data["isAudioMessage"] = "true"
-                if caption:
-                    data["message"] = caption
-                    data["text"] = caption
-                    data["caption"] = caption
-                if reply_to and self._private_api_enabled and self._helper_connected:
-                    data["method"] = "private-api"
-                    data["selectedMessageGuid"] = reply_to
-                    data["partIndex"] = "0"
                 res = await self.client.post(
                     self._api_url("/api/v1/message/attachment"),
                     files=files,
@@ -864,6 +600,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 )
                 res.raise_for_status()
                 result = res.json()
+
+            if caption:
+                await self.send(chat_id, caption)
 
             if result.get("status") == 200:
                 rdata = result.get("data") or {}
@@ -890,7 +629,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             from gateway.platforms.base import cache_image_from_url
 
             local_path = await cache_image_from_url(image_url)
-            return await self._send_attachment(chat_id, local_path, caption=caption, reply_to=reply_to)
+            return await self._send_attachment(chat_id, local_path, caption=caption)
         except Exception:
             return await super().send_image(chat_id, image_url, caption, reply_to)
 
@@ -902,7 +641,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs,
     ) -> SendResult:
-        return await self._send_attachment(chat_id, image_path, caption=caption, reply_to=reply_to)
+        return await self._send_attachment(chat_id, image_path, caption=caption)
 
     async def send_voice(
         self,
@@ -913,7 +652,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         return await self._send_attachment(
-            chat_id, audio_path, caption=caption, reply_to=reply_to, is_audio_message=True
+            chat_id, audio_path, caption=caption, is_audio_message=True
         )
 
     async def send_video(
@@ -924,7 +663,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs,
     ) -> SendResult:
-        return await self._send_attachment(chat_id, video_path, caption=caption, reply_to=reply_to)
+        return await self._send_attachment(chat_id, video_path, caption=caption)
 
     async def send_document(
         self,
@@ -936,7 +675,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         return await self._send_attachment(
-            chat_id, file_path, filename=file_name, caption=caption, reply_to=reply_to
+            chat_id, file_path, filename=file_name, caption=caption
         )
 
     async def send_animation(
@@ -956,28 +695,26 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        client = self.client
-        if client is None or not await self._private_api_helper_ready():
+        if not self._private_api_enabled or not self._helper_connected or not self.client:
             return
         try:
             guid = await self._resolve_chat_guid(chat_id)
             if guid:
                 encoded = quote(guid, safe="")
-                await client.post(
+                await self.client.post(
                     self._api_url(f"/api/v1/chat/{encoded}/typing"), timeout=5
                 )
         except Exception:
             pass
 
     async def stop_typing(self, chat_id: str) -> None:
-        client = self.client
-        if client is None or not await self._private_api_helper_ready():
+        if not self._private_api_enabled or not self._helper_connected or not self.client:
             return
         try:
             guid = await self._resolve_chat_guid(chat_id)
             if guid:
                 encoded = quote(guid, safe="")
-                await client.delete(
+                await self.client.delete(
                     self._api_url(f"/api/v1/chat/{encoded}/typing"), timeout=5
                 )
         except Exception:
@@ -988,14 +725,13 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def mark_read(self, chat_id: str) -> bool:
-        client = self.client
-        if client is None or not await self._private_api_helper_ready():
+        if not self._private_api_enabled or not self._helper_connected or not self.client:
             return False
         try:
             guid = await self._resolve_chat_guid(chat_id)
             if guid:
                 encoded = quote(guid, safe="")
-                await client.post(
+                await self.client.post(
                     self._api_url(f"/api/v1/chat/{encoded}/read"), timeout=5
                 )
                 return True
@@ -1113,25 +849,19 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     # Webhook handling
     # ------------------------------------------------------------------
 
-    def _extract_payload_records(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Normalize every supported wrapper without truncating data lists."""
-        data = payload.get("data")
-        if isinstance(data, dict):
-            return [data]
-        if isinstance(data, list):
-            if not all(isinstance(item, dict) for item in data):
-                raise ValueError("data list members must be message records")
-            return data
-        if isinstance(payload.get("message"), dict):
-            return [payload["message"]]
-        return [payload] if isinstance(payload, dict) else []
-
     def _extract_payload_record(
         self, payload: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        """Compatibility helper for callers that intentionally inspect one record."""
-        records = self._extract_payload_records(payload)
-        return records[0] if records else None
+        data = payload.get("data")
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    return item
+        if isinstance(payload.get("message"), dict):
+            return payload.get("message")
+        return payload if isinstance(payload, dict) else None
 
     @staticmethod
     def _value(*candidates: Any) -> Optional[str]:
@@ -1140,329 +870,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 return candidate.strip()
         return None
 
-    @staticmethod
-    def _coerce_bool(
-        value: Any, *, default: bool = False, field: str = "value"
-    ) -> bool:
-        if isinstance(value, bool):
-            return value
-        if value is None:
-            return default
-        if isinstance(value, int) and value in {0, 1}:
-            return bool(value)
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on"}:
-                return True
-            if normalized in {"0", "false", "no", "off"}:
-                return False
-        raise ValueError(f"{field} is not a boolean")
-
-    @staticmethod
-    def _value_or_raw(mapping: Mapping[str, Any], *names: str) -> Any:
-        for name in names:
-            if name in mapping and mapping[name] is not None:
-                return mapping[name]
-        return None
-
-    @staticmethod
-    def _coerce_int(value: Any) -> Optional[int]:
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
-            try:
-                return int(value.strip())
-            except ValueError:
-                return None
-        return None
-
-    @classmethod
-    def _source_timestamp(
-        cls, record: Mapping[str, Any], *, received_at: float
-    ) -> tuple[float, str]:
-        for field in (
-            "dateCreated", "date_created", "createdAt", "created_at", "timestamp", "date"
-        ):
-            raw = record.get(field)
-            if raw is None or isinstance(raw, bool):
-                continue
-            try:
-                if isinstance(raw, str) and not re.fullmatch(r"[+-]?\d+(?:\.\d+)?", raw.strip()):
-                    parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
-                    if parsed.tzinfo is None:
-                        parsed = parsed.replace(tzinfo=timezone.utc)
-                    return parsed.timestamp(), field
-                value = float(raw)
-                magnitude = abs(value)
-                if magnitude >= 1e18:
-                    value /= 1e9
-                elif magnitude >= 1e15:
-                    value /= 1e6
-                elif magnitude >= 1e12:
-                    value /= 1e3
-                if value >= 0:
-                    return value, field
-            except (TypeError, ValueError, OverflowError):
-                continue
-        return float(received_at), "received_at"
-
-    def _normalize_ingress_record(
-        self, record: Mapping[str, Any], *, received_at: float, record_index: int = 0
-    ) -> CommunicationIngressEnvelope:
-        """Freeze one BlueBubbles record as versioned transport-only facts."""
-        from gateway.contact_memory.imessage_communication_adapter import (
-            _media_kind,
-            _safe_mime,
-            _safe_uti,
-            parse_associated_guid,
-        )
-        from gateway.contact_memory.imessage_link_review import extract_urls
-
-        text = self._value(record.get("text"), record.get("message"), record.get("body")) or ""
-        is_from_me = self._coerce_bool(
-            self._value_or_raw(record, "isFromMe", "fromMe", "is_from_me"),
-            field="isFromMe",
-        )
-        chat_guid = self._value(record.get("chatGuid"), record.get("chat_guid"))
-        chat_identifier = self._value(
-            record.get("chatIdentifier"), record.get("chat_identifier"),
-            record.get("identifier"),
-        )
-        if not chat_guid:
-            chats = record.get("chats")
-            if isinstance(chats, list) and chats and isinstance(chats[0], dict):
-                chat_guid = self._value(chats[0].get("guid"), chats[0].get("chatGuid"))
-                chat_identifier = chat_identifier or self._value(
-                    chats[0].get("chatIdentifier"), chats[0].get("chat_identifier"),
-                    chats[0].get("identifier"),
-                )
-        sender = self._value(
-            record.get("handle", {}).get("address")
-            if isinstance(record.get("handle"), dict) else None,
-            record.get("sender"), record.get("from"), record.get("address"),
-            chat_identifier,
-        ) or "unknown"
-        is_group = self._coerce_bool(
-            self._value_or_raw(record, "isGroup", "is_group"), field="isGroup"
-        )
-        is_group = is_group or ";+;" in (chat_guid or "")
-        associated_type = self._coerce_int(self._value_or_raw(
-            record, "associatedMessageType", "associated_message_type"
-        ))
-        associated_raw = self._value(
-            record.get("associatedMessageGuid"), record.get("associated_message_guid")
-        )
-        if (
-            associated_type not in {None, 0}
-            and associated_type not in _TAPBACK_ADDED
-            and associated_type not in _TAPBACK_REMOVED
-        ):
-            raise ValueError("unsupported associated message type")
-        reaction_kind = None
-        event_kind = "text"
-        reaction_target = None
-        if associated_type in _TAPBACK_ADDED or associated_type in _TAPBACK_REMOVED:
-            reaction_kind = (_TAPBACK_ADDED.get(associated_type)
-                             or _TAPBACK_REMOVED.get(associated_type))
-            event_kind = "reaction_add" if associated_type in _TAPBACK_ADDED else "reaction_remove"
-            reaction_target = parse_associated_guid(associated_raw)
-            if not reaction_target:
-                raise ValueError("reaction target is malformed")
-        reply_raw_values = tuple(value for value in (
-            self._value(record.get("threadOriginatorGuid"), record.get("thread_originator_guid")),
-            self._value(record.get("replyToGuid"), record.get("reply_to_guid")),
-            associated_raw if associated_type in {None, 0} else None,
-        ) if value)
-        reply_targets = tuple(parse_associated_guid(value) for value in reply_raw_values)
-        if any(not target for target in reply_targets):
-            raise ValueError("reply target is malformed")
-        if len(set(reply_targets)) > 1:
-            raise ValueError("conflicting reply targets")
-        reply_target = reply_targets[0] if reply_targets else None
-
-        attachments: list[CommunicationIngressAttachment] = []
-        raw_attachments = record.get("attachments")
-        if isinstance(raw_attachments, list):
-            for index, raw in enumerate(raw_attachments):
-                if not isinstance(raw, Mapping):
-                    continue
-                source_attachment_id = self._value(
-                    raw.get("guid"), raw.get("id"), raw.get("attachmentGuid"),
-                    raw.get("attachment_guid"),
-                ) or f"missing:{index}"
-                mime = _safe_mime(self._value_or_raw(raw, "mimeType", "mime_type"))
-                uti = _safe_uti(self._value_or_raw(
-                    raw, "uti", "typeIdentifier", "type_identifier"
-                ))
-                size = self._coerce_int(self._value_or_raw(
-                    raw, "totalBytes", "total_bytes", "sizeBytes", "size_bytes", "size"
-                ))
-                if size is not None and not 0 <= size <= 10_000_000_000:
-                    size = None
-                attachments.append(CommunicationIngressAttachment(
-                    source_attachment_id=source_attachment_id,
-                    media_kind=_media_kind(mime, uti),
-                    mime_type=mime,
-                    uti=uti,
-                    size_bytes=size,
-                ))
-        visible_urls = tuple(extract_urls(text))
-        if event_kind not in {"reaction_add", "reaction_remove"}:
-            if reply_target:
-                event_kind = "reply"
-            elif attachments:
-                event_kind = "attachment_share"
-            elif visible_urls:
-                event_kind = "link_share"
-        occurred_at, timestamp_source = self._source_timestamp(
-            record, received_at=received_at
-        )
-        source_message_id = self._value(
-            record.get("guid"), record.get("messageGuid"), record.get("message_guid"),
-            str(record.get("id")) if record.get("id") is not None else None,
-        )
-        if not source_message_id:
-            fallback_record = json.dumps(
-                dict(record), ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            )
-            source_message_id = "fallback:" + hashlib.sha256(
-                f"{record_index}\0{fallback_record}".encode()
-            ).hexdigest()
-        return CommunicationIngressEnvelope(
-            version=1,
-            source_message_id=source_message_id,
-            received_at=float(received_at),
-            occurred_at=occurred_at,
-            timestamp_source=timestamp_source,
-            chat_type="group" if is_group else "dm",
-            direction="outbound" if is_from_me else "inbound",
-            sender_identity=sender,
-            visible_text=text,
-            visible_urls=visible_urls,
-            attachments=tuple(attachments),
-            reply_target=reply_target,
-            reaction_target=reaction_target,
-            reaction_kind=reaction_kind,
-            event_kind=event_kind,
-        )
-
-    @staticmethod
-    def _load_mention_patterns(raw: Any) -> List[str]:
-        defaults = ["@hermes", "hermes:", "hermes,", "hey hermes"]
-        if isinstance(raw, list):
-            values = raw
-        elif isinstance(raw, str) and raw.strip():
-            try:
-                parsed = json.loads(raw)
-                values = parsed if isinstance(parsed, list) else raw.split(",")
-            except Exception:
-                values = raw.split(",")
-        else:
-            values = defaults
-        patterns = [str(v).strip().lower() for v in values if str(v).strip()]
-        return patterns or defaults
-
-    def _strip_group_mention(self, text: str) -> Optional[str]:
-        stripped = text.strip()
-        for pattern in self._mention_patterns:
-            match = pattern.match(stripped)
-            if match:
-                return stripped[match.end():].lstrip(" ,:-") or stripped
-        lowered = stripped.lower()
-        for pattern in self.mention_patterns:
-            if lowered.startswith(pattern):
-                return stripped[len(pattern):].lstrip(" ,:-") or stripped
-        if lowered.startswith("hermes "):
-            return stripped[len("hermes "):].lstrip(" ,:-") or stripped
-        return None
-
-    def _dispatch_message_event(self, event: MessageEvent) -> None:
-        task = asyncio.create_task(self.handle_message(event))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
-    def _text_batch_key(self, event: MessageEvent) -> str:
-        """Session-scoped key for iMessage split/link-preview batching."""
-        from gateway.session import build_session_key
-
-        return build_session_key(
-            event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-        )
-
-    def _looks_like_link_preview(self, event: MessageEvent) -> bool:
-        """Best-effort signal for iOS/BlueBubbles rich previews arriving before typed text."""
-        if event.media_urls:
-            return True
-        raw = event.raw_message or {}
-        record = self._extract_payload_record(raw) or raw
-        attachments = record.get("attachments") or [] if isinstance(record, dict) else []
-        if attachments:
-            return True
-        text = (event.text or "").strip().lower()
-        return "instagram.com" in text or "http://" in text or "https://" in text
-
-    def _enqueue_text_event(self, event: MessageEvent) -> None:
-        """Buffer rapid iMessage text/link-preview webhooks into one agent turn."""
-        key = self._text_batch_key(event)
-        existing = self._pending_text_batches.get(key)
-        if existing is None:
-            event._bluebubbles_link_preview = self._looks_like_link_preview(event)  # type: ignore[attr-defined]
-            self._pending_text_batches[key] = event
-        else:
-            if event.text:
-                if existing.text == "(attachment)":
-                    existing.text = event.text
-                else:
-                    existing.text = f"{existing.text}\n{event.text}" if existing.text else event.text
-            if event.media_urls:
-                existing.media_urls.extend(event.media_urls)
-                existing.media_types.extend(event.media_types)
-            if event.communication_ingress:
-                existing.communication_ingress = (
-                    *existing.communication_ingress,
-                    *event.communication_ingress,
-                )
-            if event.message_id:
-                existing.message_id = event.message_id
-            if event.reply_to_message_id:
-                existing.reply_to_message_id = event.reply_to_message_id
-            existing._bluebubbles_link_preview = (  # type: ignore[attr-defined]
-                bool(getattr(existing, "_bluebubbles_link_preview", False))
-                or self._looks_like_link_preview(event)
-            )
-            if getattr(event, "_bluebubbles_was_mentioned", False):
-                existing._bluebubbles_was_mentioned = True  # type: ignore[attr-defined]
-
-        prior_task = self._pending_text_batch_tasks.get(key)
-        if prior_task and not prior_task.done():
-            prior_task.cancel()
-        self._pending_text_batch_tasks[key] = asyncio.create_task(self._flush_text_batch(key))
-
-    async def _flush_text_batch(self, key: str) -> None:
-        current_task = asyncio.current_task()
-        try:
-            pending = self._pending_text_batches.get(key)
-            delay = self._text_batch_link_delay_seconds if getattr(pending, "_bluebubbles_link_preview", False) else self._text_batch_delay_seconds
-            await asyncio.sleep(max(0.0, delay))
-            event = self._pending_text_batches.pop(key, None)
-            if not event:
-                return
-            logger.info("[bluebubbles] Flushing text batch %s (%d chars)", _redact(key), len(event.text or ""))
-            await self.handle_message(event)
-        finally:
-            if self._pending_text_batch_tasks.get(key) is current_task:
-                self._pending_text_batch_tasks.pop(key, None)
-
-    async def _handle_webhook(
-        self,
-        request,
-        *,
-        _committed_ingress: tuple[CommunicationIngressEnvelope, ...] | None = None,
-    ):
+    async def _handle_webhook(self, request):
         from aiohttp import web
 
         token = (
@@ -1499,128 +907,32 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if event_type and event_type not in _MESSAGE_EVENTS:
             return web.Response(text="ok")
 
-        received_at = datetime.now(timezone.utc).timestamp()
-        try:
-            records = self._extract_payload_records(payload)
-            if not records:
-                return web.json_response({"error": "missing message records"}, status=400)
-            if _committed_ingress is not None:
-                ingress = _committed_ingress
-            else:
-                ingress = tuple(
-                    self._normalize_ingress_record(
-                        record, received_at=received_at, record_index=index
-                    )
-                    for index, record in enumerate(records)
-                )
-        except ValueError as exc:
-            logger.warning("[bluebubbles] rejected malformed ingress: %s", exc)
-            return web.json_response({"error": "invalid message record"}, status=400)
-        owner_reaction_only = all(
-            item.direction == "outbound"
-            and item.event_kind in {"reaction_add", "reaction_remove"}
-            for item in ingress
+        record = self._extract_payload_record(payload) or {}
+        is_from_me = bool(
+            record.get("isFromMe")
+            or record.get("fromMe")
+            or record.get("is_from_me")
         )
-        owner_outbound_only = all(item.direction == "outbound" for item in ingress)
-        if any(item.direction != "inbound" for item in ingress) and not owner_reaction_only:
-            if not owner_outbound_only:
-                return web.json_response({"error": "mixed message directions"}, status=400)
-        if len({(item.sender_identity, item.chat_type) for item in ingress}) != 1:
-            return web.json_response({"error": "mixed message principals"}, status=400)
-        record = dict(records[0])
-        text = "\n".join(
-            item.visible_text for item in ingress
-            if item.event_kind not in {"reaction_add", "reaction_remove"}
-            and item.visible_text
-        )
-        reaction_only = all(
-            item.event_kind in {"reaction_add", "reaction_remove"} for item in ingress
-        )
-
-        # Persist authenticated direct ingress before attachment download,
-        # batching, or ordinary agent dispatch. The gateway callback performs
-        # owner/guest routing and returns only after SQLite commits.
-        if self._ingress_handler is not None and _committed_ingress is None:
-            pre_chat_guid = self._value(
-                record.get("chatGuid"), payload.get("chatGuid"),
-                record.get("chat_guid"), payload.get("chat_guid"), payload.get("guid"),
-            )
-            if not pre_chat_guid:
-                pre_chats = record.get("chats") or []
-                if pre_chats and isinstance(pre_chats[0], dict):
-                    pre_chat_guid = pre_chats[0].get("guid") or pre_chats[0].get("chatGuid")
-            pre_chat_identifier = self._value(
-                record.get("chatIdentifier"), record.get("identifier"),
-                payload.get("chatIdentifier"), payload.get("identifier"),
-            )
-            pre_sender = ingress[0].sender_identity
-            if not (pre_chat_guid or pre_chat_identifier):
-                pre_chat_identifier = pre_sender
-            pre_is_group = ingress[0].chat_type == "group"
-            pre_session_chat_id = self._canonical_session_chat_id(
-                pre_chat_guid, pre_chat_identifier, pre_sender, is_group=pre_is_group
-            )
-            if not pre_session_chat_id:
-                return web.json_response({"error": "missing chat target"}, status=400)
-            pre_source = self.build_source(
-                chat_id=pre_session_chat_id,
-                chat_name=pre_chat_identifier or pre_sender,
-                chat_type="group" if pre_is_group else "dm",
-                user_id=pre_sender,
-                user_name=pre_sender,
-                chat_id_alt=pre_chat_identifier,
-            )
-            pre_event = MessageEvent(
-                text=text or ("(reaction)" if reaction_only else "(attachment)"),
-                source=pre_source,
-                raw_message=payload,
-                message_id=ingress[-1].source_message_id,
-                communication_ingress=ingress,
-            )
-            try:
-                await self._ingress_handler(pre_event)
-            except Exception:
-                logger.exception("[bluebubbles] durable ingress failed")
-                return web.json_response({"error": "ingress unavailable"}, status=503)
-            if reaction_only or owner_outbound_only:
-                return web.Response(text="ok")
-
-        # Owner-authored records are canonical evidence and reply targets, but
-        # never reactive agent input. Without a durable ingress handler there is
-        # nowhere safe to store them, so acknowledge without dispatching.
-        if owner_outbound_only:
+        if is_from_me:
             return web.Response(text="ok")
+
+        # Skip tapback reactions delivered as messages
+        assoc_type = record.get("associatedMessageType")
+        if isinstance(assoc_type, int) and assoc_type in {
+            **_TAPBACK_ADDED,
+            **_TAPBACK_REMOVED,
+        }:
+            return web.Response(text="ok")
+
+        text = (
+            self._value(
+                record.get("text"), record.get("message"), record.get("body")
+            )
+            or ""
+        )
 
         # --- Inbound attachment handling ---
-        attachments = [
-            attachment
-            for source_record in records
-            for attachment in (
-                source_record.get("attachments")
-                if isinstance(source_record.get("attachments"), list) else []
-            )
-            if isinstance(attachment, dict)
-        ]
-        if (
-            attachments
-            and self._ingress_handler is not None
-            and _committed_ingress is None
-        ):
-            body = json.dumps(payload, separators=(",", ":")).encode()
-
-            class _CommittedRequest:
-                query = {"password": self.password}
-                headers: dict[str, str] = {}
-
-                async def read(self) -> bytes:
-                    return body
-
-            task = asyncio.ensure_future(self._handle_webhook(
-                _CommittedRequest(), _committed_ingress=ingress
-            ))
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
-            return web.Response(text="ok")
+        attachments = record.get("attachments") or []
         media_urls: List[str] = []
         media_types: List[str] = []
         msg_type = MessageType.TEXT
@@ -1651,10 +963,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             if "image" in mime_prefixes:
                 msg_type = MessageType.PHOTO
 
-        if not text and any(item.attachments for item in ingress):
+        if not text and media_urls:
             text = "(attachment)"
-        if reaction_only:
-            text = "(reaction)"
         # --- End attachment handling ---
 
         chat_guid = self._value(
@@ -1693,17 +1003,15 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if not sender or not (chat_guid or chat_identifier) or not text:
             return web.json_response({"error": "missing message fields"}, status=400)
 
-        is_group = ingress[0].chat_type == "group"
-        session_chat_id = self._canonical_session_chat_id(
-            chat_guid,
-            chat_identifier,
-            sender,
-            is_group=is_group,
-        )
-        if not session_chat_id:
-            return web.json_response({"error": "missing chat target"}, status=400)
-        if not is_group and chat_guid and ";" in chat_guid:
-            self._guid_cache[session_chat_id] = chat_guid
+        session_chat_id = chat_guid or chat_identifier
+        is_group = bool(record.get("isGroup")) or (";+;" in (chat_guid or ""))
+        if is_group and self.require_mention:
+            if not self._message_matches_mention_patterns(text):
+                logger.debug(
+                    "[bluebubbles] ignoring group message (require_mention=true, no mention pattern matched)"
+                )
+                return web.Response(text="ok")
+            text = self._clean_mention_text(text)
         source = self.build_source(
             chat_id=session_chat_id,
             chat_name=chat_identifier or sender,
@@ -1712,63 +1020,26 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             user_name=sender,
             chat_id_alt=chat_identifier,
         )
-        # Durable contact-store source uniqueness is authoritative. The adapter
-        # must not claim a GUID before routed persistence succeeds.
-        message_id = ingress[-1].source_message_id
-        reply_to_message_id = next(
-            (item.reply_target for item in reversed(ingress) if item.reply_target), None
-        )
-        mentioned_text = None
-        if is_group and self.group_require_mention:
-            mentioned_text = self._strip_group_mention(text)
-            # iMessage has no real bot mention primitive. Treat replies to a
-            # recent Hermes outbound bubble as addressed, but keep ordinary
-            # inline replies to other humans as observed-only group context.
-            reply_addresses_hermes = self._is_recent_outbound_message_guid(reply_to_message_id)
-            if mentioned_text is None and not reply_addresses_hermes:
-                event = MessageEvent(
-                    text=text,
-                    message_type=msg_type,
-                    source=source,
-                    raw_message=payload,
-                    message_id=message_id,
-                    media_urls=media_urls,
-                    media_types=media_types,
-                    communication_ingress=ingress,
-                    channel_prompt=(
-                        "Observed group context may be present; treat it as background only."
-                    ),
-                    observed_only=True,
-                )
-                if self._message_handler:
-                    task = asyncio.ensure_future(self._message_handler(event))
-                    self._background_tasks.add(task)
-                    task.add_done_callback(self._background_tasks.discard)
-                return web.Response(text="ok")
-            if mentioned_text is not None:
-                text = mentioned_text
         event = MessageEvent(
             text=text,
             message_type=msg_type,
             source=source,
             raw_message=payload,
-            message_id=message_id,
-            reply_to_message_id=reply_to_message_id,
+            message_id=self._value(
+                record.get("guid"),
+                record.get("messageGuid"),
+                record.get("id"),
+            ),
+            reply_to_message_id=self._value(
+                record.get("threadOriginatorGuid"),
+                record.get("associatedMessageGuid"),
+            ),
             media_urls=media_urls,
             media_types=media_types,
-            communication_ingress=ingress,
-            metadata={"_bluebubbles_reaction_only": reaction_only},
-            channel_prompt=(
-                "Observed group context may be present; treat it as background only."
-                if is_group else None
-            ),
         )
-        if is_group and mentioned_text is not None:
-            event._bluebubbles_was_mentioned = True  # type: ignore[attr-defined]
-        if (event.message_type == MessageType.TEXT or event.media_urls) and self._text_batch_delay_seconds > 0:
-            self._enqueue_text_event(event)
-        else:
-            self._dispatch_message_event(event)
+        task = asyncio.create_task(self.handle_message(event))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
         # Fire-and-forget read receipt
         if self.send_read_receipts and session_chat_id:

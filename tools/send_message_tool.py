@@ -1175,6 +1175,34 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
+    # --- BlueBubbles: when the bluebubbles platform plugin is registered,
+    # route through its standalone sender (carries the local enhancements:
+    # send-only transient adapter, ordered text+media delivery). Falls
+    # through to the pristine built-in path when the plugin isn't loaded.
+    if platform == Platform.BLUEBUBBLES:
+        bb_entry = None
+        try:
+            from gateway.platform_registry import platform_registry
+            bb_entry = platform_registry.get("bluebubbles")
+        except Exception:
+            bb_entry = None
+        if bb_entry is not None and bb_entry.standalone_sender_fn is not None:
+            last_result = None
+            for i, chunk in enumerate(chunks):
+                is_last = i == len(chunks) - 1
+                result = await bb_entry.standalone_sender_fn(
+                    pconfig,
+                    chat_id,
+                    chunk,
+                    thread_id=thread_id,
+                    media_files=media_files if is_last else [],
+                    force_document=force_document,
+                )
+                if isinstance(result, dict) and result.get("error"):
+                    return result
+                last_result = result
+            return last_result
+
     # --- Non-media platforms ---
     if media_files and not message.strip():
         plugin_can_send_media = False
@@ -1184,10 +1212,10 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             plugin_can_send_media = bool(entry and entry.standalone_sender_fn)
         except Exception:
             plugin_can_send_media = False
-        if not plugin_can_send_media and platform != Platform.BLUEBUBBLES:
+        if not plugin_can_send_media:
             return {
                 "error": (
-                    f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, bluebubbles, feishu, whatsapp and slack; "
+                    f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and slack; "
                     f"target {platform.value} had only media attachments"
                 )
             }
@@ -1195,7 +1223,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, bluebubbles, feishu, whatsapp and slack"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and slack"
         )
 
     last_result = None
@@ -1215,7 +1243,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         elif platform == Platform.WECOM:
             result = await _registry_standalone_send("wecom", pconfig, chat_id, chunk, thread_id)
         elif platform == Platform.BLUEBUBBLES:
-            result = await _send_bluebubbles(pconfig.extra, chat_id, chunk, media_files=media_files)
+            result = await _send_bluebubbles(pconfig.extra, chat_id, chunk)
         elif platform == Platform.QQBOT:
             result = await _send_qqbot(pconfig, chat_id, chunk)
         elif platform == Platform.YUANBAO:
@@ -2096,7 +2124,7 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
         return _error(f"Weixin send failed: {e}")
 
 
-async def _send_bluebubbles(extra, chat_id, message, media_files=None):
+async def _send_bluebubbles(extra, chat_id, message):
     """Send via BlueBubbles iMessage server using the adapter's REST API."""
     try:
         from gateway.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
@@ -2107,45 +2135,16 @@ async def _send_bluebubbles(extra, chat_id, message, media_files=None):
 
     try:
         from gateway.config import PlatformConfig
-        # This is the standalone outbound path (send_message and cron fallback),
-        # never an ingress owner. Do not inherit webhook_register=true from the
-        # profile or ambient environment: that would bind/register a receiver
-        # merely to send one message. Keep the live gateway config untouched.
-        send_only_extra = dict(extra or {})
-        send_only_extra["webhook_register"] = False
-        pconfig = PlatformConfig(extra=send_only_extra)
+        pconfig = PlatformConfig(extra=extra)
         adapter = BlueBubblesAdapter(pconfig)
         connected = await adapter.connect()
         if not connected:
             return _error("BlueBubbles: failed to connect to server")
         try:
-            last_result = None
-            if message.strip():
-                last_result = await adapter.send(chat_id, message)
-                if not last_result.success:
-                    return _error(f"BlueBubbles send failed: {last_result.error}")
-            for media_path, is_voice in media_files or []:
-                if not os.path.exists(media_path):
-                    return _error(f"Media file not found: {media_path}")
-                ext = os.path.splitext(media_path)[1].lower()
-                if ext in _IMAGE_EXTS:
-                    last_result = await adapter.send_image_file(chat_id, media_path)
-                elif ext in _VIDEO_EXTS:
-                    last_result = await adapter.send_video(chat_id, media_path)
-                elif ext in _AUDIO_EXTS:
-                    last_result = await adapter.send_voice(chat_id, media_path)
-                else:
-                    last_result = await adapter.send_document(chat_id, media_path)
-                if not last_result.success:
-                    return _error(f"BlueBubbles media send failed: {last_result.error}")
-            if last_result is None:
-                return _error("BlueBubbles: no deliverable text or media remained after processing MEDIA tags")
-            return {
-                "success": True,
-                "platform": "bluebubbles",
-                "chat_id": chat_id,
-                "message_id": last_result.message_id,
-            }
+            result = await adapter.send(chat_id, message)
+            if not result.success:
+                return _error(f"BlueBubbles send failed: {result.error}")
+            return {"success": True, "platform": "bluebubbles", "chat_id": chat_id, "message_id": result.message_id}
         finally:
             await adapter.disconnect()
     except Exception as e:
