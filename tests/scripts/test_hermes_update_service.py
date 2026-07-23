@@ -276,6 +276,19 @@ def test_parked_run_resumes_forward_and_can_repark(tmp_path: Path) -> None:
         SERVICE.transition(tmp_path, run_id, SERVICE.PARKED)
 
 
+def test_record_preserves_parked_phase(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-fffffffffff0"
+    make_ledger(tmp_path, run_id)
+    SERVICE.transition(tmp_path, run_id, "PREFLIGHT")
+    SERVICE.transition(tmp_path, run_id, SERVICE.PARKED)
+
+    ledger = SERVICE.record(tmp_path, run_id, checkpoint_ref="refs/x")
+
+    assert ledger["phase"] == "NEEDS_RESOLUTION"
+    assert ledger["status"] == "NEEDS_RESOLUTION"
+    assert ledger["checkpoint_ref"] == "refs/x"
+
+
 def test_parked_run_can_still_fail_or_abort(tmp_path: Path) -> None:
     run_id = "20260723T120000Z-777777777777"
     make_ledger(tmp_path, run_id)

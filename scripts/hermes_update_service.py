@@ -175,6 +175,17 @@ def transition(root: Path, run_id: str, phase: str, **updates: Any) -> dict[str,
         return ledger
 
 
+def record(root: Path, run_id: str, **updates: Any) -> dict[str, Any]:
+    """Update ledger fields without changing phase.
+
+    Bookkeeping (checkpoint refs, resolver flags) must be re-recordable on
+    resume; a parked run re-entering the merge block cannot transition back
+    to PREFLIGHT (phase regression).
+    """
+    ledger = read_json(ledger_path(root, run_id))
+    return transition(root, run_id, str(ledger["phase"]), **updates)
+
+
 def phase_before(ledger: dict[str, Any], phase: str) -> bool:
     current = str(ledger["phase"])
     if current in TERMINAL:
@@ -1064,7 +1075,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     300,
                 )
                 upstream = git(repo, "rev-parse", "origin/main")
-                transition(root, run_id, "PREFLIGHT", upstream_sha=upstream)
+                record(root, run_id, upstream_sha=upstream)
             worker_command(
                 root,
                 run_id,
@@ -1119,10 +1130,9 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     ref,
                 )
             link_checkout_dependencies(repo, worktree)
-            transition(
+            record(
                 root,
                 run_id,
-                "PREFLIGHT",
                 checkpoint_ref=checkpoint_ref,
                 run_ref=ref,
             )
@@ -1170,7 +1180,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 resolver = shutil.which("hermes")
                 ledger = read_json(ledger_path(root, run_id))
                 if resolver and not ledger.get("resolver_attempted"):
-                    transition(root, run_id, "PREFLIGHT", resolver_attempted=True)
+                    record(root, run_id, resolver_attempted=True)
                     prompt = (
                         "Resolve only the listed Git merge conflicts in the supplied worktree. "
                         "Preserve upstream behavior and registered local carry. Do not run tests, "
