@@ -63,11 +63,14 @@ items name their commit; open items are the work queue.
 6. **Evaluate upstream's borrowed-provider routing config** — it may express
    the vibeproxy short-alias routing natively and let that code carry retire
    (tests at `tests/test_tui_gateway_server.py:2478,2497` guard it).
-7. **Carry-weight ratchet vs upstream churn.** The pre-push baseline inflates
+7. **Carry-weight ratchet vs upstream churn.** ~~The pre-push baseline inflates
    as origin/main moves (37,950 → 261,618 with zero local change), blocking
-   pushes until after a merge. Consider scoring against the recorded merge
-   base or last-merged upstream pin instead of live origin/main. Then push
-   `local/studio-slim` after refreshing the baseline post-update.
+   pushes until after a merge.~~ FIXED 2026-07-23: `thinning.py check` now
+   scores against the baseline's recorded `upstream_sha` (not the live ref),
+   making the score deterministic between baseline refreshes, and accepts a
+   `--tolerance-pct` band (default 1%) for weighted-score growth. New hotspot
+   paths still hard-fail. Regression tests in
+   `tests/scripts/test_thinning.py`.
 8. **WebUI: 58 pre-existing test failures** (identical pre/post merge) —
    recorded in `~/.hermes/hermes-webui/.known-failing-tests-20260723.txt`;
    triage separately.

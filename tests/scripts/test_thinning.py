@@ -39,3 +39,78 @@ def test_generated_baseline_does_not_score_itself(tmp_path: Path) -> None:
 
     assert "tracked.py" in paths
     assert "scripts/thinning_baseline.json" not in paths
+
+
+def _make_carry_repo(tmp_path: Path) -> Path:
+    """Repo with an upstream branch and one carried change on main."""
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.name", "Test")
+    git(repo, "config", "user.email", "test@example.com")
+    (repo / "tracked.py").write_text("VALUE = 1\n")
+    (repo / "other.py").write_text("OTHER = 1\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    git(repo, "branch", "upstream")
+    (repo / "tracked.py").write_text("VALUE = 2\n")
+    git(repo, "commit", "-qam", "carry")
+    return repo
+
+
+def _write_baseline(repo: Path) -> Path:
+    import argparse
+    import json
+
+    baseline_path = repo / "scripts" / "thinning_baseline.json"
+    ns = argparse.Namespace(root=repo, upstream="upstream", output=baseline_path)
+    assert THINNING.baseline(ns) == 0
+    return baseline_path
+
+
+def _check(repo: Path, baseline_path: Path, tolerance_pct: float = 1.0) -> int:
+    import argparse
+
+    ns = argparse.Namespace(
+        root=repo, baseline=baseline_path, tolerance_pct=tolerance_pct
+    )
+    return THINNING.check(ns)
+
+
+def test_check_is_immune_to_upstream_movement(tmp_path: Path) -> None:
+    repo = _make_carry_repo(tmp_path)
+    baseline_path = _write_baseline(repo)
+    assert _check(repo, baseline_path) == 0
+
+    # Upstream advances with churn on the carried file. The pinned
+    # upstream_sha must keep the score identical, so check still passes.
+    git(repo, "checkout", "-q", "upstream")
+    for i in range(5):
+        (repo / "tracked.py").write_text(f"VALUE = 1  # upstream {i}\n")
+        git(repo, "commit", "-qam", f"upstream churn {i}")
+    git(repo, "checkout", "-q", "main")
+
+    assert _check(repo, baseline_path) == 0
+
+
+def test_check_tolerance_band(tmp_path: Path) -> None:
+    repo = _make_carry_repo(tmp_path)
+    baseline_path = _write_baseline(repo)
+
+    # Grow the carry on the existing hotspot: 2 -> 4 changed lines,
+    # i.e. +100% weighted score.
+    (repo / "tracked.py").write_text("VALUE = 3\nEXTRA = 1\n")
+    git(repo, "commit", "-qam", "carry growth")
+
+    assert _check(repo, baseline_path, tolerance_pct=1.0) == 1
+    assert _check(repo, baseline_path, tolerance_pct=150.0) == 0
+
+
+def test_check_new_hotspot_always_fails(tmp_path: Path) -> None:
+    repo = _make_carry_repo(tmp_path)
+    baseline_path = _write_baseline(repo)
+
+    (repo / "other.py").write_text("OTHER = 2\n")
+    git(repo, "commit", "-qam", "new carry file")
+
+    assert _check(repo, baseline_path, tolerance_pct=1000.0) == 1

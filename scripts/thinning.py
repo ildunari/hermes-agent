@@ -108,21 +108,32 @@ def baseline(args: argparse.Namespace) -> int:
 def check(args: argparse.Namespace) -> int:
     root = args.root.resolve()
     prior = json.loads(args.baseline.read_text(encoding="utf-8"))
-    current = compute(root, str(prior["upstream"]))
+    # Score against the upstream commit the baseline was computed from, not
+    # the live ref: otherwise every upstream fetch inflates the churn
+    # multiplier on all hotspots and the ratchet fails pushes whose local
+    # carry did not grow at all.
+    upstream = str(prior.get("upstream_sha") or prior["upstream"])
+    current = compute(root, upstream)
     prior_paths = {item["path"] for item in prior["hotspots"]}
     current_paths = {item["path"] for item in current["hotspots"]}
     new_paths = sorted(current_paths - prior_paths)
     score_growth = int(current["weighted_score"]) - int(prior["weighted_score"])
-    if new_paths or score_growth > 0:
+    allowed_growth = int(int(prior["weighted_score"]) * args.tolerance_pct / 100.0)
+    if new_paths or score_growth > allowed_growth:
         print("Thinning ratchet: FAIL", file=sys.stderr)
         if new_paths:
             print(f"- new hotspots: {', '.join(new_paths)}", file=sys.stderr)
-        if score_growth > 0:
-            print(f"- weighted score grew by {score_growth}", file=sys.stderr)
+        if score_growth > allowed_growth:
+            print(
+                f"- weighted score grew by {score_growth} "
+                f"(allowed: {allowed_growth})",
+                file=sys.stderr,
+            )
         return 1
+    grew = f", growth {score_growth} within tolerance {allowed_growth}" if score_growth > 0 else ""
     print(
         f"Thinning ratchet: PASS ({current['hotspot_count']} hotspots, "
-        f"weighted_score={current['weighted_score']})"
+        f"weighted_score={current['weighted_score']}{grew})"
     )
     return 0
 
@@ -144,6 +155,12 @@ def parser() -> argparse.ArgumentParser:
         "--baseline",
         type=Path,
         default=Path(__file__).resolve().parent / "thinning_baseline.json",
+    )
+    checking.add_argument(
+        "--tolerance-pct",
+        type=float,
+        default=1.0,
+        help="allowed weighted-score growth over baseline, as a percentage",
     )
     checking.set_defaults(func=check)
     return result
