@@ -29,27 +29,33 @@ items name their commit; open items are the work queue.
 | 19 | `gateway_state.json` recorded a dead pid (145); helper's PID cross-check refused the graceful gateway restart, stalling the update 20 min | manual SIGUSR1 restart healed the status file; writer bug + helper fallback remain open (follow-up 1) |
 | 20 | Relaunched gateway raced its dying predecessor for 8642 (`Errno 48`), gave up permanently, served without its API platform | second graceful restart bound cleanly; bind-retry remains open (follow-up 2) |
 
+## Fixed 2026-07-23 (second wave — speed + restart reliability)
+
+| # | Issue | Fix |
+|---|---|---|
+| 21 | Carry-verify ran up to 24 cold serial subprocess groups (`-j 1` pytest, cold vitest/electron per feature) — ~9m | batched union runs, at most three commands, per-feature fallback for attribution (`carry.py`) |
+| 22 | Deployed carry-verify re-ran all behavior tests against the live service-occupied checkout (~7m, flaky — failed run 6) | `--probes-only` mode: needles + consumers + runtime probes only |
+| 23 | Desktop `dist:mac` build serialized after validation (~5m) | overlapped: build starts as background child at VERIFIED, BUILT reaps; killed on validation failure/abort |
+| 24 | No escalation path from scoped to full validation | `full_validation_required`: resolver used / >5 conflicts / core-dir conflicts / dep manifests / harness files → `UPDATE_VALIDATION_FULL=1` |
+| 25 | Curated step 7 (desktop typecheck+UI) ran on backend-only diffs; `dependency_manifests_changed` matched any nested package.json | `UPDATE_CHANGED_DESKTOP` env gate; manifest check restricted to six root paths |
+| 26 | Live `npm ci` and `uv sync` at activation ran serially | concurrent children, either failure kills the sibling and fails the phase |
+| 27 | Helper verdict invisible: service polled 2h while helper had already failed (open item 3) | `--completion-marker` wired into enqueue; wait probe consumes outcome JSON and fails immediately with the helper's message |
+| 28 | Abort during a running subprocess recorded FAILED (open item 4) | abort marker wins over CalledProcessError in `wait_owned_child`; pre-activation generic failures with pending abort transition ABORTED |
+| 29 | `gateway_state.json` poisoned by foreign writer (pid 145 + feishu entry) and never self-heals; helper refused graceful restart, 20-min stall (open item 1) | helper falls back to fresh `state/gateway.heartbeat` then launchd-pid-owns-8642; `write_runtime_status` ownership guard (lock handle / gateway.pid / live-identity check) stops foreign identity stamps; watchdog re-stamps identity every ~30s so clobbers self-heal |
+| 30 | api_server gave up permanently on transient `EADDRINUSE` during restart handoff (open item 2) | 60s bounded bind retry (0.5s→5s backoff, runner/site rebuilt per attempt) before the existing non-retryable fatal |
+
 ## Open follow-ups
 
-1. **`gateway_state.json` stale pid.** The status file recorded a long-dead
-   pid (145) while launchd showed the real gateway (1429); the restart
-   helper's PID cross-check then correctly refused the graceful restart and
-   the update stalled 20 minutes. Find the writer path that fails to refresh
-   `pid` (likely an in-place hot-restart), and give the helper a fallback:
-   when the status pid is dead but launchd's pid owns the expected listeners,
-   proceed.
-2. **Gateway api_server never retries its bind.** The relaunched gateway
-   raced its dying predecessor for 8642, lost (`Errno 48`), gave up
-   permanently, and served without its API platform. Add bind retry with
-   backoff. This pattern is a likely contributor to earlier "gateway up but
-   API dead" incidents.
-3. **Helper's required-failure verdict is invisible to the service.** The
-   helper logged `restart completed with required failures: ... refusing hard
-   restart` while the service polled toward a 2h timeout. The service should
-   read the helper's outcome and fail/park immediately with that message.
-4. **Abort during a running subprocess records FAILED, not ABORTED** (run 3);
-   classify AbortRequested-driven subprocess kills as ABORTED.
-5. **Rerere hygiene rule.** Never record resolutions (`git rerere`) from an
+1. **Identify the pid-145/feishu foreign writer.** The ownership guard makes
+   it harmless, but the source (worktree validation env? container?) that
+   stamped a feishu-enabled record at 12:56:58Z is still unidentified.
+2. **3 pre-existing failures in `tests/hermes_cli/test_update_gateway_restart.py`**
+   (`test_update_system_service_restart_failure_shows_error`,
+   `test_reset_failed_also_runs_before_retry_restart`,
+   `test_final_failure_message_tells_user_to_reset_failed`) — reproduce on
+   clean 51250daff; systemd restart-messaging drift from upstream. Triage
+   separately.
+3. **Rerere hygiene rule.** Never record resolutions (`git rerere`) from an
    interrupted session's staged-but-unvalidated state without marking them
    suspect — both run-5 poisons came from exactly that (Phase 0 recovery of
    `ec8970978b22`). Recovery procedure: record, then treat the first
