@@ -53,6 +53,9 @@ DESKTOP_BUILD_FD_LIMIT = 2048
 DESCENDANT_LIMIT = 64
 WORKER_LIMIT = 2
 REQUIRED_PORTS = (8642, 8787, 9119, 9120)
+# Root-gateway listeners with no HTTP health endpoint: presence/replacement
+# is required, but they are not HTTP-probed.
+LISTENER_ONLY_PORTS = (8644, 8647)
 # Best-effort surfaces are probed and recorded but never gate readiness or
 # fail the run. Keep the required/best-effort split explicit here; moving a
 # port between the two tuples is a deliberate policy change, not a tweak.
@@ -319,7 +322,7 @@ def process_snapshot(pid: int, origin_pid: int | None = None) -> dict[str, int]:
 
 def listener_pids() -> dict[int, int]:
     result: dict[int, int] = {}
-    for port in REQUIRED_PORTS:
+    for port in (*REQUIRED_PORTS, *LISTENER_ONLY_PORTS, *BEST_EFFORT_PORTS):
         probe = subprocess.run(
             ["/usr/sbin/lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
             text=True,
@@ -353,7 +356,7 @@ def surface_inventory(
             port in current
             and (not old_pids or not old_pids.get(port) or current[port] != old_pids[port])
         )
-        for port in REQUIRED_PORTS
+        for port in (*REQUIRED_PORTS, *LISTENER_ONLY_PORTS)
     }
     healthy = all(ready[port] for port in REQUIRED_PORTS) and all(replaced.values())
     return healthy, {
@@ -697,16 +700,33 @@ def handle_request(repo: Path, root: Path, payload: dict[str, Any], peer_pid: in
         status = str(ledger.get("status"))
         if status in TERMINAL:
             raise RuntimeError(f"run is terminal: {status}")
-        lease = current_lease(root)
-        if lease:
-            pid = int(lease.get("pid") or 0)
-            expected_start = float(lease.get("start_time") or 0)
-            if pid > 0 and pid != os.getpid() and ps_start_time(pid) == expected_start:
-                raise RuntimeError(f"worker already live: pid {pid}")
+        if lease_is_live(root):
+            raise RuntimeError("worker already live for the update lease")
         spawn_worker(repo, root, run_id)
         return {"ok": True, "run_id": run_id, "resumed": True}
     abort = run_dir(root, run_id) / "abort.request"
     abort.touch(mode=0o600, exist_ok=True)
+    ledger = read_json(ledger_path(root, run_id))
+    status = str(ledger.get("status"))
+    if status not in TERMINAL and not lease_is_live(root):
+        try:
+            pre_activation = phase_rank(str(ledger.get("phase"))) < phase_rank(
+                "STUDIO_ACTIVATED"
+            )
+        except ValueError:
+            pre_activation = False
+        if pre_activation:
+            # No worker will ever consume the marker (e.g. a parked run whose
+            # worker already returned): finalize the abort here so the run
+            # stops blocking future starts and updater reinstalls. Runs at or
+            # past activation must be resumed and rolled forward, not aborted.
+            transition(
+                root,
+                run_id,
+                "ABORTED",
+                error="aborted while no worker owned the run",
+            )
+            return {"ok": True, "run_id": run_id, "aborted": True}
     return {"ok": True, "run_id": run_id, "abort_requested": True}
 
 
@@ -765,7 +785,21 @@ def current_lease(root: Path) -> dict[str, Any] | None:
     path = root / "lease.json"
     if not path.is_file():
         return None
-    return read_json(path)
+    try:
+        payload = read_json(path)
+    except (OSError, json.JSONDecodeError):
+        # A released lease is truncated to zero bytes but left in place.
+        return None
+    return payload if payload else None
+
+
+def lease_is_live(root: Path) -> bool:
+    lease = current_lease(root)
+    if not lease:
+        return False
+    pid = int(lease.get("pid") or 0)
+    expected_start = float(lease.get("start_time") or 0)
+    return pid > 0 and pid != os.getpid() and ps_start_time(pid) == expected_start
 
 
 def acquire_lease(root: Path, run_id: str):
@@ -859,6 +893,21 @@ def abort_before_activation(root: Path, run_id: str) -> None:
     ledger = read_json(ledger_path(root, run_id))
     if phase_before(ledger, "STUDIO_ACTIVATED"):
         ensure_not_aborted(root, run_id)
+
+
+def conflict_is_resolved(path: Path) -> bool:
+    """Only marker-free regular text files auto-stage.
+
+    Binary files carry no conflict markers, and delete/modify conflicts leave
+    no file at all — auto-staging either silently picks a side. Both park for
+    explicit resolution instead.
+    """
+    if not path.is_file() or path.is_symlink():
+        return False
+    data = path.read_bytes()
+    if b"\x00" in data:
+        return False
+    return not CONFLICT_MARKER_RE.search(data.decode("utf-8", errors="replace"))
 
 
 def worktree_for(root: Path, run_id: str) -> Path:
@@ -1110,12 +1159,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 resolved = [
                     path
                     for path in conflicts
-                    if not CONFLICT_MARKER_RE.search(
-                        (worktree / path).read_text(
-                            encoding="utf-8",
-                            errors="replace",
-                        )
-                    )
+                    if conflict_is_resolved(worktree / path)
                 ]
                 if resolved:
                     worker_command(
@@ -1419,10 +1463,11 @@ def deploy(
             honor_abort=honor_abort,
         )
 
-    # An unreachable travel MacBook defers staging instead of failing the
+    # One bounded reachability probe (ConnectTimeout=8) decides staging vs
+    # deferral. An unreachable travel MacBook defers instead of failing the
     # Studio update; the deferral is recorded and the remote gateway check is
-    # skipped during runtime verification. Never probe/wake/mutate a travel
-    # MacBook merely to close the local run.
+    # skipped during runtime verification. Never retry-loop, wake, or mutate
+    # an absent MacBook merely to close the local run.
     if receipt_path(root, run_id, "macbook_stage").is_file() or macbook_reachable():
         receipted(
             root,
@@ -1434,6 +1479,18 @@ def deploy(
             stage_action,
             lambda: abort_before_activation(root, run_id),
         )
+        current_ledger = read_json(ledger_path(root, run_id))
+        if current_ledger.get("macbook_deferred"):
+            # A run deferred while offline can stage on recovery once the
+            # MacBook is back; the stale deferral flag must not keep runtime
+            # verification skipping the remote check.
+            transition(
+                root,
+                run_id,
+                str(current_ledger["phase"]),
+                macbook_deferred=False,
+                macbook_deferred_reason=None,
+            )
         advance(root, run_id, "MACBOOK_STAGED")
     else:
         advance(
@@ -1552,26 +1609,33 @@ def deploy(
         return surface_inventory(old_listener_pids)
 
     def restart_action() -> None:
-        worker_command(
-            root,
-            run_id,
-            [
-                sys.executable,
-                "-m",
-                "hermes_cli.restart_surfaces",
-                "--scope",
-                "hermes",
-                "--delay",
-                "10",
-                "--safe-wait-timeout",
-                "86400",
-                "--enqueue-detached",
-            ],
-            repo,
-            "restart-enqueue",
-            120,
-            honor_abort=False,
-        )
+        # A worker that died while waiting out the drain must not enqueue a
+        # second restart on recovery: the marker records the one enqueue and
+        # recovery only re-enters the wait.
+        enqueue_marker = run_dir(root, run_id) / "receipts" / "restart-enqueued.json"
+        if not enqueue_marker.is_file():
+            worker_command(
+                root,
+                run_id,
+                [
+                    sys.executable,
+                    "-m",
+                    "hermes_cli.restart_surfaces",
+                    "--scope",
+                    "hermes",
+                    "--delay",
+                    "10",
+                    "--safe-wait-timeout",
+                    "86400",
+                    "--enqueue-detached",
+                ],
+                repo,
+                "restart-enqueue",
+                120,
+                honor_abort=False,
+            )
+            enqueue_marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            atomic_json(enqueue_marker, {"enqueued_at": utc_now()})
         wait_for_surfaces(root, run_id, restart_probe, RESTART_WAIT_SECONDS)
 
     receipted(
@@ -1684,6 +1748,13 @@ def deploy(
     advance(root, run_id, "RUNTIME_VERIFIED")
     if prior.exists():
         shutil.rmtree(prior)
+    worktree = worktree_for(root, run_id)
+    if worktree.exists():
+        # The integration worktree is only needed until activation; leaving it
+        # accumulates full checkouts and trips the checklist's
+        # interrupted-update detection.
+        git(repo, "worktree", "remove", "--force", str(worktree), check=False)
+        git(repo, "worktree", "prune", check=False)
     transition(root, run_id, "COMPLETED", completed_at=utc_now())
 
 

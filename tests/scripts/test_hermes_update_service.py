@@ -335,7 +335,10 @@ def test_surface_inventory_best_effort_port_does_not_gate(monkeypatch) -> None:
     monkeypatch.setattr(
         SERVICE,
         "listener_pids",
-        lambda: {port: port + 10000 for port in SERVICE.REQUIRED_PORTS},
+        lambda: {
+            port: port + 10000
+            for port in (*SERVICE.REQUIRED_PORTS, *SERVICE.LISTENER_ONLY_PORTS)
+        },
     )
     monkeypatch.setattr(SERVICE, "http_ready", lambda port: port != 9999)
 
@@ -343,6 +346,112 @@ def test_surface_inventory_best_effort_port_does_not_gate(monkeypatch) -> None:
 
     assert ready
     assert details["http_ready"][9999] is False
+
+
+def test_surface_inventory_requires_listener_only_ports_replaced(
+    monkeypatch,
+) -> None:
+    old = {
+        port: port + 10000
+        for port in (*SERVICE.REQUIRED_PORTS, *SERVICE.LISTENER_ONLY_PORTS)
+    }
+    stale = dict(old)
+    monkeypatch.setattr(SERVICE, "listener_pids", lambda: stale)
+    monkeypatch.setattr(SERVICE, "http_ready", lambda port: True)
+
+    ready, details = SERVICE.surface_inventory(old)
+
+    assert not ready
+    assert details["replaced"][SERVICE.LISTENER_ONLY_PORTS[0]] is False
+
+
+def test_resume_verb_tolerates_released_lease_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "20260723T120000Z-cccccccccccd"
+    make_ledger(tmp_path, run_id)
+    SERVICE.transition(tmp_path, run_id, "PREFLIGHT")
+    SERVICE.transition(tmp_path, run_id, SERVICE.PARKED)
+    handle = SERVICE.acquire_lease(tmp_path, run_id)
+    SERVICE.release_lease(handle)
+    assert (tmp_path / "lease.json").is_file()
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        SERVICE, "spawn_worker", lambda repo, root, rid: spawned.append(rid)
+    )
+
+    payload = {
+        "verb": "resume",
+        "run_id": run_id,
+        "nonce": "e" * 32,
+        "timestamp": int(time.time()),
+    }
+    response = SERVICE.handle_request(tmp_path, tmp_path, payload, None)
+
+    assert response["ok"] is True
+    assert spawned == [run_id]
+
+
+def test_abort_verb_finalizes_parked_run_without_worker(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-ddddddddddde"
+    make_ledger(tmp_path, run_id)
+    SERVICE.transition(tmp_path, run_id, "PREFLIGHT")
+    SERVICE.transition(tmp_path, run_id, SERVICE.PARKED)
+
+    payload = {
+        "verb": "abort",
+        "run_id": run_id,
+        "nonce": "f" * 32,
+        "timestamp": int(time.time()),
+    }
+    response = SERVICE.handle_request(tmp_path, tmp_path, payload, None)
+
+    assert response.get("aborted") is True
+    ledger = SERVICE.read_json(SERVICE.ledger_path(tmp_path, run_id))
+    assert ledger["status"] == "ABORTED"
+    assert SERVICE.active_run(tmp_path) is None
+
+
+def test_abort_verb_leaves_marker_for_activated_run(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-eeeeeeeeeeef"
+    make_ledger(tmp_path, run_id)
+    for phase in (
+        "PREFLIGHT",
+        "MERGED",
+        "VERIFIED",
+        "BUILT",
+        "MACBOOK_STAGED",
+        "STUDIO_ACTIVATED",
+    ):
+        SERVICE.transition(tmp_path, run_id, phase)
+
+    payload = {
+        "verb": "abort",
+        "run_id": run_id,
+        "nonce": "a1" + "b" * 30,
+        "timestamp": int(time.time()),
+    }
+    response = SERVICE.handle_request(tmp_path, tmp_path, payload, None)
+
+    assert response.get("abort_requested") is True
+    ledger = SERVICE.read_json(SERVICE.ledger_path(tmp_path, run_id))
+    assert ledger["status"] == "RUNNING"
+
+
+def test_binary_and_missing_conflicts_are_not_auto_resolved(
+    tmp_path: Path,
+) -> None:
+    binary = tmp_path / "asset.png"
+    binary.write_bytes(b"\x89PNG\x00binary")
+    text = tmp_path / "resolved.py"
+    text.write_text("value = 1\n", encoding="utf-8")
+    conflicted = tmp_path / "conflicted.py"
+    conflicted.write_text("<<<<<<< HEAD\nvalue\n=======\nother\n", encoding="utf-8")
+
+    assert not SERVICE.conflict_is_resolved(binary)
+    assert not SERVICE.conflict_is_resolved(tmp_path / "deleted.py")
+    assert not SERVICE.conflict_is_resolved(conflicted)
+    assert SERVICE.conflict_is_resolved(text)
 
 
 def test_wait_for_surfaces_times_out_naming_blocked_ports(tmp_path: Path) -> None:

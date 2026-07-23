@@ -42,14 +42,18 @@ Never reset the live checkout to a checkpoint.
 ## Updates
 
 The update service is a user LaunchAgent outside Hermes and coding-session
-hosts. Interactive agents may only submit `start`, `status`, or `abort` over
-its private socket:
+hosts. Interactive agents may only submit `start`, `status`, `abort`, or `resume`
+over its private socket:
 
 ```bash
 python scripts/hermes_update_service.py request start --mode rehearse
 python scripts/hermes_update_service.py request status --run-id <run-id>
 python scripts/hermes_update_service.py request abort --run-id <run-id>
+python scripts/hermes_update_service.py request resume --run-id <run-id>
 ```
+
+A run parked at `NEEDS_RESOLUTION` waits with its conflict list and worktree
+path in `status`; resolve in that worktree only, then `resume`.
 
 All merge, test, build, and conflict-worker processes belong to the service.
 Do not run direct or background pytest lanes during an update. Tests must use

@@ -59,9 +59,12 @@ def plist_payload(python: str, service: Path, repo: Path, state: Path) -> dict[s
         "RunAtLoad": True,
         "KeepAlive": True,
         "ProcessType": "Background",
-        "EnvironmentVariables": {
-            "APPLE_NOTARY_PROFILE": NOTARY_PROFILE,
-        },
+        # No APPLE_NOTARY_PROFILE: ordinary updates must not notarize. The
+        # Desktop afterSign hook notarizes whenever that variable is present,
+        # so injecting it here made every Desktop-changing update perform a
+        # distribution-grade notary round-trip. Explicit release flows set it
+        # themselves.
+        "EnvironmentVariables": {},
         "StandardOutPath": str(logs / "service.stdout.log"),
         "StandardErrorPath": str(logs / "service.stderr.log"),
         "ThrottleInterval": 5,

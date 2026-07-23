@@ -13,7 +13,7 @@ sys.modules[SPEC.name] = SETUP
 SPEC.loader.exec_module(SETUP)
 
 
-def test_update_service_builds_with_the_local_notary_profile(tmp_path: Path) -> None:
+def test_update_service_does_not_notarize_ordinary_updates(tmp_path: Path) -> None:
     payload = SETUP.plist_payload(
         "/usr/bin/python3",
         tmp_path / "service.py",
@@ -21,6 +21,4 @@ def test_update_service_builds_with_the_local_notary_profile(tmp_path: Path) -> 
         tmp_path / "state",
     )
 
-    assert payload["EnvironmentVariables"] == {
-        "APPLE_NOTARY_PROFILE": "my-notary-profile",
-    }
+    assert "APPLE_NOTARY_PROFILE" not in payload["EnvironmentVariables"]
