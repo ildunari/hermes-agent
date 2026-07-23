@@ -632,6 +632,8 @@ def redacted_status(root: Path, run_id: str) -> dict[str, Any]:
         "conflict_files",
         "worktree",
         "dependency_sensitive_paths",
+        "macbook_deferred",
+        "macbook_deferred_reason",
     }
     return {key: ledger[key] for key in allowed if key in ledger}
 
@@ -1345,6 +1347,23 @@ def deploy(
     remote_ref = f"refs/hermes/update-runs/{run_id}"
     stage_key = hashlib.sha256(f"{run_id}:{result_commit}:macbook-stage".encode()).hexdigest()
 
+    def macbook_reachable() -> bool:
+        return (
+            subprocess.run(
+                [
+                    "ssh",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=8",
+                    "macbook",
+                    "true",
+                ],
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+
     def stage_probe() -> tuple[bool, dict[str, Any]]:
         result = subprocess.run(
             [
@@ -1400,17 +1419,30 @@ def deploy(
             honor_abort=honor_abort,
         )
 
-    receipted(
-        root,
-        run_id,
-        "macbook_stage",
-        stage_key,
-        {"commit": result_commit},
-        stage_probe,
-        stage_action,
-        lambda: abort_before_activation(root, run_id),
-    )
-    advance(root, run_id, "MACBOOK_STAGED")
+    # An unreachable travel MacBook defers staging instead of failing the
+    # Studio update; the deferral is recorded and the remote gateway check is
+    # skipped during runtime verification. Never probe/wake/mutate a travel
+    # MacBook merely to close the local run.
+    if receipt_path(root, run_id, "macbook_stage").is_file() or macbook_reachable():
+        receipted(
+            root,
+            run_id,
+            "macbook_stage",
+            stage_key,
+            {"commit": result_commit},
+            stage_probe,
+            stage_action,
+            lambda: abort_before_activation(root, run_id),
+        )
+        advance(root, run_id, "MACBOOK_STAGED")
+    else:
+        advance(
+            root,
+            run_id,
+            "MACBOOK_STAGED",
+            macbook_deferred=True,
+            macbook_deferred_reason="macbook ssh unreachable at stage time",
+        )
     activate_key = hashlib.sha256(f"{run_id}:{result_commit}:studio-activate".encode()).hexdigest()
 
     def activate_probe() -> tuple[bool, dict[str, Any]]:
@@ -1559,30 +1591,39 @@ def deploy(
     def runtime_probe() -> tuple[bool, dict[str, Any]]:
         current = git(repo, "rev-parse", "HEAD")
         health, details = surface_inventory(old_listener_pids)
-        remote = subprocess.run(
-            [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=8",
-                "macbook",
-                "for p in 8642 8787; do "
-                "test -z \"$(/usr/sbin/lsof -nP -iTCP:$p -sTCP:LISTEN -t)\" "
-                "|| exit 9; done",
-            ],
-            text=True,
-            capture_output=True,
+        deferred = bool(
+            read_json(ledger_path(root, run_id)).get("macbook_deferred")
         )
+        if deferred:
+            remote_ok = True
+            remote_state: Any = "deferred"
+        else:
+            remote = subprocess.run(
+                [
+                    "ssh",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=8",
+                    "macbook",
+                    "for p in 8642 8787; do "
+                    "test -z \"$(/usr/sbin/lsof -nP -iTCP:$p -sTCP:LISTEN -t)\" "
+                    "|| exit 9; done",
+                ],
+                text=True,
+                capture_output=True,
+            )
+            remote_ok = remote.returncode == 0
+            remote_state = remote_ok
         return (
             current == result_commit
             and health
-            and remote.returncode == 0
+            and remote_ok
             and turn_marker.is_file(),
             {
                 "commit": current,
                 "surfaces": details,
-                "macbook_gateway_stopped": remote.returncode == 0,
+                "macbook_gateway_stopped": remote_state,
                 "authenticated_turn": turn_marker.is_file(),
             },
         )

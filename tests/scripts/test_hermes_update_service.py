@@ -402,6 +402,14 @@ def test_failed_after_activation_flags_dependency_rollback(tmp_path: Path) -> No
     assert "rollback requires dependency review" in ledger["error"]
 
 
+def test_macbook_deferral_paths_exist_in_deploy() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'macbook_deferred=True' in source
+    assert '"macbook_deferred_reason"' in source or "macbook_deferred_reason=" in source
+    assert 'remote_state: Any = "deferred"' in source
+
+
 def test_desktop_identity_match_is_exact() -> None:
     expected = {
         "CDHash": "abc",
