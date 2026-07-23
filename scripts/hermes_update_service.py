@@ -914,6 +914,45 @@ def worktree_for(root: Path, run_id: str) -> Path:
     return root / "worktrees" / run_id
 
 
+NODE_DEPENDENCY_TREES = (
+    Path("node_modules"),
+    Path("web/node_modules"),
+    Path("apps/desktop/node_modules"),
+)
+
+
+def dependency_manifests_changed(changed: list[str]) -> bool:
+    return any(
+        Path(path).name in {"package-lock.json", "package.json"} for path in changed
+    )
+
+
+def materialize_node_dependencies(
+    root: Path, run_id: str, worktree: Path
+) -> None:
+    """Replace stale node_modules symlinks with a real install.
+
+    The worktree symlinks the live checkout's node_modules for speed, but a
+    merge that changes package manifests can require binaries the old install
+    lacks (2026-07-23: upstream added cross-env; every UI carry test died on
+    `command not found`). When manifests changed, break the links and run one
+    `npm ci` against the merged lockfile.
+    """
+    for relative in NODE_DEPENDENCY_TREES:
+        target = worktree / relative
+        if target.is_symlink():
+            target.unlink()
+    worker_command(
+        root,
+        run_id,
+        ["npm", "ci"],
+        worktree,
+        "npm-ci",
+        3600,
+        child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
+    )
+
+
 def link_checkout_dependencies(repo: Path, worktree: Path) -> None:
     for relative in (
         Path("node_modules"),
@@ -1227,6 +1266,8 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
         changed = git(worktree, "diff", "--name-only", f"{base}...{result_commit}").splitlines()
         if phase_before(ledger, "VERIFIED"):
             ensure_not_aborted(root, run_id)
+            if dependency_manifests_changed(changed):
+                materialize_node_dependencies(root, run_id, worktree)
             worker_command(
                 root,
                 run_id,

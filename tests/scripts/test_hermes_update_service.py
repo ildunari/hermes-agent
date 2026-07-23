@@ -511,6 +511,38 @@ def test_failed_after_activation_flags_dependency_rollback(tmp_path: Path) -> No
     assert "rollback requires dependency review" in ledger["error"]
 
 
+def test_dependency_manifest_change_detection() -> None:
+    assert SERVICE.dependency_manifests_changed(["package-lock.json"])
+    assert SERVICE.dependency_manifests_changed(["apps/desktop/package.json"])
+    assert not SERVICE.dependency_manifests_changed(
+        ["agent/agent_init.py", "pyproject.toml", "uv.lock"]
+    )
+
+
+def test_materialize_node_dependencies_breaks_symlinks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "20260723T120000Z-abcdefabcdef"
+    make_ledger(tmp_path, run_id)
+    worktree = tmp_path / "worktree"
+    (worktree / "apps" / "desktop").mkdir(parents=True)
+    real = tmp_path / "real-node-modules"
+    real.mkdir()
+    link = worktree / "node_modules"
+    link.symlink_to(real, target_is_directory=True)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        SERVICE,
+        "worker_command",
+        lambda root, rid, args, cwd, name, timeout, **kw: commands.append(args),
+    )
+
+    SERVICE.materialize_node_dependencies(tmp_path, run_id, worktree)
+
+    assert not link.exists() and not link.is_symlink()
+    assert commands == [["npm", "ci"]]
+
+
 def test_macbook_deferral_paths_exist_in_deploy() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
