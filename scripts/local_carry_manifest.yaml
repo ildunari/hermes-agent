@@ -37,6 +37,30 @@ checks:
     path: tools/send_message_tool.py
     needles: [rich_card, "platform_registry.get(\"bluebubbles\")"]
     description: rich-card delivery and BlueBubbles plugin registry hook (adapter carry retired to hermes-kosta-plugins 2026-07-23)
+  - id: vibeproxy-alias-priority
+    path: hermes_cli/models.py
+    needles: [POSITION IS LOAD-BEARING, "\"vibeproxy\": ["]
+    description: vibeproxy dict position ahead of anthropic drives bare-alias routing to the local proxy; do not reorder or enroll in _BORROWED_MODEL_PROVIDERS (refuted 2026-07-23)
+  - id: vibeproxy-alias-guard-tests
+    path: tests/test_tui_gateway_server.py
+    needles: [test_startup_runtime_resolves_short_alias_without_network, test_startup_runtime_does_not_call_network_detector]
+    description: guard tests for vibeproxy short-alias default routing
+  - id: vibeproxy-credential-plumbing
+    path: hermes_cli/auth.py
+    needles: [DEFAULT_VIBEPROXY_BASE_URL, VIBEPROXY_NOAUTH_PLACEHOLDER]
+    description: vibeproxy no-auth credential registry entry and ambient-discovery exclusion
+  - id: vibeproxy-runtime-dispatch
+    path: hermes_cli/runtime_provider.py
+    needles: [DEFAULT_VIBEPROXY_BASE_URL]
+    description: vibeproxy chat_completions api-mode and base_url defaulting
+  - id: vibeproxy-transport-seams
+    path: agent/transports/chat_completions.py
+    needles: [_is_vibeproxy_claude_family, _normalize_mcp_wire_tool_name, finalize_api_kwargs]
+    description: vibeproxy reasoning fallback, mcp__ wire-name reverse cloak (pairs with the vibeproxy-provider plugin's outbound cloak), and the finalize_api_kwargs profile seam the plugin depends on
+  - id: provider-profile-finalize-hook
+    path: providers/base.py
+    needles: [finalize_api_kwargs]
+    description: finalize_api_kwargs ProviderProfile hook (vibeproxy plugin seam; upstream-PR candidate)
   - id: closed-session-mcp-refresh
     path: tools/mcp_tool.py
     needles: [session is None, skipping dynamic tool refresh; session is closed]

@@ -192,6 +192,19 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     # Local Claude/Vibe proxy. Keep this static because the proxy's /models
     # endpoint is not the source of Kosta's curated picker list; profiles can
     # further narrow it with model_picker.visible_models.
+    #
+    # POSITION IS LOAD-BEARING: this entry must stay ahead of "anthropic" (and
+    # every other native vendor) in this dict. detect_static_provider_for_model
+    # walks it in insertion order, so vibeproxy-before-anthropic is what makes
+    # bare aliases ("sonnet", "opus", "fable", ...) resolve to the local
+    # subscription proxy instead of the metered native API when
+    # model.provider is "auto". Guarded by
+    # tests/test_tui_gateway_server.py::test_startup_runtime_resolves_short_alias_without_network
+    # and the carry-manifest vibeproxy-alias-priority entry. Do NOT alphabetize
+    # or "clean up" this dict's ordering, and do NOT enroll vibeproxy in
+    # _BORROWED_MODEL_PROVIDERS (that mechanism only wins the alias race when
+    # the provider is already configured — the opposite of this default;
+    # empirically verified 2026-07-23).
     "vibeproxy": [
         "claude-fable-5",
         "claude-opus-4-8",
