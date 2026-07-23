@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   buildGroups,
   firstVisibleGroupIndex,
+  isVirtualizedGroup,
+  LIVE_TAIL_GROUPS,
   type MessageGroup,
   messageGroupClassName,
   turnTailClassName
@@ -105,5 +107,35 @@ describe('messageGroupClassName', () => {
   it('moves skipped-content containment below the sticky user bubble', () => {
     expect(turnTailClassName()).toContain('content-visibility:auto')
     expect(turnTailClassName()).toContain('contain-intrinsic-size:auto_37.5rem')
+  })
+})
+
+describe('isVirtualizedGroup', () => {
+  it('never virtualizes the newest turns (the live tail)', () => {
+    const count = 20
+
+    for (let i = count - LIVE_TAIL_GROUPS; i < count; i++) {
+      expect(isVirtualizedGroup(i, count)).toBe(false)
+    }
+  })
+
+  it('virtualizes older turns that sit before the live tail', () => {
+    const count = 20
+
+    expect(isVirtualizedGroup(0, count)).toBe(true)
+    expect(isVirtualizedGroup(count - LIVE_TAIL_GROUPS - 1, count)).toBe(true)
+  })
+
+  it('keeps every turn rendered when the whole transcript fits in the tail', () => {
+    const count = LIVE_TAIL_GROUPS
+
+    for (let i = 0; i < count; i++) {
+      expect(isVirtualizedGroup(i, count)).toBe(false)
+    }
+  })
+
+  it('honors a custom tail size', () => {
+    expect(isVirtualizedGroup(5, 10, 3)).toBe(true)
+    expect(isVirtualizedGroup(7, 10, 3)).toBe(false)
   })
 })

@@ -117,21 +117,33 @@ const MESSAGE_GROUP_BASE_CLASS = 'flex min-w-0 flex-col gap-(--conversation-turn
 
 const SKIPPED_CONTENT_CLASS = '[contain-intrinsic-size:auto_37.5rem] [content-visibility:auto]'
 
-export function messageGroupClassName(group: MessageGroup): string {
+// Keep the newest turns always rendered so Chromium records their final size
+// before an older group becomes eligible for skipped-content virtualization.
+export const LIVE_TAIL_GROUPS = 6
+
+export function isVirtualizedGroup(
+  indexInVisible: number,
+  visibleCount: number,
+  liveTail = LIVE_TAIL_GROUPS
+): boolean {
+  return indexInVisible < visibleCount - liveTail
+}
+
+export function messageGroupClassName(group: MessageGroup, virtualized = true): string {
   // A turn contains a sticky user bubble. Chromium can retain that sticky
   // composited layer while content-visibility skips and later re-lays out its
   // ancestor, visually painting the turn above older image/message content.
   // Standalone non-user messages have no sticky descendant and remain safe to
   // skip off-screen.
-  return cn(MESSAGE_GROUP_BASE_CLASS, group.kind === 'standalone' && SKIPPED_CONTENT_CLASS)
+  return cn(MESSAGE_GROUP_BASE_CLASS, group.kind === 'standalone' && virtualized && SKIPPED_CONTENT_CLASS)
 }
 
-export function turnTailClassName(): string {
+export function turnTailClassName(virtualized = true): string {
   // Keep the expensive assistant/tool subtree skippable without making it an
   // ancestor of the sticky user bubble. The outer turn remains the sticky
   // containing block, so its geometry stays stable across Chromium relevance
   // changes while the long non-user tail retains the performance optimization.
-  return cn('flex min-w-0 flex-col gap-(--conversation-turn-gap)', SKIPPED_CONTENT_CLASS)
+  return cn('flex min-w-0 flex-col gap-(--conversation-turn-gap)', virtualized && SKIPPED_CONTENT_CLASS)
 }
 
 const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
@@ -380,7 +392,7 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
                 {t.assistant.thread.showEarlier}
               </button>
             )}
-            {visibleGroups.map(group => (
+            {visibleGroups.map((group, indexInVisible) => (
               // content-visibility:auto — off-screen standalone messages and
               // non-user turn tails skip style recalc, layout, and paint. This keeps
               // UNRELATED UI fast: any dialog/popover mount (Radix Presence
@@ -393,7 +405,14 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
               // bubbles, and Chromium can paint stale sticky layers when their
               // content-visibility ancestor crosses the relevance boundary. The
               // assistant/tool tail is skipped in a sibling subtree instead.
-              <div className={messageGroupClassName(group)} data-slot="aui_message-group" key={group.id}>
+              <div
+                className={messageGroupClassName(
+                  group,
+                  isVirtualizedGroup(indexInVisible, visibleGroups.length)
+                )}
+                data-slot="aui_message-group"
+                key={group.id}
+              >
                 <MessageRenderBoundary resetKey={messageSignature}>
                   {group.kind === 'turn' ? (
                     <div
@@ -402,7 +421,10 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
                     >
                       <ThreadPrimitive.MessageByIndex components={components} index={group.indices[0]} />
                       {group.indices.length > 1 && (
-                        <div className={turnTailClassName()} data-slot="aui_turn-tail">
+                        <div
+                          className={turnTailClassName(isVirtualizedGroup(indexInVisible, visibleGroups.length))}
+                          data-slot="aui_turn-tail"
+                        >
                           {group.indices.slice(1).map(index => (
                             <ThreadPrimitive.MessageByIndex components={components} index={index} key={index} />
                           ))}

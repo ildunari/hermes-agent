@@ -9,7 +9,6 @@ import re
 import shutil
 import stat
 import sys
-import sysconfig
 from contextvars import ContextVar, Token
 from pathlib import Path
 
@@ -192,23 +191,6 @@ def get_default_hermes_root() -> Path:
     return env_path
 
 
-def _get_packaged_data_dir(name: str) -> Path | None:
-    """Return an installed data-files directory if one exists.
-
-    Used to discover bundled skills/optional-skills when Hermes is installed
-    from a wheel that emitted them via setuptools data_files.
-    """
-    candidates = []
-    for scheme in ("data", "purelib", "platlib"):
-        raw = sysconfig.get_path(scheme)
-        if raw:
-            candidates.append(Path(raw) / name)
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
-
-
 def get_optional_skills_dir(default: Path | None = None) -> Path:
     """Return the optional-skills directory, honoring package-manager wrappers.
 
@@ -218,9 +200,6 @@ def get_optional_skills_dir(default: Path | None = None) -> Path:
     override = os.getenv("HERMES_OPTIONAL_SKILLS", "").strip()
     if override:
         return Path(override)
-    packaged = _get_packaged_data_dir("optional-skills")
-    if packaged is not None:
-        return packaged
     if default is not None:
         return default
     return get_hermes_home() / "optional-skills"
@@ -237,9 +216,6 @@ def get_optional_mcps_dir(default: Path | None = None) -> Path:
     override = os.getenv("HERMES_OPTIONAL_MCPS", "").strip()
     if override:
         return Path(override)
-    packaged = _get_packaged_data_dir("optional-mcps")
-    if packaged is not None:
-        return packaged
     if default is not None:
         return default
     return get_hermes_home() / "optional-mcps"
@@ -250,16 +226,12 @@ def get_bundled_skills_dir(default: Path | None = None) -> Path:
 
     Resolution order:
         1. ``HERMES_BUNDLED_SKILLS`` env var (Nix wrapper / explicit override)
-        2. Wheel-installed ``<sysconfig data>/skills`` (pip install path)
-        3. Caller-supplied ``default`` (typically the source-checkout path)
-        4. ``<HERMES_HOME>/skills`` last-resort
+        2. Caller-supplied ``default`` (typically the source-checkout path)
+        3. ``<HERMES_HOME>/skills`` last-resort
     """
     override = os.getenv("HERMES_BUNDLED_SKILLS", "").strip()
     if override:
         return Path(override)
-    packaged = _get_packaged_data_dir("skills")
-    if packaged is not None:
-        return packaged
     if default is not None:
         return default
     return get_hermes_home() / "skills"

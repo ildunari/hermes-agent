@@ -323,13 +323,23 @@ export const en: Translations = {
       turnDoneBody: 'The response is ready.',
       turnErrorTitle: 'Turn failed',
       backgroundDoneTitle: 'Background task finished',
-      backgroundFailedTitle: 'Background task failed'
+      backgroundFailedTitle: 'Background task failed',
+      creditsTitle: 'Credits'
     }
   },
 
   remoteDisplayBanner: {
     message: reason =>
       `Software rendering active — remote display detected (${reason}). GPU acceleration is disabled to prevent flickering.`
+  },
+
+  billingBlock: {
+    titleNous: 'Out of Nous credits',
+    titleProvider: provider => `Out of credits — ${provider}`,
+    fallbackMessage: 'Your account is out of credits. Add credits to keep going.',
+    openBilling: 'Open billing',
+    addCredits: 'Add credits',
+    dismiss: 'Dismiss'
   },
 
   titlebar: {
@@ -438,6 +448,7 @@ export const en: Translations = {
       'composer.send': 'Send message',
       'composer.newline': 'Insert newline',
       'composer.steer': 'Steer the running turn',
+      'composer.queue': 'Queue message',
       'composer.sendQueued': 'Send next queued turn',
       'composer.mention': 'Reference files, folders, URLs',
       'composer.slash': 'Slash command palette',
@@ -576,6 +587,10 @@ export const en: Translations = {
         backgroundDone: {
           label: 'Background task finished',
           description: 'A backgrounded terminal command completed.'
+        },
+        credits: {
+          label: 'Credit alerts',
+          description: 'Credit access is paused or restored.'
         }
       },
       test: 'Send test notification',
@@ -1295,6 +1310,7 @@ export const en: Translations = {
     ageSeconds: seconds => `${seconds}s ago`,
     ageMinutes: minutes => `${minutes}m ago`,
     ageHours: hours => `${hours}h ago`,
+    ageDays: days => `${days}d ago`,
     durationSeconds: seconds => `${seconds}s`,
     durationMinutes: (minutes, seconds) => `${minutes}m ${seconds}s`,
     tokens: value => `${value} tok`
@@ -2356,7 +2372,8 @@ export const en: Translations = {
     proNeedsSubscription: 'Pro models need a paid Nous subscription.',
     free: 'Free',
     freeTier: 'Free tier',
-    priceTitle: 'Input / Output price per million tokens'
+    priceTitle: 'Input / Output price per million tokens',
+    wasPrice: 'was'
   },
 
   modelVisibility: {
@@ -2641,6 +2658,7 @@ export const en: Translations = {
     closeOthers: 'Close others',
     closeToRight: 'Close to the right',
     closeAll: 'Close all',
+    newSessionTab: 'New session tab',
     split: dir => `Split ${dir}`,
     move: dir => `Move ${dir}`,
     dirUp: 'up',
@@ -2736,7 +2754,10 @@ export const en: Translations = {
       placeholder: 'Type your answer…',
       skip: 'Skip',
       skipped: 'Skipped',
-      continueLabel: 'Continue'
+      continueLabel: 'Continue',
+      lateAnswer: (question, choice) => `Re: "${question}" — my answer: ${choice}`,
+      lateAnswerTip: 'Draft this answer as a follow-up message',
+      lateAnswerHint: 'This prompt is no longer waiting. Pick an option to draft it as a follow-up message.'
     },
     tool: {
       code: 'Code',

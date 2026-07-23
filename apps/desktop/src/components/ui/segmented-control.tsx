@@ -13,6 +13,8 @@ interface SegmentedControlProps<T extends string> {
   value: T
   onChange: (id: T) => void
   className?: string
+  /** Dims the whole track and blocks selection (e.g. gated behind a prerequisite). */
+  disabled?: boolean
 }
 
 /**
@@ -22,16 +24,18 @@ interface SegmentedControlProps<T extends string> {
  */
 export function SegmentedControl<T extends string>({
   ariaLabel,
-  options,
-  value,
+  className,
+  disabled = false,
   onChange,
-  className
+  options,
+  value
 }: SegmentedControlProps<T>) {
   return (
     <div
       aria-label={ariaLabel}
       className={cn(
         'inline-grid w-fit auto-cols-fr grid-flow-col gap-0.5 rounded-[5px] bg-(--ui-bg-tertiary) p-0.5',
+        disabled && 'opacity-50',
         className
       )}
       role={ariaLabel ? 'group' : undefined}
@@ -43,9 +47,10 @@ export function SegmentedControl<T extends string>({
           <button
             aria-pressed={active}
             className={cn(
-              'flex items-center justify-center gap-1 rounded-[3px] px-2.5 py-0.5 text-[0.6875rem] font-medium transition-colors',
+              'flex items-center justify-center gap-1 rounded-[3px] px-2.5 py-0.5 text-[0.6875rem] font-medium transition-colors disabled:cursor-default',
               active ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
             )}
+            disabled={disabled}
             key={id}
             onClick={() => onChange(id)}
             type="button"
