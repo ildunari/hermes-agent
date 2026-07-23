@@ -524,12 +524,16 @@ def test_failed_after_activation_flags_dependency_rollback(tmp_path: Path) -> No
     assert "rollback requires dependency review" in ledger["error"]
 
 
-def test_dependency_manifest_change_detection() -> None:
+def test_dependency_manifest_change_detection_is_exact_paths() -> None:
     assert SERVICE.dependency_manifests_changed(["package-lock.json"])
     assert SERVICE.dependency_manifests_changed(["apps/desktop/package.json"])
+    assert SERVICE.dependency_manifests_changed(["web/package.json"])
+    assert SERVICE.dependency_manifests_changed(["pyproject.toml"])
+    assert SERVICE.dependency_manifests_changed(["uv.lock"])
     assert not SERVICE.dependency_manifests_changed(
-        ["agent/agent_init.py", "pyproject.toml", "uv.lock"]
+        ["agent/agent_init.py", "docs/package.json", "vendor/x/package-lock.json"]
     )
+    assert not SERVICE.dependency_manifests_changed(["web/package-lock.json"])
 
 
 def test_materialize_node_dependencies_breaks_symlinks(
@@ -622,3 +626,352 @@ def test_owned_command_can_reconcile_after_activation_abort(tmp_path: Path) -> N
     )
 
     assert result == 0
+
+
+def test_owned_command_failure_with_abort_marker_classifies_as_abort(
+    tmp_path: Path,
+) -> None:
+    abort = tmp_path / "abort.request"
+    abort.touch()
+
+    with pytest.raises(SERVICE.AbortRequested):
+        SERVICE.owned_command(
+            [sys.executable, "-c", "raise SystemExit(3)"],
+            tmp_path,
+            tmp_path / "abort-classify.log",
+            30,
+            None,
+            SERVICE.FD_LIMIT,
+            abort_path=abort,
+        )
+
+
+def test_start_wait_and_kill_owned_child(tmp_path: Path) -> None:
+    child, output = SERVICE.start_owned_child(
+        [sys.executable, "-c", "print('background')"],
+        tmp_path,
+        tmp_path / "bg.log",
+    )
+    result = SERVICE.wait_owned_child(
+        child, output, ["python"], 30, None, SERVICE.FD_LIMIT
+    )
+    assert result == 0
+    assert output.closed
+    assert "background" in (tmp_path / "bg.log").read_text(encoding="utf-8")
+
+    sleeper, sleeper_output = SERVICE.start_owned_child(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        tmp_path,
+        tmp_path / "bg-kill.log",
+    )
+    SERVICE.kill_owned_child(sleeper, sleeper_output)
+    assert sleeper.poll() is not None
+    assert sleeper_output.closed
+
+
+def test_wait_owned_child_honors_abort_marker(tmp_path: Path) -> None:
+    abort = tmp_path / "abort.request"
+    abort.touch()
+    child, output = SERVICE.start_owned_child(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        tmp_path,
+        tmp_path / "bg-abort.log",
+    )
+
+    with pytest.raises(SERVICE.AbortRequested):
+        SERVICE.wait_owned_child(
+            child, output, ["python"], 60, None, SERVICE.FD_LIMIT, abort_path=abort
+        )
+    assert child.poll() is not None
+
+
+def test_wait_worker_child_uses_ledger_budget(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-abcabcabcabc"
+    make_ledger(tmp_path, run_id)
+    child, output = SERVICE.start_owned_child(
+        [sys.executable, "-c", "raise SystemExit(0)"],
+        tmp_path,
+        SERVICE.run_dir(tmp_path, run_id) / "evidence" / "bg-worker.log",
+    )
+
+    result = SERVICE.wait_worker_child(
+        tmp_path, run_id, child, output, ["python"], 30
+    )
+
+    assert result == 0
+
+
+def test_worker_failure_with_pending_abort_records_aborted(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-abcdefabcde0"
+    make_ledger(tmp_path, run_id)
+    SERVICE.transition(tmp_path, run_id, "PREFLIGHT")
+    (SERVICE.run_dir(tmp_path, run_id) / "abort.request").touch()
+    (SERVICE.run_dir(tmp_path, run_id) / "bundle").mkdir(parents=True)
+
+    SERVICE.execute_worker(tmp_path, tmp_path, run_id)
+
+    ledger = SERVICE.read_json(SERVICE.ledger_path(tmp_path, run_id))
+    assert ledger["status"] == "ABORTED"
+    assert ledger["error"].startswith("aborted during ")
+
+
+def test_worker_failure_after_activation_ignores_abort_marker(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-abcdefabcde1"
+    make_ledger(tmp_path, run_id)
+    for phase in (
+        "PREFLIGHT",
+        "MERGED",
+        "VERIFIED",
+        "BUILT",
+        "MACBOOK_STAGED",
+        "STUDIO_ACTIVATED",
+    ):
+        SERVICE.transition(tmp_path, run_id, phase)
+    (SERVICE.run_dir(tmp_path, run_id) / "abort.request").touch()
+    (SERVICE.run_dir(tmp_path, run_id) / "bundle").mkdir(parents=True)
+
+    SERVICE.execute_worker(tmp_path, tmp_path, run_id)
+
+    ledger = SERVICE.read_json(SERVICE.ledger_path(tmp_path, run_id))
+    assert ledger["status"] == "FAILED"
+
+
+def test_full_validation_required_gates() -> None:
+    assert SERVICE.full_validation_required(
+        {"resolver_attempted": True}, [], []
+    ) == (True, "merge resolver was attempted")
+
+    many = [f"docs/f{index}.md" for index in range(6)]
+    required, reason = SERVICE.full_validation_required(
+        {"merge_conflicts": many}, [], []
+    )
+    assert required and "exceeds 5" in reason
+
+    required, reason = SERVICE.full_validation_required(
+        {"merge_conflicts": ["gateway/session.py"]}, [], []
+    )
+    assert required and "gateway/session.py" in reason
+
+    required, reason = SERVICE.full_validation_required(
+        {}, ["pyproject.toml"], ["pyproject.toml"]
+    )
+    assert required and "dependency manifests" in reason
+
+    required, reason = SERVICE.full_validation_required(
+        {}, ["scripts/run_tests.sh"], []
+    )
+    assert required and "scripts/run_tests.sh" in reason
+
+    required, reason = SERVICE.full_validation_required(
+        {}, ["tests/conftest.py"], []
+    )
+    assert required and "tests/conftest.py" in reason
+
+    assert SERVICE.full_validation_required(
+        {"merge_conflicts": ["docs/readme.md"]}, ["agent/x.py"], []
+    ) == (False, "")
+
+
+def test_full_validation_required_uses_parked_conflict_files() -> None:
+    required, reason = SERVICE.full_validation_required(
+        {"conflict_files": ["hermes_cli/main.py"]}, [], []
+    )
+    assert required and "hermes_cli/main.py" in reason
+
+
+def test_consume_restart_outcome_marker(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-abcdefabcde2"
+    make_ledger(tmp_path, run_id)
+    marker = SERVICE.run_dir(tmp_path, run_id) / "receipts" / "restart-outcome.json"
+    evidence = SERVICE.run_dir(tmp_path, run_id) / "evidence" / "restart-outcome.json"
+
+    SERVICE.consume_restart_outcome(tmp_path, run_id, marker)
+    assert not evidence.is_file()
+
+    marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    SERVICE.atomic_json(marker, {"exit_code": 0, "message": "ok"})
+    SERVICE.consume_restart_outcome(tmp_path, run_id, marker)
+    assert SERVICE.read_json(evidence)["exit_code"] == 0
+
+    SERVICE.atomic_json(
+        marker,
+        {"exit_code": 7, "message": "restart blew up", "log_path": "/tmp/r.log"},
+    )
+    with pytest.raises(RuntimeError, match=r"restart blew up.*(/tmp/r\.log)"):
+        SERVICE.consume_restart_outcome(tmp_path, run_id, marker)
+    assert SERVICE.read_json(evidence)["exit_code"] == 7
+
+
+def test_tracked_children_reaped_on_resume(tmp_path: Path, monkeypatch) -> None:
+    """A crashed worker's persisted background child is killed before resume
+    relaunches it; a recycled pid (command mismatch) is left alone."""
+    run_id = "20260723T120000Z-abcdefabcde7"
+    make_ledger(tmp_path, run_id)
+
+    class FakeChild:
+        pid = 54321
+
+    ps_answers = {"54321": "npm run dist:mac"}
+    monkeypatch.setattr(
+        SERVICE.subprocess,
+        "run",
+        lambda cmd, **_k: subprocess.CompletedProcess(
+            cmd, 0, stdout=ps_answers.get(cmd[-1], "") + "\n", stderr=""
+        ),
+    )
+    SERVICE.track_owned_child(tmp_path, run_id, "desktop-build", FakeChild())
+    marker = SERVICE.children_dir(tmp_path, run_id) / "desktop-build.json"
+    assert SERVICE.read_json(marker)["pid"] == 54321
+
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(SERVICE.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+    monkeypatch.setattr(SERVICE.time, "sleep", lambda _s: None)
+    SERVICE.reap_tracked_children(tmp_path, run_id)
+    assert (54321, SERVICE.signal.SIGTERM) in killed
+    assert not marker.is_file()
+
+    # Recycled pid: current command no longer matches the recorded one.
+    SERVICE.track_owned_child(tmp_path, run_id, "desktop-build", FakeChild())
+    ps_answers["54321"] = "some-unrelated-daemon"
+    killed.clear()
+    SERVICE.reap_tracked_children(tmp_path, run_id)
+    assert killed == []
+    assert not marker.is_file()
+
+    SERVICE.track_owned_child(tmp_path, run_id, "live-npm-ci", FakeChild())
+    SERVICE.untrack_owned_child(tmp_path, run_id, "live-npm-ci")
+    assert not (SERVICE.children_dir(tmp_path, run_id) / "live-npm-ci.json").is_file()
+
+
+def test_restart_enqueue_passes_completion_marker() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert '"--completion-marker"' in source
+    assert "consume_restart_outcome(root, run_id, restart_outcome_marker)" in source
+
+
+def test_live_dependency_refresh_overlaps_and_reaps_on_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "20260723T120000Z-abcdefabcde3"
+    make_ledger(tmp_path, run_id)
+    events: list[str] = []
+
+    class FakeOutput:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeChild:
+        pid = 999999
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self) -> int:
+            return 0
+
+    def fake_start(command_args, cwd, log, env=None, child_fd_limit=0):
+        events.append(f"start:{command_args[0]}")
+        return FakeChild(), FakeOutput()
+
+    def fake_wait(root, rid, child, output, command_args, timeout, **kwargs):
+        events.append(f"wait:{command_args[0]}")
+        if command_args[0] == "npm":
+            raise subprocess.CalledProcessError(1, command_args)
+        return 0
+
+    monkeypatch.setattr(SERVICE, "start_owned_child", fake_start)
+    monkeypatch.setattr(SERVICE, "wait_worker_child", fake_wait)
+    monkeypatch.setattr(
+        SERVICE,
+        "kill_owned_child",
+        lambda child, output: events.append("kill"),
+    )
+
+    with pytest.raises(subprocess.CalledProcessError):
+        SERVICE.live_dependency_refresh(tmp_path, run_id, tmp_path)
+
+    assert events == ["start:npm", "start:uv", "wait:npm", "kill", "kill"]
+
+
+def test_live_dependency_refresh_success_waits_both(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "20260723T120000Z-abcdefabcde4"
+    make_ledger(tmp_path, run_id)
+    events: list[str] = []
+    monkeypatch.setattr(
+        SERVICE,
+        "start_owned_child",
+        lambda command_args, cwd, log, env=None, child_fd_limit=0: (
+            events.append(f"start:{command_args[0]}"),
+            events,
+        ),
+    )
+    monkeypatch.setattr(
+        SERVICE,
+        "wait_worker_child",
+        lambda root, rid, child, output, command_args, timeout, **kwargs: events.append(
+            f"wait:{command_args[0]}"
+        ),
+    )
+    monkeypatch.setattr(
+        SERVICE,
+        "track_owned_child",
+        lambda root, rid, name, child: events.append(f"track:{name}"),
+    )
+    monkeypatch.setattr(
+        SERVICE,
+        "untrack_owned_child",
+        lambda root, rid, name: events.append(f"untrack:{name}"),
+    )
+
+    SERVICE.live_dependency_refresh(tmp_path, run_id, tmp_path)
+
+    assert events == [
+        "start:npm",
+        "track:live-npm-ci",
+        "start:uv",
+        "track:live-uv-sync",
+        "wait:npm",
+        "untrack:live-npm-ci",
+        "wait:uv",
+        "untrack:live-uv-sync",
+    ]
+
+
+def test_desktop_build_overlaps_validation_in_source() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert "desktop_build_child, desktop_build_output = start_owned_child(" in source
+    assert source.index("desktop_build_child, desktop_build_output") < source.index(
+        '"curated-validation"'
+    )
+    assert "kill_owned_child(desktop_build_child, desktop_build_output)" in source
+
+
+def test_deployed_carry_verify_is_probes_only_in_source() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    deployed = source.index('"deployed-carry-verify"')
+    verify_argv = source.rindex('"--probes-only"', 0, deployed)
+
+    assert verify_argv > source.index('"carry-verify"')
+
+
+def test_validation_env_scoping_signals_in_source() -> None:
+    service_source = SCRIPT.read_text(encoding="utf-8")
+    script = SCRIPT.parent / "run_update_smart_client_validation.sh"
+    shell_source = script.read_text(encoding="utf-8")
+
+    assert '"UPDATE_CHANGED_DESKTOP"' in service_source
+    assert '"UPDATE_VALIDATION_FULL"' in service_source
+    assert "UPDATE_CHANGED_DESKTOP" in shell_source
+    assert "UPDATE_VALIDATION_FULL" in shell_source
+    bash_check = subprocess.run(
+        ["/opt/homebrew/bin/bash", "-n", str(script)],
+        text=True,
+        capture_output=True,
+    )
+    assert bash_check.returncode == 0, bash_check.stderr

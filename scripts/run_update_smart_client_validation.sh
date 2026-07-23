@@ -80,10 +80,26 @@ echo "[6/8] web extraction tests"
   tests/tools/test_web_tools_dict_urls.py -q
 
 echo "[7/8] Desktop typecheck and focused UI/platform tests"
-cd "$ROOT/apps/desktop"
-npm run typecheck
-npm run test:ui -- --run src/app/session/hooks/use-session-actions.test.tsx src/hermes.test.ts
-npm run test:desktop:platforms
+# UPDATE_CHANGED_DESKTOP=0 is set by the update service when the merge diff
+# touched neither apps/desktop/ nor web/; UPDATE_VALIDATION_FULL=1 overrides
+# every scoping decision. Unset means run everything (manual invocation).
+if [[ "${UPDATE_VALIDATION_FULL:-0}" != "1" && "${UPDATE_CHANGED_DESKTOP:-1}" == "0" ]]; then
+  echo "SKIPPED: diff touched neither apps/desktop/ nor web/"
+else
+  cd "$ROOT/apps/desktop"
+  npm run typecheck
+  npm run test:ui -- --run src/app/session/hooks/use-session-actions.test.tsx src/hermes.test.ts
+  npm run test:desktop:platforms
+fi
+
+if [[ "${UPDATE_VALIDATION_FULL:-0}" == "1" ]]; then
+  echo "[full] escalated: full python test suite"
+  # High-collision merges (LLM resolver used, core-dir conflicts, dependency
+  # manifests) are exactly where scoped carry/curated tests miss regressions
+  # (2026-07-23 runs 5-6). Full escalation runs the whole python suite.
+  cd "$ROOT"
+  "$TEST_RUNNER" tests/
+fi
 
 echo "[8/8] final source checks"
 cd "$ROOT"

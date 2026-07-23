@@ -445,20 +445,16 @@ def enforce_budget(pid: int, origin_pid: int | None, origin_fd_limit: int) -> di
     return snapshot
 
 
-def owned_command(
+def start_owned_child(
     command_args: list[str],
     cwd: Path,
     log: Path,
-    timeout: int,
-    origin_pid: int | None,
-    origin_fd_limit: int,
     env: dict[str, str] | None = None,
-    abort_path: Path | None = None,
-    allow_failure: bool = False,
     child_fd_limit: int = FD_LIMIT,
-) -> int:
+) -> tuple[subprocess.Popen[bytes], Any]:
     log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with log.open("ab", buffering=0) as output:
+    output = log.open("ab", buffering=0)
+    try:
         child = subprocess.Popen(
             command_args,
             cwd=cwd,
@@ -473,13 +469,38 @@ def owned_command(
                 (child_fd_limit, child_fd_limit),
             ),
         )
+    except Exception:
+        output.close()
+        raise
+    return child, output
+
+
+def kill_owned_child(child: subprocess.Popen[bytes], output: Any) -> None:
+    if child.poll() is None:
+        os.killpg(child.pid, signal.SIGTERM)
+        time.sleep(1)
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+    child.wait()
+    if not output.closed:
+        output.close()
+
+
+def wait_owned_child(
+    child: subprocess.Popen[bytes],
+    output: Any,
+    command_args: list[str],
+    timeout: int,
+    origin_pid: int | None,
+    origin_fd_limit: int,
+    abort_path: Path | None = None,
+    allow_failure: bool = False,
+) -> int:
+    try:
         deadline = time.monotonic() + timeout
         while child.poll() is None:
             if abort_path and abort_path.exists():
-                os.killpg(child.pid, signal.SIGTERM)
-                time.sleep(1)
-                if child.poll() is None:
-                    os.killpg(child.pid, signal.SIGKILL)
+                kill_owned_child(child, output)
                 raise AbortRequested("abort requested")
             if time.monotonic() >= deadline:
                 os.killpg(child.pid, signal.SIGTERM)
@@ -497,8 +518,40 @@ def owned_command(
                 raise
             time.sleep(0.5)
         if child.returncode and not allow_failure:
+            # A SIGTERM-killed child exits non-zero; an armed abort marker is
+            # the real cause, not the command failure.
+            if abort_path and abort_path.exists():
+                raise AbortRequested("abort requested")
             raise subprocess.CalledProcessError(child.returncode, command_args)
         return int(child.returncode or 0)
+    finally:
+        if not output.closed:
+            output.close()
+
+
+def owned_command(
+    command_args: list[str],
+    cwd: Path,
+    log: Path,
+    timeout: int,
+    origin_pid: int | None,
+    origin_fd_limit: int,
+    env: dict[str, str] | None = None,
+    abort_path: Path | None = None,
+    allow_failure: bool = False,
+    child_fd_limit: int = FD_LIMIT,
+) -> int:
+    child, output = start_owned_child(command_args, cwd, log, env, child_fd_limit)
+    return wait_owned_child(
+        child,
+        output,
+        command_args,
+        timeout,
+        origin_pid,
+        origin_fd_limit,
+        abort_path,
+        allow_failure,
+    )
 
 
 def sha256(path: Path) -> str:
@@ -898,6 +951,92 @@ def worker_command(
     )
 
 
+def wait_worker_child(
+    root: Path,
+    run_id: str,
+    child: subprocess.Popen[bytes],
+    output: Any,
+    command_args: list[str],
+    timeout: int,
+    honor_abort: bool = True,
+    allow_failure: bool = False,
+) -> int:
+    ledger = read_json(ledger_path(root, run_id))
+    origin_pid = ledger.get("origin_pid")
+    baseline = int(ledger.get("origin_fd_baseline") or 0)
+    origin_limit = max(FD_LIMIT, baseline + 32)
+    return wait_owned_child(
+        child,
+        output,
+        command_args,
+        timeout,
+        int(origin_pid) if origin_pid else None,
+        origin_limit,
+        run_dir(root, run_id) / "abort.request" if honor_abort else None,
+        allow_failure,
+    )
+
+
+def children_dir(root: Path, run_id: str) -> Path:
+    return run_dir(root, run_id) / "children"
+
+
+def track_owned_child(
+    root: Path, run_id: str, name: str, child: subprocess.Popen[bytes]
+) -> None:
+    """Persist a background child's identity so a crashed worker's orphans can
+    be reconciled on resume instead of racing a duplicate against the same
+    output tree (start_new_session detaches them from the worker's fate)."""
+    try:
+        command = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(child.pid)],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except OSError:
+        command = ""
+    atomic_json(
+        children_dir(root, run_id) / f"{name}.json",
+        {"pid": child.pid, "command": command, "started_at": utc_now()},
+    )
+
+
+def untrack_owned_child(root: Path, run_id: str, name: str) -> None:
+    (children_dir(root, run_id) / f"{name}.json").unlink(missing_ok=True)
+
+
+def reap_tracked_children(root: Path, run_id: str) -> None:
+    """Kill any background children a previous worker left behind.
+
+    Only kills a recorded pid when its current command line still matches the
+    recorded one, so a recycled pid is never signalled."""
+    directory = children_dir(root, run_id)
+    if not directory.is_dir():
+        return
+    for marker in sorted(directory.glob("*.json")):
+        try:
+            entry = read_json(marker)
+        except (OSError, json.JSONDecodeError):
+            marker.unlink(missing_ok=True)
+            continue
+        pid = entry.get("pid")
+        recorded = entry.get("command") or ""
+        if isinstance(pid, int) and pid > 1 and recorded:
+            current = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            if current == recorded:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                    time.sleep(2)
+                    os.killpg(pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+        marker.unlink(missing_ok=True)
+
+
 def abort_requested(root: Path, run_id: str) -> bool:
     return (run_dir(root, run_id) / "abort.request").exists()
 
@@ -939,10 +1078,55 @@ NODE_DEPENDENCY_TREES = (
 )
 
 
+DEPENDENCY_MANIFEST_PATHS = {
+    "package.json",
+    "package-lock.json",
+    "web/package.json",
+    "apps/desktop/package.json",
+    "pyproject.toml",
+    "uv.lock",
+}
+FULL_VALIDATION_CONFLICT_PREFIXES = ("agent/", "gateway/", "hermes_cli/", "tools/")
+FULL_VALIDATION_HARNESS_PATHS = {
+    "tests/conftest.py",
+    "scripts/run_tests.sh",
+    "scripts/local_carry_manifest.yaml",
+}
+
+
 def dependency_manifests_changed(changed: list[str]) -> bool:
-    return any(
-        Path(path).name in {"package-lock.json", "package.json"} for path in changed
-    )
+    return any(path in DEPENDENCY_MANIFEST_PATHS for path in changed)
+
+
+def full_validation_required(
+    ledger: dict[str, Any],
+    changed: list[str],
+    dependency_sensitive: list[str],
+) -> tuple[bool, str]:
+    """Escalate the curated validation to the full suite when the merge was
+    risky enough that scoping is no longer trustworthy."""
+    if ledger.get("resolver_attempted"):
+        return True, "merge resolver was attempted"
+    conflicts = [
+        str(path)
+        for path in (ledger.get("merge_conflicts") or ledger.get("conflict_files") or [])
+    ]
+    if len(conflicts) > 5:
+        return True, f"resolved conflict count {len(conflicts)} exceeds 5"
+    hot = [
+        path for path in conflicts if path.startswith(FULL_VALIDATION_CONFLICT_PREFIXES)
+    ]
+    if hot:
+        return True, "conflicts touch core paths: " + ", ".join(hot[:5])
+    if dependency_sensitive or dependency_manifests_changed(changed):
+        touched = dependency_sensitive or sorted(
+            set(changed) & DEPENDENCY_MANIFEST_PATHS
+        )
+        return True, "dependency manifests changed: " + ", ".join(touched[:5])
+    harness = sorted(FULL_VALIDATION_HARNESS_PATHS.intersection(changed))
+    if harness:
+        return True, "validation harness changed: " + ", ".join(harness)
+    return False, ""
 
 
 def materialize_node_dependencies(
@@ -1053,6 +1237,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
     worker_fd_baseline = fd_count(os.getpid())
     try:
         lease_handle = acquire_lease(root, run_id)
+        reap_tracked_children(root, run_id)
         verify_bundle(bundle)
         ledger = read_json(ledger_path(root, run_id))
         if ledger["branch"] != "local/studio-slim":
@@ -1184,6 +1369,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
             if merge_rc and not conflicts and not merge_in_progress:
                 raise RuntimeError("merge failed without resolvable file conflicts")
             if conflicts:
+                record(root, run_id, merge_conflicts=conflicts)
                 resolver = shutil.which("hermes")
                 ledger = read_json(ledger_path(root, run_id))
                 if resolver and not ledger.get("resolver_attempted"):
@@ -1281,93 +1467,142 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
             )
         link_checkout_dependencies(repo, worktree)
         changed = git(worktree, "diff", "--name-only", f"{base}...{result_commit}").splitlines()
-        if phase_before(ledger, "VERIFIED"):
-            ensure_not_aborted(root, run_id)
-            if dependency_manifests_changed(changed):
-                materialize_node_dependencies(root, run_id, worktree)
-            worker_command(
-                root,
-                run_id,
-                [
-                    sys.executable,
-                    str(bundle / "carry.py"),
-                    "--root",
-                    str(worktree),
-                    "--manifest",
-                    str(bundle / "local_carry_manifest.yaml"),
-                    "verify",
-                    "--changed-since",
-                    base,
-                    "--skip-runtime-probes",
-                    "--json",
-                    str(run_dir(root, run_id) / "evidence" / "carry-verify.json"),
-                ],
-                worktree,
-                "carry-verify",
-                3600,
-            )
-            validation_env = os.environ.copy()
-            validation_env["HERMES_REPO_ROOT"] = str(worktree)
-            validation_env["HERMES_TEST_RUNNER"] = str(bundle / "run_tests.sh")
-            worker_command(
-                root,
-                run_id,
-                [str(bundle / "run_update_smart_client_validation.sh")],
-                worktree,
-                "curated-validation",
-                7200,
-                validation_env,
-            )
-            dependency_sensitive = [
-                path
-                for path in changed
-                if Path(path).name in DEP_MANIFEST_NAMES
-                or Path(path).name.endswith(".lock")
-            ]
-            transition(
-                root,
-                run_id,
-                "VERIFIED",
-                changed_paths=changed,
-                dependency_sensitive_paths=dependency_sensitive,
-            )
-        ledger = read_json(ledger_path(root, run_id))
-        desktop_changed = bool(
-            ledger.get("desktop_changed")
-            or any(path.startswith("apps/desktop/") for path in changed)
+        desktop_diff_changed = any(
+            path.startswith("apps/desktop/") for path in changed
         )
-        if phase_before(ledger, "BUILT"):
-            desktop_artifact: str | None = None
-            desktop_artifact_identity: dict[str, str] | None = None
-            if desktop_changed:
+        web_diff_changed = any(path.startswith("web/") for path in changed)
+        dependency_sensitive = [
+            path
+            for path in changed
+            if Path(path).name in DEP_MANIFEST_NAMES
+            or Path(path).name.endswith(".lock")
+        ]
+        # The Desktop build only depends on the merged tree, so it overlaps
+        # with validation; the phase ledger still transitions VERIFIED before
+        # BUILT because BUILT only reaps the child.
+        desktop_build_child: subprocess.Popen[bytes] | None = None
+        desktop_build_output: Any = None
+        try:
+            if phase_before(ledger, "VERIFIED"):
+                ensure_not_aborted(root, run_id)
+                if dependency_manifests_changed(changed):
+                    materialize_node_dependencies(root, run_id, worktree)
+                if desktop_diff_changed:
+                    desktop_build_child, desktop_build_output = start_owned_child(
+                        ["npm", "run", "dist:mac"],
+                        worktree / "apps" / "desktop",
+                        run_dir(root, run_id) / "evidence" / "desktop-build.log",
+                        child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
+                    )
+                    track_owned_child(
+                        root, run_id, "desktop-build", desktop_build_child
+                    )
                 worker_command(
                     root,
                     run_id,
-                    ["npm", "run", "dist:mac"],
-                    worktree / "apps" / "desktop",
-                    "desktop-build",
+                    [
+                        sys.executable,
+                        str(bundle / "carry.py"),
+                        "--root",
+                        str(worktree),
+                        "--manifest",
+                        str(bundle / "local_carry_manifest.yaml"),
+                        "verify",
+                        "--changed-since",
+                        base,
+                        "--skip-runtime-probes",
+                        "--json",
+                        str(run_dir(root, run_id) / "evidence" / "carry-verify.json"),
+                    ],
+                    worktree,
+                    "carry-verify",
+                    3600,
+                )
+                validation_env = os.environ.copy()
+                validation_env["HERMES_REPO_ROOT"] = str(worktree)
+                validation_env["HERMES_TEST_RUNNER"] = str(bundle / "run_tests.sh")
+                validation_env["UPDATE_CHANGED_DESKTOP"] = (
+                    "1" if desktop_diff_changed or web_diff_changed else "0"
+                )
+                full_required, full_reason = full_validation_required(
+                    read_json(ledger_path(root, run_id)),
+                    changed,
+                    dependency_sensitive,
+                )
+                if full_required:
+                    validation_env["UPDATE_VALIDATION_FULL"] = "1"
+                    record(root, run_id, full_validation_reason=full_reason)
+                worker_command(
+                    root,
+                    run_id,
+                    [str(bundle / "run_update_smart_client_validation.sh")],
+                    worktree,
+                    "curated-validation",
                     7200,
-                    child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
+                    validation_env,
                 )
-                apps = sorted(
-                    (worktree / "apps" / "desktop" / "release").glob(
-                        "**/Hermes.app"
-                    ),
-                    key=lambda path: path.stat().st_mtime_ns,
+                transition(
+                    root,
+                    run_id,
+                    "VERIFIED",
+                    changed_paths=changed,
+                    dependency_sensitive_paths=dependency_sensitive,
                 )
-                if not apps:
-                    raise RuntimeError("signed Desktop artifact not found")
-                artifact = apps[-1]
-                desktop_artifact = str(artifact)
-                desktop_artifact_identity = desktop_identity(artifact)
-            transition(
-                root,
-                run_id,
-                "BUILT",
-                desktop_changed=desktop_changed,
-                desktop_artifact=desktop_artifact,
-                desktop_artifact_identity=desktop_artifact_identity,
+            ledger = read_json(ledger_path(root, run_id))
+            desktop_changed = bool(
+                ledger.get("desktop_changed") or desktop_diff_changed
             )
+            if phase_before(ledger, "BUILT"):
+                desktop_artifact: str | None = None
+                desktop_artifact_identity: dict[str, str] | None = None
+                if desktop_changed:
+                    if desktop_build_child is not None:
+                        try:
+                            wait_worker_child(
+                                root,
+                                run_id,
+                                desktop_build_child,
+                                desktop_build_output,
+                                ["npm", "run", "dist:mac"],
+                                7200,
+                            )
+                        finally:
+                            untrack_owned_child(root, run_id, "desktop-build")
+                        desktop_build_child = None
+                    else:
+                        worker_command(
+                            root,
+                            run_id,
+                            ["npm", "run", "dist:mac"],
+                            worktree / "apps" / "desktop",
+                            "desktop-build",
+                            7200,
+                            child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
+                        )
+                    apps = sorted(
+                        (worktree / "apps" / "desktop" / "release").glob(
+                            "**/Hermes.app"
+                        ),
+                        key=lambda path: path.stat().st_mtime_ns,
+                    )
+                    if not apps:
+                        raise RuntimeError("signed Desktop artifact not found")
+                    artifact = apps[-1]
+                    desktop_artifact = str(artifact)
+                    desktop_artifact_identity = desktop_identity(artifact)
+                transition(
+                    root,
+                    run_id,
+                    "BUILT",
+                    desktop_changed=desktop_changed,
+                    desktop_artifact=desktop_artifact,
+                    desktop_artifact_identity=desktop_artifact_identity,
+                )
+        except BaseException:
+            if desktop_build_child is not None:
+                kill_owned_child(desktop_build_child, desktop_build_output)
+                untrack_owned_child(root, run_id, "desktop-build")
+            raise
         ledger = read_json(ledger_path(root, run_id))
         if ledger["mode"] == "rehearse":
             ensure_not_aborted(root, run_id)
@@ -1419,19 +1654,88 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 )
             except ValueError:
                 activated = False
-            if activated and current.get("dependency_sensitive_paths"):
-                note = (
-                    " | rollback requires dependency review (git alone is insufficient): "
-                    + ", ".join(current["dependency_sensitive_paths"][:10])
+            if not activated and abort_requested(root, run_id):
+                # The failure surfaced while an abort was pending: the abort is
+                # the cause, mirror the explicit AbortRequested path above.
+                transition(
+                    root,
+                    run_id,
+                    "ABORTED",
+                    error=f"aborted during {type(exc).__name__}",
                 )
-            transition(
-                root,
-                run_id,
-                "FAILED",
-                error=f"{type(exc).__name__}: {str(exc)[:500]}{note}",
-            )
+            else:
+                if activated and current.get("dependency_sensitive_paths"):
+                    note = (
+                        " | rollback requires dependency review (git alone is insufficient): "
+                        + ", ".join(current["dependency_sensitive_paths"][:10])
+                    )
+                transition(
+                    root,
+                    run_id,
+                    "FAILED",
+                    error=f"{type(exc).__name__}: {str(exc)[:500]}{note}",
+                )
     finally:
         release_lease(lease_handle)
+
+
+def consume_restart_outcome(root: Path, run_id: str, marker: Path) -> None:
+    """Fail the restart wait immediately when the restart helper reported a
+    failure through its completion marker instead of polling out the timeout.
+    A missing or unreadable marker keeps the plain readiness-poll behavior."""
+    if not marker.is_file():
+        return
+    try:
+        outcome = read_json(marker)
+    except (OSError, json.JSONDecodeError):
+        return
+    atomic_json(run_dir(root, run_id) / "evidence" / "restart-outcome.json", outcome)
+    if int(outcome.get("exit_code") or 0) != 0:
+        raise RuntimeError(
+            "restart helper failed: "
+            f"{outcome.get('message') or 'unknown'} "
+            f"(log: {outcome.get('log_path') or 'unknown'})"
+        )
+
+
+def live_dependency_refresh(root: Path, run_id: str, repo: Path) -> None:
+    """Refresh the live checkout's npm and uv trees concurrently.
+
+    The two installers target independent trees (node_modules vs .venv), so
+    they overlap; either failure fails the phase with that command's error.
+    """
+    evidence = run_dir(root, run_id) / "evidence"
+    jobs = (
+        (["npm", "ci"], "live-npm-ci"),
+        (["uv", "sync", *UV_SYNC_EXTRA_ARGS], "live-uv-sync"),
+    )
+    started: list[tuple[subprocess.Popen[bytes], Any, list[str], str]] = []
+    try:
+        for command_args, name in jobs:
+            child, output = start_owned_child(
+                command_args,
+                repo,
+                evidence / f"{name}.log",
+                child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
+            )
+            track_owned_child(root, run_id, name, child)
+            started.append((child, output, command_args, name))
+        for child, output, command_args, name in started:
+            wait_worker_child(
+                root,
+                run_id,
+                child,
+                output,
+                command_args,
+                3600,
+                honor_abort=False,
+            )
+            untrack_owned_child(root, run_id, name)
+    except BaseException:
+        for child, output, _, name in started:
+            kill_owned_child(child, output)
+            untrack_owned_child(root, run_id, name)
+        raise
 
 
 def deploy(
@@ -1618,26 +1922,7 @@ def deploy(
             {"commit": result_commit},
         )
         if receipt.get("state") != "COMPLETED":
-            worker_command(
-                root,
-                run_id,
-                ["npm", "ci"],
-                repo,
-                "live-npm-ci",
-                3600,
-                honor_abort=False,
-                child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
-            )
-            worker_command(
-                root,
-                run_id,
-                ["uv", "sync", *UV_SYNC_EXTRA_ARGS],
-                repo,
-                "live-uv-sync",
-                3600,
-                honor_abort=False,
-                child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
-            )
+            live_dependency_refresh(root, run_id, repo)
             complete_receipt(
                 root, run_id, "live_dependency_refresh", {"refreshed": True}
             )
@@ -1704,8 +1989,10 @@ def deploy(
         old_listener_pids = {int(key): int(value) for key, value in raw_old_pids.items()}
     else:
         old_listener_pids = listener_pids()
+    restart_outcome_marker = run_dir(root, run_id) / "receipts" / "restart-outcome.json"
 
     def restart_probe() -> tuple[bool, dict[str, Any]]:
+        consume_restart_outcome(root, run_id, restart_outcome_marker)
         return surface_inventory(old_listener_pids)
 
     def restart_action() -> None:
@@ -1728,6 +2015,8 @@ def deploy(
                     "--safe-wait-timeout",
                     "86400",
                     "--enqueue-detached",
+                    "--completion-marker",
+                    str(restart_outcome_marker),
                 ],
                 repo,
                 "restart-enqueue",
@@ -1826,6 +2115,9 @@ def deploy(
                 "verify",
                 "--changed-since",
                 base,
+                # The worktree already ran the behavior tests on this exact
+                # commit; the deployed pass only proves runtime wiring.
+                "--probes-only",
                 "--json",
                 str(run_dir(root, run_id) / "evidence" / "deployed-carry-verify.json"),
             ],

@@ -410,32 +410,39 @@ def run_probe(registry: Registry, feature: Feature) -> tuple[bool, str]:
     return result.returncode == 0, result.stderr.strip() or result.stdout.strip()
 
 
-def run_feature_tests(
-    registry: Registry,
-    feature: Feature,
-) -> subprocess.CompletedProcess[str]:
-    python_tests = [path for path in feature.tests if Path(path).suffix == ".py"]
+def classify_feature_tests(
+    tests: tuple[str, ...],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    python_tests = [path for path in tests if Path(path).suffix == ".py"]
     web_tests = [
         str(Path(path).relative_to("web"))
-        for path in feature.tests
+        for path in tests
         if path.startswith("web/") and Path(path).suffix in {".ts", ".tsx"}
     ]
     desktop_tests = [
         str(Path(path).relative_to("apps/desktop"))
-        for path in feature.tests
-        if path.startswith("apps/desktop/")
-        and Path(path).suffix in {".ts", ".tsx"}
+        for path in tests
+        if path.startswith("apps/desktop/") and Path(path).suffix in {".ts", ".tsx"}
     ]
-    recognized = len(python_tests) + len(web_tests) + len(desktop_tests)
-    if recognized != len(feature.tests):
-        unsupported = sorted(
-            set(feature.tests)
-            - {
-                *python_tests,
-                *(f"web/{path}" for path in web_tests),
-                *(f"apps/desktop/{path}" for path in desktop_tests),
-            }
-        )
+    unsupported = sorted(
+        set(tests)
+        - {
+            *python_tests,
+            *(f"web/{path}" for path in web_tests),
+            *(f"apps/desktop/{path}" for path in desktop_tests),
+        }
+    )
+    return python_tests, web_tests, desktop_tests, unsupported
+
+
+def run_feature_tests(
+    registry: Registry,
+    feature: Feature,
+) -> subprocess.CompletedProcess[str]:
+    python_tests, web_tests, desktop_tests, unsupported = classify_feature_tests(
+        feature.tests
+    )
+    if unsupported:
         return subprocess.CompletedProcess(
             args=[],
             returncode=2,
@@ -488,6 +495,85 @@ def run_feature_tests(
     )
 
 
+def run_batched_tests(
+    registry: Registry,
+    features: list[Feature],
+) -> dict[str, subprocess.CompletedProcess[str]]:
+    """Run every selected feature's tests in at most three shared commands.
+
+    Per-feature runs cost up to three cold subprocess groups each; the union
+    runs once per runner instead. A failed batch falls back to per-feature
+    runs only for the features whose tests were in it, for attribution.
+    """
+    classified = {
+        feature.id: classify_feature_tests(feature.tests) for feature in features
+    }
+    python_union = sorted({test for py, _, _, _ in classified.values() for test in py})
+    web_union = sorted({test for _, web, _, _ in classified.values() for test in web})
+    desktop_union = sorted(
+        {test for _, _, desktop, _ in classified.values() for test in desktop}
+    )
+    batches: dict[str, subprocess.CompletedProcess[str] | None] = {
+        "python": None,
+        "web": None,
+        "desktop": None,
+    }
+    if python_union:
+        batches["python"] = command(
+            registry.root,
+            str(registry.root / "scripts" / "run_tests.sh"),
+            "-j",
+            str(max(2, (os.cpu_count() or 2) // 2)),
+            *python_union,
+            "-q",
+            check=False,
+        )
+    if web_union:
+        batches["web"] = command(
+            registry.root / "web",
+            "npm",
+            "exec",
+            "--",
+            "vitest",
+            "run",
+            *web_union,
+            check=False,
+        )
+    if desktop_union:
+        batches["desktop"] = command(
+            registry.root / "apps" / "desktop",
+            "npm",
+            "run",
+            "test:ui",
+            "--",
+            "--run",
+            *desktop_union,
+            check=False,
+        )
+    results: dict[str, subprocess.CompletedProcess[str]] = {}
+    for feature in features:
+        python_tests, web_tests, desktop_tests, unsupported = classified[feature.id]
+        used = [
+            batch
+            for tests, batch in (
+                (python_tests, batches["python"]),
+                (web_tests, batches["web"]),
+                (desktop_tests, batches["desktop"]),
+            )
+            if tests and batch is not None
+        ]
+        if unsupported or any(batch.returncode for batch in used):
+            results[feature.id] = run_feature_tests(registry, feature)
+            continue
+        results[feature.id] = subprocess.CompletedProcess(
+            args=[arg for batch in used for arg in batch.args],
+            returncode=0,
+            stdout="".join(batch.stdout + batch.stderr for batch in used),
+            stderr="",
+        )
+    return results
+
+
 def verify(args: argparse.Namespace) -> int:
     registry = load(args)
     failures = validate_checks(registry)
@@ -498,6 +584,9 @@ def verify(args: argparse.Namespace) -> int:
         missing = wanted.difference(feature.id for feature in selected)
         failures.extend(f"unknown or unaffected feature: {feature}" for feature in sorted(missing))
     evidence: dict[str, Any] = {"features": {}, "failures": failures}
+    test_results: dict[str, subprocess.CompletedProcess[str]] = {}
+    if not args.probes_only:
+        test_results = run_batched_tests(registry, selected)
     for feature in selected:
         record: dict[str, Any] = {}
         provisional = bool(
@@ -508,14 +597,17 @@ def verify(args: argparse.Namespace) -> int:
             "status": "PROVISIONAL" if provisional and not consumer_ok else ("PASS" if consumer_ok else "FAIL"),
             "output": consumer_output[-1000:],
         }
-        test_result = run_feature_tests(registry, feature)
-        record["tests"] = {
-            "status": "PASS" if test_result.returncode == 0 else "FAIL",
-            "returncode": test_result.returncode,
-            "output": (test_result.stdout + test_result.stderr)[-3000:],
-        }
-        if test_result.returncode:
-            failures.append(f"behavior tests failed: {feature.id}")
+        if args.probes_only:
+            record["tests"] = {"status": "SKIPPED", "returncode": 0, "output": ""}
+        else:
+            test_result = test_results[feature.id]
+            record["tests"] = {
+                "status": "PASS" if test_result.returncode == 0 else "FAIL",
+                "returncode": test_result.returncode,
+                "output": (test_result.stdout + test_result.stderr)[-3000:],
+            }
+            if test_result.returncode:
+                failures.append(f"behavior tests failed: {feature.id}")
         if not consumer_ok and not provisional:
             failures.append(f"runtime consumer failed: {feature.id}")
         if args.skip_runtime_probes:
@@ -666,6 +758,7 @@ def build_parser() -> argparse.ArgumentParser:
     verifying.add_argument("--feature", action="append")
     verifying.add_argument("--changed-since")
     verifying.add_argument("--skip-runtime-probes", action="store_true")
+    verifying.add_argument("--probes-only", action="store_true")
     verifying.add_argument("--json", type=Path)
     verifying.set_defaults(func=verify)
     reporting = sub.add_parser("report")
