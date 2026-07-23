@@ -46,7 +46,24 @@ items name their commit; open items are the work queue.
 
 ## Open follow-ups
 
-1. **Identify the pid-145/feishu foreign writer.** The ownership guard makes
+1. **Identify the pid-145/feishu foreign writer.** Evening investigation
+   (2026-07-23): the poisoned payload was not preserved anywhere (file
+   overwritten, no snapshot in run ledgers), so definitive identification is
+   impossible from surviving evidence. Narrowing established: NOT cron (no
+   feishu delivery target in any profile's jobs), NOT profile/root config (feishu
+   `enabled: false` everywhere, no FEISHU_* creds in any .env), NOT the update
+   service (first run 15:01Z, poison 12:56:58Z), NOT current containers (only
+   ~/.hermes/mem0 subpaths are mounted). Correlates in time with a Desktop
+   remote-dashboard health blip (watchdog UNHEALTHY streak 08:58:00) and a
+   dashboard-backend restart storm (1Password rate-limit burst 08:58:04). The
+   colima VM mounts ~/.hermes writable and is the only local environment where
+   pid 145 is a natural value (container/VM pid namespaces); ad-hoc docker runs
+   do occur on this machine. Tripwire for recurrence: non-owner writers can now
+   only merge their named `platforms.<name>` payload — if a foreign feishu entry
+   reappears, capture `gateway_state.json` immediately and check
+   `docker ps` + `colima ssh -- ps aux` before it's overwritten. Worth
+   upstreaming: stamp writer identity (pid + argv) inside each platform payload
+   so the next foreign write self-identifies. Original note: the ownership guard makes
    it harmless, but the source (worktree validation env? container?) that
    stamped a feishu-enabled record at 12:56:58Z is still unidentified.
 2. **3 pre-existing failures in `tests/hermes_cli/test_update_gateway_restart.py`**
