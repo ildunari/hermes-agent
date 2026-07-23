@@ -81,10 +81,10 @@ checks:
     path: apps/desktop/scripts/after-pack.mjs
     needles: [3A22F53A48A189F4A8766CACE00192860CC37F8F, HERMES_OP_SHIM, HERMES_SIGNING_PASSWORD_SERVICE, serviceAccountToken, set-key-partition-list, 'apple-tool:,apple:,codesign:', refusing to produce an ad-hoc local build]
     description: unattended Developer ID signing
-  - id: compaction-replay-budget
+  - id: forced-compaction-tail-budget
     path: agent/context_compressor.py
-    needles: [_REPLAY_BUDGET_KEYS, _serialized_length_for_budget]
-    description: upstream replay-budget accounting for compaction tail
+    needles: [_tail_budget_for_compression]
+    description: manual /compress tail budget scaled from observed usage (replaces retired compaction-replay-budget entry — replay budget is upstream since 65d42e35; upstream-PR candidate)
   - id: portable-guest-denylist
     path: gateway/guest_access.py
     needles: [_HOST_HOME_PATH, _HOST_HOME_PATH_RE, Path.home()]
