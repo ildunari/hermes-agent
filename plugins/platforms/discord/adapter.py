@@ -1013,10 +1013,14 @@ class DiscordVoiceReplyStreamer:
         self._abort_event.set()
         self.finish()
 
+    # Sentence boundary: punctuation followed by whitespace, or a blank line.
+    # Inlined (was tools.tts_tool._SENTENCE_BOUNDARY_RE) — upstream removed
+    # that private symbol when the speaker pipeline moved to SentenceChunker.
+    _VOICE_SENTENCE_BOUNDARY_RE = re.compile(r'(?<=[.!?])(?:\s|\n)|(?:\n\n)')
+
     def _extract_ready_chunks(self, buffer: str, *, flush_remainder: bool) -> tuple[list[str], str]:
-        from tools.tts_tool import _SENTENCE_BOUNDARY_RE
         ready, remaining = [], buffer
-        while (match := _SENTENCE_BOUNDARY_RE.search(remaining)) is not None:
+        while (match := self._VOICE_SENTENCE_BOUNDARY_RE.search(remaining)) is not None:
             sentence, remaining = remaining[:match.end()], remaining[match.end():]
             if len(sentence.strip()) < self.min_sentence_len:
                 remaining = sentence + remaining
