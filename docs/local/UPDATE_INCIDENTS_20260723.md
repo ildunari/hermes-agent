@@ -135,10 +135,25 @@ items name their commit; open items are the work queue.
     (gateway_state.json frozen 18:03:15; no messages/cron/dashboard work).
     Two queued restart helpers (one stale scope-hermes from 16:20) waited
     indefinitely; killed both, restarted via `hermes gateway restart`
-    (bounded 60s drain). Open: root-cause the leaked slot (likely
-    api-server run accounting) and give the external helper a
-    stale-counter escape hatch (cross-check a live gateway endpoint
-    instead of trusting the file alone).
+    (bounded 60s drain). ROOT-CAUSED same evening: not a live leak — a
+    stale-file bug. `_persist_active_agents()` fires only at
+    `_running_agents` turn boundaries (4 call sites, all gateway/run.py:
+    13850, 20500, 8856, 6188-drain-tick) and NEVER on api-server or cron
+    counter mutations (api_server.py has zero persist calls). A transient
+    api/cron blip snapshotted by a coincidental persist freezes in the
+    file until the next turn boundary. Proof: the 18:29:14 shutdown drain
+    logged active_at_start=0, cron_at_start=0, api_at_start=0 — live
+    counters were already clean while the file said 1. Most plausible
+    blip source: the Chronos cron-fire webhook's silent early-exit
+    (api_server.py:5290-5318 → scheduler_provider.py:107-111 returns
+    False before create_execution, zero logging). Fix plan (implement
+    with adversarial review, NOT yet applied): (a) call
+    _persist_active_agents from api_server's _admit_api_agent_request /
+    _release_pending_api_work finallys + /v1/runs teardown + cron
+    _run_and_release; (b) restart_surfaces: bound file-trust to ~120s
+    then cross-check live /api/status _active_work_count instead of the
+    file (keep the long total ceiling for legit long turns); (c)
+    structured claim/release log line with resulting count + subsystem.
 13. **BB private-api threaded sends hang server-side** (reply-to-tapback
     120s ReadTimeout; plain text + media instant; server accepted but never
     answered). Known stale Messages.app-injection class on the Mac Mini —
