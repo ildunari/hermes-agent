@@ -774,6 +774,63 @@ def test_full_validation_required_gates() -> None:
     ) == (True, "merge resolver was attempted")
 
 
+def test_effective_validation_curated_override() -> None:
+    # No override → escalation passes through untouched.
+    assert SERVICE.effective_validation({}, True, "validation harness changed") == (
+        True,
+        "validation harness changed",
+    )
+    # Operator override suppresses but records both reasons for audit.
+    required, reason = SERVICE.effective_validation(
+        {"curated_override": "conftest change is 3 env names; inspected"},
+        True,
+        "validation harness changed: tests/conftest.py",
+    )
+    assert required is False
+    assert "CURATED-OVERRIDE" in reason and "tests/conftest.py" in reason
+    # Blank override never suppresses.
+    assert SERVICE.effective_validation(
+        {"curated_override": "   "}, True, "x"
+    ) == (True, "x")
+    # Override is inert when no escalation fired.
+    assert SERVICE.effective_validation(
+        {"curated_override": "reason"}, False, ""
+    ) == (False, "")
+
+
+def test_start_request_validates_curated_override() -> None:
+    import pytest as _pytest
+
+    base = {
+        "verb": "start",
+        "mode": "update",
+        "nonce": "n",
+        "timestamp": 1,
+    }
+    # Non-string / empty / oversized reasons are rejected at the socket
+    # boundary (validated before nonce so we can call with a fake nonce and
+    # still see the field error first? No — nonce checks run first, so drive
+    # the validation helper path via handle_request with a monkeypatched
+    # nonce guard).
+    from unittest.mock import patch
+
+    with patch.object(SERVICE, "nonce_valid", return_value=True), patch.object(
+        SERVICE, "active_run", return_value=None
+    ), patch.object(SERVICE, "new_run", return_value="rid") as new_run, patch.object(
+        SERVICE, "spawn_worker"
+    ):
+        for bad in ("", "   ", 7, "x" * 301):
+            with _pytest.raises(ValueError):
+                SERVICE.handle_request(
+                    Path("."), Path("."), {**base, "curated_override": bad}, None
+                )
+        resp = SERVICE.handle_request(
+            Path("."), Path("."), {**base, "curated_override": " inspected "}, None
+        )
+        assert resp["ok"] is True
+        assert new_run.call_args.kwargs["curated_override"] == "inspected"
+
+
 def test_resolver_escalation_is_language_scoped() -> None:
     # JS/TS/i18n-only resolver output rides the JS lane (run-10 2026-07-24:
     # an ar-locale catalog.ts resolution escalated the ~8h python suite).

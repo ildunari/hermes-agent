@@ -604,7 +604,13 @@ def verify_bundle(bundle: Path) -> None:
             raise RuntimeError(f"pinned updater bundle hash mismatch: {name}")
 
 
-def new_run(repo: Path, root: Path, mode: str, origin_pid: int | None) -> str:
+def new_run(
+    repo: Path,
+    root: Path,
+    mode: str,
+    origin_pid: int | None,
+    curated_override: str | None = None,
+) -> str:
     stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     run_id = f"{stamp}-{uuid.uuid4().hex[:12]}"
     directory = run_dir(root, run_id)
@@ -631,6 +637,8 @@ def new_run(repo: Path, root: Path, mode: str, origin_pid: int | None) -> str:
         "bundle_hashes": hashes,
         "created_at": utc_now(),
     }
+    if curated_override:
+        ledger["curated_override"] = curated_override
     atomic_json(ledger_path(root, run_id), ledger)
     return run_id
 
@@ -753,7 +761,7 @@ def spawn_worker(repo: Path, root: Path, run_id: str) -> None:
 
 
 def handle_request(repo: Path, root: Path, payload: dict[str, Any], peer_pid: int | None) -> dict[str, Any]:
-    if set(payload) - {"verb", "mode", "run_id", "nonce", "timestamp"}:
+    if set(payload) - {"verb", "mode", "run_id", "nonce", "timestamp", "curated_override"}:
         raise ValueError("unknown request field")
     verb = payload.get("verb")
     if verb not in {"start", "status", "abort", "resume"}:
@@ -765,15 +773,24 @@ def handle_request(repo: Path, root: Path, payload: dict[str, Any], peer_pid: in
     if not nonce_valid(root, nonce, timestamp):
         raise PermissionError("stale or replayed request")
     if verb == "start":
-        if set(payload) - {"verb", "mode", "nonce", "timestamp"}:
+        if set(payload) - {"verb", "mode", "nonce", "timestamp", "curated_override"}:
             raise ValueError("start payload is invalid")
         mode = payload.get("mode")
         if mode not in {"rehearse", "update"}:
             raise ValueError("invalid mode")
+        curated_override = payload.get("curated_override")
+        if curated_override is not None:
+            if (
+                not isinstance(curated_override, str)
+                or not curated_override.strip()
+                or len(curated_override) > 300
+            ):
+                raise ValueError("curated_override must be a short non-empty reason")
+            curated_override = curated_override.strip()
         prior = active_run(root)
         if prior:
             raise RuntimeError(f"run already active: {prior}")
-        run_id = new_run(repo, root, mode, peer_pid)
+        run_id = new_run(repo, root, mode, peer_pid, curated_override=curated_override)
         spawn_worker(repo, root, run_id)
         return {"ok": True, "run_id": run_id}
     run_id = payload.get("run_id")
@@ -857,6 +874,8 @@ def request(args: argparse.Namespace) -> int:
     }
     if args.verb == "start":
         payload["mode"] = args.mode
+        if getattr(args, "curated_override", None):
+            payload["curated_override"] = args.curated_override
     else:
         payload["run_id"] = args.run_id
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1132,6 +1151,25 @@ FULL_VALIDATION_HARNESS_PATHS = {
 
 def dependency_manifests_changed(changed: list[str]) -> bool:
     return any(path in DEPENDENCY_MANIFEST_PATHS for path in changed)
+
+
+def effective_validation(
+    ledger: dict[str, Any], required: bool, reason: str
+) -> tuple[bool, str]:
+    """Apply an operator's audited curated-override to a full-suite escalation.
+
+    ``curated_override`` is set only by an explicit ``request start
+    --curated-override <reason>`` from an attended operator who inspected the
+    escalation trigger (e.g. a 3-line conftest scrub-list addition on a busy
+    upstream day). The suppression and both reasons land in the ledger so the
+    decision is auditable; an empty/absent override never suppresses.
+    """
+    if not required:
+        return False, reason
+    override = str(ledger.get("curated_override") or "").strip()
+    if override:
+        return False, f"CURATED-OVERRIDE({override}); suppressed: {reason}"
+    return True, reason
 
 
 def full_validation_required(
@@ -1587,13 +1625,18 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 validation_env["UPDATE_CHANGED_DESKTOP"] = (
                     "1" if desktop_diff_changed or web_diff_changed else "0"
                 )
+                _gate_ledger = read_json(ledger_path(root, run_id))
                 full_required, full_reason = full_validation_required(
-                    read_json(ledger_path(root, run_id)),
+                    _gate_ledger,
                     changed,
                     dependency_sensitive,
                 )
+                full_required, full_reason = effective_validation(
+                    _gate_ledger, full_required, full_reason
+                )
                 if full_required:
                     validation_env["UPDATE_VALIDATION_FULL"] = "1"
+                if full_reason:
                     record(root, run_id, full_validation_reason=full_reason)
                 worker_command(
                     root,
@@ -2541,6 +2584,12 @@ def parser() -> argparse.ArgumentParser:
     requesting.add_argument("verb", choices=("start", "status", "abort", "resume"))
     requesting.add_argument("--mode", choices=("rehearse", "update"), default="rehearse")
     requesting.add_argument("--run-id")
+    requesting.add_argument(
+        "--curated-override",
+        dest="curated_override",
+        help="Operator-inspected reason to keep this run on the curated lane "
+        "despite a full-suite escalation (recorded in the ledger).",
+    )
     requesting.set_defaults(func=request)
     worker = sub.add_parser("run-worker")
     worker.add_argument("--run-id", required=True)
