@@ -392,12 +392,21 @@ def wait_for_surfaces(
     poll_seconds: float = 5,
     audit_seconds: float = 60,
     sleeper: Callable[[float], None] = time.sleep,
+    busy_probe: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     """Poll readiness with an observable drain audit.
 
     While waiting, append a per-interval snapshot (listener PIDs, readiness,
     replacement state) to evidence/drain-audit.jsonl so a long drain is
     diagnosable instead of a silent hang. On timeout, name the blocked ports.
+
+    ``busy_probe``, when given, is called at the same audit cadence and its
+    return value is embedded under the "busy" key — the structured
+    per-target explanation (label, active_agents, gateway_state,
+    restart_requested, freshness age) of what is actually holding the drain
+    open, not just which ports aren't ready yet. A probe failure is recorded
+    as an error string rather than raised: a diagnostic collection failure
+    must never fail or block the drain wait itself.
     """
     audit_path = run_dir(root, run_id) / "evidence" / "drain-audit.jsonl"
     audit_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -410,10 +419,14 @@ def wait_for_surfaces(
             return
         if time.monotonic() - last_audit >= audit_seconds:
             last_audit = time.monotonic()
+            entry: dict[str, Any] = {"at": utc_now(), **details}
+            if busy_probe is not None:
+                try:
+                    entry["busy"] = busy_probe()
+                except Exception as exc:
+                    entry["busy"] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
             with audit_path.open("a", encoding="utf-8") as handle:
-                handle.write(
-                    json.dumps({"at": utc_now(), **details}, sort_keys=True) + "\n"
-                )
+                handle.write(json.dumps(entry, sort_keys=True) + "\n")
         sleeper(poll_seconds)
     blocked = sorted(
         {
@@ -708,6 +721,8 @@ def redacted_status(root: Path, run_id: str) -> dict[str, Any]:
         "dependency_sensitive_paths",
         "macbook_deferred",
         "macbook_deferred_reason",
+        "retired",
+        "retired_at",
     }
     return {key: ledger[key] for key in allowed if key in ledger}
 
@@ -1698,6 +1713,40 @@ def consume_restart_outcome(root: Path, run_id: str, marker: Path) -> None:
         )
 
 
+def restart_busy_snapshot(repo: Path, scope: str = "hermes") -> dict[str, Any]:
+    """Best-effort structured busy-state snapshot for drain-audit evidence.
+
+    Shells into ``hermes_cli.restart_surfaces --busy-snapshot-json`` (cwd=repo,
+    matching how restart-enqueue itself is invoked as ``-m hermes_cli.
+    restart_surfaces``) instead of re-deriving active_agents/gateway_state/
+    restart_requested/freshness math here — that module is the single source
+    of truth for what "busy" means. Never raises: a diagnostic collection
+    failure must not fail or block the drain wait that calls this.
+    """
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "hermes_cli.restart_surfaces",
+                "--scope",
+                scope,
+                "--busy-snapshot-json",
+            ],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return {
+                "error": f"busy snapshot exited {result.returncode}: {result.stderr[-300:]}"
+            }
+        return json.loads(result.stdout)
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+
 def live_dependency_refresh(root: Path, run_id: str, repo: Path) -> None:
     """Refresh the live checkout's npm and uv trees concurrently.
 
@@ -2025,7 +2074,13 @@ def deploy(
             )
             enqueue_marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             atomic_json(enqueue_marker, {"enqueued_at": utc_now()})
-        wait_for_surfaces(root, run_id, restart_probe, RESTART_WAIT_SECONDS)
+        wait_for_surfaces(
+            root,
+            run_id,
+            restart_probe,
+            RESTART_WAIT_SECONDS,
+            busy_probe=lambda: restart_busy_snapshot(repo),
+        )
 
     receipted(
         root,
@@ -2155,6 +2210,202 @@ def run_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+# A run's status stays FAILED/ABORTED forever once terminal (see TERMINAL and
+# transition()'s guard); retire only ever acts on those two, never COMPLETED
+# (which already self-cleans its worktree at the end of deploy()) and never a
+# still-active run.
+RETIRABLE_STATUSES = {"FAILED", "ABORTED"}
+
+
+def resolve_last_failed_run(root: Path) -> str | None:
+    """Most recent run whose ledger status is FAILED, newest first.
+
+    Mirrors active_run()'s reverse-sorted scan (run ids are zero-padded UTC
+    timestamps, so lexicographic order is chronological order).
+    """
+    runs = root / "runs"
+    if not runs.is_dir():
+        return None
+    for path in sorted(runs.glob("*/ledger.json"), reverse=True):
+        try:
+            ledger = read_json(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if ledger.get("status") == "FAILED":
+            return str(ledger["run_id"])
+    return None
+
+
+def worktree_unique_commits(
+    repo: Path, worktree: Path, run_ref: str | None
+) -> list[str]:
+    """Commits reachable only from this run's ref/worktree, not from any local
+    branch or remote-tracking ref.
+
+    ``git worktree remove --force`` (and losing the ref alongside it) would
+    make these commits unreachable and effectively lost, so retire must
+    refuse whenever this list is non-empty rather than guess which side to
+    keep.
+    """
+    tip = ""
+    if run_ref:
+        tip = git(repo, "rev-parse", "-q", "--verify", run_ref, check=False)
+    if not tip and worktree.exists():
+        tip = git(worktree, "rev-parse", "-q", "--verify", "HEAD", check=False)
+    if not tip:
+        return []
+    other_refs = [
+        line
+        for line in git(
+            repo, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"
+        ).splitlines()
+        if line and line != run_ref
+    ]
+    if not other_refs:
+        return [tip]
+    output = git(repo, "rev-list", tip, "--not", *other_refs, check=False)
+    return [line for line in output.splitlines() if line]
+
+
+def archive_run_evidence(root: Path, run_id: str, worktree: Path) -> list[str]:
+    """Copy residue that lives outside the run's own ledger directory into it
+    before the worktree is deleted.
+
+    Everything the worker itself produces (worker_command logs, receipts,
+    drain-audit, carry-verify JSON) already lands under run_dir() and is
+    already durable — this only rescues the validation script's own scratch
+    directory, which the curated-validation step writes inside the worktree
+    (scripts/run_update_smart_client_validation.sh's $LOGDIR), not under
+    run_dir(), so it would otherwise vanish with the worktree.
+    """
+    archived: list[str] = []
+    residue = worktree / ".update-smart-validation"
+    if residue.is_dir():
+        destination = run_dir(root, run_id) / "archive" / "update-smart-validation"
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(residue, destination)
+        archived.append(str(destination))
+    return archived
+
+
+def stamp_terminal_ledger(root: Path, run_id: str, **updates: Any) -> dict[str, Any]:
+    """Attach bookkeeping to an already-terminal ledger.
+
+    transition()/record() deliberately refuse to touch a terminal ledger — a
+    finished run's record must not silently change. Retiring a terminal run
+    is bookkeeping, not a phase/status change, so this takes the same file
+    lock and writes directly instead of going through transition().
+    """
+    path = ledger_path(root, run_id)
+    lock_path = path.with_suffix(".lock")
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        ledger = read_json(path)
+        if str(ledger.get("status")) not in TERMINAL:
+            raise RuntimeError(f"run is not terminal: {ledger.get('status')}")
+        ledger.update(updates)
+        atomic_json(path, ledger)
+        return ledger
+
+
+def retire_run(repo: Path, root: Path, run_id: str) -> dict[str, Any]:
+    """Clean up a terminal (failed/aborted) run so the update preflight
+    checklist stops seeing it as an interrupted, still-live run.
+
+    Archives evidence that would otherwise be lost, removes the integration
+    worktree (refusing when it holds commits unreachable from any branch or
+    remote), removes leftover .update-smart-validation residue, and stamps
+    the ledger retired. Refuses outright on a non-terminal run.
+    """
+    ledger = read_json(ledger_path(root, run_id))
+    status = str(ledger.get("status"))
+    if status not in RETIRABLE_STATUSES:
+        raise RuntimeError(
+            f"run {run_id} is not retirable: status={status} "
+            f"(only {sorted(RETIRABLE_STATUSES)} can be retired)"
+        )
+    if ledger.get("retired"):
+        return {"run_id": run_id, "already_retired": True}
+    lease = current_lease(root)
+    if lease and str(lease.get("run_id")) == run_id and lease_is_live(root):
+        raise RuntimeError(f"run {run_id} has a live worker lease; wait for it to finish")
+
+    worktree = worktree_for(root, run_id)
+    run_ref = ledger.get("run_ref")
+    unique = worktree_unique_commits(repo, worktree, run_ref)
+    if unique:
+        raise RuntimeError(
+            f"refusing to remove worktree for {run_id}: "
+            f"{len(unique)} commit(s) not reachable from any branch or remote "
+            f"({', '.join(unique[:5])}{', ...' if len(unique) > 5 else ''})"
+        )
+
+    archived = archive_run_evidence(root, run_id, worktree)
+
+    worktree_removed = False
+    if worktree.exists():
+        git(repo, "worktree", "remove", "--force", str(worktree), check=False)
+        git(repo, "worktree", "prune", check=False)
+        if worktree.exists():
+            raise RuntimeError(f"worktree remove did not clean up: {worktree}")
+        worktree_removed = True
+
+    # Defensive: the worktree removal above already deletes everything under
+    # it, including .update-smart-validation, but cover the case where a
+    # prior half-finished cleanup already removed the worktree by hand and
+    # left the scratch directory orphaned at the same path.
+    residue_removed = False
+    residue = worktree / ".update-smart-validation"
+    if residue.exists():
+        shutil.rmtree(residue)
+        residue_removed = True
+
+    stamp_terminal_ledger(
+        root,
+        run_id,
+        retired=True,
+        retired_at=utc_now(),
+        retire_archived_paths=archived,
+        retire_worktree_removed=worktree_removed,
+    )
+    return {
+        "run_id": run_id,
+        "archived": archived,
+        "worktree_removed": worktree_removed,
+        "residue_removed": residue_removed,
+    }
+
+
+def run_retire(args: argparse.Namespace) -> int:
+    repo = args.repo.resolve()
+    root = state_root(args.state_root)
+    run_id = args.run_id
+    if args.last_failed:
+        if run_id:
+            print("specify either --run-id or --last-failed, not both", file=sys.stderr)
+            return 2
+        run_id = resolve_last_failed_run(root)
+        if not run_id:
+            print("no FAILED run found to retire", file=sys.stderr)
+            return 1
+    if not run_id:
+        print("retire requires --run-id or --last-failed", file=sys.stderr)
+        return 2
+    if not RUN_ID_RE.fullmatch(run_id):
+        print(f"invalid run id: {run_id}", file=sys.stderr)
+        return 2
+    try:
+        result = retire_run(repo, root, run_id)
+    except RuntimeError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=DESCRIPTION)
     result.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
@@ -2170,6 +2421,10 @@ def parser() -> argparse.ArgumentParser:
     worker = sub.add_parser("run-worker")
     worker.add_argument("--run-id", required=True)
     worker.set_defaults(func=run_worker)
+    retiring = sub.add_parser("retire")
+    retiring.add_argument("--run-id")
+    retiring.add_argument("--last-failed", action="store_true")
+    retiring.set_defaults(func=run_retire)
     return result
 
 

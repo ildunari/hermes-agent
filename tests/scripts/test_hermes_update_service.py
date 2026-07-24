@@ -19,6 +19,38 @@ sys.modules[SPEC.name] = SERVICE
 SPEC.loader.exec_module(SERVICE)
 
 
+def _run_git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=repo, text=True, capture_output=True, check=True
+    )
+    return result.stdout.strip()
+
+
+def _init_repo(repo: Path) -> str:
+    """A minimal local/studio-slim git repo with one commit; returns its sha."""
+    repo.mkdir(parents=True, exist_ok=True)
+    _run_git(repo, "init", "-q", "-b", "local/studio-slim")
+    _run_git(repo, "config", "user.email", "test@example.com")
+    _run_git(repo, "config", "user.name", "Test")
+    (repo / "README.md").write_text("root\n", encoding="utf-8")
+    _run_git(repo, "add", "README.md")
+    _run_git(repo, "commit", "-q", "-m", "root")
+    return _run_git(repo, "rev-parse", "HEAD")
+
+
+def make_terminal_ledger(root: Path, run_id: str, status: str, **extra: object) -> None:
+    directory = SERVICE.run_dir(root, run_id)
+    directory.mkdir(mode=0o700, parents=True)
+    payload: dict[str, object] = {
+        "run_id": run_id,
+        "phase": status,
+        "status": status,
+        "phase_history": [],
+    }
+    payload.update(extra)
+    SERVICE.atomic_json(SERVICE.ledger_path(root, run_id), payload)
+
+
 def make_ledger(root: Path, run_id: str) -> None:
     directory = SERVICE.run_dir(root, run_id)
     directory.mkdir(mode=0o700, parents=True)
@@ -975,3 +1007,265 @@ def test_validation_env_scoping_signals_in_source() -> None:
         capture_output=True,
     )
     assert bash_check.returncode == 0, bash_check.stderr
+
+
+def test_retire_refuses_non_terminal_run(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-aaaaaaaaaaa1"
+    make_ledger(tmp_path, run_id)  # status RUNNING
+
+    with pytest.raises(RuntimeError, match="not retirable"):
+        SERVICE.retire_run(tmp_path, tmp_path, run_id)
+
+
+def test_retire_refuses_worktree_with_unique_commits(tmp_path: Path) -> None:
+    """A commit reachable only from the run's ref/worktree must block the
+    worktree removal instead of being silently discarded."""
+    repo = tmp_path / "repo"
+    root = tmp_path / "state"
+    base = _init_repo(repo)
+
+    run_id = "20260723T120000Z-aaaaaaaaaaa2"
+    run_ref = f"refs/hermes/update-runs/{run_id}"
+    _run_git(repo, "checkout", "-q", "--detach", base)
+    (repo / "unique.txt").write_text("only here\n", encoding="utf-8")
+    _run_git(repo, "add", "unique.txt")
+    _run_git(repo, "commit", "-q", "-m", "unique work")
+    unique_commit = _run_git(repo, "rev-parse", "HEAD")
+    _run_git(repo, "update-ref", run_ref, unique_commit)
+    _run_git(repo, "checkout", "-q", "local/studio-slim")
+
+    worktree = root / "worktrees" / run_id
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    _run_git(repo, "worktree", "add", "--detach", str(worktree), run_ref)
+
+    make_terminal_ledger(root, run_id, "FAILED", run_ref=run_ref)
+
+    with pytest.raises(RuntimeError, match="not reachable"):
+        SERVICE.retire_run(repo, root, run_id)
+
+    assert worktree.exists()
+    ledger = SERVICE.read_json(SERVICE.ledger_path(root, run_id))
+    assert not ledger.get("retired")
+
+
+def test_retire_removes_worktree_archives_residue_and_marks_retired(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    root = tmp_path / "state"
+    _init_repo(repo)
+
+    # Simulate the real post-activation shape: the run's result commit landed
+    # on local/studio-slim via deploy()'s ff-only activate_action, so it is
+    # fully reachable from the branch tip and carries no unique commits.
+    (repo / "feature.txt").write_text("merged\n", encoding="utf-8")
+    _run_git(repo, "add", "feature.txt")
+    _run_git(repo, "commit", "-q", "-m", "activated commit")
+    result_commit = _run_git(repo, "rev-parse", "HEAD")
+
+    run_id = "20260723T120000Z-aaaaaaaaaaa3"
+    run_ref = f"refs/hermes/update-runs/{run_id}"
+    _run_git(repo, "update-ref", run_ref, result_commit)
+
+    worktree = root / "worktrees" / run_id
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    _run_git(repo, "worktree", "add", "--detach", str(worktree), run_ref)
+
+    residue = worktree / ".update-smart-validation"
+    residue.mkdir(parents=True)
+    (residue / "validation.log").write_text("validation output\n", encoding="utf-8")
+
+    make_terminal_ledger(
+        root, run_id, "FAILED", run_ref=run_ref, result_commit=result_commit
+    )
+
+    result = SERVICE.retire_run(repo, root, run_id)
+
+    assert result["worktree_removed"] is True
+    assert not worktree.exists()
+    archived = (
+        SERVICE.run_dir(root, run_id)
+        / "archive"
+        / "update-smart-validation"
+        / "validation.log"
+    )
+    assert archived.read_text(encoding="utf-8") == "validation output\n"
+    ledger = SERVICE.read_json(SERVICE.ledger_path(root, run_id))
+    assert ledger["retired"] is True
+    assert ledger["retire_worktree_removed"] is True
+    # Terminal status/phase must be untouched by the direct-write path.
+    assert ledger["status"] == "FAILED"
+
+    # Retiring an already-retired run is a no-op, not an error.
+    second = SERVICE.retire_run(repo, root, run_id)
+    assert second == {"run_id": run_id, "already_retired": True}
+
+
+def test_retire_refuses_when_lease_is_live(tmp_path: Path, monkeypatch) -> None:
+    run_id = "20260723T120000Z-aaaaaaaaaaa4"
+    root = tmp_path / "state"
+    make_terminal_ledger(root, run_id, "FAILED")
+    SERVICE.atomic_json(
+        root / "lease.json", {"run_id": run_id, "pid": 999999, "start_time": 1.0}
+    )
+    monkeypatch.setattr(SERVICE, "lease_is_live", lambda _root: True)
+
+    with pytest.raises(RuntimeError, match="live worker lease"):
+        SERVICE.retire_run(tmp_path / "repo-unused", root, run_id)
+
+
+def test_stamp_terminal_ledger_refuses_non_terminal_ledger(tmp_path: Path) -> None:
+    run_id = "20260723T120000Z-aaaaaaaaaaa5"
+    make_ledger(tmp_path, run_id)  # status RUNNING
+
+    with pytest.raises(RuntimeError, match="not terminal"):
+        SERVICE.stamp_terminal_ledger(tmp_path, run_id, retired=True)
+
+
+def test_resolve_last_failed_run_finds_newest_failed(tmp_path: Path) -> None:
+    make_terminal_ledger(tmp_path, "20260723T100000Z-000000000001", "COMPLETED")
+    make_terminal_ledger(tmp_path, "20260723T110000Z-000000000002", "FAILED")
+    make_terminal_ledger(tmp_path, "20260723T120000Z-000000000003", "FAILED")
+    make_terminal_ledger(tmp_path, "20260723T130000Z-000000000004", "ABORTED")
+
+    assert (
+        SERVICE.resolve_last_failed_run(tmp_path)
+        == "20260723T120000Z-000000000003"
+    )
+
+
+def test_resolve_last_failed_run_none_when_no_failed_runs(tmp_path: Path) -> None:
+    assert SERVICE.resolve_last_failed_run(tmp_path) is None
+    make_terminal_ledger(tmp_path, "20260723T120000Z-000000000009", "COMPLETED")
+    assert SERVICE.resolve_last_failed_run(tmp_path) is None
+
+
+def test_run_retire_rejects_conflicting_or_missing_run_selector(tmp_path: Path) -> None:
+    import types
+
+    both = types.SimpleNamespace(
+        repo=tmp_path, state_root=tmp_path, run_id="x", last_failed=True
+    )
+    assert SERVICE.run_retire(both) == 2
+
+    neither = types.SimpleNamespace(
+        repo=tmp_path, state_root=tmp_path, run_id=None, last_failed=False
+    )
+    assert SERVICE.run_retire(neither) == 2
+
+
+def test_run_retire_last_failed_reports_none_found(tmp_path: Path) -> None:
+    import types
+
+    args = types.SimpleNamespace(
+        repo=tmp_path, state_root=tmp_path, run_id=None, last_failed=True
+    )
+    assert SERVICE.run_retire(args) == 1
+
+
+def test_wait_for_surfaces_embeds_busy_probe_in_drain_audit(tmp_path: Path) -> None:
+    """The drain audit's evidence carries the structured busy-state snapshot
+    (per-target label/active_agents/gateway_state/restart_requested/freshness)
+    alongside the plain port readiness, so a stuck drain is diagnosable from
+    the run's own evidence without a live investigation."""
+    run_id = "20260723T120000Z-aaaaaaaaaaa6"
+    make_ledger(tmp_path, run_id)
+
+    busy_payload = {
+        "scope": "hermes",
+        "gateway": [
+            {
+                "label": "ai.hermes.gateway",
+                "active_agents": 1,
+                "gateway_state": "draining",
+                "restart_requested": True,
+                "active_agents_age_seconds": 3.2,
+            }
+        ],
+        "webui": [],
+        "desktop": [],
+    }
+
+    def probe() -> tuple[bool, dict[str, object]]:
+        return False, {"http_ready": {9119: False}, "replaced": {}}
+
+    with pytest.raises(RuntimeError):
+        SERVICE.wait_for_surfaces(
+            tmp_path,
+            run_id,
+            probe,
+            wait_seconds=0.2,
+            poll_seconds=0.05,
+            audit_seconds=0,
+            sleeper=lambda _: None,
+            busy_probe=lambda: busy_payload,
+        )
+
+    audit = SERVICE.run_dir(tmp_path, run_id) / "evidence" / "drain-audit.jsonl"
+    record = json.loads(audit.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert record["busy"]["gateway"][0]["label"] == "ai.hermes.gateway"
+    assert record["busy"]["gateway"][0]["active_agents"] == 1
+    assert record["busy"]["gateway"][0]["gateway_state"] == "draining"
+    assert record["busy"]["gateway"][0]["restart_requested"] is True
+
+
+def test_wait_for_surfaces_busy_probe_failure_is_recorded_not_raised(
+    tmp_path: Path,
+) -> None:
+    """A diagnostic collection failure must not fail or block the drain wait
+    itself — only the readiness probe governs the timeout."""
+    run_id = "20260723T120000Z-aaaaaaaaaaa7"
+    make_ledger(tmp_path, run_id)
+
+    def failing_busy_probe() -> dict[str, object]:
+        raise RuntimeError("busy snapshot subprocess exploded")
+
+    # The readiness probe fails once (writing one audit entry with the
+    # busy_probe's recorded error) before succeeding, so the wait still
+    # returns normally instead of raising.
+    calls = {"n": 0}
+
+    def flaky_probe() -> tuple[bool, dict[str, object]]:
+        calls["n"] += 1
+        return calls["n"] > 1, {"http_ready": {8642: calls["n"] > 1}, "replaced": {}}
+
+    SERVICE.wait_for_surfaces(
+        tmp_path,
+        run_id,
+        flaky_probe,
+        wait_seconds=5,
+        poll_seconds=0.01,
+        audit_seconds=0,
+        sleeper=lambda _: None,
+        busy_probe=failing_busy_probe,
+    )
+
+    audit = SERVICE.run_dir(tmp_path, run_id) / "evidence" / "drain-audit.jsonl"
+    record = json.loads(audit.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert "busy snapshot subprocess exploded" in record["busy"]["error"]
+
+
+def test_restart_busy_snapshot_never_raises_on_subprocess_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise SERVICE.subprocess.TimeoutExpired(cmd="restart_surfaces", timeout=15)
+
+    monkeypatch.setattr(SERVICE.subprocess, "run", fake_run)
+
+    result = SERVICE.restart_busy_snapshot(tmp_path)
+
+    assert "error" in result
+
+
+def test_restart_busy_snapshot_parses_subprocess_json(monkeypatch, tmp_path: Path) -> None:
+    payload = {"scope": "hermes", "gateway": [], "webui": [], "desktop": []}
+    monkeypatch.setattr(
+        SERVICE.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            a[0] if a else [], 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+
+    assert SERVICE.restart_busy_snapshot(tmp_path) == payload
