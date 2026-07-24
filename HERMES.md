@@ -47,3 +47,16 @@ Therefore, treat merge-back as part of finishing the job, not an afterthought:
 ## Multi-Agent Collaboration
 
 Other models may be working in this project at the same time. If anything odd happens or files change unexpectedly, assume another agent may be responsible before reverting or overwriting it. Use `hey.md` in the project root to coordinate with the other agents. Never block waiting for them: leave a concise message, keep making progress on unblocked work, reconcile changes constructively, and work together to achieve the shared goal. When the work is complete, remove resolved coordination messages from `hey.md`; delete the file if it is empty.
+
+## Customization placement (post 2026-07-23 de-carry)
+
+Kosta-specific platforms, providers, and tools live in the user-plugin repo at
+`~/.hermes/plugins` (ildunari/hermes-kosta-plugins) — including full gateway
+platform overrides (bluebubbles, telegram_override, discord_override) and the
+vibeproxy model provider. Default for ANY new customization: plugin first;
+read the `hermes-plugin-hygiene` skill before touching core. A core patch is
+the exception and must register in `scripts/local_carry_manifest.yaml` — it is
+collision debt every `hermes update` pays for. The gateway loads user plugins
+from the ROOT `~/.hermes/config.yaml` `plugins.enabled`; per-profile enables
+only cover standalone CLI/cron contexts. De-carry and update mechanics:
+`slim-carry-update-path` skill.
