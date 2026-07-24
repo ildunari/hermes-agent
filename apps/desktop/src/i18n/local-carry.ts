@@ -5,15 +5,6 @@
  * into en/ja/zh mid-literal.
  */
 import type { Locale } from './types'
-
-/**
- * Locale-robust lookup for carry copy: upstream adds locales (2026-07-24: ar)
- * faster than carry strings get translated, and a plain `[locale]` index is a
- * tsc error the moment `Locale` grows. English is the always-present fallback.
- */
-export function localCarryFor<T>(map: { en: T } & Partial<Record<Locale, T>>, locale: Locale): T {
-  return map[locale] ?? map.en
-}
 export const localCarryComposer = {
   draftPendingNotice: {
     en: 'Draft only — press Send to queue it after the current run.',
@@ -23,7 +14,18 @@ export const localCarryComposer = {
   },
 } as const
 
-export const localCarrySettings = {
+export interface LocalCarryCopy {
+  title: string
+  description: string
+}
+
+/**
+ * Typed wide (not `as const`) so indexing with the full `Locale` type stays
+ * legal as upstream adds locales (2026-07-24: ar); callers fall back to en.
+ */
+export const localCarrySettings: {
+  localEnhancements: { en: LocalCarryCopy } & Partial<Record<Locale, LocalCarryCopy>>
+} = {
   localEnhancements: {
     en: {
       title: 'Local Enhancements',
@@ -42,4 +44,4 @@ export const localCarrySettings = {
       description: '由你的 Hermes Desktop 版本維護的功能。'
     }
   }
-} as const
+}
