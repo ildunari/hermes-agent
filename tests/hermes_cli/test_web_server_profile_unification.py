@@ -643,6 +643,81 @@ class TestProfileScopedGateway:
         assert data["gateway_state"] == "running"
         assert data["gateway_platforms"] == {"telegram": {"state": "connected"}}
 
+    def test_status_reports_running_when_served_by_default_multiplex_gateway(
+        self, client, isolated_profiles, monkeypatch
+    ):
+        """A named profile with no local gateway process must report the
+        default profile's multiplex gateway as its own when that gateway's
+        served_profiles includes it (Desktop renders the backend as down
+        otherwise)."""
+        import hermes_cli.web_server as web_server
+
+        worker_home = isolated_profiles["worker_beta"]
+        default_home = isolated_profiles["default"]
+        (worker_home / ".env").write_text(
+            "TELEGRAM_BOT_TOKEN=worker-token\n", encoding="utf-8"
+        )
+        (worker_home / "config.yaml").write_text(
+            yaml.safe_dump({"platforms": {"telegram": {"enabled": True}}}),
+            encoding="utf-8",
+        )
+        mux_runtime = {
+            "pid": 777,
+            "gateway_state": "running",
+            "served_profiles": ["default", "worker_beta"],
+            "platforms": {"telegram": {"state": "connected"}},
+            "exit_reason": None,
+            "updated_at": "2026-07-23T00:00:00+00:00",
+        }
+
+        def fake_read_runtime_status(path=None):
+            if path is None:
+                return None  # no profile-local runtime file
+            if str(path).startswith(str(default_home)):
+                return mux_runtime
+            return None
+
+        monkeypatch.setattr(web_server, "check_config_version", lambda: (1, 1))
+        monkeypatch.setattr(web_server, "get_running_pid_cached", lambda: None)
+        monkeypatch.setattr(
+            web_server, "read_runtime_status", fake_read_runtime_status
+        )
+        monkeypatch.setattr(
+            web_server,
+            "get_runtime_status_running_pid",
+            lambda payload: 777 if payload is mux_runtime else None,
+        )
+        monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", None)
+        monkeypatch.setattr(
+            "hermes_cli.profiles.profiles_to_serve",
+            lambda include_default: [
+                ("default", default_home),
+                ("worker_beta", worker_home),
+            ],
+        )
+        monkeypatch.setattr(
+            "hermes_cli.profiles._check_gateway_running",
+            lambda home: home == default_home,
+        )
+        from gateway.config import Platform
+
+        class _FakeGatewayConfig:
+            def get_connected_platforms(self):
+                return [Platform.TELEGRAM]
+
+        monkeypatch.setattr(
+            "gateway.config.load_gateway_config", lambda: _FakeGatewayConfig()
+        )
+
+        resp = client.get("/api/status", params={"profile": "worker_beta"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["gateway_running"] is True
+        assert data["gateway_pid"] == 777
+        assert data["gateway_state"] == "running"
+        assert data["gateway_platforms"] == {"telegram": {"state": "connected"}}
+
 
 class TestProfileScopedTelegramOnboarding:
     def test_apply_writes_target_profile_and_restarts_target(

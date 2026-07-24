@@ -3264,6 +3264,46 @@ async def get_status(profile: Optional[str] = None):
                 gateway_running = True
                 gateway_pid = runtime_pid
 
+        # Multiplex fallback: a named profile served by the default profile's
+        # multiplex gateway has no profile-local gateway process, so the local
+        # PID/state checks above report "stopped" even while the multiplexer
+        # is live and serving this profile (Desktop then renders the backend
+        # as down). Only consulted when the local checks found nothing.
+        if not gateway_running:
+            try:
+                from hermes_cli.profiles import (
+                    _check_gateway_running as _mux_check_running,
+                    profiles_to_serve as _mux_profiles_to_serve,
+                )
+
+                _own_home = get_hermes_home()
+                _own_profile = (
+                    _own_home.name
+                    if _own_home.parent.name == "profiles"
+                    else "default"
+                )
+                for _mux_name, _mux_home in _mux_profiles_to_serve(True):
+                    if _mux_home == _own_home:
+                        continue
+                    if not _mux_check_running(_mux_home):
+                        continue
+                    _mux_runtime = read_runtime_status(
+                        _mux_home / "gateway_state.json"
+                    )
+                    _mux_served = [
+                        str(p)
+                        for p in ((_mux_runtime or {}).get("served_profiles") or [])
+                    ]
+                    if _own_profile in _mux_served:
+                        gateway_running = True
+                        gateway_pid = get_runtime_status_running_pid(_mux_runtime)
+                        runtime = _mux_runtime
+                        break
+            except Exception:
+                _log.debug(
+                    "multiplex gateway fallback probe failed", exc_info=True
+                )
+
         if runtime:
             gateway_state = runtime.get("gateway_state")
             gateway_platforms = runtime.get("platforms") or {}
