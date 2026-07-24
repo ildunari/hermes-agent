@@ -869,16 +869,40 @@ def gateway_busy_snapshot(targets: Iterable[RestartTarget]) -> list[dict[str, An
         if not _count_is_fresh:
             live = _heartbeat_active_agents(target)
             if live is None:
-                # No independent confirmation: fail closed. A stale/unknown
-                # count of any value is treated as BUSY until a fresh source
-                # confirms zero — never let an unverifiable idle proceed.
+                # No independent confirmation: fail closed for NONZERO counts.
+                # For ZERO there is one sanctioned exception: a LEGACY writer
+                # (no stamp field at all — a gateway predating the stamp) can
+                # never prove freshness, so demanding it deadlocks every
+                # first-upgrade restart (observed live 2026-07-24: the old
+                # gateway idled for 6h while the new helper refused its zero).
+                # A legacy zero with fresh updated_at and a live pid is the
+                # best evidence a legacy writer can produce and matches
+                # pre-stamp behavior; once the NEW gateway runs, the stamp
+                # exists and the strict path applies. A PRESENT-but-stale
+                # stamp still fails closed — that writer could have stamped
+                # and didn't.
                 if active_agents == 0:
-                    _append_log(
-                        f"{target.label}: active_agents=0 but count freshness is "
-                        f"unknown (stamp={_stamp!r}, age={active_agents_age!r}s) and "
-                        "no heartbeat is available; treating as BUSY (failing closed)"
-                    )
-                    active_agents = 1  # force busy; unverifiable idle is not idle
+                    _legacy_writer = "active_agents_updated_at" not in payload
+                    _updated_age = _iso_age_seconds(payload.get("updated_at"))
+                    if (
+                        _legacy_writer
+                        and _updated_age is not None
+                        and _updated_age <= ACTIVE_AGENTS_TRUST_WINDOW_S
+                    ):
+                        _append_log(
+                            f"{target.label}: active_agents=0 from a legacy "
+                            f"writer (no count stamp), updated_at fresh "
+                            f"({_updated_age:.1f}s) and pid live; accepting "
+                            "legacy idle (first-upgrade transition)"
+                        )
+                    else:
+                        _append_log(
+                            f"{target.label}: active_agents=0 but count freshness "
+                            f"is unknown (stamp={_stamp!r}, age={active_agents_age!r}s) "
+                            "and no heartbeat is available; treating as BUSY "
+                            "(failing closed)"
+                        )
+                        active_agents = 1  # force busy; unverifiable idle is not idle
                 else:
                     _append_log(
                         f"{target.label}: active_agents={active_agents} but status "

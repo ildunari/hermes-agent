@@ -2007,10 +2007,10 @@ def test_gateway_busy_details_missing_count_stamp_consults_heartbeat(monkeypatch
     assert not busy  # heartbeat says idle
 
 
-def test_gateway_busy_details_stale_zero_without_heartbeat_is_busy(monkeypatch, tmp_path):
-    """Codex batch-2 review P1-3: a stale/unknown-freshness ZERO count with no
-    heartbeat must be treated as BUSY (unverifiable idle is not idle), so a
-    restart cannot proceed during a live run whose count-write was skipped."""
+def test_gateway_busy_details_legacy_zero_with_fresh_updated_at_is_idle(monkeypatch, tmp_path):
+    """First-upgrade transition: a LEGACY writer (no stamp field) reporting
+    zero with fresh updated_at and a live pid is accepted as idle — demanding
+    a stamp it cannot produce deadlocked the 2026-07-24 05:35 restart for 6h."""
     import json
     from datetime import datetime, timezone
     from hermes_cli.restart_surfaces import _gateway_busy_details
@@ -2021,7 +2021,7 @@ def test_gateway_busy_details_stale_zero_without_heartbeat_is_busy(monkeypatch, 
         "active_agents": 0,
         "gateway_state": "running",
         "updated_at": datetime.now(timezone.utc).isoformat(),
-        # no active_agents_updated_at -> unknown freshness
+        # no active_agents_updated_at field at all -> legacy writer
     }))
     target = targets_for_scope("gateways")[0]
     monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
@@ -2029,4 +2029,31 @@ def test_gateway_busy_details_stale_zero_without_heartbeat_is_busy(monkeypatch, 
     monkeypatch.setattr("hermes_cli.restart_surfaces._heartbeat_active_agents", lambda t: None)
 
     busy = _gateway_busy_details([target])
-    assert len(busy) == 1  # unverifiable zero -> fail closed to busy
+    assert not busy  # legacy zero + fresh updated_at + live pid -> idle
+
+
+def test_gateway_busy_details_stale_zero_from_stamping_writer_is_busy(monkeypatch, tmp_path):
+    """Codex batch-2 review P1-3: a writer that CAN stamp but whose stamp is
+    stale must fail closed even at zero (a skipped count-write cannot
+    authorize a restart mid-run)."""
+    import json
+    from datetime import datetime, timedelta, timezone
+    from hermes_cli.restart_surfaces import _gateway_busy_details
+
+    now = datetime.now(timezone.utc)
+    status = tmp_path / "gateway_state.json"
+    status.write_text(json.dumps({
+        "pid": 123,
+        "active_agents": 0,
+        "gateway_state": "running",
+        "updated_at": now.isoformat(),
+        # stamp PRESENT but stale -> this writer stamps, and didn't.
+        "active_agents_updated_at": (now - timedelta(seconds=900)).isoformat(),
+    }))
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr("hermes_cli.restart_surfaces._heartbeat_active_agents", lambda t: None)
+
+    busy = _gateway_busy_details([target])
+    assert len(busy) == 1  # stale stamp at zero -> fail closed to busy
