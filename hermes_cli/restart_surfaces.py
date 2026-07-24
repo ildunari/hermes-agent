@@ -213,6 +213,18 @@ HEARTBEAT_FRESH_WINDOW_S = 90.0
 # Listener port owned by the root gateway's API server. Used as a second
 # liveness fallback when both gateway_state.json and the heartbeat are unusable.
 GATEWAY_LISTENER_PORT = 8642
+# gateway_state.json's active_agents only rewrites on turn/claim/release
+# boundaries. In the ordinary case those now fire immediately (api_server and
+# cron claim/release paths persist on every mutation — see
+# gateway/platforms/api_server.py, cron/scheduler.py), so the file is
+# reliably fresh. But a single long-running turn with no intermediate
+# mutation, a persist that failed, or a foreign clobber can still leave it
+# stale. Trusting a stale nonzero active_agents forever wedged a drain for
+# hours in docs/local/UPDATE_INCIDENTS_20260723.md item 12. Once the file is
+# older than this window, ``_gateway_busy_details`` cross-checks the
+# independent loop heartbeat (refreshed every ~30s regardless of activity;
+# see gateway/shutdown_watchdog.py) before trusting a nonzero count.
+ACTIVE_AGENTS_TRUST_WINDOW_S = 120.0
 # A queued restart should behave like a staged operation: if another Hermes
 # session is still running, wait for it to drain instead of forcing Kosta to
 # rerun the command manually.  Twenty-four hours keeps a stuck gateway from
@@ -761,6 +773,56 @@ def _desktop_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
     return []
 
 
+def _iso_age_seconds(value: Any) -> float | None:
+    """Age in seconds of an RFC3339 timestamp, or ``None`` if unparseable."""
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith(("Z", "z")):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - parsed).total_seconds()
+
+
+def _heartbeat_active_agents(target: RestartTarget) -> tuple[int, float] | None:
+    """Live ``active_agents`` from the loop heartbeat, when fresh.
+
+    ``gateway_state.json`` only rewrites on turn/claim/release boundaries; the
+    loop heartbeat (``gateway.shutdown_watchdog``) is rewritten on a fixed
+    ~30s cadence regardless of activity, with a live ``active_agents``
+    snapshot merged in every tick (gateway/run.py's ``loop_heartbeat_forever``
+    call). That makes it an independent cross-check for exactly the case
+    where the state file might be stale: a single long turn past the trust
+    window, a persist that silently failed, or a foreign clobber of the
+    state file. Returns ``None`` when the heartbeat is missing, older than
+    ``HEARTBEAT_FRESH_WINDOW_S``, or predates this field (older gateway
+    build) — callers must treat that as "cannot confirm", not "confirmed
+    idle".
+    """
+    path = _heartbeat_path_for_target(target)
+    if path is None:
+        return None
+    payload = _read_json(path)
+    if not payload:
+        return None
+    age = _iso_age_seconds(payload.get("updated_at"))
+    if age is None or not (-HEARTBEAT_FRESH_WINDOW_S <= age <= HEARTBEAT_FRESH_WINDOW_S):
+        return None
+    if "active_agents" not in payload:
+        return None
+    try:
+        return int(payload["active_agents"]), age
+    except (TypeError, ValueError):
+        return None
+
+
 def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
     busy: list[str] = []
     for target in targets:
@@ -778,6 +840,30 @@ def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
             active_agents = 0
         gateway_state = str(payload.get("gateway_state") or "unknown")
         restart_requested = bool(payload.get("restart_requested"))
+
+        if active_agents > 0:
+            file_age = _iso_age_seconds(payload.get("updated_at"))
+            if file_age is None or file_age > ACTIVE_AGENTS_TRUST_WINDOW_S:
+                live = _heartbeat_active_agents(target)
+                if live is None:
+                    _append_log(
+                        f"{target.label}: active_agents={active_agents} but status "
+                        f"file is stale (age={file_age!r}s, trust_window="
+                        f"{ACTIVE_AGENTS_TRUST_WINDOW_S}s) and no fresh heartbeat "
+                        "active_agents is available; trusting the stale file "
+                        "(failing closed)"
+                    )
+                else:
+                    live_count, live_age = live
+                    if live_count != active_agents:
+                        _append_log(
+                            f"{target.label}: status file active_agents="
+                            f"{active_agents} is stale (age={file_age!r}s); fresh "
+                            f"heartbeat reports active_agents={live_count} "
+                            f"(age={live_age:.1f}s) — trusting the heartbeat"
+                        )
+                    active_agents = live_count
+
         if active_agents > 0 or (restart_requested and gateway_state == "draining"):
             busy.append(
                 f"{target.label}: active_agents={active_agents}, state={gateway_state}, "

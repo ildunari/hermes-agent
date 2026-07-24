@@ -128,6 +128,122 @@ class TestDrainWaitsForCronWork:
         assert timed_out is False
 
 
+class TestCronPersistsActiveAgentsOnClaimRelease:
+    """Regression coverage for docs/local/UPDATE_INCIDENTS_20260723.md item 12:
+    cron dispatch/completion mutates ``_running_job_ids`` from a worker thread,
+    entirely outside GatewayRunner, and previously never told the gateway to
+    persist ``active_agents`` — leaving ``gateway_state.json`` stale until an
+    unrelated turn boundary. ``_submit_with_guard`` must now persist on claim
+    (job dispatched), on release (job finishes), and on the dispatch-failure
+    release path."""
+
+    def test_persists_on_claim_and_release(self, monkeypatch):
+        import cron.scheduler as sched
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = {
+            "id": "persist-job",
+            "name": "persist-test",
+            "prompt": "test",
+            "schedule": "every 5m",
+            "enabled": True,
+            "next_run_at": "2020-01-01T00:00:00",
+            "deliver": "local",
+        }
+
+        calls = []
+        monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
+        monkeypatch.setattr(sched, "advance_next_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "run_job", lambda j, **_kw: (True, "out", "resp", None))
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: "/tmp/out")
+        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+
+        with patch("gateway.run.persist_active_agents_now", side_effect=lambda: calls.append(1)):
+            n = sched.tick(verbose=False)
+
+        assert n == 1
+        # Claim (dispatch) + release (worker finally) == at least 2 calls.
+        assert len(calls) >= 2
+        assert "persist-job" not in sched._running_job_ids
+
+        sched._shutdown_parallel_pool()
+
+    def test_persists_on_dispatch_failure_release(self, monkeypatch):
+        """The ``pool.submit`` exception path releases the claim too — it
+        must persist on that release path just like the normal one."""
+        import cron.scheduler as sched
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = {
+            "id": "dispatch-fail-job",
+            "name": "dispatch-fail-test",
+            "prompt": "test",
+            "schedule": "every 5m",
+            "enabled": True,
+            "next_run_at": "2020-01-01T00:00:00",
+            "deliver": "local",
+        }
+
+        calls = []
+        pool = MagicMock()
+        pool.submit.side_effect = RuntimeError("executor dispatch boom")
+        monkeypatch.setattr(sched, "_get_parallel_pool", lambda *_a, **_kw: pool)
+        monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
+        monkeypatch.setattr(sched, "advance_next_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "finish_execution", lambda *_a, **_kw: None)
+
+        with patch("gateway.run.persist_active_agents_now", side_effect=lambda: calls.append(1)):
+            sched.tick(verbose=False)
+
+        # Claim + dispatch-failure release == at least 2 calls, and the
+        # claim must not be left dangling in _running_job_ids.
+        assert len(calls) >= 2
+        assert "dispatch-fail-job" not in sched._running_job_ids
+
+        sched._shutdown_parallel_pool()
+
+    def test_persist_failure_never_breaks_dispatch(self, monkeypatch):
+        """Best-effort: a broken persist hook must not stop the job from
+        running or from being released from the running set."""
+        import cron.scheduler as sched
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = {
+            "id": "persist-broken-job",
+            "name": "persist-broken-test",
+            "prompt": "test",
+            "schedule": "every 5m",
+            "enabled": True,
+            "next_run_at": "2020-01-01T00:00:00",
+            "deliver": "local",
+        }
+
+        monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
+        monkeypatch.setattr(sched, "advance_next_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "run_job", lambda j, **_kw: (True, "out", "resp", None))
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: "/tmp/out")
+        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+
+        with patch("gateway.run.persist_active_agents_now", side_effect=RuntimeError("boom")):
+            n = sched.tick(verbose=False)
+
+        assert n == 1
+        assert "persist-broken-job" not in sched._running_job_ids
+
+        sched._shutdown_parallel_pool()
+
+
 class TestKillToolSubprocessesMarksCronInterrupted:
     @pytest.mark.asyncio
     async def test_in_flight_cron_job_marked_interrupted_on_forced_kill(self, monkeypatch):

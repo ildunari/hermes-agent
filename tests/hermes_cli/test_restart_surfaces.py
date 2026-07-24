@@ -1334,6 +1334,134 @@ def test_gateway_busy_details_ignores_stale_dead_status(monkeypatch, tmp_path):
     assert _gateway_busy_details([target]) == []
 
 
+def _write_status_with_age(tmp_path, *, active_agents, age_s, pid=123):
+    """A gateway_state.json with a controllable ``updated_at`` age."""
+    from datetime import datetime, timedelta, timezone
+
+    status = tmp_path / "gateway_state.json"
+    updated_at = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    status.write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "active_agents": active_agents,
+                "gateway_state": "running",
+                "updated_at": updated_at.isoformat(),
+            }
+        )
+    )
+    return status
+
+
+def _write_heartbeat_with_agents(tmp_path, *, active_agents, age_s, pid=123):
+    from datetime import datetime, timedelta, timezone
+
+    heartbeat_path = tmp_path / "state" / "gateway.heartbeat"
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    updated_at = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "updated_at": updated_at.isoformat(),
+                "monotonic": 1.0,
+                "active_agents": active_agents,
+            }
+        )
+    )
+    return heartbeat_path
+
+
+def test_gateway_busy_details_trusts_fresh_status_file_without_heartbeat(monkeypatch, tmp_path):
+    """A recently-written status file is trusted directly — no heartbeat needed."""
+    from hermes_cli.restart_surfaces import _gateway_busy_details
+
+    status = _write_status_with_age(tmp_path, active_agents=1, age_s=5)
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+
+    busy = _gateway_busy_details([target])
+    assert len(busy) == 1
+    assert "active_agents=1" in busy[0]
+
+
+def test_gateway_busy_details_stale_file_trusts_fresh_heartbeat_showing_idle(monkeypatch, tmp_path):
+    """The exact phantom-drain shape (item 12): a stale nonzero active_agents
+    in gateway_state.json must not block a restart when a fresh, independent
+    heartbeat confirms the gateway is actually idle."""
+    from hermes_cli import restart_surfaces
+    from hermes_cli.restart_surfaces import _gateway_busy_details
+
+    status = _write_status_with_age(
+        tmp_path, active_agents=1, age_s=restart_surfaces.ACTIVE_AGENTS_TRUST_WINDOW_S + 30
+    )
+    _write_heartbeat_with_agents(tmp_path, active_agents=0, age_s=5)
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+
+    assert _gateway_busy_details([target]) == []
+
+
+def test_gateway_busy_details_stale_file_heartbeat_confirms_still_busy(monkeypatch, tmp_path):
+    """A legitimate long-running turn: file is past the trust window but the
+    fresh heartbeat still reports active work, so the restart still waits."""
+    from hermes_cli import restart_surfaces
+    from hermes_cli.restart_surfaces import _gateway_busy_details
+
+    status = _write_status_with_age(
+        tmp_path, active_agents=1, age_s=restart_surfaces.ACTIVE_AGENTS_TRUST_WINDOW_S + 30
+    )
+    _write_heartbeat_with_agents(tmp_path, active_agents=1, age_s=5)
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+
+    busy = _gateway_busy_details([target])
+    assert len(busy) == 1
+    assert "active_agents=1" in busy[0]
+
+
+def test_gateway_busy_details_stale_file_no_heartbeat_fails_closed(monkeypatch, tmp_path):
+    """No independent evidence available: stay conservative and trust the
+    stale file rather than silently unwedging a possibly-real busy state."""
+    from hermes_cli import restart_surfaces
+    from hermes_cli.restart_surfaces import _gateway_busy_details
+
+    status = _write_status_with_age(
+        tmp_path, active_agents=1, age_s=restart_surfaces.ACTIVE_AGENTS_TRUST_WINDOW_S + 30
+    )
+    # No heartbeat file written at all.
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+
+    busy = _gateway_busy_details([target])
+    assert len(busy) == 1
+    assert "active_agents=1" in busy[0]
+
+
+def test_gateway_busy_details_stale_file_stale_heartbeat_fails_closed(monkeypatch, tmp_path):
+    """A heartbeat that is itself too old to trust must not vouch for idle."""
+    from hermes_cli import restart_surfaces
+    from hermes_cli.restart_surfaces import _gateway_busy_details
+
+    status = _write_status_with_age(
+        tmp_path, active_agents=1, age_s=restart_surfaces.ACTIVE_AGENTS_TRUST_WINDOW_S + 30
+    )
+    _write_heartbeat_with_agents(
+        tmp_path, active_agents=0, age_s=restart_surfaces.HEARTBEAT_FRESH_WINDOW_S + 30
+    )
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+
+    busy = _gateway_busy_details([target])
+    assert len(busy) == 1
+    assert "active_agents=1" in busy[0]
+
+
 def test_restart_scope_sends_completion_notifications(monkeypatch, tmp_path):
     calls = []
     notifications = []

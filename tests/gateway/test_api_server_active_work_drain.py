@@ -234,6 +234,188 @@ class TestDrainWaitsForApiWork:
         assert timed_out is False
 
 
+class TestPersistsActiveAgentsOnClaimRelease:
+    """Regression coverage for docs/local/UPDATE_INCIDENTS_20260723.md item 12:
+    API-server claim/release paths mutate counters (``_pending_agent_requests``,
+    ``_inflight_agent_runs``, ``_active_run_tasks``) that feed
+    ``GatewayRunner._active_work_count()`` but previously never told the
+    gateway to persist ``active_agents`` -- leaving ``gateway_state.json``
+    stale until an unrelated turn boundary."""
+
+    @pytest.mark.asyncio
+    async def test_admission_wrapper_persists_on_claim_and_release(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        runner, _adapter = make_restart_runner()
+        runner.adapters = {Platform.API_SERVER: adapter}
+        app = _make_admission_app(adapter)
+        calls = []
+
+        with patch("gateway.run._gateway_runner_ref", lambda: runner), patch(
+            "gateway.run.persist_active_agents_now", side_effect=lambda: calls.append(1)
+        ), patch.object(
+            adapter, "_get_existing_session_or_404", return_value=({}, None)
+        ), patch.object(
+            adapter, "_read_json_body", new=AsyncMock(return_value=({"message": "hi"}, None))
+        ), patch.object(
+            adapter, "_run_agent", new=AsyncMock(return_value=({"final_response": "ok"}, {}))
+        ):
+            async with TestClient(TestServer(app)) as client:
+                response = await client.post("/api/sessions/missing/chat", json={})
+
+        assert response.status == 200
+        # Claim (admission) + release (finally) == at least 2 calls.
+        assert len(calls) >= 2
+
+    @pytest.mark.asyncio
+    async def test_v1_runs_persists_on_claim_and_teardown(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        runner, _adapter = make_restart_runner()
+        runner.adapters = {Platform.API_SERVER: adapter}
+        app = _make_admission_app(adapter)
+        calls = []
+
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "done"}
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        with patch("gateway.run._gateway_runner_ref", lambda: runner), patch(
+            "gateway.run.persist_active_agents_now", side_effect=lambda: calls.append(1)
+        ), patch.object(adapter, "_create_agent", return_value=mock_agent):
+            async with TestClient(TestServer(app)) as client:
+                response = await client.post("/v1/runs", json={"input": "hello"})
+                assert response.status == 202
+                run_id = (await response.json())["run_id"]
+
+                for _ in range(200):
+                    if run_id not in adapter._active_run_tasks:
+                        break
+                    await asyncio.sleep(0.01)
+
+        assert run_id not in adapter._active_run_tasks
+        # Claim (task registration) + release (teardown finally) == at least 2.
+        assert len(calls) >= 2
+
+    @pytest.mark.asyncio
+    async def test_persist_hook_failure_never_breaks_admission(self):
+        """Best-effort: a broken persist hook must not fail the request."""
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        runner, _adapter = make_restart_runner()
+        runner.adapters = {Platform.API_SERVER: adapter}
+        app = _make_admission_app(adapter)
+
+        with patch("gateway.run._gateway_runner_ref", lambda: runner), patch(
+            "gateway.run.persist_active_agents_now", side_effect=RuntimeError("boom")
+        ), patch.object(
+            adapter, "_get_existing_session_or_404", return_value=({}, None)
+        ), patch.object(
+            adapter, "_read_json_body", new=AsyncMock(return_value=({"message": "hi"}, None))
+        ), patch.object(
+            adapter, "_run_agent", new=AsyncMock(return_value=({"final_response": "ok"}, {}))
+        ):
+            async with TestClient(TestServer(app)) as client:
+                response = await client.post("/api/sessions/missing/chat", json={})
+
+        assert response.status == 200
+
+
+class TestPersistActiveAgentsNowThrottle:
+    """Unit coverage for gateway.run.persist_active_agents_now — the shared,
+    throttled entry point api_server and cron use to persist active_agents
+    from claim/release sites outside GatewayRunner (docs/local/
+    UPDATE_INCIDENTS_20260723.md item 12)."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cron_running_set(self):
+        import cron.scheduler as sched
+
+        sched._running_job_ids.clear()
+        yield
+        sched._running_job_ids.clear()
+
+    def _isolated_state(self, monkeypatch):
+        import gateway.run as run_mod
+
+        state = {"ts": 0.0, "count": -1.0}
+        monkeypatch.setattr(run_mod, "_active_agents_persist_state", state)
+        return run_mod, state
+
+    def test_no_runner_is_a_silent_no_op(self, monkeypatch):
+        import gateway.run as run_mod
+
+        monkeypatch.setattr(run_mod, "_gateway_runner_ref", lambda: None)
+        run_mod.persist_active_agents_now()  # must not raise
+
+    def test_first_call_always_persists(self, monkeypatch):
+        run_mod, _state = self._isolated_state(monkeypatch)
+        runner, _adapter = make_restart_runner()
+        runner._running_agents = {"s1": object()}
+        monkeypatch.setattr(run_mod, "_gateway_runner_ref", lambda: runner)
+        runner._update_runtime_status = MagicMock()  # unused by _persist_active_agents
+
+        with patch("gateway.status.write_runtime_status") as write_mock:
+            run_mod.persist_active_agents_now()
+
+        write_mock.assert_called_once_with(active_agents=1)
+
+    def test_repeat_calls_within_window_are_throttled(self, monkeypatch):
+        run_mod, _state = self._isolated_state(monkeypatch)
+        runner, _adapter = make_restart_runner()
+        runner._running_agents = {"s1": object(), "s2": object()}
+        monkeypatch.setattr(run_mod, "_gateway_runner_ref", lambda: runner)
+
+        with patch("gateway.status.write_runtime_status") as write_mock:
+            run_mod.persist_active_agents_now()
+            run_mod.persist_active_agents_now()  # same count, immediately after
+
+        assert write_mock.call_count == 1
+
+    def test_transition_to_zero_always_persists_even_within_window(self, monkeypatch):
+        """The exact case that matters: a release must never sit behind the
+        throttle window, or a drain poller reads a stale nonzero count."""
+        run_mod, _state = self._isolated_state(monkeypatch)
+        runner, _adapter = make_restart_runner()
+        runner._running_agents = {"s1": object()}
+        monkeypatch.setattr(run_mod, "_gateway_runner_ref", lambda: runner)
+
+        with patch("gateway.status.write_runtime_status") as write_mock:
+            run_mod.persist_active_agents_now()  # count=1
+            runner._running_agents.clear()  # release -> count=0
+            run_mod.persist_active_agents_now()  # must NOT be throttled
+
+        assert write_mock.call_count == 2
+        assert write_mock.call_args_list[-1].kwargs == {"active_agents": 0}
+
+    def test_transition_from_zero_always_persists_even_within_window(self, monkeypatch):
+        run_mod, _state = self._isolated_state(monkeypatch)
+        runner, _adapter = make_restart_runner()
+        monkeypatch.setattr(run_mod, "_gateway_runner_ref", lambda: runner)
+
+        with patch("gateway.status.write_runtime_status") as write_mock:
+            run_mod.persist_active_agents_now()  # count=0
+            runner._running_agents = {"s1": object()}  # claim -> count=1
+            run_mod.persist_active_agents_now()  # must NOT be throttled
+
+        assert write_mock.call_count == 2
+        assert write_mock.call_args_list[-1].kwargs == {"active_agents": 1}
+
+    def test_after_window_elapses_repeat_call_persists(self, monkeypatch):
+        run_mod, state = self._isolated_state(monkeypatch)
+        runner, _adapter = make_restart_runner()
+        runner._running_agents = {"s1": object()}
+        monkeypatch.setattr(run_mod, "_gateway_runner_ref", lambda: runner)
+
+        with patch("gateway.status.write_runtime_status") as write_mock:
+            run_mod.persist_active_agents_now()
+            # Fast-forward the throttle clock past the window without a real
+            # sleep.
+            state["ts"] -= run_mod._ACTIVE_AGENTS_PERSIST_MIN_INTERVAL + 0.01
+            run_mod.persist_active_agents_now()
+
+        assert write_mock.call_count == 2
+
+
 class TestDrainAdmission:
     @pytest.mark.asyncio
     async def test_drain_refuses_every_agent_start_endpoint(self):

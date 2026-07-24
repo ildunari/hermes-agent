@@ -818,6 +818,21 @@ _api_agent_request_reservation: ContextVar[Optional[dict[str, bool]]] = ContextV
 )
 
 
+def _persist_active_agents_for_api() -> None:
+    """Best-effort: tell the owning GatewayRunner its active_agents changed.
+
+    Called from every claim/release site in this module so the drain-visible
+    ``active_agents`` count in ``gateway_state.json`` never goes stale between
+    turn boundaries (see docs/local/UPDATE_INCIDENTS_20260723.md item 12).
+    Lazy import avoids a module-level circular import with gateway.run.
+    """
+    try:
+        from gateway.run import persist_active_agents_now
+        persist_active_agents_now()
+    except Exception:
+        pass
+
+
 def _admit_api_agent_request(handler):
     """Reserve an authenticated API turn before its handler first awaits.
 
@@ -839,12 +854,22 @@ def _admit_api_agent_request(handler):
         reservation = {"active": True}
         token = _api_agent_request_reservation.set(reservation)
         self._pending_agent_requests += 1
+        logger.info(
+            "[api_server] claimed agent-request slot for %s %s (pending=%d)",
+            request.method, request.path, self._pending_agent_requests,
+        )
+        _persist_active_agents_for_api()
         try:
             return await handler(self, request, *args, **kwargs)
         finally:
             if reservation["active"]:
                 reservation["active"] = False
                 self._pending_agent_requests = max(0, self._pending_agent_requests - 1)
+                logger.info(
+                    "[api_server] released agent-request slot for %s %s (pending=%d)",
+                    request.method, request.path, self._pending_agent_requests,
+                )
+                _persist_active_agents_for_api()
             _api_agent_request_reservation.reset(token)
 
     return _wrapped
@@ -855,6 +880,11 @@ def _release_pending_api_work(adapter, reservation: dict[str, bool]) -> None:
     if reservation["active"]:
         reservation["active"] = False
         adapter._pending_agent_requests = max(0, adapter._pending_agent_requests - 1)
+        logger.info(
+            "[api_server] released pending-work reservation (pending=%d)",
+            adapter._pending_agent_requests,
+        )
+        _persist_active_agents_for_api()
 
 
 @contextmanager
@@ -866,6 +896,11 @@ def _reserve_pending_api_work(adapter):
     """
     reservation = {"active": True, "detached": False}
     adapter._pending_agent_requests += 1
+    logger.info(
+        "[api_server] claimed pending-work reservation (pending=%d)",
+        adapter._pending_agent_requests,
+    )
+    _persist_active_agents_for_api()
     try:
         yield reservation
     finally:
@@ -5642,10 +5677,20 @@ class APIServerAdapter(BasePlatformAdapter):
 
         self._activate_admitted_request()
         self._inflight_agent_runs += 1
+        logger.info(
+            "[api_server] claimed inflight-run slot for session=%s (inflight=%d)",
+            session_id, self._inflight_agent_runs,
+        )
+        _persist_active_agents_for_api()
         try:
             return await loop.run_in_executor(None, _run)
         finally:
             self._inflight_agent_runs -= 1
+            logger.info(
+                "[api_server] released inflight-run slot for session=%s (inflight=%d)",
+                session_id, self._inflight_agent_runs,
+            )
+            _persist_active_agents_for_api()
 
     # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
@@ -6266,10 +6311,20 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._active_run_tasks.pop(run_id, None)
                 self._run_approval_sessions.pop(run_id, None)
                 self._stopping_run_ids.discard(run_id)
+                logger.info(
+                    "[api_server] released /v1/runs slot for run_id=%s (active=%d)",
+                    run_id, len(self._active_run_tasks),
+                )
+                _persist_active_agents_for_api()
 
         self._activate_admitted_request()
         task = asyncio.create_task(_run_and_close())
         self._active_run_tasks[run_id] = task
+        logger.info(
+            "[api_server] claimed /v1/runs slot for run_id=%s (active=%d)",
+            run_id, len(self._active_run_tasks),
+        )
+        _persist_active_agents_for_api()
         try:
             self._background_tasks.add(task)
         except TypeError:

@@ -411,6 +411,25 @@ _running_probe_snapshots: dict = {}
 _interrupted_job_ids: set = set()
 
 
+def _persist_active_agents_for_cron() -> None:
+    """Best-effort: tell the owning GatewayRunner its active_agents changed.
+
+    Cron dispatch/completion mutates ``_running_job_ids`` from the parallel
+    pool's worker threads, entirely outside GatewayRunner. Without an
+    explicit persist here that claim/release was invisible in
+    ``gateway_state.json`` until the next unrelated turn boundary — the
+    stale-file bug behind the phantom-drain incident in
+    docs/local/UPDATE_INCIDENTS_20260723.md item 12. Lazy import avoids a
+    module-level circular import with gateway.run (which already lazily
+    imports this module for ``get_running_job_ids``).
+    """
+    try:
+        from gateway.run import persist_active_agents_now
+        persist_active_agents_now()
+    except Exception:
+        pass
+
+
 def get_running_job_ids() -> "frozenset[str]":
     """Thread-safe snapshot of cron job IDs currently executing.
 
@@ -4374,6 +4393,12 @@ def tick(
                 _running_probe_snapshots[job_id] = (
                     dict(binding) if isinstance(binding, dict) else None
                 )
+                claimed_count = len(_running_job_ids)
+            logger.info(
+                "Cron claimed running-job slot for '%s' (running=%d)",
+                job.get("name", job_id), claimed_count,
+            )
+            _persist_active_agents_for_cron()
             # Record the attempt before executor dispatch. Recovery classifies
             # abandoned records as unknown; it never automatically retries them.
             execution = create_execution(job_id, source="builtin")
@@ -4387,6 +4412,12 @@ def tick(
                     with _running_lock:
                         _running_job_ids.discard(j["id"])
                         _running_probe_snapshots.pop(j["id"], None)
+                        released_count = len(_running_job_ids)
+                    logger.info(
+                        "Cron released running-job slot for '%s' (running=%d)",
+                        j.get("name", j["id"]), released_count,
+                    )
+                    _persist_active_agents_for_cron()
 
             try:
                 return pool.submit(_run_and_release)
@@ -4394,6 +4425,12 @@ def tick(
                 with _running_lock:
                     _running_job_ids.discard(job_id)
                     _running_probe_snapshots.pop(job_id, None)
+                    dispatch_failed_count = len(_running_job_ids)
+                logger.info(
+                    "Cron released running-job slot for '%s' after dispatch failure (running=%d)",
+                    job.get("name", job_id), dispatch_failed_count,
+                )
+                _persist_active_agents_for_cron()
                 finish_execution(
                     execution["id"],
                     success=False,

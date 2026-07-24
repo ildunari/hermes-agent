@@ -175,6 +175,81 @@ async def test_loop_heartbeat_refreshes_runtime_status_identity_and_survives_err
     assert path.is_file()
 
 
+@pytest.mark.asyncio
+async def test_loop_heartbeat_merges_extra_provider_every_tick(tmp_path):
+    """extra_provider is called fresh each cycle and merged into the payload —
+    the mechanism hermes_cli.restart_surfaces relies on to cross-check a
+    stale gateway_state.json's active_agents (docs/local/
+    UPDATE_INCIDENTS_20260723.md item 12)."""
+    path = get_loop_heartbeat_path(tmp_path)
+    counter = {"n": 0}
+
+    def provider():
+        counter["n"] += 1
+        return {"active_agents": counter["n"]}
+
+    task = asyncio.create_task(
+        loop_heartbeat_forever(interval_s=0.05, home=tmp_path, extra_provider=provider)
+    )
+    try:
+        for _ in range(50):
+            if path.is_file():
+                break
+            await asyncio.sleep(0.02)
+        assert path.is_file()
+        first = json.loads(path.read_text(encoding="utf-8"))
+        assert first["active_agents"] == 1
+
+        second_value = first
+        for _ in range(100):
+            await asyncio.sleep(0.03)
+            second_value = json.loads(path.read_text(encoding="utf-8"))
+            if second_value["active_agents"] != first["active_agents"]:
+                break
+        assert second_value["active_agents"] > first["active_agents"]
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_loop_heartbeat_survives_broken_extra_provider(tmp_path):
+    """A raising extra_provider must not kill the heartbeat loop — it is a
+    liveness signal and must never itself become the single point of failure."""
+    path = get_loop_heartbeat_path(tmp_path)
+
+    def broken_provider():
+        raise RuntimeError("active_work_count blew up")
+
+    task = asyncio.create_task(
+        loop_heartbeat_forever(interval_s=0.05, home=tmp_path, extra_provider=broken_provider)
+    )
+    try:
+        for _ in range(50):
+            if path.is_file():
+                break
+            await asyncio.sleep(0.02)
+        assert path.is_file()
+        first = path.read_text(encoding="utf-8")
+        assert "active_agents" not in json.loads(first)
+
+        # Confirm the loop keeps rewriting (didn't die) despite the provider
+        # always raising.
+        second = first
+        for _ in range(100):
+            await asyncio.sleep(0.03)
+            second = path.read_text(encoding="utf-8")
+            if second != first:
+                break
+        assert second != first
+        assert "active_agents" not in json.loads(second)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
 def test_gateway_runner_exposes_shutdown_watchdog_state():
     """Attrs used by stop()/start() exist after normal construction hooks."""
     from gateway.run import GatewayRunner

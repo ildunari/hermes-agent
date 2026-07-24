@@ -3908,6 +3908,54 @@ import weakref as _weakref
 _gateway_runner_ref: _weakref.ref = lambda: None
 
 
+# ── active_agents persistence for out-of-class claim/release paths ──────────
+# GatewayRunner._persist_active_agents() only had call sites inside this
+# class (turn boundaries on self._running_agents + the drain watcher). The
+# api_server adapter's request-admission counters and cron's in-flight job
+# set also feed _active_work_count() but mutate entirely outside this class,
+# so a claim/release there could leave gateway_state.json's active_agents
+# stale until the next unrelated turn boundary — the root cause of the
+# phantom-drain incident in docs/local/UPDATE_INCIDENTS_20260723.md item 12
+# (drain wedged for hours on a stale nonzero count while live counters were
+# already 0). persist_active_agents_now() is the shared entry point for
+# those out-of-class sites (gateway/platforms/api_server.py,
+# cron/scheduler.py); both import it lazily to avoid a module-level circular
+# import with gateway.run.
+_ACTIVE_AGENTS_PERSIST_MIN_INTERVAL = 0.25  # seconds
+_active_agents_persist_state: Dict[str, float] = {"ts": 0.0, "count": -1.0}
+
+
+def persist_active_agents_now() -> None:
+    """Best-effort, throttled persist of the live active_agents count.
+
+    Meant for callers outside GatewayRunner (API-server request admission,
+    cron job dispatch) whose claim/release mutations fire once per HTTP
+    request / per cron dispatch rather than once per full agent turn like
+    this class's existing call sites. Under a request burst that would mean
+    far more file writes than the turn-boundary sites ever produced, so
+    repeat calls are throttled to once per _ACTIVE_AGENTS_PERSIST_MIN_INTERVAL
+    -- EXCEPT when the count is transitioning to/from zero, which always
+    writes immediately. That exception matters: the transition to zero is
+    exactly the signal a drain poller is waiting on, so it must never sit
+    behind the throttle window.
+    """
+    runner = _gateway_runner_ref()
+    if runner is None:
+        return
+    try:
+        count = runner._active_work_count()
+        now = time.monotonic()
+        state = _active_agents_persist_state
+        crossing_zero = (count == 0) != (state["count"] == 0)
+        if not crossing_zero and (now - state["ts"]) < _ACTIVE_AGENTS_PERSIST_MIN_INTERVAL:
+            return
+        state["ts"] = now
+        state["count"] = float(count)
+        runner._persist_active_agents()
+    except Exception:
+        pass
+
+
 def _normalize_empty_agent_response(
     agent_result: dict,
     response: str,
@@ -9510,6 +9558,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     loop_heartbeat_forever(
                         interval_s=DEFAULT_HEARTBEAT_INTERVAL_S,
                         start_time=getattr(self, "_gateway_started_at", 0.0),
+                        # Live active_agents snapshot, refreshed every tick
+                        # regardless of turn activity — the independent
+                        # cross-check hermes_cli.restart_surfaces uses when
+                        # gateway_state.json's own active_agents is stale
+                        # (docs/local/UPDATE_INCIDENTS_20260723.md item 12).
+                        extra_provider=lambda: {"active_agents": self._active_work_count()},
                     )
                 )
                 _bg = getattr(self, "_background_tasks", None)

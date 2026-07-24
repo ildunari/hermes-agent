@@ -262,17 +262,41 @@ def arm_shutdown_watchdog(
     return done
 
 
+def _collect_heartbeat_extra(
+    extra_provider: Optional[Callable[[], Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    """Best-effort: call ``extra_provider`` without letting it break the loop."""
+    if extra_provider is None:
+        return None
+    try:
+        return extra_provider()
+    except Exception:
+        logger.debug("Loop heartbeat extra_provider failed", exc_info=True)
+        return None
+
+
 async def loop_heartbeat_forever(
     *,
     interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S,
     start_time: Optional[float] = None,
     home: Optional[Path] = None,
     should_continue: Optional[Callable[[], bool]] = None,
+    extra_provider: Optional[Callable[[], Dict[str, Any]]] = None,
 ) -> None:
     """Rewrite the loop heartbeat file on a cadence until cancelled / gated off.
 
     Runs as an asyncio task on the gateway loop — if the loop freezes, this
     task stops and the file mtime/updated_at goes stale for external monitors.
+
+    ``extra_provider``, when given, is called fresh on every tick and its
+    return value merged into the heartbeat payload (e.g. a live
+    ``active_agents`` snapshot). Unlike ``gateway_state.json`` — which only
+    rewrites on turn/claim/release boundaries — this file refreshes on a
+    fixed cadence regardless of activity, so external callers that don't
+    trust a stale ``gateway_state.json`` (see
+    ``hermes_cli.restart_surfaces._gateway_busy_details``) have an
+    independent, periodically-refreshed cross-check. A failing provider is
+    swallowed — a broken snapshot must never kill the heartbeat loop.
     """
     try:
         interval = max(float(interval_s), 1.0)
@@ -281,7 +305,7 @@ async def loop_heartbeat_forever(
 
     # Immediate first write so monitors see a fresh file as soon as the
     # gateway is running, not after the first interval.
-    write_loop_heartbeat(start_time=start_time, home=home)
+    write_loop_heartbeat(start_time=start_time, home=home, extra=_collect_heartbeat_extra(extra_provider))
     _refresh_runtime_status_identity()
     while True:
         if should_continue is not None and not should_continue():
@@ -289,5 +313,5 @@ async def loop_heartbeat_forever(
         await asyncio.sleep(interval)
         if should_continue is not None and not should_continue():
             return
-        write_loop_heartbeat(start_time=start_time, home=home)
+        write_loop_heartbeat(start_time=start_time, home=home, extra=_collect_heartbeat_extra(extra_provider))
         _refresh_runtime_status_identity()
