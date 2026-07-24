@@ -1757,17 +1757,6 @@ def switch_model(
             if not api_key:
                 api_key = "no-key-required"
 
-    # MoA is a virtual provider. It must never inherit the previous provider's
-    # OpenAI-compatible endpoint (often http://127.0.0.1/v1 for local models),
-    # because the live runtime is agent.moa_loop.MoAClient, not a network API.
-    # Keep the persisted/session override explicit so resumed sessions,
-    # manual compression, and slash workers rebuild the virtual facade instead
-    # of trying to POST to a stale local URL.
-    if target_provider == "moa":
-        api_key = "moa-virtual-provider"
-        base_url = "moa://local"
-        api_mode = "chat_completions"
-
     # --- Resolve api_mode from the final (provider, base_url) before validation ---
     # Two cases this closes, both surfaced when the switched model's reasoning
     # is actually applied (post the reasoning-unification refactor):

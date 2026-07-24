@@ -1310,14 +1310,7 @@ def try_recover_primary_transport(
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
 
-        if agent.provider == "moa":
-            # MoA is a virtual provider with no real OpenAI client kwargs.
-            # Recreate its facade instead of trying to open a network client.
-            from agent.moa_loop import MoAClient
-
-            agent.client = MoAClient(agent.model or "default")
-            agent._anthropic_client = None
-        elif agent.api_mode == "anthropic_messages":
+        if agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
             agent._anthropic_api_key = rt["anthropic_api_key"]
             agent._anthropic_base_url = rt["anthropic_base_url"]
@@ -1500,14 +1493,7 @@ def restore_primary_runtime(agent) -> bool:
         )
 
         # ── Rebuild client for the primary provider ──
-        if agent.provider == "moa":
-            # Restoring after fallback must rebuild the virtual MoA facade,
-            # never OpenAI() with the intentionally empty client kwargs.
-            from agent.moa_loop import MoAClient
-
-            agent.client = MoAClient(agent.model or "default")
-            agent._anthropic_client = None
-        elif agent.api_mode == "anthropic_messages":
+        if agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
             agent._anthropic_api_key = rt["anthropic_api_key"]
             agent._anthropic_base_url = rt["anthropic_base_url"]

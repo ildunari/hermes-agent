@@ -4639,12 +4639,6 @@ def _resolve_auto(
             resolved_provider = "custom"
             explicit_base_url = runtime_base_url
             explicit_api_key = runtime_api_key or None
-        elif main_provider == "moa":
-            # MoA is a virtual provider. Its runtime base/key are placeholders
-            # for the main agent's aggregator client, not credentials that
-            # should be forwarded into the resolved aggregator provider.
-            explicit_base_url = None
-            explicit_api_key = None
         elif main_provider.startswith("custom:"):
             # Named custom provider (custom_providers / providers dict entry).
             _has_named_entry = False
@@ -4678,13 +4672,12 @@ def _resolve_auto(
         if main_chain_label and _is_provider_unhealthy(main_chain_label):
             _log_skip_unhealthy(main_chain_label)
         else:
-            call_api_mode = None if main_provider == "moa" else (runtime_api_mode or None)
             client, resolved = resolve_provider_client(
                 resolved_provider,
                 main_model,
                 explicit_base_url=explicit_base_url,
                 explicit_api_key=explicit_api_key,
-                api_mode=call_api_mode,
+                api_mode=runtime_api_mode or None,
             )
             if client is not None:
                 logger.info("Auxiliary auto-detect: using main provider %s (%s)",
@@ -5088,37 +5081,6 @@ def resolve_provider_client(
         final_model = model or resolved
         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                 else (client, final_model))
-
-    # ── Mixture of Agents virtual provider ────────────────────────
-    if provider == "moa":
-        try:
-            from hermes_cli.config import load_config
-            from hermes_cli.moa_config import resolve_moa_preset
-
-            moa_cfg = (load_config() or {}).get("moa") or {}
-            preset = resolve_moa_preset(moa_cfg, model)
-            aggregator = preset.get("aggregator") or {}
-            agg_provider = str(aggregator.get("provider") or "").strip()
-            agg_model = str(aggregator.get("model") or "").strip()
-            if not agg_provider or agg_provider == "moa":
-                logger.warning(
-                    "resolve_provider_client: moa preset %r has invalid aggregator %r",
-                    model,
-                    aggregator,
-                )
-                return None, None
-            return resolve_provider_client(
-                agg_provider,
-                model=agg_model,
-                async_mode=async_mode,
-                raw_codex=raw_codex,
-                main_runtime=main_runtime,
-                is_vision=is_vision,
-                task=task,
-            )
-        except Exception as exc:
-            logger.warning("resolve_provider_client: moa requested but preset resolution failed: %s", exc)
-            return None, None
 
     # ── OpenRouter ───────────────────────────────────────────
     if provider == "openrouter":
@@ -6848,11 +6810,6 @@ def _get_task_extra_body(task: str) -> Dict[str, Any]:
 def _get_task_reasoning_config(task: str) -> Optional[Dict[str, Any]]:
     """Parse ``auxiliary.<task>.reasoning_effort`` using the shared schema."""
     if not task:
-        return None
-    # MoA reasoning belongs to each preset slot. Ignore stale task-level keys
-    # here as well as in _get_task_extra_body so they cannot bypass the
-    # per-slot contract through the top-level reasoning_config call path.
-    if task in ("moa_reference", "moa_aggregator"):
         return None
     from hermes_constants import parse_reasoning_effort
 
