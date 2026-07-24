@@ -207,7 +207,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     # empirically verified 2026-07-23).
     "vibeproxy": [
         "claude-fable-5",
-        "claude-opus-4-8",
+        "claude-opus-5",
         "claude-sonnet-5",
         "claude-haiku-4-5-20251001",
         "gemini-3.6-flash-high",

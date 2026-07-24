@@ -240,7 +240,7 @@ def test_vibeproxy_provider_dict_does_not_emit_custom_duplicate(monkeypatch):
                 "name": "VibeProxy",
                 "api": "http://127.0.0.1:8484/v1",
                 "models": {
-                    "claude-opus-4-8": {},
+                    "claude-opus-5": {},
                     "claude-sonnet-4-6": {},
                     "claude-haiku-4-5-20251001": {},
                 },
@@ -252,7 +252,7 @@ def test_vibeproxy_provider_dict_does_not_emit_custom_duplicate(monkeypatch):
                 "name": "VibeProxy",
                 "base_url": "http://127.0.0.1:8484/v1",
                 "models": {
-                    "claude-opus-4-8": {},
+                    "claude-opus-5": {},
                     "claude-sonnet-4-6": {},
                     "claude-haiku-4-5-20251001": {},
                 },
@@ -266,7 +266,7 @@ def test_vibeproxy_provider_dict_does_not_emit_custom_duplicate(monkeypatch):
     assert len(vibe_rows) == 1
     assert duplicate_rows == []
     assert {
-        "claude-opus-4-8",
+        "claude-opus-5",
         "claude-haiku-4-5-20251001",
     }.issubset(vibe_rows[0]["models"])
 
