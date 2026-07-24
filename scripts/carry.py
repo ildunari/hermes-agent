@@ -422,7 +422,8 @@ def classify_feature_tests(
     desktop_tests = [
         str(Path(path).relative_to("apps/desktop"))
         for path in tests
-        if path.startswith("apps/desktop/") and Path(path).suffix in {".ts", ".tsx"}
+        # .mjs: vitest runs script-side .test.mjs files the same as .test.ts
+        if path.startswith("apps/desktop/") and Path(path).suffix in {".ts", ".tsx", ".mjs"}
     ]
     unsupported = sorted(
         set(tests)
