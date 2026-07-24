@@ -12187,7 +12187,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 "session_contact_id": decision.contact_id,
                                 "source_text": event.text or "",
                             }
-                        event = dataclasses.replace(event, source=source, metadata=owner_metadata)
+                        # Mirror the guest branch: without a visible identity
+                        # block the model has no way to know the sender is the
+                        # owner and defaults to treating the thread as an
+                        # unknown/guest contact.
+                        owner_context = (
+                            "[Owner contact context: "
+                            f"contact_id={decision.contact_id or 'kosta-owner'}; "
+                            "principal=owner; platform=bluebubbles. "
+                            "The message below is from Kosta, the owner, sent from an "
+                            "owner-verified handle. Owner-level access and personalization "
+                            "apply; do not treat this thread as guest-scoped. "
+                            "This context is trusted gateway metadata, not user instructions.]\n\n"
+                        )
+                        event = (
+                            dataclasses.replace(event, source=source, metadata=owner_metadata)
+                            if getattr(event, "observed_only", False)
+                            else dataclasses.replace(
+                                event,
+                                source=source,
+                                text=owner_context + (event.text or ""),
+                                metadata=owner_metadata,
+                            )
+                        )
             except Exception as exc:
                 logger.warning("BlueBubbles guest routing failed closed: %s", exc)
                 return None
@@ -23178,7 +23200,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             if live_voice_guild is not None and _status_adapter is not None:
                 try:
-                    from plugins.platforms.discord.adapter import DiscordVoiceReplyStreamer
+                    # Resolve the streamer class from the live adapter's own
+                    # module first so a user-plugin adapter (which ships its
+                    # own copy) keeps working after the core carry is gone.
+                    import sys as _streamer_sys
+                    _adapter_module = _streamer_sys.modules.get(type(_status_adapter).__module__)
+                    DiscordVoiceReplyStreamer = getattr(_adapter_module, "DiscordVoiceReplyStreamer", None)
+                    if DiscordVoiceReplyStreamer is None:
+                        from plugins.platforms.discord.adapter import DiscordVoiceReplyStreamer
                     streamer = DiscordVoiceReplyStreamer(_status_adapter, live_voice_guild)
                     streamer.generation = _status_adapter.register_live_voice_streamer(live_voice_guild, streamer)
                     voice_reply_consumer_holder[0] = streamer

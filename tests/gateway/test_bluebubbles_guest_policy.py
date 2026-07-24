@@ -718,6 +718,11 @@ contacts: {}
     assert trusted_scope.contact_id == "kosta-owner"
     routed_source = handler_call.args[1]
     assert routed_source.profile == "poke"
+    routed_event = handler_call.args[0]
+    assert routed_event.text.startswith("[Owner contact context: ")
+    assert "contact_id=kosta-owner" in routed_event.text
+    assert "principal=owner" in routed_event.text
+    assert routed_event.text.endswith("hello")
 
 
 @pytest.mark.asyncio
