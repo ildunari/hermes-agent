@@ -117,6 +117,35 @@ items name their commit; open items are the work queue.
    reading `drain-audit.jsonl` at the first sign of a slow RESTARTED phase;
    and never re-fixing in a doomed run — abort, fix pre-merge, rerun.
 
+## Codex adversarial review of the evening's work (2026-07-23 ~20:00)
+
+Three review lanes ran over the evening's changes (PR batch, carry commits,
+plugins repo). Verdicts and dispositions:
+- **BlueBubbles live path: PASS** (no P0/P1; registry-first selection,
+  chunk/media semantics, error propagation, and ownership-gated webhook
+  cleanup all probed clean).
+- **Carry lane**: 1 P1 fixed — stale carried test
+  `tests/tools/test_bluebubbles_standalone.py` pinned the retired send-only
+  fallback and failed deterministically (removed; contract lives in the
+  plugin's test). P2s fixed: thinning check now refuses pre-pin baselines
+  lacking `upstream_sha`; vibeproxy alias priority promoted to a manifest
+  FEATURE so the guard tests run on any models.py change (behavioral order
+  enforcement, not needle presence).
+- **Plugins lane**: 3 P1s fixed on the STAGED (not enabled) telegram/discord
+  overrides — 4 decorators dropped by the extraction (AST body-compare
+  missed decorator drift; lesson recorded), missing explicit
+  queue/uuid/Path imports in the copied Discord streamer, and the
+  gateway/run.py:23181 hard-import of DiscordVoiceReplyStreamer from the
+  core module (stage-2 hazard, now documented in the cutover doc). Plus a
+  latent design flaw found via an order-dependent test failure: top-level
+  plugin package names `telegram`/`discord` shadowed python-telegram-bot
+  and discord.py — renamed to `telegram_override`/`discord_override`.
+- **PR batch**: A and C ship-with-nits; B HOLD (3 P1s: mixed-version-writer
+  last_active staleness, destructive-path chain refresh, import-chain
+  settle) and D HOLD (change-detector tests) — sent back to the PR worker
+  for fixes + rebase onto moved origin/main (69365109b); re-review before
+  any push.
+
 ## Evening addendum (BlueBubbles de-carry stage 2, 2026-07-23 ~18:00-19:00)
 
 10. **BlueBubbles carry retired** (`52def61f1`): adapter + tests reverted to
