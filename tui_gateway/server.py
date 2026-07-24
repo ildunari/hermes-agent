@@ -1678,22 +1678,47 @@ def _live_session_browser_annotation_error(session: dict, rid: Any) -> dict | No
     if source == "browser_annotation":
         session["root_source"] = "browser_annotation"
         return _err(rid, 4026, "browser_annotation_session_requires_dedicated_rpc")
-    db = _get_db()
+    # Classify against the SESSION's profile state.db, never the launch
+    # handle: session.* RPCs on a foreign-profile session must not touch the
+    # launch profile's DB (upstream #62503 contract), and the lineage rows
+    # live in the session's own store anyway.
+    _session_profile_home = str(session.get("profile_home") or "").strip()
+    db = None
+    _owns_db_handle = False
+    if _session_profile_home and (
+        Path(_session_profile_home).resolve() != Path(_hermes_home).resolve()
+    ):
+        try:
+            from hermes_state import SessionDB
+
+            db = SessionDB(db_path=Path(_session_profile_home) / "state.db")
+            _owns_db_handle = True
+        except Exception:
+            db = None
+    else:
+        db = _get_db()
     if db is None:
         # Without the durable lineage store, a legacy live session cannot be
         # proven generic. Fail closed instead of exposing a possible browser
         # annotation session through ordinary chat RPCs.
         return _err(rid, 5027, "session_lineage_classification_unavailable")
     try:
-        row = db.get_session(session.get("session_key"))
-    except AttributeError:
-        # Store cannot fetch rows at all (minimal/test stores); such a store
-        # cannot host durable annotation sessions.
-        row = None
-    try:
-        kind = _browser_annotation_row_kind(db, row)
-    except Exception:
-        kind = None
+        try:
+            row = db.get_session(session.get("session_key"))
+        except AttributeError:
+            # Store cannot fetch rows at all (minimal/test stores); such a
+            # store cannot host durable annotation sessions.
+            row = None
+        try:
+            kind = _browser_annotation_row_kind(db, row)
+        except Exception:
+            kind = None
+    finally:
+        if _owns_db_handle:
+            try:
+                db.close()
+            except Exception:
+                pass
     if kind is None:
         return _err(rid, 5027, "session_lineage_classification_unavailable")
     session["root_source"] = "browser_annotation" if kind else (source or "tui")
@@ -6367,8 +6392,19 @@ def _(rid, params: dict) -> dict:
     if profile is not None:
         explicit_profile_home = _resolve_profile_dir(profile)
         if explicit_profile_home is None:
+            # Defer to the _profile_home seam before failing: upstream #62503
+            # resolves session.* profiles through it (tests patch it), and it
+            # may know homes the local registry does not. It returns None for
+            # the launch profile too, but that case already resolved above.
+            _seam_home = _profile_home(profile)
+            if _seam_home is not None:
+                explicit_profile_home = Path(_seam_home).resolve()
+        if explicit_profile_home is None:
             return _err(rid, 4004, "profile not found")
-        if not (explicit_profile_home / "state.db").is_file():
+        # A plain create may target a profile whose state.db does not exist
+        # yet (created lazily on first persist, upstream #62503 contract).
+        # Only a branch needs the DB up front — the parent row lives there.
+        if parent_session_id and not (explicit_profile_home / "state.db").is_file():
             return _err(rid, 5008, "profile state.db unavailable")
         profile_home = None if explicit_profile_home.resolve() == Path(_hermes_home).resolve() else explicit_profile_home
 

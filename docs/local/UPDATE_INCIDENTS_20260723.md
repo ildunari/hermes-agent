@@ -296,3 +296,19 @@ python escalation) with a regression test reproducing run-3's exact path
 list. Run-3 aborted at 9% of ~44,828 tests (~3,232s in); relaunched as
 run-4 on the fixed tip. Lesson: when a gate takes two inputs that look like
 the same data, test the one the caller actually populates.
+
+## 19. Run-5 carry-verify FAIL: upstream absorbed profile-scoped session RPCs (2026-07-24 ~16:30)
+
+Upstream moved twice between runs (a61183b5 → 8611b69d → 55ef425d); the last
+pull landed #62503 (profile-scoped session.* state.db access) with new tests.
+Two collided with our carry semantically (clean textual merge): (a) our strict
+create-path gates resolved profiles via the hermes_cli registry and required a
+pre-existing state.db, while upstream resolves through the _profile_home seam
+and creates the DB lazily; (b) our browser-annotation lineage guard classified
+sessions against the launch _get_db() handle, which upstream's tests now
+forbid for foreign-profile sessions. Adapted the carry: registry miss defers
+to the _profile_home seam before 4004; state.db precondition scoped to branch
+creates; guard opens/closes the session's own profile state.db. Verified both
+sides: 502 tests on live tree, 450 on the merged worktree (upstream's new
+tests included). Run-4's separate failure was a load flake (auxiliary_client
+hang under concurrent desktop build; passes 340/340 in 25s standalone x3).
