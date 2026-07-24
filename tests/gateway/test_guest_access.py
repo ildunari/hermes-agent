@@ -164,6 +164,104 @@ def test_guest_terminal_policy_blocks_host_paths_and_1password(tmp_path):
     assert evaluate_guest_tool_call("terminal", {"command": "pwd", "workdir": "/Users/Kosta"}, root).allowed is False
 
 
+def test_guest_terminal_policy_blocks_absolute_write_outside_sandbox(tmp_path):
+    """Live finding: workdir alone is not a sandbox -- a command can `cd`
+    inside the sandbox and still copy to an absolute destination outside it
+    (`cp <attachment> /tmp/x` previously succeeded)."""
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+    attachment = root / "attachments" / "photo.jpg"
+    attachment.parent.mkdir(parents=True)
+    attachment.write_text("fake image data")
+
+    blocked = evaluate_guest_tool_call(
+        "terminal",
+        {"command": f"cp {attachment} /tmp/x", "workdir": str(root)},
+        root,
+    )
+    assert blocked.allowed is False
+    assert "outside the guest sandbox" in blocked.reason
+
+    # Redirection-style escape (`>`, `>>`) must be caught the same way.
+    blocked_redirect = evaluate_guest_tool_call(
+        "terminal",
+        {"command": f"cat {attachment} > /tmp/leak.jpg", "workdir": str(root)},
+        root,
+    )
+    assert blocked_redirect.allowed is False
+
+
+def test_guest_terminal_policy_allows_absolute_paths_inside_sandbox(tmp_path):
+    """The fix must not regress normal in-sandbox absolute-path commands."""
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+    src = root / "a.txt"
+    src.write_text("hi")
+
+    allowed = evaluate_guest_tool_call(
+        "terminal",
+        {"command": f"cp {src} {root}/b.txt", "workdir": str(root)},
+        root,
+    )
+    assert allowed.allowed is True
+
+
+def test_guest_terminal_policy_allowlists_readonly_system_bin_paths(tmp_path):
+    """Normal commands invoking a binary by absolute path (env, homebrew
+    tools, etc) must not be broken by the new absolute-path guard."""
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+
+    allowed = evaluate_guest_tool_call(
+        "terminal",
+        {"command": "/usr/bin/env python3 -c 'print(1)'", "workdir": str(root)},
+        root,
+    )
+    assert allowed.allowed is True
+
+
+def test_guest_terminal_policy_does_not_flag_urls_as_path_escapes(tmp_path):
+    """A URL argument (curl, wget) must not be misread as a filesystem path
+    escape just because it contains '/' after the scheme."""
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+
+    allowed = evaluate_guest_tool_call(
+        "terminal",
+        {"command": "curl -s https://example.com/api/data", "workdir": str(root)},
+        root,
+    )
+    assert allowed.allowed is True
+
+
+def test_guest_execute_code_policy_blocks_absolute_write_outside_sandbox(tmp_path):
+    """Same write-escape class for execute_code: a script can write outside
+    the sandbox without tripping the sensitive-marker or host-home checks."""
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+
+    blocked = evaluate_guest_tool_call(
+        "execute_code",
+        {"code": "open('/tmp/x', 'w').write('leak')"},
+        root,
+    )
+    assert blocked.allowed is False
+    assert "outside the guest sandbox" in blocked.reason
+
+
+def test_guest_execute_code_policy_allows_writes_inside_sandbox(tmp_path):
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+    target = root / "ok.txt"
+
+    allowed = evaluate_guest_tool_call(
+        "execute_code",
+        {"code": f"open({str(target)!r}, 'w').write('fine')"},
+        root,
+    )
+    assert allowed.allowed is True
+
+
 def test_guest_policy_blocks_host_home_from_path_home(tmp_path):
     """Guest denylist must match Path.home(), not a hardcoded Studio path."""
     from pathlib import Path as P

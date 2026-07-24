@@ -257,6 +257,64 @@ _SENSITIVE_COMMAND_PATTERNS = (
     rf"\b(open|cat|less|more|tail|head)\s+[^\n]*(~|{_HOST_HOME_PATH_RE})(?![^\n]*\.hermes/profiles/guest)",
 )
 
+# Read-only system prefixes a guest command may legitimately reference (a
+# binary path, an interpreter, a shared library) even though they resolve
+# outside the sandbox. These are never writable targets, so allowing them
+# keeps ordinary commands (``/usr/bin/env python3``, a homebrew-installed
+# tool) from tripping the absolute-path escape guard below. This is an
+# allowlist of specific, narrow, read-only directories -- NOT a general
+# carve-out -- so it must never be widened to cover user data directories
+# (Desktop, Downloads, home itself, etc).
+_READ_ONLY_SYSTEM_PATH_PREFIXES = (
+    "/usr/bin/",
+    "/usr/sbin/",
+    "/bin/",
+    "/sbin/",
+    "/usr/local/bin/",
+    "/usr/local/opt/",
+    "/opt/homebrew/bin/",
+    "/opt/homebrew/opt/",
+    "/System/Library/",
+    "/Library/Developer/CommandLineTools/",
+)
+
+# Matches shell-token-shaped absolute (``/...``) or home-relative (``~...``)
+# path references inside a command/code string. Deliberately conservative:
+# false positives (flagging something that was actually fine) fail a guest
+# command closed, which is the safe direction; false negatives (missing a
+# real escape) are the bug this exists to close.
+_ABSOLUTE_PATH_TOKEN_RE = re.compile(r"(?<![:\w])(/[^\s\"'`;|&<>()]+|~[^\s\"'`;|&<>()]*)")
+
+
+def _command_absolute_path_escape(command: str, root: Path) -> str | None:
+    """Return the first absolute/home-relative path token in *command* that
+    escapes the guest sandbox, or ``None`` if every such token is either
+    inside *root* or an allowlisted read-only system path.
+
+    The workdir/cwd check alone is not a sandbox: a guest terminal command
+    can ``cd`` (or be launched with ``workdir``) inside the sandbox while
+    still naming an absolute destination outside it in an argument --
+    ``cp <attachment> /tmp/x`` is exactly this shape, and the workdir-only
+    check never inspects the copy destination. This scans for path-shaped
+    tokens and requires each one to resolve under the sandbox root unless
+    it is an obvious read-only system path.
+    """
+    for match in _ABSOLUTE_PATH_TOKEN_RE.finditer(command):
+        start = match.start()
+        if start > 0 and command[start - 1] == "/":
+            # Second slash of a "//" sequence (scheme://host, file://, ...)
+            # -- not a filesystem path token, just a URL guests may
+            # legitimately reference (e.g. inside `curl`/execute_code).
+            continue
+        token = match.group(0).rstrip(",;:")
+        if not token or token == "~":
+            continue
+        if any(token.startswith(prefix) for prefix in _READ_ONLY_SYSTEM_PATH_PREFIXES):
+            continue
+        if resolve_under_sandbox(token, root) is None:
+            return token
+    return None
+
 
 def _ids_from_surface(value: Any, key: str = "ids") -> Sequence[Any]:
     if isinstance(value, Mapping):
@@ -475,6 +533,16 @@ def evaluate_guest_tool_call(function_name: str, function_args: Mapping[str, Any
         for pattern in _SENSITIVE_COMMAND_PATTERNS:
             if re.search(pattern, command):
                 return GuestToolDecision(False, "terminal command matches a blocked guest-session pattern")
+        # workdir alone is not a sandbox: a command can `cd`/be launched
+        # inside the sandbox and still name an absolute destination outside
+        # it in an argument (`cp <attachment> /tmp/x`), which the workdir
+        # check above never inspects.
+        escape = _command_absolute_path_escape(command, root)
+        if escape is not None:
+            return GuestToolDecision(
+                False,
+                f"terminal command references a path outside the guest sandbox {root}: {escape}",
+            )
         return GuestToolDecision(True)
 
     if function_name == "execute_code":
@@ -484,6 +552,15 @@ def evaluate_guest_tool_call(function_name: str, function_args: Mapping[str, Any
                 return GuestToolDecision(False, f"execute_code references blocked path marker {marker}")
         if re.search(rf"({_HOST_HOME_PATH_RE}|Path\(['\"]~|expanduser\(['\"]~)", code):
             return GuestToolDecision(False, "execute_code must not access host home paths in guest sessions")
+        # Same write-escape as the terminal tool: a guest script can write to
+        # an absolute path outside the sandbox (`open('/tmp/x', 'w')`)
+        # without ever touching a denylisted marker or the host home.
+        escape = _command_absolute_path_escape(code, root)
+        if escape is not None:
+            return GuestToolDecision(
+                False,
+                f"execute_code references a path outside the guest sandbox {root}: {escape}",
+            )
         return GuestToolDecision(True)
 
     if function_name == "web":
