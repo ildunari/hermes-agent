@@ -52,10 +52,28 @@ export const writeActiveSessionFile = (sessionId: null | string, file = process.
   }
 }
 
-export const liveSessionInflightMessages = (inflight?: null | SessionInflightTurn): Msg[] => {
+export const liveSessionInflightMessages = (
+  inflight?: null | SessionInflightTurn,
+  transcript: readonly Msg[] = []
+): Msg[] => {
   const user = String(inflight?.user ?? '').trim()
-
-  return user ? [{ role: 'user', text: user }] : []
+  if (!user) {
+    return []
+  }
+  // The backend clears inflight asynchronously after a turn persists; a
+  // resume in that window re-appends the prompt BELOW its own answer. Skip
+  // the projection when the newest matching user row already has an
+  // assistant reply after it (a fresh identical re-send has none yet).
+  for (let index = transcript.length - 1; index >= 0; index--) {
+    const row = transcript[index]
+    if (row.role !== 'user' || String(row.text ?? '').trim() !== user) {
+      continue
+    }
+    return transcript.slice(index + 1).some(later => later.role === 'assistant')
+      ? []
+      : [{ role: 'user', text: user }]
+  }
+  return [{ role: 'user', text: user }]
 }
 
 export const hydrateLiveSessionInflight = (inflight?: null | SessionInflightTurn) => {
@@ -329,7 +347,8 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
           resetSession()
           setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
-          const transcript = [...toTranscriptMessages(r.messages), ...liveSessionInflightMessages(r.inflight)]
+          const persisted = toTranscriptMessages(r.messages)
+          const transcript = [...persisted, ...liveSessionInflightMessages(r.inflight, persisted)]
           setHistoryItems(info ? [introMsg(info), ...transcript] : transcript)
           writeActiveSessionFile(r.session_key ?? r.session_id)
           patchUiState({
@@ -382,7 +401,8 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             resetSession()
             setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
 
-            const resumed = [...toTranscriptMessages(r.messages), ...liveSessionInflightMessages(r.inflight)]
+            const persistedResume = toTranscriptMessages(r.messages)
+            const resumed = [...persistedResume, ...liveSessionInflightMessages(r.inflight, persistedResume)]
 
             setHistoryItems(info ? [introMsg(info), ...resumed] : resumed)
             writeActiveSessionFile(r.resumed ?? r.session_id)

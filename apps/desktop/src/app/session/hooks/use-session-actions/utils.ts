@@ -379,7 +379,9 @@ export function appendLiveSessionProjection(
   // Only suppress the projection when the latest authoritative user row is the
   // same turn — older identical prompts must not hide a newly accepted repeat.
   const latestUser = [...messages].reverse().find(message => message.role === 'user')
-  const inflightUserAlreadyPersisted = latestUser && chatMessageText(latestUser).trim() === inflightUser
+  const inflightUserAlreadyPersisted =
+    (latestUser && chatMessageText(latestUser).trim() === inflightUser) ||
+    turnAlreadyAnswered(messages, inflightUser)
 
   if (inflightUser && !inflightUserAlreadyPersisted) {
     projected.push({
@@ -400,7 +402,12 @@ export function appendLiveSessionProjection(
     })
   }
 
-  if (queuedUser) {
+  // The backend clears inflight/queued asynchronously after a turn persists,
+  // so a switch-back can land in the window where the transcript already
+  // holds the answered turn while the projection still reports it. Without
+  // this guard the prompt re-appends BELOW the assistant's answer (out of
+  // order); the queued branch previously had no dedup at all.
+  if (queuedUser && !turnAlreadyAnswered(messages, queuedUser)) {
     projected.push({
       id: `user-queued-${sessionId}`,
       role: 'user',
@@ -409,6 +416,34 @@ export function appendLiveSessionProjection(
   }
 
   return projected.length ? [...messages, ...projected] : messages
+}
+
+/**
+ * True when the most recent user row matching `text` is already followed by a
+ * completed (non-pending) assistant reply — i.e. the turn persisted and a
+ * stale inflight/queued projection must not re-append it. The scan stops at
+ * the newest matching user row so a genuinely re-sent identical prompt (which
+ * has no answer after it yet) still renders.
+ */
+export function turnAlreadyAnswered(messages: ChatMessage[], text: string): boolean {
+  const wanted = text.trim()
+  if (!wanted) {
+    return false
+  }
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message.role !== 'user' || chatMessageText(message).trim() !== wanted) {
+      continue
+    }
+    for (let after = index + 1; after < messages.length; after++) {
+      const later = messages[after]
+      if (later.role === 'assistant' && !later.pending) {
+        return true
+      }
+    }
+    return false
+  }
+  return false
 }
 
 export interface BranchMessage {

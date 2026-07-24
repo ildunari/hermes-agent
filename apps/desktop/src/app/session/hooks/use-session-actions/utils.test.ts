@@ -563,4 +563,52 @@ describe('appendLiveSessionProjection', () => {
 
     expect(appendLiveSessionProjection(stored, { session_id: 'runtime-1' })).toBe(stored)
   })
+
+  it('drops a stale queued prompt whose turn already persisted with an answer', () => {
+    // Switch-back race: the transcript already holds the answered turn but
+    // the backend has not cleared queued yet. Without the guard the prompt
+    // re-appended BELOW the answer, out of order.
+    const stored = [
+      msg('stored-user', 'user', 'check cliproxy models'),
+      msg('stored-assistant', 'assistant', 'here are the models')
+    ]
+
+    const restored = appendLiveSessionProjection(stored, {
+      session_id: 'runtime-1',
+      queued: { user: 'check cliproxy models' }
+    })
+
+    expect(restored).toEqual(stored)
+  })
+
+  it('drops a stale inflight prompt answered earlier than the newest user row', () => {
+    const stored = [
+      msg('u1', 'user', 'old prompt'),
+      msg('a1', 'assistant', 'old answer'),
+      msg('u2', 'user', 'different newer prompt'),
+      msg('a2', 'assistant', 'newer answer')
+    ]
+
+    const restored = appendLiveSessionProjection(stored, {
+      session_id: 'runtime-1',
+      inflight: { user: 'old prompt', assistant: '', streaming: false }
+    })
+
+    expect(restored).toEqual(stored)
+  })
+
+  it('still projects a queued repeat whose newest matching turn has no answer yet', () => {
+    const stored = [
+      msg('u1', 'user', 'repeat me'),
+      msg('a1', 'assistant', 'done'),
+      msg('u2', 'user', 'repeat me')
+    ]
+
+    const restored = appendLiveSessionProjection(stored, {
+      session_id: 'runtime-1',
+      queued: { user: 'repeat me' }
+    })
+
+    expect(restored.at(-1)).toMatchObject({ id: 'user-queued-runtime-1' })
+  })
 })

@@ -76,6 +76,34 @@ describe('live session activation in-flight state', () => {
     expect(turnController.bufRef).toBe('')
     expect(getTurnState().streaming).toBe('')
   })
+
+  it('drops a stale inflight prompt whose turn already persisted with an answer', () => {
+    // Resume can land after the turn persisted but before the backend clears
+    // inflight; the prompt must not re-append below its own answer.
+    const transcript = [
+      { role: 'user' as const, text: 'check cliproxy models' },
+      { role: 'assistant' as const, text: 'here are the models' }
+    ]
+
+    expect(
+      liveSessionInflightMessages(
+        { assistant: '', streaming: false, user: 'check cliproxy models' },
+        transcript
+      )
+    ).toEqual([])
+  })
+
+  it('still projects a repeat prompt whose newest matching turn has no answer yet', () => {
+    const transcript = [
+      { role: 'user' as const, text: 'repeat me' },
+      { role: 'assistant' as const, text: 'done' },
+      { role: 'user' as const, text: 'repeat me' }
+    ]
+
+    expect(
+      liveSessionInflightMessages({ assistant: '', streaming: true, user: 'repeat me' }, transcript)
+    ).toEqual([{ role: 'user', text: 'repeat me' }])
+  })
 })
 
 describe('resume scroll settle', () => {
