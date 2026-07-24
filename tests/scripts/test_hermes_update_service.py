@@ -1269,3 +1269,45 @@ def test_restart_busy_snapshot_parses_subprocess_json(monkeypatch, tmp_path: Pat
     )
 
     assert SERVICE.restart_busy_snapshot(tmp_path) == payload
+
+
+def test_retire_refuses_dirty_worktree(tmp_path: Path) -> None:
+    """Codex batch-2 review P1-6: uncommitted/untracked work (a manual
+    conflict resolution) must block --force removal, but the archived
+    .update-smart-validation scratch dir must NOT."""
+    repo = tmp_path / "repo"
+    root = tmp_path / "state"
+    base = _init_repo(repo)
+
+    run_id = "20260723T120000Z-dddddddddddd"
+    run_ref = f"refs/hermes/update-runs/{run_id}"
+    (repo / "feature.txt").write_text("merged\n", encoding="utf-8")
+    _run_git(repo, "add", "feature.txt")
+    _run_git(repo, "commit", "-q", "-m", "activated")
+    result_commit = _run_git(repo, "rev-parse", "HEAD")
+    _run_git(repo, "update-ref", run_ref, result_commit)
+
+    worktree = root / "worktrees" / run_id
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    _run_git(repo, "worktree", "add", "--detach", str(worktree), run_ref)
+    # A real, unarchived uncommitted change (a hand conflict resolution).
+    (worktree / "resolved.txt").write_text("hand-resolved\n", encoding="utf-8")
+    # The always-present validation scratch dir — must be tolerated.
+    (worktree / ".update-smart-validation").mkdir()
+    (worktree / ".update-smart-validation" / "validation.log").write_text("x\n")
+
+    make_terminal_ledger(root, run_id, "FAILED", run_ref=run_ref)
+
+    with pytest.raises(RuntimeError, match="uncommitted"):
+        SERVICE.retire_run(repo, root, run_id)
+    assert worktree.exists()
+
+
+def test_stamp_terminal_ledger_rejects_non_retirement_fields(tmp_path: Path) -> None:
+    """Codex batch-2 review P2: the immutability exception must not be usable
+    to rewrite status/phase/history."""
+    root = tmp_path / "state"
+    run_id = "20260723T120000Z-eeeeeeeeeeee"
+    make_terminal_ledger(root, run_id, "FAILED")
+    with pytest.raises(RuntimeError, match="non-retirement"):
+        SERVICE.stamp_terminal_ledger(root, run_id, status="ACTIVE")

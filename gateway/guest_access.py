@@ -265,15 +265,17 @@ _SENSITIVE_COMMAND_PATTERNS = (
 # allowlist of specific, narrow, read-only directories -- NOT a general
 # carve-out -- so it must never be widened to cover user data directories
 # (Desktop, Downloads, home itself, etc).
+# Only OS-owned, non-user-writable directories. Homebrew prefixes
+# (/opt/homebrew, /usr/local) are deliberately EXCLUDED: they are writable by
+# the owning user on this host, so `cp payload /opt/homebrew/bin/x` there is a
+# real sandbox-escape write, not a read-only reference (Codex batch-2 review
+# P1-4). Guests reach homebrew tools by bare name via PATH, which never trips
+# the absolute-path scan; only explicit absolute homebrew paths are refused.
 _READ_ONLY_SYSTEM_PATH_PREFIXES = (
     "/usr/bin/",
     "/usr/sbin/",
     "/bin/",
     "/sbin/",
-    "/usr/local/bin/",
-    "/usr/local/opt/",
-    "/opt/homebrew/bin/",
-    "/opt/homebrew/opt/",
     "/System/Library/",
     "/Library/Developer/CommandLineTools/",
 )
@@ -341,15 +343,17 @@ _GUEST_TERMINAL_DYNAMIC_ESCAPES: tuple[tuple[str, str], ...] = (
     (r"\$\{?[A-Za-z_]", "environment variable expansion"),
     (r"\$\(", "command substitution"),
     (r"`", "backtick command substitution"),
-    (r"file://", "file:// scheme local filesystem access"),
+    # Case-insensitive, any slash count: FILE://, file:/, file:///... all
+    # name the local filesystem (Codex batch-2 review P1-5).
+    (r"(?i)\bfile:/", "file: scheme local filesystem access"),
     (r"<<-?\s*['\"]?\w", "heredoc"),
 )
 # execute_code bodies are real programs where $, backticks, and heredoc-like
-# text are legitimate syntax; only traversal and file:// are tripwires there.
+# text are legitimate syntax; only traversal and file: are tripwires there.
 _GUEST_CODE_DYNAMIC_ESCAPES: tuple[tuple[str, str], ...] = (
     (r"(^|[\s\"'=(:])\.\./", "relative path traversal (../)"),
     (r"/\.\.(/|[\s\"')]|$)", "relative path traversal (/..)"),
-    (r"file://", "file:// scheme local filesystem access"),
+    (r"(?i)\bfile:/", "file: scheme local filesystem access"),
 )
 
 

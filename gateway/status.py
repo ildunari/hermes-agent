@@ -11,6 +11,8 @@ that will be useful when we add named profiles (multiple agents running
 concurrently under distinct configurations).
 """
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import logging
@@ -1045,7 +1047,13 @@ def write_runtime_status(
     serialization — a captured-early stale value can never overwrite a newer
     one.
     """
-    with _RUNTIME_STATUS_WRITE_LOCK:
+    # Cross-PROCESS lock: the owner gateway, detached helpers, and imported
+    # platform adapters (dashboards) all write this file from separate
+    # processes. A threading.Lock only orders this process's threads; without
+    # an flock a non-owner reading count 0 could atomically replace a file the
+    # owner just wrote count 1 into (Codex batch-2 review P1-1). The in-process
+    # lock still guards the callable recount ordering within this process.
+    with _RUNTIME_STATUS_WRITE_LOCK, _runtime_status_file_lock():
         _write_runtime_status_locked(
             gateway_state=gateway_state,
             exit_reason=exit_reason,
@@ -1061,6 +1069,38 @@ def write_runtime_status(
 
 
 _RUNTIME_STATUS_WRITE_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _runtime_status_file_lock():
+    """Cross-process exclusive lock guarding the runtime-status read-merge-write.
+
+    Uses an flock on a sidecar ``.lock`` next to gateway_state.json so writers
+    in different processes serialize. Best-effort: if flock is unavailable
+    (unsupported FS, permission), fall back to no cross-process guard rather
+    than blocking a status write — the in-process lock still applies.
+    """
+    lock_path = _get_runtime_status_path().with_suffix(".lock")
+    handle = None
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "w")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                pass
+            handle = None
+    try:
+        yield
+    finally:
+        if handle is not None:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
 
 
 def _write_runtime_status_locked(

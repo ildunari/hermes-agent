@@ -2215,6 +2215,17 @@ def run_worker(args: argparse.Namespace) -> int:
 # (which already self-cleans its worktree at the end of deploy()) and never a
 # still-active run.
 RETIRABLE_STATUSES = {"FAILED", "ABORTED"}
+# The only fields stamp_terminal_ledger may set on an immutable terminal
+# ledger — retirement bookkeeping, never status/phase/run_id/history.
+_RETIRE_LEDGER_FIELDS = frozenset(
+    {
+        "retired",
+        "retired_at",
+        "retire_worktree_removed",
+        "retire_archived_paths",
+        "retire_residue_removed",
+    }
+)
 
 
 def resolve_last_failed_run(root: Path) -> str | None:
@@ -2231,7 +2242,9 @@ def resolve_last_failed_run(root: Path) -> str | None:
             ledger = read_json(path)
         except (OSError, json.JSONDecodeError):
             continue
-        if ledger.get("status") == "FAILED":
+        # Skip already-retired runs: otherwise the newest retired failure
+        # permanently shadows older un-retired ones (Codex batch-2 review P2).
+        if ledger.get("status") == "FAILED" and not ledger.get("retired"):
             return str(ledger["run_id"])
     return None
 
@@ -2247,12 +2260,20 @@ def worktree_unique_commits(
     refuse whenever this list is non-empty rather than guess which side to
     keep.
     """
-    tip = ""
+    # Check BOTH the run ref AND the live worktree HEAD: the ref can be stale
+    # (a parked run resolved by hand advances HEAD without moving run_ref), so
+    # trusting the ref alone could miss real unique commits (Codex batch-2
+    # review P1-6). Take the union of commits unique to either tip.
+    tips: list[str] = []
     if run_ref:
-        tip = git(repo, "rev-parse", "-q", "--verify", run_ref, check=False)
-    if not tip and worktree.exists():
-        tip = git(worktree, "rev-parse", "-q", "--verify", "HEAD", check=False)
-    if not tip:
+        ref_tip = git(repo, "rev-parse", "-q", "--verify", run_ref, check=False)
+        if ref_tip:
+            tips.append(ref_tip)
+    if worktree.exists():
+        head_tip = git(worktree, "rev-parse", "-q", "--verify", "HEAD", check=False)
+        if head_tip and head_tip not in tips:
+            tips.append(head_tip)
+    if not tips:
         return []
     other_refs = [
         line
@@ -2261,10 +2282,49 @@ def worktree_unique_commits(
         ).splitlines()
         if line and line != run_ref
     ]
-    if not other_refs:
-        return [tip]
-    output = git(repo, "rev-list", tip, "--not", *other_refs, check=False)
-    return [line for line in output.splitlines() if line]
+    unique: list[str] = []
+    seen: set[str] = set()
+    for tip in tips:
+        output = (
+            tip
+            if not other_refs
+            else git(repo, "rev-list", tip, "--not", *other_refs, check=False)
+        )
+        for line in output.splitlines():
+            if line and line not in seen:
+                seen.add(line)
+                unique.append(line)
+    return unique
+
+
+def worktree_dirty_paths(worktree: Path) -> list[str]:
+    """Return modified/untracked paths in the worktree (empty when clean).
+
+    ``git worktree remove --force`` deletes uncommitted resolutions and
+    untracked files without a trace, so retire must refuse when this is
+    non-empty unless the caller has archived a full patch (Codex batch-2
+    review P1-6). Uses ``status --porcelain`` so both staged and untracked
+    content is reported.
+
+    ``.update-smart-validation`` is EXCLUDED: it is the validation script's
+    own scratch dir, always untracked, and retire explicitly archives it via
+    archive_run_evidence() before removal — refusing on it would block every
+    legitimate retire. Any OTHER dirty/untracked path is real, unarchived
+    work and blocks the removal.
+    """
+    if not worktree.exists():
+        return []
+    output = git(worktree, "status", "--porcelain", check=False)
+    dirty = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        # porcelain format: "XY <path>"; path starts at column 3.
+        rel = line[3:].strip().strip('"')
+        if rel == ".update-smart-validation" or rel.startswith(".update-smart-validation/"):
+            continue
+        dirty.append(line)
+    return dirty
 
 
 def archive_run_evidence(root: Path, run_id: str, worktree: Path) -> list[str]:
@@ -2298,6 +2358,13 @@ def stamp_terminal_ledger(root: Path, run_id: str, **updates: Any) -> dict[str, 
     is bookkeeping, not a phase/status change, so this takes the same file
     lock and writes directly instead of going through transition().
     """
+    # Retirement bookkeeping only: never let this immutability exception be
+    # used to rewrite status/phase/run_id/history (Codex batch-2 review P2).
+    disallowed = set(updates) - _RETIRE_LEDGER_FIELDS
+    if disallowed:
+        raise RuntimeError(
+            f"stamp_terminal_ledger refuses non-retirement fields: {sorted(disallowed)}"
+        )
     path = ledger_path(root, run_id)
     lock_path = path.with_suffix(".lock")
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2341,6 +2408,15 @@ def retire_run(repo: Path, root: Path, run_id: str) -> dict[str, Any]:
             f"refusing to remove worktree for {run_id}: "
             f"{len(unique)} commit(s) not reachable from any branch or remote "
             f"({', '.join(unique[:5])}{', ...' if len(unique) > 5 else ''})"
+        )
+    dirty = worktree_dirty_paths(worktree)
+    if dirty:
+        raise RuntimeError(
+            f"refusing to remove worktree for {run_id}: it has "
+            f"{len(dirty)} uncommitted/untracked path(s) that --force removal "
+            f"would destroy ({', '.join(p[3:] for p in dirty[:5])}"
+            f"{', ...' if len(dirty) > 5 else ''}). Commit, stash, or archive "
+            "them first, then retire."
         )
 
     archived = archive_run_evidence(root, run_id, worktree)

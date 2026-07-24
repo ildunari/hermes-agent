@@ -399,3 +399,32 @@ def test_guest_execute_code_blocks_traversal_and_file_scheme(tmp_path):
         "execute_code", {"code": "x = f'{1+1}$'; print(x)"}, root
     )
     assert ok.allowed is True
+
+
+def test_guest_homebrew_write_is_blocked(tmp_path):
+    """Codex batch-2 review P1-4: /opt/homebrew is user-writable, so an
+    explicit absolute write there is a sandbox escape, not a read-only ref."""
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+    decision = evaluate_guest_tool_call(
+        "terminal",
+        {"command": "cp payload /opt/homebrew/bin/new-command", "workdir": str(root)},
+        root,
+    )
+    assert decision.allowed is False
+
+
+def test_guest_file_scheme_variants_blocked(tmp_path):
+    """Codex batch-2 review P1-5: file: local-fs access in any case / slash
+    count must be rejected."""
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+    for command in [
+        "curl FILE:///etc/passwd",
+        "curl file:/etc/passwd",
+        "curl File://localhost/etc/passwd",
+    ]:
+        decision = evaluate_guest_tool_call(
+            "terminal", {"command": command, "workdir": str(root)}, root
+        )
+        assert decision.allowed is False, command

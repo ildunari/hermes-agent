@@ -1354,6 +1354,10 @@ def _write_status_with_age(tmp_path, *, active_agents, age_s, pid=123):
                 "active_agents": active_agents,
                 "gateway_state": "running",
                 "updated_at": updated_at.isoformat(),
+                # Freshness now comes from the dedicated count stamp, matching
+                # the real writer (gateway/status.py); age it the same as
+                # updated_at so these helper-built fixtures stay representative.
+                "active_agents_updated_at": updated_at.isoformat(),
             }
         )
     )
@@ -1970,3 +1974,59 @@ def test_active_agents_freshness_uses_dedicated_stamp(monkeypatch, tmp_path):
     busy = restart_surfaces._gateway_busy_details([target])
     assert consulted.get("hit") is True
     assert not busy  # heartbeat said 0 -> not busy
+
+
+def test_gateway_busy_details_missing_count_stamp_consults_heartbeat(monkeypatch, tmp_path):
+    """Codex batch-2 review P1-2: a legacy file lacking active_agents_updated_at
+    has UNKNOWN count freshness (updated_at is watchdog-restamped and must not
+    bless the count), so it must consult the heartbeat rather than trust the
+    file."""
+    import json
+    from datetime import datetime, timezone
+    from hermes_cli.restart_surfaces import _gateway_busy_details
+
+    status = tmp_path / "gateway_state.json"
+    status.write_text(json.dumps({
+        "pid": 123,
+        "active_agents": 3,
+        "gateway_state": "running",
+        # fresh updated_at, but NO active_agents_updated_at (old gateway)
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }))
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+    consulted = {}
+    def fake_hb(t):
+        consulted["hit"] = True
+        return (0, 4.0)
+    monkeypatch.setattr("hermes_cli.restart_surfaces._heartbeat_active_agents", fake_hb)
+
+    busy = _gateway_busy_details([target])
+    assert consulted.get("hit") is True
+    assert not busy  # heartbeat says idle
+
+
+def test_gateway_busy_details_stale_zero_without_heartbeat_is_busy(monkeypatch, tmp_path):
+    """Codex batch-2 review P1-3: a stale/unknown-freshness ZERO count with no
+    heartbeat must be treated as BUSY (unverifiable idle is not idle), so a
+    restart cannot proceed during a live run whose count-write was skipped."""
+    import json
+    from datetime import datetime, timezone
+    from hermes_cli.restart_surfaces import _gateway_busy_details
+
+    status = tmp_path / "gateway_state.json"
+    status.write_text(json.dumps({
+        "pid": 123,
+        "active_agents": 0,
+        "gateway_state": "running",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        # no active_agents_updated_at -> unknown freshness
+    }))
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr("hermes_cli.restart_surfaces._heartbeat_active_agents", lambda t: None)
+
+    busy = _gateway_busy_details([target])
+    assert len(busy) == 1  # unverifiable zero -> fail closed to busy

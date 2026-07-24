@@ -853,38 +853,50 @@ def gateway_busy_snapshot(targets: Iterable[RestartTarget]) -> list[dict[str, An
         heartbeat_active_agents: int | None = None
         heartbeat_age: float | None = None
 
-        if active_agents > 0:
-            # Age the COUNT's own stamp, not top-level updated_at: the
-            # watchdog identity restamp refreshes updated_at every ~30s
-            # without touching the count, which would keep re-blessing a
-            # stale phantom count and make this cross-check unreachable
-            # (Codex fix-lane review P1-1). Legacy files without the
-            # dedicated stamp fall back to updated_at.
-            active_agents_age = _iso_age_seconds(
-                payload.get("active_agents_updated_at")
-                or payload.get("updated_at")
-            )
-            if active_agents_age is None or active_agents_age > ACTIVE_AGENTS_TRUST_WINDOW_S:
-                live = _heartbeat_active_agents(target)
-                if live is None:
+        # Freshness comes ONLY from the count's dedicated stamp. A missing
+        # active_agents_updated_at means UNKNOWN freshness (an old gateway that
+        # predates the stamp, or a failed recount that skipped it) — never fall
+        # back to updated_at, which the watchdog identity-restamps every ~30s
+        # and would re-bless a stale count forever (Codex batch-2 review P1-2).
+        # Verify BOTH zero and nonzero counts: a stale/unknown ZERO must not
+        # authorize a restart during a live run either (Codex batch-2 P1-3).
+        _stamp = payload.get("active_agents_updated_at")
+        active_agents_age = _iso_age_seconds(_stamp) if _stamp else None
+        _count_is_fresh = (
+            active_agents_age is not None
+            and active_agents_age <= ACTIVE_AGENTS_TRUST_WINDOW_S
+        )
+        if not _count_is_fresh:
+            live = _heartbeat_active_agents(target)
+            if live is None:
+                # No independent confirmation: fail closed. A stale/unknown
+                # count of any value is treated as BUSY until a fresh source
+                # confirms zero — never let an unverifiable idle proceed.
+                if active_agents == 0:
+                    _append_log(
+                        f"{target.label}: active_agents=0 but count freshness is "
+                        f"unknown (stamp={_stamp!r}, age={active_agents_age!r}s) and "
+                        "no heartbeat is available; treating as BUSY (failing closed)"
+                    )
+                    active_agents = 1  # force busy; unverifiable idle is not idle
+                else:
                     _append_log(
                         f"{target.label}: active_agents={active_agents} but status "
-                        f"file is stale (age={active_agents_age!r}s, trust_window="
-                        f"{ACTIVE_AGENTS_TRUST_WINDOW_S}s) and no fresh heartbeat "
-                        "active_agents is available; trusting the stale file "
-                        "(failing closed)"
+                        f"file freshness is unknown/stale (age={active_agents_age!r}s, "
+                        f"trust_window={ACTIVE_AGENTS_TRUST_WINDOW_S}s) and no fresh "
+                        "heartbeat is available; trusting the file (failing closed)"
                     )
-                else:
-                    heartbeat_active_agents, heartbeat_age = live
-                    if heartbeat_active_agents != active_agents:
-                        _append_log(
-                            f"{target.label}: status file active_agents="
-                            f"{active_agents} is stale (age={active_agents_age!r}s); "
-                            f"fresh heartbeat reports active_agents="
-                            f"{heartbeat_active_agents} (age={heartbeat_age:.1f}s) — "
-                            "trusting the heartbeat"
-                        )
-                    active_agents = heartbeat_active_agents
+            else:
+                heartbeat_active_agents, heartbeat_age = live
+                if heartbeat_active_agents != active_agents:
+                    _append_log(
+                        f"{target.label}: status file active_agents="
+                        f"{active_agents} freshness unknown/stale "
+                        f"(age={active_agents_age!r}s); fresh heartbeat reports "
+                        f"active_agents={heartbeat_active_agents} "
+                        f"(age={heartbeat_age:.1f}s) — trusting the heartbeat"
+                    )
+                active_agents = heartbeat_active_agents
 
         snapshot.append(
             {
