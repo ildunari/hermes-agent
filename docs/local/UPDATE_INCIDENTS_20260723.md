@@ -279,3 +279,20 @@ Dev lane's own reviewed commit), 1e48f2529 (mechanical baseline), 44b0a22ae
 (docs-only). Review lane itself died silently mid-pass once; resumed via
 `codex exec ... resume <thread_id>` (exec resume --last grabs the wrong
 session when multi-agent v2 threads exist).
+
+## 18. Run-3 escalated to the ~8h python suite AGAIN (2026-07-24 ~14:45)
+
+Run `20260724T135644Z-d77b04ce48bf` re-triggered python-full on five
+package.json changes despite the language-scoped gate landing after run-2.
+The gate fix scoped the wrong input: `full_validation_required` checked
+`dependency_sensitive or python_manifests`, and `dependency_sensitive` is
+collected language-blind in `execute_worker` (any DEP_MANIFEST_NAMES
+basename or `*.lock`), so the unfiltered JS entries short-circuited ahead of
+the scoped helper. Yesterday's gate tests never fed JS paths through the
+`dependency_sensitive` argument, which is how the hole survived review.
+Fixed by re-scoping inside `full_validation_required` (JS suffixes +
+yarn.lock/pnpm-lock.yaml filtered out of dependency_sensitive before the
+python escalation) with a regression test reproducing run-3's exact path
+list. Run-3 aborted at 9% of ~44,828 tests (~3,232s in); relaunched as
+run-4 on the fixed tip. Lesson: when a gate takes two inputs that look like
+the same data, test the one the caller actually populates.

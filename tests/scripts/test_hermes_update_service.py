@@ -804,6 +804,27 @@ def test_full_validation_required_gates() -> None:
     ) == (False, "")
 
 
+def test_full_validation_ignores_js_entries_in_dependency_sensitive() -> None:
+    # Regression for run 20260724T135644Z: dependency_sensitive is collected
+    # language-blind, so five package.json changes escalated the ~8h python
+    # suite even after the language-scoped gate landed.
+    js_only = [
+        "apps/bootstrap-installer/package.json",
+        "apps/desktop/package.json",
+        "apps/shared/package.json",
+        "tests-js/package.json",
+        "ui-tui/package.json",
+        "package-lock.json",
+        "web/yarn.lock",
+    ]
+    assert SERVICE.full_validation_required({}, js_only, js_only) == (False, "")
+
+    mixed = ["apps/desktop/package.json", "uv.lock"]
+    required, reason = SERVICE.full_validation_required({}, mixed, mixed)
+    assert required
+    assert "uv.lock" in reason and "package.json" not in reason
+
+
 def test_full_validation_required_uses_parked_conflict_files() -> None:
     required, reason = SERVICE.full_validation_required(
         {"conflict_files": ["hermes_cli/main.py"]}, [], []

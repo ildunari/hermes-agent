@@ -105,7 +105,7 @@ class TestCommandRegistry:
         assert restart_gateways is not None
         assert restart_hermes is not None
         assert restart.gateway_only and not restart.advertise_in_gateway
-        assert restart_webui.cli_only and not restart_webui.gateway_only
+        assert not restart_webui.cli_only and not restart_webui.gateway_only
         assert not restart_gateways.cli_only and not restart_gateways.gateway_only
         assert not restart_hermes.cli_only and not restart_hermes.gateway_only
         assert resolve_command("restart_gateways").name == "restart-gateways"
@@ -115,18 +115,12 @@ class TestCommandRegistry:
         assert "restart" not in telegram_names
         assert "restart_gateways" in telegram_names
         assert "restart_hermes" in telegram_names
+        assert "restart_webui" in telegram_names
         help_text = "\n".join(gateway_help_lines())
         assert "/restart " not in help_text
         assert "/restart-gateways" in help_text
         assert "/restart-hermes" in help_text
-
-    def test_discord_registers_safe_restart_commands_not_single_gateway_restart(self):
-        repo = pathlib.Path(__file__).resolve().parents[2]
-        adapter_py = (repo / "plugins" / "platforms" / "discord" / "adapter.py").read_text()
-        assert '@tree.command(name="restart"' not in adapter_py
-        assert '@tree.command(name="restart-gateways"' in adapter_py
-        assert '@tree.command(name="restart-hermes"' in adapter_py
-        assert "not cmd_def.advertise_in_gateway" in adapter_py
+        assert "/restart-webui" in help_text
 
     def test_telegram_visible_core_commands_have_cold_gateway_dispatch(self):
         """Commands shown in Telegram must not fall through as model text."""

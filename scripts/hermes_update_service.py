@@ -1151,13 +1151,26 @@ def full_validation_required(
     ]
     if hot:
         return True, "conflicts touch core paths: " + ", ".join(hot[:5])
-    python_manifests = python_dependency_manifests_changed(changed)
-    if dependency_sensitive or python_manifests:
-        touched = dependency_sensitive or python_manifests
-        return True, "python dependency manifests changed: " + ", ".join(touched[:5])
     # JS manifests do NOT justify the python suite: the JS lane (npm ci +
     # desktop/web batches) already runs whenever the diff touches those
-    # surfaces, and package.json cannot regress python behavior.
+    # surfaces, and package.json cannot regress python behavior. The
+    # dependency_sensitive list is collected language-blind (any manifest
+    # basename or *.lock), so it must be re-scoped here — run-3 2026-07-24
+    # escalated to the ~8h python suite on five package.json changes because
+    # the unfiltered list short-circuited ahead of the scoped check.
+    js_suffixes = JS_DEPENDENCY_MANIFEST_SUFFIXES + ("yarn.lock", "pnpm-lock.yaml")
+    python_manifests = sorted(
+        set(python_dependency_manifests_changed(changed))
+        | {
+            path
+            for path in dependency_sensitive
+            if not path.endswith(js_suffixes)
+        }
+    )
+    if python_manifests:
+        return True, "python dependency manifests changed: " + ", ".join(
+            python_manifests[:5]
+        )
     harness = sorted(FULL_VALIDATION_HARNESS_PATHS.intersection(changed))
     if harness:
         return True, "validation harness changed: " + ", ".join(harness)

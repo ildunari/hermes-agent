@@ -259,7 +259,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("restart", "Gracefully restart only this gateway after draining active runs", "Session",
                gateway_only=True, advertise_in_gateway=False),
     CommandDef("restart-webui", "Queue one detached restart of Hermes WebUI", "Session",
-               aliases=("restart_webui",), cli_only=True, args_hint="[--dry-run]"),
+               aliases=("restart_webui",), args_hint="[--dry-run]"),
     CommandDef("restart-gateways", "Queue one detached restart of the canonical Hermes gateway set", "Session",
                aliases=("restart_gateways",), args_hint="[--dry-run]"),
     CommandDef("restart-hermes", "Queue one detached restart of gateways plus local Hermes surfaces", "Session",
@@ -1229,7 +1229,7 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - debug: the log/report upload surface; reached via /hermes debug on Slack.
 #   - insights/platform/update/update-smart/update-desktop/version: lower-frequency ops surfaces;
 #     routed via /hermes to keep Slack under its native slash-command cap.
-_SLACK_VIA_HERMES_ONLY = frozenset({"topup", "moa", "debug", "insights", "platform", "update", "update-smart", "update_smart", "update-desktop", "update_desktop", "version"})
+_SLACK_VIA_HERMES_ONLY = frozenset({"topup", "moa", "debug", "insights", "platform", "update", "update-smart", "update_smart", "update-desktop", "update_desktop", "version", "restart-webui", "restart_webui"})
 
 
 def _sanitize_slack_name(raw: str) -> str:

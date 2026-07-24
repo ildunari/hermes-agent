@@ -12791,6 +12791,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "restart",
                 "restart-gateways",
                 "restart-hermes",
+                "restart-webui",
             }:
                 if _cmd_def_inner.name == "restart":
                     return await self._handle_restart_command(event)
@@ -13369,7 +13370,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "restart":
             return await self._handle_restart_command(event)
 
-        if canonical in ("restart-gateways", "restart-hermes"):
+        if canonical in ("restart-gateways", "restart-hermes", "restart-webui"):
             return await self._handle_detached_surface_restart_command(event, canonical)
 
         if canonical == "stop":
@@ -16705,7 +16706,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Queue cross-surface restart work outside the receiving gateway."""
         from hermes_cli.restart_surfaces import enqueue_detached_restart
 
-        scope = "gateways" if canonical == "restart-gateways" else "hermes"
+        scope = {
+            "restart-gateways": "gateways",
+            "restart-webui": "webui",
+        }.get(canonical, "hermes")
+        if scope == "webui" and event.source and event.source.platform:
+            try:
+                origin_platform = event.source.platform.value
+            except Exception:
+                origin_platform = ""
+            # A WebUI restart requested over the WebUI's own HTTP transport
+            # would sever the connection that carries the reply (and Hermex
+            # would retry into a restarting server). Route it via a chat
+            # surface instead.
+            if origin_platform == "api_server":
+                return (
+                    "Refusing to restart the WebUI from the WebUI surface "
+                    "itself — send /restart-webui from Telegram (or another "
+                    "chat platform), or run `hermes restart-webui` in a "
+                    "terminal."
+                )
         args = event.get_command_args().split()
         dry_run = any(
             arg.lower() in {"--dry-run", "dry-run", "smoke", "test", "plan"}
