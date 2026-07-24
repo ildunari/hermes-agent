@@ -126,6 +126,13 @@ def test_multiplex_gateway_scope_plan_uses_single_root_topology(monkeypatch):
 def test_multiplex_gateway_listener_ports_follow_merged_config(monkeypatch):
     from hermes_cli import restart_surfaces
 
+    # Port env vars deliberately override merged config in production; a
+    # dotenv load by any earlier test (the drain suites) leaks them into
+    # os.environ and breaks this exact-port assertion. Isolate them.
+    for env_name in restart_surfaces._PLATFORM_PORT_ENV.values():
+        if env_name:
+            monkeypatch.delenv(env_name, raising=False)
+
     monkeypatch.setattr(
         restart_surfaces,
         "_multiplex_gateway_config",
