@@ -1469,6 +1469,119 @@ def test_gateway_busy_details_stale_file_stale_heartbeat_fails_closed(monkeypatc
     assert "active_agents=1" in busy[0]
 
 
+def test_gateway_busy_snapshot_reports_structured_fields_and_freshness(monkeypatch, tmp_path):
+    """gateway_busy_snapshot is the structured record _gateway_busy_details'
+    formatted string is derived from: same trust-window/heartbeat logic, but
+    with label/active_agents/gateway_state/restart_requested/freshness age
+    as separate fields so a caller can embed them without re-parsing text."""
+    from hermes_cli.restart_surfaces import gateway_busy_snapshot
+
+    status = _write_status_with_age(tmp_path, active_agents=2, age_s=5)
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+
+    snapshot = gateway_busy_snapshot([target])
+
+    assert len(snapshot) == 1
+    record = snapshot[0]
+    assert record["label"] == target.label
+    assert record["active_agents"] == 2
+    assert record["gateway_state"] == "running"
+    assert record["restart_requested"] is False
+    assert record["busy"] is True
+    assert record["active_agents_age_seconds"] is not None
+    assert record["active_agents_age_seconds"] < 60
+    assert record["heartbeat_active_agents"] is None
+
+
+def test_gateway_busy_snapshot_records_heartbeat_override(monkeypatch, tmp_path):
+    """When the status file is stale and a fresh heartbeat overrides the
+    count, the snapshot exposes both the overriding heartbeat count/age and
+    the (overridden) active_agents value actually used."""
+    from hermes_cli import restart_surfaces
+    from hermes_cli.restart_surfaces import gateway_busy_snapshot
+
+    status = _write_status_with_age(
+        tmp_path, active_agents=1, age_s=restart_surfaces.ACTIVE_AGENTS_TRUST_WINDOW_S + 30
+    )
+    _write_heartbeat_with_agents(tmp_path, active_agents=0, age_s=5)
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+
+    snapshot = gateway_busy_snapshot([target])
+
+    assert len(snapshot) == 1
+    record = snapshot[0]
+    assert record["active_agents"] == 0
+    assert record["heartbeat_active_agents"] == 0
+    assert record["heartbeat_age_seconds"] is not None
+    assert record["busy"] is False
+
+
+def test_gateway_busy_details_and_snapshot_agree_on_busy_targets(monkeypatch, tmp_path):
+    """No divergence between the formatted-string helper and the structured
+    snapshot it now reuses."""
+    from hermes_cli.restart_surfaces import _gateway_busy_details, gateway_busy_snapshot
+
+    status = _write_status_with_age(tmp_path, active_agents=3, age_s=5)
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr("hermes_cli.restart_surfaces._pid_is_alive", lambda _pid: True)
+
+    details = _gateway_busy_details([target])
+    snapshot = gateway_busy_snapshot([target])
+
+    assert len(details) == 1
+    assert f"active_agents=3" in details[0]
+    assert snapshot[0]["active_agents"] == 3
+    assert snapshot[0]["busy"] is True
+
+
+def test_busy_state_snapshot_combines_gateway_webui_desktop(monkeypatch):
+    from hermes_cli import restart_surfaces
+
+    monkeypatch.setattr(
+        restart_surfaces, "gateway_busy_snapshot", lambda _targets: [{"label": "g", "busy": True}]
+    )
+    monkeypatch.setattr(restart_surfaces, "_webui_busy_details", lambda _targets: ["webui busy"])
+    monkeypatch.setattr(restart_surfaces, "_desktop_busy_details", lambda _targets: [])
+
+    result = restart_surfaces.busy_state_snapshot("hermes")
+
+    assert result == {
+        "scope": "hermes",
+        "gateway": [{"label": "g", "busy": True}],
+        "webui": ["webui busy"],
+        "desktop": [],
+    }
+
+
+def test_busy_state_snapshot_normalizes_and_rejects_unknown_scope():
+    from hermes_cli import restart_surfaces
+
+    assert restart_surfaces.busy_state_snapshot("restart-hermes")["scope"] == "hermes"
+    with pytest.raises(restart_surfaces.RestartError):
+        restart_surfaces.busy_state_snapshot("not-a-scope")
+
+
+def test_main_busy_snapshot_json_flag_prints_snapshot_and_exits(monkeypatch, capsys):
+    from hermes_cli import restart_surfaces
+
+    monkeypatch.setattr(
+        restart_surfaces,
+        "busy_state_snapshot",
+        lambda scope: {"scope": scope, "gateway": [], "webui": [], "desktop": []},
+    )
+
+    exit_code = restart_surfaces.main(["--scope", "gateways", "--busy-snapshot-json"])
+
+    assert exit_code == 0
+    printed = json.loads(capsys.readouterr().out.strip())
+    assert printed == {"scope": "gateways", "gateway": [], "webui": [], "desktop": []}
+
+
 def test_restart_scope_sends_completion_notifications(monkeypatch, tmp_path):
     calls = []
     notifications = []

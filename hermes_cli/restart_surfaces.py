@@ -823,8 +823,17 @@ def _heartbeat_active_agents(target: RestartTarget) -> tuple[int, float] | None:
         return None
 
 
-def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
-    busy: list[str] = []
+def gateway_busy_snapshot(targets: Iterable[RestartTarget]) -> list[dict[str, Any]]:
+    """Structured per-target busy-state record: label, active_agents,
+    gateway_state, restart_requested, and the freshness age behind that
+    active_agents count.
+
+    This is the single source of the trust-window/heartbeat cross-check
+    logic; ``_gateway_busy_details`` (the plain-text explanation used by the
+    safe-restart wait) and the update service's drain-audit evidence both
+    read off this same computation instead of re-deriving it.
+    """
+    snapshot: list[dict[str, Any]] = []
     for target in targets:
         status_path = _gateway_status_path_for_target(target)
         if status_path is None:
@@ -840,6 +849,9 @@ def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
             active_agents = 0
         gateway_state = str(payload.get("gateway_state") or "unknown")
         restart_requested = bool(payload.get("restart_requested"))
+        active_agents_age: float | None = None
+        heartbeat_active_agents: int | None = None
+        heartbeat_age: float | None = None
 
         if active_agents > 0:
             # Age the COUNT's own stamp, not top-level updated_at: the
@@ -848,37 +860,77 @@ def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
             # stale phantom count and make this cross-check unreachable
             # (Codex fix-lane review P1-1). Legacy files without the
             # dedicated stamp fall back to updated_at.
-            file_age = _iso_age_seconds(
+            active_agents_age = _iso_age_seconds(
                 payload.get("active_agents_updated_at")
                 or payload.get("updated_at")
             )
-            if file_age is None or file_age > ACTIVE_AGENTS_TRUST_WINDOW_S:
+            if active_agents_age is None or active_agents_age > ACTIVE_AGENTS_TRUST_WINDOW_S:
                 live = _heartbeat_active_agents(target)
                 if live is None:
                     _append_log(
                         f"{target.label}: active_agents={active_agents} but status "
-                        f"file is stale (age={file_age!r}s, trust_window="
+                        f"file is stale (age={active_agents_age!r}s, trust_window="
                         f"{ACTIVE_AGENTS_TRUST_WINDOW_S}s) and no fresh heartbeat "
                         "active_agents is available; trusting the stale file "
                         "(failing closed)"
                     )
                 else:
-                    live_count, live_age = live
-                    if live_count != active_agents:
+                    heartbeat_active_agents, heartbeat_age = live
+                    if heartbeat_active_agents != active_agents:
                         _append_log(
                             f"{target.label}: status file active_agents="
-                            f"{active_agents} is stale (age={file_age!r}s); fresh "
-                            f"heartbeat reports active_agents={live_count} "
-                            f"(age={live_age:.1f}s) — trusting the heartbeat"
+                            f"{active_agents} is stale (age={active_agents_age!r}s); "
+                            f"fresh heartbeat reports active_agents="
+                            f"{heartbeat_active_agents} (age={heartbeat_age:.1f}s) — "
+                            "trusting the heartbeat"
                         )
-                    active_agents = live_count
+                    active_agents = heartbeat_active_agents
 
-        if active_agents > 0 or (restart_requested and gateway_state == "draining"):
-            busy.append(
-                f"{target.label}: active_agents={active_agents}, state={gateway_state}, "
-                f"restart_requested={restart_requested}, status={status_path}"
-            )
-    return busy
+        snapshot.append(
+            {
+                "label": target.label,
+                "status_path": str(status_path),
+                "active_agents": active_agents,
+                "gateway_state": gateway_state,
+                "restart_requested": restart_requested,
+                "active_agents_age_seconds": active_agents_age,
+                "heartbeat_active_agents": heartbeat_active_agents,
+                "heartbeat_age_seconds": heartbeat_age,
+                "busy": bool(
+                    active_agents > 0
+                    or (restart_requested and gateway_state == "draining")
+                ),
+            }
+        )
+    return snapshot
+
+
+def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
+    return [
+        f"{record['label']}: active_agents={record['active_agents']}, "
+        f"state={record['gateway_state']}, "
+        f"restart_requested={record['restart_requested']}, "
+        f"status={record['status_path']}"
+        for record in gateway_busy_snapshot(targets)
+        if record["busy"]
+    ]
+
+
+def busy_state_snapshot(scope: str = "hermes") -> dict[str, Any]:
+    """Combined structured + plain-text busy-state evidence for a scope.
+
+    Reuses the same helpers ``_wait_for_safe_restart`` polls during a real
+    restart, so this is exactly what a caller would see if it asked "why is
+    the drain stuck" at that instant — safe to embed verbatim into another
+    process's evidence trail (e.g. the update service's drain-audit.jsonl).
+    """
+    targets = targets_for_scope(scope)
+    return {
+        "scope": normalize_scope(scope),
+        "gateway": gateway_busy_snapshot(targets),
+        "webui": _webui_busy_details(targets),
+        "desktop": _desktop_busy_details(targets),
+    }
 
 
 
@@ -1729,7 +1781,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--detached-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--busy-snapshot-json",
+        action="store_true",
+        help=(
+            "print the structured busy-state snapshot for --scope as JSON and "
+            "exit; a read-only diagnostic, not a restart"
+        ),
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.busy_snapshot_json:
+        print(json.dumps(busy_state_snapshot(args.scope), sort_keys=True))
+        return 0
     if args.install_system_restart_sudoers:
         print(install_system_restart_sudoers(args.sudoers_user, dry_run=args.dry_run))
         return 0
