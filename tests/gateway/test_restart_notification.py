@@ -344,6 +344,9 @@ async def test_send_home_channel_startup_notification_preserves_thread_metadata(
         "♻️ Gateway online — Hermes is back and ready.",
         metadata={
             "thread_id": "777",
+            # local carry: chat_type hint consumed by the telegram override
+            # plugin's _reply_to_message_id_for_send (hermes-kosta-plugins)
+            "chat_type": "dm",
             "telegram_dm_topic_reply_fallback": True,
             "direct_messages_topic_id": "777",
         },
@@ -488,6 +491,8 @@ async def test_send_restart_notification_with_thread(tmp_path, monkeypatch):
     call_args = adapter.send.call_args
     assert call_args[1]["metadata"] == {
         "thread_id": "777",
+        # local carry: chat_type hint (see note above)
+        "chat_type": "dm",
         "telegram_dm_topic_reply_fallback": True,
         "direct_messages_topic_id": "777",
         "telegram_reply_to_message_id": "m2",
@@ -751,6 +756,8 @@ async def test_restart_shutdown_notification_anchors_telegram_dm_topic():
     assert "Gateway restarting" in call.args[1]
     assert call.kwargs["metadata"] == {
         "thread_id": "20197",
+        # local carry: chat_type hint (see note above)
+        "chat_type": "dm",
         "telegram_dm_topic_reply_fallback": True,
         "direct_messages_topic_id": "20197",
         "telegram_reply_to_message_id": "462",

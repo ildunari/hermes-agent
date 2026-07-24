@@ -79,8 +79,8 @@ checks:
     description: gateway restart, compact HUD, and Discord live voice integration
   - id: discord-live-voice
     path: plugins/platforms/discord/adapter.py
-    needles: [DiscordVoiceReplyStreamer, _handle_barge_in_event, start_busy_voice]
-    description: Discord live voice, barge-in, and busy-audio lifecycle
+    needles: []
+    description: RETIRED 2026-07-23 — Discord live voice/barge-in/busy-audio carry moved to hermes-kosta-plugins discord_override; core file reverted to pristine upstream. Entry removable once the path drops out of changed_paths.
   - id: spoken-text-formatting
     path: hermes_cli/web_server.py
     needles: [prepare_spoken_text, spoken_formatter]

@@ -20,7 +20,6 @@ from gateway.config import PlatformConfig
 from gateway.platforms.base import SendResult
 from plugins.platforms.telegram.adapter import TelegramAdapter
 from telegram.error import BadRequest, NetworkError, TimedOut
-from telegram.constants import ParseMode
 
 
 # Content exercising rich-only constructs: a heading, a real Markdown table,
@@ -69,7 +68,6 @@ def _make_adapter(extra=None):
     # so _bot_supports_rich() is satisfied (real Bot.do_api_request is async too).
     bot.do_api_request = AsyncMock(return_value=SimpleNamespace(message_id=123))
     bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
-    bot.edit_message_text = AsyncMock(return_value=MagicMock(message_id=1))
     bot.send_chat_action = AsyncMock()  # keeps the post-send typing re-trigger quiet
     bot.send_message_draft = AsyncMock(return_value=True)  # legacy draft fallback
     bot.edit_message_text = AsyncMock(return_value=MagicMock(message_id=1))  # legacy edit path
@@ -126,107 +124,6 @@ async def test_rich_happy_path_sends_raw_markdown():
     assert "- [x] table renders" in api_kwargs["rich_message"]["markdown"]
     # Legacy path must not run on rich success.
     adapter._bot.send_message.assert_not_called()
-
-
-def test_rich_prepare_hard_breaks_adjacent_prose_lines():
-    """Adjacent prose lines get Markdown hard breaks (issue #46070), not
-    blank-line paragraph spacing.  A single ``\\n`` between prose lines must
-    become ``  \\n`` so Bot API rich rendering shows visible line breaks."""
-    adapter = _make_adapter()
-    content = "First paragraph.\nSecond paragraph."
-
-    assert adapter._prepare_rich_markdown(content) == "First paragraph.  \nSecond paragraph."
-
-
-@pytest.mark.asyncio
-async def test_rich_hard_breaks_preserve_structural_markdown():
-    """Hard-break injection must not touch table rows, list items, or fenced
-    code blocks — only prose lines between them get the trailing two spaces."""
-    adapter = _make_adapter()
-    content = "Intro\n| A | B |\n|---|---|\n| 1 | 2 |\n- [x] task\n```\na\nb\n```"
-
-    result = await adapter.send("12345", content)
-
-    assert result.success is True
-    api_kwargs = _rich_api_kwargs(adapter)
-    markdown = api_kwargs["rich_message"]["markdown"]
-    # The prose "Intro" line gains a hard break before the table.
-    assert "Intro  \n| A | B |" in markdown
-    # Table rows, list, and fenced code stay bare.
-    assert "| A | B |\n|---|---|\n| 1 | 2 |" in markdown
-    assert "- [x] task" in markdown
-    assert "```\na\nb\n```" in markdown
-
-
-@pytest.mark.asyncio
-async def test_rich_wide_tables_get_soft_cell_breaks_without_losing_grid():
-    adapter = _make_adapter()
-    content = (
-        "| Feature | Why it matters |\n"
-        "|---|---|\n"
-        "| Professional previews | This lets a real publishing workflow keep review links readable instead of forcing one huge scrolling table cell. |"
-    )
-
-    result = await adapter.send("12345", content)
-
-    assert result.success is True
-    api_kwargs = _rich_api_kwargs(adapter)
-    markdown = api_kwargs["rich_message"]["markdown"]
-    assert markdown.startswith("| Feature | Why it matters |\n|---|---|\n| ")
-    assert "<br>" in markdown
-    assert "| Professional previews |" in markdown
-
-
-@pytest.mark.asyncio
-async def test_rich_table_soft_wrapping_ignores_fenced_code_tables():
-    adapter = _make_adapter()
-    content = "```\n| A very very long header | B very very long header |\n|---|---|\n| This should stay untouched because it is code | not a rich table |\n```"
-
-    result = await adapter.send("12345", content)
-
-    assert result.success is True
-    api_kwargs = _rich_api_kwargs(adapter)
-    assert api_kwargs["rich_message"]["markdown"] == content
-
-
-@pytest.mark.asyncio
-async def test_disable_rich_metadata_uses_legacy_send_for_progress_layout():
-    adapter = _make_adapter()
-    progress = "☁️×1 Thinking\n🌐×2 Searching the web\n📋 Updating tasks\n☑ Patch fix"
-
-    result = await adapter.send(
-        "12345",
-        progress,
-        metadata={"disable_rich_messages": "true"},
-    )
-
-    assert result.success is True
-    adapter._bot.do_api_request.assert_not_awaited()
-    adapter._bot.send_message.assert_awaited_once()
-    kwargs = adapter._bot.send_message.await_args.kwargs
-    assert kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
-    assert "\n" in kwargs["text"]
-
-
-@pytest.mark.asyncio
-async def test_disable_rich_metadata_uses_legacy_edit_for_progress_layout():
-    adapter = _make_adapter()
-    progress = "☁️×1 Thinking\n🌐×2 Searching the web\n📋 Updating tasks\n☑ Patch fix"
-
-    result = await adapter.edit_message(
-        "12345",
-        "999",
-        progress,
-        finalize=True,
-        metadata={"disable_rich_messages": True},
-    )
-
-    assert result.success is True
-    adapter._bot.do_api_request.assert_not_awaited()
-    adapter._bot.edit_message_text.assert_awaited_once()
-    kwargs = adapter._bot.edit_message_text.await_args.kwargs
-    assert kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
-    assert "\n" in kwargs["text"]
 
 
 @pytest.mark.asyncio
@@ -320,8 +217,10 @@ async def test_rich_messages_opt_out_accepts_string_false():
 
 
 @pytest.mark.asyncio
-async def test_rich_messages_default_to_native_rich_path():
-    """Rich-eligible content uses Telegram's native rich renderer by default."""
+async def test_rich_messages_default_is_legacy_copyable_path():
+    """Rich messages stay opt-in because current Telegram clients can make
+    Bot API rich messages hard to copy as plain text. Rich-eligible content
+    defaults to the legacy MarkdownV2 path unless the user opts in."""
     config = PlatformConfig(enabled=True, token="fake-token")
     adapter = TelegramAdapter(config)
     bot = MagicMock()
@@ -335,8 +234,8 @@ async def test_rich_messages_default_to_native_rich_path():
     assert result.success is True
     bot = adapter._bot
     assert bot is not None
-    bot.do_api_request.assert_awaited_once()
-    bot.send_message.assert_not_called()
+    bot.do_api_request.assert_not_called()
+    bot.send_message.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -636,17 +535,16 @@ async def test_routing_thread_id_maps_to_message_thread_id():
 
 
 @pytest.mark.asyncio
-async def test_routing_direct_messages_topic_id_maps_to_message_thread_id():
+async def test_routing_direct_messages_topic_id_drops_message_thread_id():
     adapter = _make_adapter()
 
     await adapter.send("-100123", RICH_CONTENT, metadata={"direct_messages_topic_id": "20189"})
 
-    bot = adapter._bot
-    assert bot is not None
-    bot.do_api_request.assert_not_called()
-    kwargs = bot.send_message.call_args.kwargs
-    assert kwargs["message_thread_id"] == 20189
-    assert "direct_messages_topic_id" not in kwargs
+    api_kwargs = _rich_api_kwargs(adapter)
+    assert api_kwargs["direct_messages_topic_id"] == 20189
+    # _thread_kwargs_for_send pairs the topic id with message_thread_id=None;
+    # the rich payload must drop the None key, not send a stray field.
+    assert "message_thread_id" not in api_kwargs
 
 
 @pytest.mark.asyncio
@@ -696,8 +594,8 @@ async def test_table_only_uses_legacy_when_rich_messages_opt_out():
 
 
 @pytest.mark.asyncio
-async def test_table_only_uses_rich_with_default_config():
-    """Local deployed default keeps native rich table rendering enabled."""
+async def test_table_only_uses_legacy_with_default_config():
+    """Default config (rich_messages unset → False) keeps tables on legacy path."""
     config = PlatformConfig(enabled=True, token="fake-token")
     adapter = TelegramAdapter(config)
     bot = MagicMock()
@@ -709,8 +607,8 @@ async def test_table_only_uses_rich_with_default_config():
     result = await adapter.send("12345", TABLE_ONLY_CONTENT)
 
     assert result.success is True
-    bot.do_api_request.assert_awaited_once()
-    bot.send_message.assert_not_called()
+    bot.do_api_request.assert_not_called()
+    bot.send_message.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -729,12 +627,8 @@ async def test_dm_topic_resumed_send_uses_legacy_for_table_when_opt_out():
     )
 
     assert result.success is True
-    bot = adapter._bot
-    assert bot is not None
-    bot.do_api_request.assert_not_called()
-    kwargs = bot.send_message.call_args.kwargs
-    assert kwargs["message_thread_id"] == 20189
-    assert "direct_messages_topic_id" not in kwargs
+    adapter._bot.do_api_request.assert_not_called()
+    adapter._bot.send_message.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -770,44 +664,7 @@ async def test_rich_gate_tolerates_minimal_bot_without_raw_endpoint():
     assert result.message_id == "42"
 
 
-@pytest.mark.asyncio
-async def test_finalize_edit_uses_raw_rich_message():
-    adapter = _make_adapter()
-
-    result = await adapter.edit_message("12345", "999", RICH_CONTENT, finalize=True)
-
-    assert result.success is True
-    bot = adapter._bot
-    assert bot is not None
-    call = bot.do_api_request.call_args
-    assert call.args[0] == "editMessageText"
-    api_kwargs = call.kwargs["api_kwargs"]
-    assert api_kwargs["chat_id"] == 12345
-    assert api_kwargs["message_id"] == 999
-    assert api_kwargs["rich_message"]["markdown"] == RICH_CONTENT
-    assert "| Case | Status |" in api_kwargs["rich_message"]["markdown"]
-    bot.edit_message_text.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_finalize_rich_edit_bad_request_falls_back_to_markdownv2():
-    adapter = _make_adapter()
-    bot = adapter._bot
-    assert bot is not None
-    bot.do_api_request = AsyncMock(side_effect=BadRequest("can't parse rich message"))
-    bot.edit_message_text = AsyncMock(return_value=SimpleNamespace(message_id=999))
-
-    result = await adapter.edit_message("12345", "999", RICH_CONTENT, finalize=True)
-
-    assert result.success is True
-    bot.do_api_request.assert_awaited_once()
-    bot.edit_message_text.assert_awaited_once()
-    kwargs = bot.edit_message_text.call_args.kwargs
-    assert kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
-    assert "*Results*" in kwargs["text"]
-    assert "• Status: ✅" in kwargs["text"]
-
-
+# ── Streaming drafts: sendRichMessageDraft ─────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -855,26 +712,6 @@ async def test_rich_draft_opt_in_sends_raw_markdown():
 
 
 @pytest.mark.asyncio
-async def test_rich_thinking_draft_sends_tg_thinking_html():
-    adapter = _make_adapter()
-    adapter._bot.do_api_request = AsyncMock(return_value=True)
-
-    result = await adapter.send_thinking_draft("12345", draft_id=7, content="Thinking…")
-
-    assert result.success is True
-    adapter._bot.do_api_request.assert_awaited_once()
-    call = adapter._bot.do_api_request.call_args
-    assert call.args[0] == "sendRichMessageDraft"
-    api_kwargs = call.kwargs["api_kwargs"]
-    assert api_kwargs["draft_id"] == 7
-    assert api_kwargs["rich_message"] == {
-        "html": "<tg-thinking>Thinking…</tg-thinking>",
-        "skip_entity_detection": True,
-    }
-    adapter._bot.send_message_draft.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_cjk_rich_content_skips_rich_draft_to_avoid_tdesktop_garble():
     adapter = _make_adapter(extra={"rich_drafts": True})
     adapter._bot.do_api_request = AsyncMock(return_value=True)
@@ -884,7 +721,6 @@ async def test_cjk_rich_content_skips_rich_draft_to_avoid_tdesktop_garble():
     assert result.success is True
     adapter._bot.do_api_request.assert_not_called()
     adapter._bot.send_message_draft.assert_awaited_once()
-
 
 
 @pytest.mark.asyncio
@@ -930,43 +766,6 @@ async def test_rich_draft_oversized_uses_legacy():
     assert result.success is True
     adapter._bot.do_api_request.assert_not_called()
     adapter._bot.send_message_draft.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_disable_rich_metadata_uses_legacy_draft_for_progress_layout():
-    adapter = _make_adapter()
-    progress = "☁️×1 Thinking\n🌐×2 Searching the web\n📋 Updating tasks\n☑ Patch fix"
-
-    result = await adapter.send_draft(
-        "12345",
-        draft_id=7,
-        content=progress,
-        metadata={"disable_rich_messages": True},
-    )
-
-    assert result.success is True
-    bot = adapter._bot
-    assert bot is not None
-    bot.do_api_request.assert_not_called()
-    bot.send_message_draft.assert_awaited_once()
-    kwargs = bot.send_message_draft.await_args.kwargs
-    assert kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
-    assert "\n" in kwargs["text"]
-
-
-@pytest.mark.asyncio
-async def test_rich_draft_bad_request_falls_back_without_latching_off():
-    adapter = _make_adapter(extra={"rich_drafts": True})
-    bot = adapter._bot
-    assert bot is not None
-    bot.do_api_request = AsyncMock(side_effect=BadRequest("can't parse rich message"))
-
-    result = await adapter.send_draft("12345", draft_id=7, content=RICH_CONTENT)
-
-    assert result.success is True
-    bot.do_api_request.assert_awaited_once()
-    bot.send_message_draft.assert_awaited_once()
-    assert adapter._rich_draft_disabled is False
 
 
 # ----------------------------------------------------------------------

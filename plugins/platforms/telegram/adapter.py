@@ -209,10 +209,6 @@ async def _shutdown_abandoned_app(app) -> None:
 try:
     from telegram import Update, Bot, Message, InlineKeyboardButton, InlineKeyboardMarkup
     try:
-        from telegram import WebAppInfo
-    except ImportError:
-        WebAppInfo = Any
-    try:
         from telegram import LinkPreviewOptions
     except ImportError:
         LinkPreviewOptions = None
@@ -234,7 +230,6 @@ except ImportError:
     Message = Any
     InlineKeyboardButton = Any
     InlineKeyboardMarkup = Any
-    WebAppInfo = Any
     LinkPreviewOptions = None
     Application = Any
     CommandHandler = Any
@@ -379,7 +374,7 @@ def check_telegram_requirements() -> bool:
     so the adapter's class-level type aliases get rebound.
     """
     global TELEGRAM_AVAILABLE, Update, Bot, Message, InlineKeyboardButton
-    global InlineKeyboardMarkup, WebAppInfo, LinkPreviewOptions, Application
+    global InlineKeyboardMarkup, LinkPreviewOptions, Application
     global CommandHandler, CallbackQueryHandler, TelegramMessageHandler
     global ContextTypes, filters, ParseMode, ChatType, HTTPXRequest
     if TELEGRAM_AVAILABLE:
@@ -392,10 +387,6 @@ def check_telegram_requirements() -> bool:
     try:
         from telegram import Update as _Update, Bot as _Bot, Message as _Message
         from telegram import InlineKeyboardButton as _IKB, InlineKeyboardMarkup as _IKM
-        try:
-            from telegram import WebAppInfo as _WAI
-        except ImportError:
-            _WAI = Any
         try:
             from telegram import LinkPreviewOptions as _LPO
         except ImportError:
@@ -415,7 +406,6 @@ def check_telegram_requirements() -> bool:
     Message = _Message
     InlineKeyboardButton = _IKB
     InlineKeyboardMarkup = _IKM
-    WebAppInfo = _WAI
     LinkPreviewOptions = _LPO
     Application = _App
     CommandHandler = _CH
@@ -492,16 +482,6 @@ from gateway.platforms.helpers import (
     TABLE_SEPARATOR_RE as _TABLE_SEPARATOR_RE,
     convert_table_to_bullets as _wrap_markdown_tables,
 )
-
-
-def _split_markdown_table_row(line: str) -> list[str]:
-    """Split a simple GFM table row into stripped cell values."""
-    stripped = line.strip()
-    if stripped.startswith("|"):
-        stripped = stripped[1:]
-    if stripped.endswith("|"):
-        stripped = stripped[:-1]
-    return [cell.strip() for cell in stripped.split("|")]
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +679,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # current Telegram clients can make rich messages difficult to copy
         # as plain text, which is worse than degraded table/task-list rendering
         # for command snippets and mobile handoffs.
-        self._rich_messages_enabled: bool = self._coerce_bool_extra("rich_messages", True)
+        self._rich_messages_enabled: bool = self._coerce_bool_extra("rich_messages", False)
         # Rich draft previews use a separate opt-in. Telegram macOS / Desktop
         # can leave Bot API 10.1 rich draft frames visually overlaid until the
         # chat is redrawn, while final rich messages remain useful.
@@ -781,10 +761,6 @@ class TelegramAdapter(BasePlatformAdapter):
         self._general_request_drain_lock = asyncio.Lock()
         # DM Topics: map of topic_name -> message_thread_id (populated at startup)
         self._dm_topics: Dict[str, int] = {}
-        # Last non-General direct-message topic seen per private chat. Telegram
-        # sometimes omits topic fields on follow-up updates inside the same
-        # visible DM lane; this keeps those replies routed to the active topic.
-        self._last_dm_topic_by_chat: Dict[str, int] = {}
         # Track forum chats where we've already registered bot commands
         self._forum_command_registered: set[int] = set()
         # Lock per la registrazione sicura dei comandi nei forum supergroup
@@ -825,13 +801,6 @@ class TelegramAdapter(BasePlatformAdapter):
         self._choice_picker_state: Dict[str, dict] = {}
         # Approval button state: message_id → session_key
         self._approval_state: Dict[int, str] = {}
-        # Context badge state: final assistant message_id → session metadata.
-        self._context_badge_sessions: Dict[str, str] = {}
-        self._context_badge_details: Dict[str, Dict[str, Any]] = {}
-        self._pending_context_badges: Dict[str, Dict[str, Any]] = {}
-        # Cache DM chat menu web-app URLs so final messages can include a
-        # one-tap Connect button without re-fetching the menu config every turn.
-        self._chat_menu_web_app_urls: Dict[str, Optional[str]] = {}
         # Slash-confirm button state: confirm_id → session_key (for /reload-mcp
         # and any other slash-confirm prompts; see GatewayRunner._request_slash_confirm).
         self._slash_confirm_state: Dict[str, str] = {}
@@ -981,32 +950,28 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
 
         chat_id = str(getattr(chat, "id", "")).strip() or user_id
-        raw_chat_type = getattr(chat, "type", "dm")
-        chat_type = str(getattr(raw_chat_type, "value", raw_chat_type)).strip().lower() or "dm"
-        if "supergroup" in chat_type:
-            chat_type = "supergroup"
-        elif "private" in chat_type:
-            chat_type = "private"
-        thread_id_raw = getattr(message, "message_thread_id", None)
-        is_topic_message = bool(getattr(message, "is_topic_message", False))
-        is_forum_group = getattr(chat, "is_forum", False) is True
+        chat_type = str(getattr(chat, "type", "dm")).strip().lower() or "dm"
         if chat_type == "private":
             chat_type = "dm"
         elif chat_type == "supergroup":
-            # Keep Hermes session keys on the established "group" surface while
-            # preserving the forum topic id as thread_id.  Telegram omits
-            # message_thread_id for the General topic, so synthesize "1" for
-            # forum groups to avoid routing those messages to the root chat.
-            chat_type = "group"
+            thread_id_raw = getattr(message, "message_thread_id", None)
+            is_topic_message = bool(getattr(message, "is_topic_message", False))
+            is_forum_group = getattr(chat, "is_forum", False) is True
+            chat_type = (
+                "forum"
+                if thread_id_raw is not None and (is_topic_message or is_forum_group)
+                else "group"
+            )
 
         thread_id = None
+        thread_id_raw = getattr(message, "message_thread_id", None)
         if thread_id_raw is not None:
-            if chat_type == "group" and (is_topic_message or is_forum_group):
+            is_topic_message = bool(getattr(message, "is_topic_message", False))
+            is_forum_group = getattr(chat, "is_forum", False) is True
+            if chat_type == "forum" and (is_topic_message or is_forum_group):
                 thread_id = str(thread_id_raw)
             elif chat_type == "dm" and is_topic_message:
                 thread_id = str(thread_id_raw)
-        elif chat_type == "group" and is_forum_group:
-            thread_id = self._GENERAL_TOPIC_THREAD_ID
 
         return SessionSource(
             platform=Platform.TELEGRAM,
@@ -1106,12 +1071,7 @@ class TelegramAdapter(BasePlatformAdapter):
     def _metadata_thread_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
         if not metadata:
             return None
-        thread_id = (
-            metadata.get("thread_id")
-            or metadata.get("message_thread_id")
-            or metadata.get("direct_messages_topic_id")
-            or metadata.get("telegram_direct_messages_topic_id")
-        )
+        thread_id = metadata.get("thread_id") or metadata.get("message_thread_id")
         return str(thread_id) if thread_id is not None else None
 
     @classmethod
@@ -1120,22 +1080,6 @@ class TelegramAdapter(BasePlatformAdapter):
             return None
         topic_id = metadata.get("direct_messages_topic_id") or metadata.get("telegram_direct_messages_topic_id")
         return str(topic_id) if topic_id is not None else None
-
-    @classmethod
-    def _metadata_has_explicit_direct_topic_only(cls, metadata: Optional[Dict[str, Any]]) -> bool:
-        """True for explicit Bot API Direct Messages topic sends.
-
-        Hermes-created private-topic lanes carry both ``thread_id`` and
-        ``direct_messages_topic_id`` as identity metadata; those must keep using
-        ``message_thread_id``.  Only a caller that supplies the direct topic id
-        without a thread id is asking for Telegram's native
-        ``direct_messages_topic_id`` parameter.
-        """
-        if not metadata or cls._metadata_direct_messages_topic_id(metadata) is None:
-            return False
-        if metadata.get("telegram_dm_topic_reply_fallback"):
-            return False
-        return not (metadata.get("thread_id") or metadata.get("message_thread_id"))
 
     @classmethod
     def _metadata_reply_to_message_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[int]:
@@ -1151,18 +1095,18 @@ class TelegramAdapter(BasePlatformAdapter):
         thread_id: Optional[str],
         metadata: Optional[Dict[str, Any]],
     ) -> bool:
-        if cls._metadata_has_explicit_direct_topic_only(metadata):
-            return True
+        if cls._metadata_direct_messages_topic_id(metadata) is not None:
+            return bool(
+                metadata
+                and metadata.get("telegram_dm_topic_reply_fallback")
+                and cls._metadata_reply_to_message_id(metadata) is not None
+            )
         if metadata and metadata.get("telegram_dm_topic_created_for_send"):
             return False
         return bool(
             thread_id
             and metadata
-            and (
-                metadata.get("telegram_dm_topic_reply_fallback")
-                or cls._metadata_direct_messages_topic_id(metadata) is not None
-                or str(metadata.get("chat_type", "")).lower() == "dm"
-            )
+            and metadata.get("telegram_dm_topic_reply_fallback")
         )
 
     @staticmethod
@@ -1178,12 +1122,10 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> Optional[int]:
         if reply_to:
             return int(reply_to)
-        if metadata:
+        if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
             if reply_to_mode == "off":
                 return None
-            metadata_reply = cls._metadata_reply_to_message_id(metadata)
-            if metadata_reply is not None:
-                return metadata_reply
+            return cls._metadata_reply_to_message_id(metadata)
         return None
 
     @classmethod
@@ -1197,19 +1139,34 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> Dict[str, Any]:
         """Return Telegram send kwargs for forum and direct-message topic routing.
 
-        Supergroup/forum topics and Hermes private-topic lanes use
-        ``message_thread_id``.  ``direct_messages_topic_id`` remains durable
-        identity metadata, but forwarding it to Telegram makes final replies
-        land in All/vanish from the visible topic on the deployed client path.
-        Live private-topic replies additionally carry a reply anchor; resumed
-        sends stay on the legacy path when no anchor exists.
+        Supergroup/forum topics use ``message_thread_id``. True Bot API Direct
+        Messages topics can opt in with explicit ``direct_messages_topic_id``
+        metadata. Hermes-created private-chat topic lanes are marked with
+        ``telegram_dm_topic_reply_fallback``. Live replies send the private
+        topic thread id together with a reply anchor; synthetic/resumed sends
+        without an anchor use ``direct_messages_topic_id`` when metadata has it.
+        ``message_thread_id`` alone can render outside the visible lane.
 
-        When ``reply_to_mode`` is ``"off"``, the reply anchor is suppressed
-        while preserving ``message_thread_id`` so the message still lands in
-        the correct topic.
+        When ``reply_to_mode`` is ``"off"``, the reply anchor is suppressed for
+        DM topic fallback sends while preserving the ``message_thread_id`` so
+        the message still lands in the correct topic.
         """
-        if cls._metadata_has_explicit_direct_topic_only(metadata):
-            direct_topic_id = cls._metadata_direct_messages_topic_id(metadata)
+        if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
+            if reply_to_mode == "off":
+                return {"message_thread_id": cls._message_thread_id_for_send(thread_id)}
+            if reply_to_message_id is None:
+                reply_to_message_id = cls._metadata_reply_to_message_id(metadata)
+            if reply_to_message_id is None:
+                direct_topic_id = cls._metadata_direct_messages_topic_id(metadata)
+                if direct_topic_id is not None:
+                    return {
+                        "message_thread_id": None,
+                        "direct_messages_topic_id": int(direct_topic_id),
+                    }
+                return {}
+            return {"message_thread_id": cls._message_thread_id_for_send(thread_id)}
+        direct_topic_id = cls._metadata_direct_messages_topic_id(metadata)
+        if direct_topic_id is not None:
             return {
                 "message_thread_id": None,
                 "direct_messages_topic_id": int(direct_topic_id),
@@ -1312,13 +1269,7 @@ class TelegramAdapter(BasePlatformAdapter):
            mentions topic/thread routing, we retry without routing rather
            than dropping the message.
         """
-        if not (
-            metadata
-            and (
-                metadata.get("telegram_dm_topic_reply_fallback")
-                or cls._metadata_direct_messages_topic_id(metadata) is not None
-            )
-        ):
+        if not (metadata and metadata.get("telegram_dm_topic_reply_fallback")):
             return False
         if not cls._is_bad_request_error(error):
             return False
@@ -1371,8 +1322,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 reset_media()
             retry_kwargs = dict(send_kwargs)
             retry_kwargs["reply_to_message_id"] = None
-            # Keep message_thread_id for Hermes private-topic lanes. Dropping it
-            # sends the retry to All/nowhere in Telegram's DM-topic UI.
+            retry_kwargs.pop("message_thread_id", None)
             retry_kwargs.pop("direct_messages_topic_id", None)
             return await send_fn(**retry_kwargs)
 
@@ -1601,17 +1551,6 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         return bool(content and self._RICH_CJK_RE.search(content))
 
-    def _metadata_disables_rich(self, metadata: Optional[Dict[str, Any]]) -> bool:
-        """Return True when a caller needs literal text/edit semantics."""
-        if not isinstance(metadata, dict):
-            return False
-        value = metadata.get("disable_rich_messages")
-        if value is None:
-            value = metadata.get("telegram_disable_rich_messages")
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
-
     def _needs_rich_rendering(self, content: str) -> bool:
         """Return True for markdown constructs that the legacy path degrades.
 
@@ -1634,88 +1573,11 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
         return False
 
-    _RICH_TABLE_SEPARATOR_RE = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
-    _RICH_TABLE_CELL_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
-
-    def _is_rich_markdown_table_start(self, lines: List[str], index: int) -> bool:
-        if index + 1 >= len(lines):
-            return False
-        first = lines[index].strip()
-        second = lines[index + 1].strip()
-        return first.startswith("|") and "|" in first[1:] and self._RICH_TABLE_SEPARATOR_RE.match(second) is not None
-
-    def _wrap_rich_table_cell(self, cell: str, width: int) -> str:
-        stripped = cell.strip()
-        if len(stripped) <= width or self._RICH_TABLE_CELL_BREAK_RE.search(stripped):
-            return stripped
-        import textwrap
-        wrapped = textwrap.wrap(
-            stripped,
-            width=width,
-            break_long_words=False,
-            break_on_hyphens=False,
-            replace_whitespace=False,
-        )
-        return "<br>".join(wrapped) if len(wrapped) > 1 else stripped
-
-    def _soft_wrap_rich_markdown_table(self, table_block: List[str]) -> List[str]:
-        rows = [_split_markdown_table_row(line) for line in table_block]
-        if len(rows) < 2 or len(rows[0]) < 2:
-            return table_block
-        column_count = len(rows[0])
-        if any(len(row) != column_count for row in rows if row):
-            return table_block
-        longest_cell = max((len(cell.strip()) for row in rows for cell in row), default=0)
-        rough_width = sum(max(len(row[col].strip()) for row in rows if len(row) > col) for col in range(column_count))
-        if longest_cell <= 36 and rough_width <= 72:
-            return table_block
-        target_width = max(18, min(38, 78 // column_count))
-        rendered: List[str] = [table_block[0], table_block[1]]
-        for row in rows[2:]:
-            wrapped = [self._wrap_rich_table_cell(cell, target_width) for cell in row]
-            rendered.append("| " + " | ".join(wrapped) + " |")
-        return rendered
-
-    def _soft_wrap_rich_markdown_tables(self, content: str) -> str:
-        if "|" not in content or "\n" not in content:
-            return content
-        lines = content.splitlines()
-        out: List[str] = []
-        i = 0
-        in_fence = False
-        while i < len(lines):
-            stripped = lines[i].strip()
-            if stripped.startswith(("```", "~~~")):
-                in_fence = not in_fence
-                out.append(lines[i])
-                i += 1
-                continue
-            if not in_fence and self._is_rich_markdown_table_start(lines, i):
-                block = [lines[i], lines[i + 1]]
-                i += 2
-                while i < len(lines) and lines[i].strip().startswith("|"):
-                    block.append(lines[i])
-                    i += 1
-                out.extend(self._soft_wrap_rich_markdown_table(block))
-                continue
-            out.append(lines[i])
-            i += 1
-        suffix = "\n" if content.endswith("\n") else ""
-        return "\n".join(out) + suffix
-
-    def _prepare_rich_markdown(self, content: str) -> str:
-        # Hard-break normalization (issue #46070) MUST run after table
-        # soft-wrapping so it sees the final line structure.  It is
-        # table/fence-aware and leaves protected regions untouched.
-        return _rich_normalize_linebreaks(
-            self._soft_wrap_rich_markdown_tables(content)
-        )
-
     def _rich_delivery_enabled(self) -> bool:
         """Whether rich delivery is allowed (``rich_messages`` opt-in)."""
         return bool(getattr(self, "_rich_messages_enabled", True))
 
-    def _rich_eligible(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+    def _rich_eligible(self, content: str) -> bool:
         """Capability/content eligibility for rich, ignoring ``expect_edits``.
 
         Shared core of :meth:`_should_attempt_rich` minus the per-call
@@ -1725,8 +1587,7 @@ class TelegramAdapter(BasePlatformAdapter):
         FINAL edit should still upgrade to rich when the content warrants it.
         """
         return bool(
-            not self._metadata_disables_rich(metadata)
-            and self._rich_delivery_enabled()
+            self._rich_delivery_enabled()
             and not getattr(self, "_rich_send_disabled", False)
             and content
             and content.strip()
@@ -1742,7 +1603,7 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> bool:
         return bool(
             not (metadata or {}).get("expect_edits")
-            and self._rich_eligible(content, metadata=metadata)
+            and self._rich_eligible(content)
         )
 
     def prefers_fresh_final_streaming(
@@ -1791,7 +1652,7 @@ class TelegramAdapter(BasePlatformAdapter):
         multi-line content (slash-command lists, etc.) renders correctly
         in the rich-message path.  See ``_rich_normalize_linebreaks``.
         """
-        payload: Dict[str, Any] = {"markdown": self._prepare_rich_markdown(content)}
+        payload: Dict[str, Any] = {"markdown": _rich_normalize_linebreaks(content)}
         if skip_entity_detection:
             payload["skip_entity_detection"] = True
         return payload
@@ -2071,14 +1932,9 @@ class TelegramAdapter(BasePlatformAdapter):
             pass
         return SendResult(success=True, message_id=message_id)
 
-    def _should_attempt_rich_draft(
-        self,
-        content: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
+    def _should_attempt_rich_draft(self, content: str) -> bool:
         return bool(
-            not self._metadata_disables_rich(metadata)
-            and getattr(self, "_rich_messages_enabled", True)
+            getattr(self, "_rich_messages_enabled", True)
             and getattr(self, "_rich_drafts_enabled", False)
             and not getattr(self, "_rich_send_disabled", False)
             and not getattr(self, "_rich_draft_disabled", False)
@@ -3202,15 +3058,6 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
             return None
 
-    async def create_topic(
-        self,
-        chat_id: int,
-        name: str,
-        persist: bool = False,
-    ) -> Optional[int]:
-        """Create a Telegram forum/private topic for the gateway /newthread contract."""
-        return await self._create_dm_topic(chat_id=int(chat_id), name=name)
-
     async def create_handoff_thread(
         self,
         parent_chat_id: str,
@@ -4177,450 +4024,6 @@ class TelegramAdapter(BasePlatformAdapter):
         else:  # "first" (default)
             return chunk_index == 0
 
-    @staticmethod
-    def _telegram_runtime_symbol(name: str, default: Any) -> Any:
-        """Resolve Telegram SDK symbols, honoring the legacy shim in tests."""
-        shim = sys.modules.get("gateway.platforms.telegram")
-        return getattr(shim, name, default) if shim is not None else default
-
-    async def _menu_web_app_url_for_chat(self, chat_id: str) -> Optional[str]:
-        """Return the configured Telegram menu web-app URL for this chat, if any."""
-        cache_key = str(chat_id)
-        cache = getattr(self, "_chat_menu_web_app_urls", None)
-        if cache is None:
-            cache = {}
-            self._chat_menu_web_app_urls = cache
-        if cache_key in cache:
-            return cache[cache_key]
-        url: Optional[str] = None
-        try:
-            if self._bot and hasattr(self._bot, "get_chat_menu_button"):
-                for kwargs in ({"chat_id": int(chat_id)}, {}):
-                    menu_button = await self._bot.get_chat_menu_button(**kwargs)
-                    web_app = getattr(menu_button, "web_app", None)
-                    candidate = getattr(web_app, "url", None)
-                    if candidate:
-                        url = str(candidate)
-                        break
-        except Exception as exc:
-            logger.debug("[%s] get_chat_menu_button failed for %s: %s", self.name, chat_id, exc)
-        cache[cache_key] = url
-        return url
-
-    @staticmethod
-    def _short_context_badge_path(path: Any, *, limit: int = 42) -> str:
-        text = str(path or "").strip()
-        if not text:
-            return "?"
-        try:
-            home = str(_Path.home())
-            if text == home:
-                text = "~"
-            elif text.startswith(home + os.sep):
-                text = "~" + text[len(home):]
-        except Exception:
-            pass
-        if len(text) <= limit:
-            return text
-        parts = [part for part in text.split(os.sep) if part]
-        if len(parts) >= 2:
-            compact = "…" + os.sep + os.sep.join(parts[-2:])
-            if len(compact) <= limit:
-                return compact
-        return "…" + text[-max(1, limit - 1):]
-
-    @staticmethod
-    def _short_context_badge_model(model: Any, *, limit: int = 34) -> str:
-        text = str(model or "").strip()
-        if not text:
-            return "?"
-        if "/" in text:
-            text = text.rsplit("/", 1)[-1]
-        if len(text) <= limit:
-            return text
-        return "…" + text[-max(1, limit - 1):]
-
-    @staticmethod
-    def _context_badge_reasoning_label(reasoning: Any) -> str:
-        if isinstance(reasoning, dict):
-            if reasoning.get("enabled") is False:
-                return "none"
-            effort = str(reasoning.get("effort") or "").strip()
-            if effort:
-                return effort
-        elif reasoning:
-            return str(reasoning).strip()
-        return "default"
-
-    @staticmethod
-    def _context_badge_k(n: Any) -> str:
-        try:
-            value = int(n)
-        except Exception:
-            return "?"
-        if value >= 1_000_000:
-            compact = f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".")
-            return f"{compact}M"
-        if value >= 1_000:
-            compact = f"{value / 1000:.1f}".rstrip("0").rstrip(".")
-            return f"{compact}k"
-        return str(value)
-
-    @staticmethod
-    def _context_badge_key(chat_id: Any, message_id: Any) -> str:
-        return f"{chat_id}:{message_id}"
-
-    def _remember_context_badge_details(
-        self,
-        chat_id: Any,
-        message_id: int,
-        *,
-        used: int,
-        total: int,
-        details: Dict[str, Any],
-        session_key: Optional[str],
-    ) -> None:
-        record = dict(details or {})
-        record["used"] = int(used or 0)
-        record["total"] = int(total or 0)
-        if session_key:
-            record.setdefault("session_key", session_key)
-        key = self._context_badge_key(chat_id, message_id)
-        details_cache = getattr(self, "_context_badge_details", None)
-        if details_cache is None:
-            details_cache = {}
-            self._context_badge_details = details_cache
-        sessions = getattr(self, "_context_badge_sessions", None)
-        if sessions is None:
-            sessions = {}
-            self._context_badge_sessions = sessions
-        details_cache[key] = record
-        if session_key:
-            sessions[key] = session_key
-        while len(details_cache) > 1000:
-            old_key = next(iter(details_cache))
-            details_cache.pop(old_key, None)
-            sessions.pop(old_key, None)
-
-    def _format_context_badge_alert(self, stats: Dict[str, Any]) -> str:
-        used = int(stats.get("used", stats.get("u", 0)) or 0)
-        total = int(stats.get("total", stats.get("t", 0)) or 0)
-        pct = int(round((used / max(total, 1)) * 100)) if total else 0
-        provider = str(stats.get("provider") or "").strip()
-        model = self._short_context_badge_model(stats.get("model"))
-        model_line = f"Model: {provider + '/' if provider else ''}{model}"
-        lines = [
-            f"Profile: {str(stats.get('profile') or '?')}",
-            model_line,
-            f"Reasoning: {self._context_badge_reasoning_label(stats.get('reasoning'))}",
-            f"Context: {self._context_badge_k(used)}/{self._context_badge_k(total)} ({pct}%)",
-            f"CWD: {self._short_context_badge_path(stats.get('cwd'))}",
-        ]
-        has_runtime_fields = any(stats.get(key) for key in ("profile", "model", "provider", "cwd", "reasoning"))
-        prompt_tokens = int(stats.get("prompt", stats.get("p", 0)) or 0)
-        completion_tokens = int(stats.get("completion", stats.get("c", 0)) or 0)
-        if (prompt_tokens or completion_tokens) and not has_runtime_fields:
-            lines.append(f"Tokens: prompt {prompt_tokens:,} · output {completion_tokens:,}")
-        if stats.get("api_calls") or stats.get("a") or stats.get("compressions") or stats.get("x"):
-            calls = int(stats.get("api_calls", stats.get("a", 0)) or 0)
-            comps = int(stats.get("compressions", stats.get("x", 0)) or 0)
-            lines.append(f"Calls: {calls} · Compressions: {comps}")
-        session_id = str(stats.get("session_id") or stats.get("session_key") or "").strip()
-        if session_id:
-            lines.append(f"Session: …{session_id[-12:]}")
-
-        selected: list[str] = []
-        for line in lines:
-            candidate = "\n".join([*selected, line]) if selected else line
-            if len(candidate) <= 200:
-                selected.append(line)
-        alert = "\n".join(selected)
-        if len(alert) > 200:
-            alert = alert[:199] + "…"
-        return alert
-
-    async def attach_context_badge(
-        self,
-        chat_id: str,
-        message_id: str,
-        used: int,
-        total: int,
-        details: Optional[Dict[str, Any]] = None,
-        session_key: Optional[str] = None,
-    ) -> bool:
-        """Attach a compact context/action row to an existing assistant message."""
-        if not self._bot or total <= 0:
-            return False
-
-        try:
-            pct = max(0, min(999, int(round((used / max(total, 1)) * 100))))
-            primary_text = f"Compress · ctx {self._context_badge_k(used)}/{self._context_badge_k(total)} ({pct}%)"
-            details = details or {}
-            payload: Dict[str, int] = {"u": int(used), "t": int(total)}
-            for src_key, dst_key in (("prompt", "p"), ("completion", "c"), ("api_calls", "a"), ("compressions", "x")):
-                val = details.get(src_key)
-                if isinstance(val, (int, float)) and val:
-                    payload[dst_key] = int(val)
-
-            def _pack(p: Dict[str, int]) -> str:
-                return "ctx:" + json.dumps(p, separators=(",", ":"))
-
-            message_id_int = int(message_id)
-            self._remember_context_badge_details(
-                chat_id,
-                message_id_int,
-                used=int(used),
-                total=int(total),
-                details=details,
-                session_key=session_key,
-            )
-
-            info_cb_data = f"ctxd:{message_id_int}"
-            if len(info_cb_data.encode("utf-8")) > 64:
-                info_cb_data = _pack(payload)
-                for drop_key in ("x", "a", "c", "p"):
-                    if len(info_cb_data.encode("utf-8")) <= 64:
-                        break
-                    payload.pop(drop_key, None)
-                    info_cb_data = _pack(payload)
-                if len(info_cb_data.encode("utf-8")) > 64:
-                    info_cb_data = "ctx:noop"
-
-            compact_cb_data = f"compact:{message_id}"
-            if len(compact_cb_data.encode("utf-8")) > 64:
-                return False
-
-            Button = self._telegram_runtime_symbol("InlineKeyboardButton", InlineKeyboardButton)
-            Markup = self._telegram_runtime_symbol("InlineKeyboardMarkup", InlineKeyboardMarkup)
-            WebInfo = self._telegram_runtime_symbol("WebAppInfo", WebAppInfo)
-
-            rows = []
-            connect_url = await self._menu_web_app_url_for_chat(chat_id)
-            if connect_url:
-                connect_kwargs = {"text": "Connect"}
-                if WebInfo is not Any:
-                    connect_kwargs["web_app"] = WebInfo(url=connect_url)
-                else:
-                    connect_kwargs["url"] = connect_url
-                rows.append([Button(**connect_kwargs)])
-
-            rows.append([
-                Button(text=primary_text, callback_data=compact_cb_data),
-                Button(text="ⓘ", callback_data=info_cb_data),
-            ])
-            await self._bot.edit_message_reply_markup(
-                chat_id=int(chat_id),
-                message_id=message_id_int,
-                reply_markup=Markup(rows),
-            )
-            return True
-        except Exception as exc:
-            logger.debug("[%s] attach_context_badge failed: %s", self.name, exc)
-            return False
-
-    async def _compact_session_from_badge(
-        self,
-        query: Any,
-        message_id: int,
-        session_key: str,
-    ) -> None:
-        """Compact the transcript for a session referenced by a context badge."""
-        try:
-            session_store = getattr(self, "_session_store", None)
-            if session_store is None:
-                await self._safe_answer_callback(query, "Compaction unavailable right now.")
-                return
-
-            session_entry = session_store._entries.get(session_key)
-            if not session_entry:
-                await self._safe_answer_callback(query, "Session not found for this message.")
-                return
-
-            history = session_store.load_transcript(session_entry.session_id)
-            if not history or len(history) < 4:
-                await self._safe_answer_callback(query, "Not enough conversation to compact.")
-                return
-
-            from gateway.run import _resolve_gateway_model, _resolve_runtime_agent_kwargs
-            from run_agent import AIAgent
-            from agent.model_metadata import estimate_messages_tokens_rough
-
-            runtime_kwargs = _resolve_runtime_agent_kwargs()
-            if not runtime_kwargs.get("api_key"):
-                await self._safe_answer_callback(query, "No provider configured for compaction.")
-                return
-
-            model = _resolve_gateway_model()
-            msgs = [
-                {
-                    "role": msg.get("role"),
-                    "content": msg.get("content"),
-                    "tool_name": msg.get("tool_name"),
-                    "tool_calls": msg.get("tool_calls"),
-                    "tool_call_id": msg.get("tool_call_id"),
-                    "reasoning": msg.get("reasoning"),
-                    "reasoning_details": msg.get("reasoning_details"),
-                    "codex_reasoning_items": msg.get("codex_reasoning_items"),
-                }
-                for msg in history
-                if msg.get("role") in ("system", "user", "assistant", "tool")
-            ]
-            if len(msgs) < 4:
-                await self._safe_answer_callback(query, "Not enough structured history to compact.")
-                return
-
-            old_tokens = estimate_messages_tokens_rough(msgs)
-            tmp_agent = AIAgent(
-                **runtime_kwargs,
-                model=model,
-                max_iterations=4,
-                quiet_mode=True,
-                enabled_toolsets=["memory"],
-                session_id=session_entry.session_id,
-            )
-            tmp_agent._print_fn = lambda *a, **kw: None
-
-            await self._safe_answer_callback(query, "Compacting context...")
-            loop = asyncio.get_running_loop()
-            compressed = await loop.run_in_executor(
-                None,
-                lambda: tmp_agent.context_compressor.compress(msgs, current_tokens=old_tokens),
-            )
-
-            session_store.rewrite_transcript(session_entry.session_id, compressed)
-            session_store.update_session(session_entry.session_key, last_prompt_tokens=0)
-
-            new_tokens = estimate_messages_tokens_rough(compressed)
-            details = {
-                "prompt": int(getattr(session_entry, "input_tokens", 0) or 0),
-                "completion": int(getattr(session_entry, "output_tokens", 0) or 0),
-                "api_calls": 0,
-                "compressions": 1,
-            }
-            await self.attach_context_badge(
-                chat_id=str(query.message.chat_id),
-                message_id=str(message_id),
-                used=new_tokens,
-                total=int(getattr(tmp_agent.context_compressor, "context_length", 0) or 0),
-                details=details,
-                session_key=session_key,
-            )
-
-            try:
-                msg = query.message
-                chat_id = str(msg.chat_id)
-                thread_id = getattr(msg, "message_thread_id", None)
-                chat = getattr(msg, "chat", None)
-                chat_type = getattr(chat, "type", None)
-                chat_type_value = getattr(chat_type, "value", chat_type)
-                is_private_chat = str(chat_type_value).lower() in {
-                    "private",
-                    str(ChatType.PRIVATE).lower(),
-                    str(getattr(ChatType.PRIVATE, "value", ChatType.PRIVATE)).lower(),
-                }
-                metadata: Dict[str, Any] = {"thread_id": str(thread_id)} if thread_id is not None else {}
-                if is_private_chat and thread_id is not None:
-                    metadata.update({
-                        "chat_type": "dm",
-                        "direct_messages_topic_id": str(thread_id),
-                    })
-                reply_to_id = int(msg.message_id) if getattr(msg, "message_id", None) is not None and metadata else None
-                thread_kwargs = (
-                    self._thread_kwargs_for_send(
-                        chat_id,
-                        str(thread_id),
-                        metadata,
-                        reply_to_message_id=reply_to_id,
-                    )
-                    if metadata
-                    else {}
-                )
-                await self._bot.send_message(
-                    chat_id=msg.chat_id,
-                    text=f"Compacted: {old_tokens:,} → {new_tokens:,} tokens",
-                    reply_to_message_id=reply_to_id,
-                    **thread_kwargs,
-                )
-            except Exception:
-                pass
-        except Exception as exc:
-            logger.warning("Telegram compact callback failed for msg %s: %s", message_id, exc)
-            await self._safe_answer_callback(query, f"Compaction failed: {exc}")
-
-    async def _safe_answer_callback(self, query: Any, text: str) -> None:
-        """Answer a Telegram callback, falling back to an in-thread message."""
-        try:
-            await query.answer(text=text)
-            return
-        except Exception:
-            pass
-
-        msg = getattr(query, "message", None)
-        bot = getattr(self, "_bot", None)
-        if msg is None or bot is None or not hasattr(bot, "send_message"):
-            return
-
-        chat_id = getattr(msg, "chat_id", None)
-        if chat_id is None:
-            return
-
-        thread_id = getattr(msg, "message_thread_id", None)
-        metadata: Dict[str, Any] = {"thread_id": str(thread_id)} if thread_id is not None else {}
-        reply_to_id = int(msg.message_id) if getattr(msg, "message_id", None) is not None and metadata else None
-        thread_kwargs = (
-            self._thread_kwargs_for_send(
-                str(chat_id),
-                str(thread_id),
-                metadata,
-                reply_to_message_id=reply_to_id,
-            )
-            if metadata
-            else {}
-        )
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_to_message_id=reply_to_id,
-                **thread_kwargs,
-            )
-        except Exception:
-            logger.debug("Telegram callback fallback send failed", exc_info=True)
-
-    async def prompt_newthread_name(
-        self,
-        chat_id: str,
-        prompt: str,
-        *,
-        metadata: Optional[Dict[str, Any]] = None,
-        reply_to: Optional[str] = None,
-    ) -> SendResult:
-        """Ask the user for a /newthread title with Telegram's native reply composer."""
-        if not self._bot:
-            return SendResult(success=False, error="Not connected")
-        try:
-            from telegram import ForceReply
-
-            formatted = self.format_message(prompt)
-            thread_id = self._metadata_thread_id(metadata)
-            thread_kwargs = self._thread_kwargs_for_send(chat_id, thread_id, metadata)
-            msg = await self._bot.send_message(
-                chat_id=int(chat_id),
-                text=formatted,
-                parse_mode=getattr(ParseMode, "MARKDOWN_V2", "MarkdownV2"),
-                reply_to_message_id=int(reply_to) if reply_to else None,
-                reply_markup=ForceReply(
-                    selective=True,
-                    input_field_placeholder="Name this Hermes thread/session",
-                ),
-                **thread_kwargs,
-                **self._link_preview_kwargs(),
-            )
-            return SendResult(success=True, message_id=str(getattr(msg, "message_id", "") or ""))
-        except Exception as exc:
-            logger.warning("[%s] Failed to send /newthread ForceReply prompt: %s", self.name, exc)
-            return SendResult(success=False, error=str(exc))
-
     async def send(
         self,
         chat_id: str,
@@ -4701,7 +4104,6 @@ class TelegramAdapter(BasePlatformAdapter):
 
             for i, chunk in enumerate(chunks):
                 retried_thread_not_found = False
-                retried_reply_not_found = False
                 metadata_reply_to = self._metadata_reply_to_message_id(metadata)
                 private_dm_topic_send = self._is_private_dm_topic_send(chat_id, thread_id, metadata)
                 # reply_to_mode="off" on the existing telegram_dm_topic_reply_fallback path
@@ -4725,6 +4127,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 else:
                     should_thread = self._should_thread_reply(reply_to_source, i)
                 reply_to_id = int(reply_to_source) if should_thread and reply_to_source else None
+                if private_dm_topic_send and reply_to_id is None and not dm_topic_reply_to_off:
+                    return SendResult(
+                        success=False,
+                        error=self._dm_topic_missing_anchor_error(),
+                        retryable=False,
+                    )
                 thread_kwargs = self._thread_kwargs_for_send(
                     chat_id,
                     thread_id,
@@ -4812,22 +4220,9 @@ class TelegramAdapter(BasePlatformAdapter):
                                 thread_kwargs = {"message_thread_id": None}
                                 continue
                             err_lower = str(send_err).lower()
-                            if "message to be replied not found" in err_lower and (reply_to_id is not None or retried_reply_not_found):
+                            if "message to be replied not found" in err_lower and reply_to_id is not None:
                                 if private_dm_topic_send:
-                                    if not retried_reply_not_found:
-                                        retried_reply_not_found = True
-                                        reply_to_id = None
-                                        thread_kwargs = self._thread_kwargs_for_send(
-                                            chat_id,
-                                            thread_id,
-                                            metadata,
-                                            reply_to_message_id=reply_to_id,
-                                            reply_to_mode=self._reply_to_mode,
-                                        )
-                                        effective_thread_id = thread_kwargs.get("message_thread_id")
-                                        continue
                                     safe_send_error = _redact_telegram_error_text(send_err)
-
                                     return SendResult(
                                         success=False,
                                         error=safe_send_error,
@@ -4884,34 +4279,6 @@ class TelegramAdapter(BasePlatformAdapter):
                         else:
                             raise
                     except Exception as send_err:
-                        if self._is_bad_request_error(send_err):
-                            if self._is_thread_not_found_error(send_err) and effective_thread_id is not None:
-                                if private_dm_topic_send or (metadata and metadata.get("telegram_dm_topic_created_for_send")):
-                                    return SendResult(
-                                        success=False,
-                                        error=str(send_err),
-                                        retryable=False,
-                                    )
-                            err_lower = str(send_err).lower()
-                            if "message to be replied not found" in err_lower and (reply_to_id is not None or retried_reply_not_found):
-                                if private_dm_topic_send:
-                                    if not retried_reply_not_found:
-                                        retried_reply_not_found = True
-                                        reply_to_id = None
-                                        thread_kwargs = self._thread_kwargs_for_send(
-                                            chat_id,
-                                            thread_id,
-                                            metadata,
-                                            reply_to_message_id=reply_to_id,
-                                            reply_to_mode=self._reply_to_mode,
-                                        )
-                                        effective_thread_id = thread_kwargs.get("message_thread_id")
-                                        continue
-                                    return SendResult(
-                                        success=False,
-                                        error=str(send_err),
-                                        retryable=False,
-                                    )
                         retry_after = getattr(send_err, "retry_after", None)
                         if retry_after is not None or "retry after" in str(send_err).lower():
                             if _send_attempt < 2:
@@ -5482,93 +4849,9 @@ class TelegramAdapter(BasePlatformAdapter):
         (added to python-telegram-bot in 22.6); older PTB installs gracefully
         fall back to the edit path even on DMs.
         """
-        if not self._bot or not (
-            hasattr(self._bot, "send_message_draft")
-            or hasattr(self._bot, "_post")
-            or hasattr(self._bot, "do_api_request")
-        ):
+        if not self._bot or not hasattr(self._bot, "send_message_draft"):
             return False
         return (chat_type or "").lower() in {"dm", "private"}
-
-    async def send_message_draft(
-        self,
-        chat_id: str,
-        draft_id: int,
-        content: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Backward-compatible raw sendMessageDraft helper.
-
-        Older gateway/tests call this method directly and some PTB versions only
-        expose the Bot API through ``_post``/``do_api_request``.  ``send_draft``
-        remains the richer SendResult API used by the stream consumer.
-        """
-        if not self._bot:
-            return False
-        text = content if len(content) <= self.MAX_MESSAGE_LENGTH else \
-            self.truncate_message(content, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)[0]
-        payload: Dict[str, Any] = {
-            "chat_id": int(chat_id),
-            "draft_id": int(draft_id),
-            "text": text,
-        }
-        thread_id = self._metadata_thread_id(metadata)
-        if thread_id is not None:
-            payload["message_thread_id"] = int(thread_id)
-        try:
-            if hasattr(self._bot, "send_message_draft"):
-                return bool(await self._bot.send_message_draft(**payload))
-            if hasattr(self._bot, "_post"):
-                return bool(await self._bot._post("sendMessageDraft", payload))
-            if hasattr(self._bot, "do_api_request"):
-                return bool(await self._bot.do_api_request("sendMessageDraft", api_kwargs=payload))
-        except Exception as exc:
-            logger.debug("[%s] sendMessageDraft raw helper failed: %s", self.name, exc)
-            return False
-        return False
-
-    async def send_thinking_draft(
-        self,
-        chat_id: str,
-        draft_id: int,
-        content: str = "Thinking…",
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
-        """Show Telegram's native animated RichBlockThinking draft."""
-        if not self._bot:
-            return SendResult(success=False, error="not_connected")
-        if not bool(
-            not self._metadata_disables_rich(metadata)
-            and getattr(self, "_rich_messages_enabled", True)
-            and not getattr(self, "_rich_send_disabled", False)
-            and not getattr(self, "_rich_draft_disabled", False)
-            and self._bot_supports_rich()
-        ):
-            return SendResult(success=False, error="rich_draft_unavailable")
-
-        text = content or "Thinking…"
-        rich_message = {
-            "html": f"<tg-thinking>{_html.escape(text)}</tg-thinking>",
-            "skip_entity_detection": True,
-        }
-        payload: Dict[str, Any] = {
-            "chat_id": int(chat_id),
-            "draft_id": int(draft_id),
-            "rich_message": rich_message,
-        }
-        thread_id = self._metadata_thread_id(metadata)
-        if thread_id is not None:
-            payload["message_thread_id"] = int(thread_id)
-        try:
-            ok = await self._bot.do_api_request("sendRichMessageDraft", api_kwargs=payload)
-        except Exception as exc:
-            if self._is_rich_capability_error(exc):
-                self._rich_draft_disabled = True
-            logger.debug("[%s] sendRichMessageDraft thinking failure: %s", self.name, exc)
-            return SendResult(success=False, error="thinking_draft_rejected")
-        if ok:
-            return SendResult(success=True, message_id=None)
-        return SendResult(success=False, error="thinking_draft_rejected")
 
     async def send_draft(
         self,
@@ -5596,7 +4879,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # streaming preview with the same raw markdown the final
         # sendRichMessage will persist, so the animated draft matches the final
         # message. Any failure degrades to the legacy plain-text draft below.
-        if self._should_attempt_rich_draft(content, metadata=metadata):
+        if self._should_attempt_rich_draft(content):
             if await self._try_send_rich_draft(chat_id, draft_id, content, metadata):
                 # Drafts have no message_id; report success without one.
                 return SendResult(success=True, message_id=None)
@@ -6219,9 +5502,7 @@ class TelegramAdapter(BasePlatformAdapter):
         page_info = f" ({start + 1}–{end} of {total})" if total_pages > 1 else ""
         return InlineKeyboardMarkup(rows), page_info
 
-    def _build_model_keyboard(
-        self, models: list, page: int, model_labels: Optional[Dict[str, str]] = None
-    ) -> tuple:
+    def _build_model_keyboard(self, models: list, page: int) -> tuple:
         """Build paginated model buttons. Returns (keyboard, page_info_text)."""
         page_size = self._MODEL_PAGE_SIZE
         total = len(models)
@@ -6235,8 +5516,7 @@ class TelegramAdapter(BasePlatformAdapter):
         buttons: list = []
         for i, model_id in enumerate(page_models):
             abs_idx = start + i
-            configured = (model_labels or {}).get(model_id)
-            short = configured or (model_id.split("/")[-1] if "/" in model_id else model_id)
+            short = model_id.split("/")[-1] if "/" in model_id else model_id
             if len(short) > 38:
                 short = short[:35] + "..."
             buttons.append(
@@ -6293,12 +5573,9 @@ class TelegramAdapter(BasePlatformAdapter):
             state["selected_provider"] = provider_slug
             state["selected_provider_name"] = provider.get("name", provider_slug)
             state["model_list"] = models
-            state["model_labels"] = provider.get("model_labels", {})
             state["model_page"] = 0
 
-            keyboard, page_info = self._build_model_keyboard(
-                models, 0, state["model_labels"]
-            )
+            keyboard, page_info = self._build_model_keyboard(models, 0)
 
             pname = provider.get("name", provider_slug)
             total = provider.get("total_models", len(models))
@@ -6329,9 +5606,7 @@ class TelegramAdapter(BasePlatformAdapter):
             models = state.get("model_list", [])
             state["model_page"] = page
 
-            keyboard, page_info = self._build_model_keyboard(
-                models, page, state.get("model_labels", {})
-            )
+            keyboard, page_info = self._build_model_keyboard(models, page)
 
             pname = state.get("selected_provider_name", "")
             provider_slug = state.get("selected_provider", "")
@@ -6752,49 +6027,6 @@ class TelegramAdapter(BasePlatformAdapter):
                 # button click.
                 if count and query_chat_id is not None:
                     self.resume_typing_for_chat(str(query_chat_id))
-            return
-
-        # --- Context badge callbacks ---
-        if data.startswith("ctxd:"):
-            try:
-                message_id = int(data.split(":", 1)[1])
-                stats = getattr(self, "_context_badge_details", {}).get(
-                    self._context_badge_key(query_chat_id, message_id)
-                )
-                if not stats:
-                    await query.answer(text="Session details expired; use a newer info button.", show_alert=True)
-                    return
-                await query.answer(text=self._format_context_badge_alert(stats), show_alert=True)
-            except Exception:
-                await query.answer(text="Context details unavailable.", show_alert=True)
-            return
-
-        if data.startswith("ctx:"):
-            payload = data[4:]
-            if payload == "noop":
-                await query.answer()
-                return
-            try:
-                stats = json.loads(payload)
-                await query.answer(text=self._format_context_badge_alert(stats), show_alert=True)
-            except Exception:
-                await query.answer(text="Context details unavailable.", show_alert=True)
-            return
-
-        if data.startswith("compact:"):
-            try:
-                message_id = int(data.split(":", 1)[1])
-            except Exception:
-                await query.answer(text="Invalid compact action.")
-                return
-            sessions = getattr(self, "_context_badge_sessions", {})
-            session_key = sessions.get(
-                self._context_badge_key(query_chat_id, message_id)
-            ) or sessions.get(str(message_id))
-            if not session_key:
-                await query.answer(text="This message is no longer linked to a session.", show_alert=True)
-                return
-            await self._compact_session_from_badge(query, message_id, session_key)
             return
 
         # --- Slash-confirm callbacks (sc:choice:confirm_id) ---
@@ -8282,25 +7514,17 @@ class TelegramAdapter(BasePlatformAdapter):
         outbound routing must all agree on the same normalized value.
         """
         chat = getattr(message, "chat", None)
-        if chat:
-            raw_chat_type = getattr(chat, "type", "")
-            chat_type = str(getattr(raw_chat_type, "value", raw_chat_type)).split(".")[-1].lower()
-            if "supergroup" in chat_type:
-                chat_type = "supergroup"
-            elif "private" in chat_type:
-                chat_type = "private"
-        else:
-            chat_type = ""
+        chat_type = str(getattr(chat, "type", "")).split(".")[-1].lower() if chat else ""
         raw = getattr(message, "message_thread_id", None)
         is_topic_message = bool(getattr(message, "is_topic_message", False))
         is_forum_group = chat_type in ("group", "supergroup") and getattr(chat, "is_forum", False) is True
         if raw is not None:
-            if is_topic_message or is_forum_group:
+            if is_forum_group or (chat_type in ("group", "supergroup") and is_topic_message):
                 return str(raw)
             if chat_type == "private" and is_topic_message:
                 return str(raw)
             return None
-        if is_forum_group or getattr(chat, "is_forum", False) is True:
+        if is_forum_group:
             return cls._GENERAL_TOPIC_THREAD_ID
         return None
 
@@ -9634,89 +8858,6 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.debug("[%s] Failed to reload dm_topics from config: %s", self.name, e)
 
-    def _remember_active_dm_topic(self, chat_id: str, thread_id: int | str | None) -> None:
-        """Remember the currently-visible private DM topic for unthreaded follow-ups."""
-        topic_map = getattr(self, "_last_dm_topic_by_chat", None)
-        if topic_map is None:
-            topic_map = {}
-            self._last_dm_topic_by_chat = topic_map
-        if thread_id is None:
-            return
-        try:
-            tid = int(thread_id)
-        except (TypeError, ValueError):
-            return
-        if tid <= 1:
-            topic_map.pop(str(chat_id), None)
-            return
-        topic_map[str(chat_id)] = tid
-
-    def _active_dm_topic_for_chat(self, chat_id: str) -> Optional[int]:
-        """Return the active private DM topic id for a chat, if one is known."""
-        topic_map = getattr(self, "_last_dm_topic_by_chat", None)
-        if topic_map is None:
-            topic_map = {}
-            self._last_dm_topic_by_chat = topic_map
-        chat_key = str(chat_id)
-        remembered = topic_map.get(chat_key)
-        if remembered and remembered > 1:
-            return remembered
-
-        # Fall back to recent session keys. Older local sessions can encode the
-        # thread id in the key even when the stored origin was missing it.
-        store = getattr(self, "_session_store", None)
-        entries = getattr(store, "_entries", None)
-        if not isinstance(entries, dict):
-            return None
-        best_tid: Optional[int] = None
-        best_updated = None
-        prefix = f"agent:main:telegram:dm:{chat_key}:"
-        for key, entry in entries.items():
-            if not isinstance(key, str) or not key.startswith(prefix):
-                continue
-            tail = key[len(prefix):].split(":", 1)[0]
-            try:
-                tid = int(tail)
-            except (TypeError, ValueError):
-                continue
-            if tid <= 1:
-                continue
-            updated = getattr(entry, "updated_at", None)
-            if best_updated is None or (updated is not None and updated > best_updated):
-                best_tid = tid
-                best_updated = updated
-        if best_tid is None:
-            for entry in entries.values():
-                origin = getattr(entry, "origin", None)
-                if origin is None:
-                    continue
-                if str(getattr(origin, "chat_id", "") or "") != chat_key:
-                    continue
-                chat_type = str(getattr(origin, "chat_type", "") or "").lower()
-                if chat_type not in {"dm", "private"}:
-                    continue
-                try:
-                    tid = int(getattr(origin, "thread_id", None))
-                except (TypeError, ValueError):
-                    continue
-                if tid <= 1:
-                    continue
-                updated = getattr(entry, "updated_at", None)
-                if best_updated is None or (updated is not None and updated > best_updated):
-                    best_tid = tid
-                    best_updated = updated
-        if best_tid is not None:
-            topic_map[chat_key] = best_tid
-        return best_tid
-
-    @staticmethod
-    def _direct_messages_topic_id_from_message(message: Any) -> Optional[str]:
-        topic = getattr(message, "direct_messages_topic", None)
-        topic_id = getattr(topic, "topic_id", None) if topic is not None else None
-        if topic_id is None:
-            topic_id = getattr(message, "direct_messages_topic_id", None)
-        return str(topic_id) if isinstance(topic_id, (int, str)) else None
-
     def _get_dm_topic_info(self, chat_id: str, thread_id: Optional[str]) -> Optional[Dict[str, Any]]:
         """Look up DM topic config by chat_id and thread_id.
 
@@ -9862,25 +9003,15 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_type = "group"
         elif telegram_chat_type == "channel":
             chat_type = "channel"
-        elif str(getattr(chat, "id", "")).startswith("-"):
-            # PTB enum shims/mocks can stringify opaquely; Telegram negative
-            # chat ids are groups/supergroups, never private DMs.
-            chat_type = "group"
 
         # Resolve routable thread id for DM topics and forum group topics via
         # the shared normalizer, so gating and session routing agree on one
         # value. Only real topic/forum messages keep a thread id; ordinary
-        # reply-UI anchors are dropped, while forum General-topic messages
-        # normalize to the General-topic id.
+        # reply-UI anchors are dropped (they are not durable session threads
+        # and sends against them hit 'Message thread not found', #3206), while
+        # forum General-topic messages (message_thread_id=None) normalize to
+        # the General-topic id so replies route back to General (#22423).
         thread_id_str = self._effective_message_thread_id(message)
-        if chat_type == "dm" and thread_id_str is None:
-            direct_dm_topic_id = self._direct_messages_topic_id_from_message(message)
-            if direct_dm_topic_id is not None:
-                thread_id_str = direct_dm_topic_id
-            else:
-                active_topic = self._active_dm_topic_for_chat(str(chat.id))
-                if active_topic is not None:
-                    thread_id_str = str(active_topic)
         chat_topic = None
         topic_skill = None
 
@@ -9897,8 +9028,6 @@ class TelegramAdapter(BasePlatformAdapter):
                     self._cache_dm_topic_from_message(str(chat.id), thread_id_str, created_name)
                     if not chat_topic:
                         chat_topic = created_name
-
-            self._remember_active_dm_topic(str(chat.id), thread_id_str)
 
         elif chat_type == "group" and thread_id_str:
             # Group/supergroup forum topic skill binding via config.extra['group_topics'].
