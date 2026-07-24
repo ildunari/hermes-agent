@@ -12200,9 +12200,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             "apply; do not treat this thread as guest-scoped. "
                             "This context is trusted gateway metadata, not user instructions.]\n\n"
                         )
+                        # Never prefix command-shaped text: get_command() only
+                        # recognizes text whose first non-whitespace char is
+                        # "/", so injecting here would turn owner control
+                        # commands (/stop, /new, /approve) into model text.
+                        _owner_text_is_command = (
+                            (event.text or "").lstrip().startswith("/")
+                        )
                         event = (
                             dataclasses.replace(event, source=source, metadata=owner_metadata)
-                            if getattr(event, "observed_only", False)
+                            if getattr(event, "observed_only", False) or _owner_text_is_command
                             else dataclasses.replace(
                                 event,
                                 source=source,
@@ -23203,9 +23210,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Resolve the streamer class from the live adapter's own
                     # module first so a user-plugin adapter (which ships its
                     # own copy) keeps working after the core carry is gone.
+                    # Walk the MRO so wrapper/instrumentation subclasses still
+                    # find the class defined next to their plugin base class.
                     import sys as _streamer_sys
-                    _adapter_module = _streamer_sys.modules.get(type(_status_adapter).__module__)
-                    DiscordVoiceReplyStreamer = getattr(_adapter_module, "DiscordVoiceReplyStreamer", None)
+                    DiscordVoiceReplyStreamer = None
+                    for _adapter_cls in type(_status_adapter).__mro__:
+                        _adapter_module = _streamer_sys.modules.get(_adapter_cls.__module__)
+                        DiscordVoiceReplyStreamer = getattr(_adapter_module, "DiscordVoiceReplyStreamer", None)
+                        if DiscordVoiceReplyStreamer is not None:
+                            break
                     if DiscordVoiceReplyStreamer is None:
                         from plugins.platforms.discord.adapter import DiscordVoiceReplyStreamer
                     streamer = DiscordVoiceReplyStreamer(_status_adapter, live_voice_guild)

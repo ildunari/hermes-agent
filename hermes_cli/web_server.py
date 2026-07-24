@@ -3270,13 +3270,17 @@ async def get_status(profile: Optional[str] = None):
         # is live and serving this profile (Desktop then renders the backend
         # as down). Only consulted when the local checks found nothing.
         if not gateway_running:
-            try:
+            # The scan walks the filesystem and probes the process table, so
+            # keep it off the event loop (same reasoning as the topology scan
+            # below).
+            _own_home = get_hermes_home()
+
+            def _find_serving_multiplex_runtime():
                 from hermes_cli.profiles import (
                     _check_gateway_running as _mux_check_running,
                     profiles_to_serve as _mux_profiles_to_serve,
                 )
 
-                _own_home = get_hermes_home()
                 _own_profile = (
                     _own_home.name
                     if _own_home.parent.name == "profiles"
@@ -3295,10 +3299,17 @@ async def get_status(profile: Optional[str] = None):
                         for p in ((_mux_runtime or {}).get("served_profiles") or [])
                     ]
                     if _own_profile in _mux_served:
-                        gateway_running = True
-                        gateway_pid = get_runtime_status_running_pid(_mux_runtime)
-                        runtime = _mux_runtime
-                        break
+                        return _mux_runtime
+                return None
+
+            try:
+                _serving_runtime = await asyncio.to_thread(
+                    _find_serving_multiplex_runtime
+                )
+                if _serving_runtime is not None:
+                    gateway_running = True
+                    gateway_pid = get_runtime_status_running_pid(_serving_runtime)
+                    runtime = _serving_runtime
             except Exception:
                 _log.debug(
                     "multiplex gateway fallback probe failed", exc_info=True

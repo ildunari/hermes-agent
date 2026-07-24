@@ -726,6 +726,50 @@ contacts: {}
 
 
 @pytest.mark.asyncio
+async def test_bluebubbles_owner_dm_command_text_is_not_prefixed(tmp_path):
+    """Slash commands from an owner DM must survive untouched: get_command()
+    only matches text starting with "/", so the owner-context prefix would
+    turn control commands into ordinary model text."""
+    registry = tmp_path / "contacts.yaml"
+    registry.write_text(
+        """
+owner_identities:
+  - kosta@example.com
+owner_profile: poke
+owner_contact_id: kosta-owner
+contacts: {}
+""".strip(),
+        encoding="utf-8",
+    )
+    runner = _runner(
+        extra={"guest_routing_enabled": True, "guest_contacts_file": str(registry)}
+    )
+    runner._handle_message_with_agent = AsyncMock(return_value=None)
+    event = _event(
+        "/definitely_not_a_real_gateway_command_xyz arg1",
+        _source(
+            user_id="kosta@example.com",
+            chat_id="kosta@example.com",
+            chat_type="dm",
+        ),
+    )
+
+    captured = {}
+
+    def capture_routed_event(_hook_name, **kwargs):
+        if "event" in kwargs:
+            captured["event"] = kwargs["event"]
+        return []
+
+    with patch("hermes_cli.plugins.invoke_hook", side_effect=capture_routed_event):
+        await runner._handle_message(event)
+
+    routed_event = captured["event"]
+    assert routed_event.text == "/definitely_not_a_real_gateway_command_xyz arg1"
+    assert routed_event.source.user_id_alt == "owner:poke"
+
+
+@pytest.mark.asyncio
 async def test_bluebubbles_live_guest_routing_denies_unknown_sender(tmp_path):
     registry = tmp_path / "contacts.yaml"
     registry.write_text("owner_identities: []\ncontacts: {}\n", encoding="utf-8")
