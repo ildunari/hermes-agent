@@ -6559,7 +6559,19 @@ def _(rid, params: dict) -> dict:
             # resolves session.* profiles through it (tests patch it), and it
             # may know homes the local registry does not. It returns None for
             # the launch profile too, but that case already resolved above.
-            _seam_home = _profile_home(profile)
+            # Only a validated profile NAME may reach the seam: get_profile_dir
+            # resolves absolute/traversal-shaped values verbatim, so an
+            # unvalidated fallback would bind the session to an arbitrary
+            # HERMES_HOME and write its state.db there (Codex P1 2026-07-24).
+            _seam_home = None
+            try:
+                from hermes_cli import profiles as _profiles_mod
+
+                _canon = _profiles_mod.normalize_profile_name(profile)
+                _profiles_mod.validate_profile_name(_canon)
+                _seam_home = _profile_home(_canon)
+            except Exception:
+                _seam_home = None
             if _seam_home is not None:
                 explicit_profile_home = Path(_seam_home).resolve()
         if explicit_profile_home is None:

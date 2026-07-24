@@ -49,6 +49,33 @@ def test_session_create_branch_rejects_profile_or_parent_before_runtime(monkeypa
     assert set(server._sessions) == before
 
 
+@pytest.mark.parametrize("name", ["/tmp/existing-writable-dir", "../escaped", "foo/bar"])
+def test_session_create_seam_fallback_never_accepts_pathlike_profiles(monkeypatch, tmp_path, name):
+    """Codex P1 2026-07-24: the _profile_home seam fallback must only see a
+    validated profile NAME — get_profile_dir resolves absolute/traversal
+    values verbatim, so an unvalidated fallback binds the session to an
+    arbitrary HERMES_HOME."""
+    escaped = tmp_path / "escaped"
+    escaped.mkdir()
+
+    monkeypatch.setattr(server, "_resolve_profile_dir", lambda _name: None)
+    # Simulate get_profile_dir's verbatim behavior: the seam happily returns
+    # an existing directory for the path-like value. create must refuse
+    # anyway — only a validated NAME may be honored through the seam.
+    monkeypatch.setattr(server, "_profile_home", lambda _value: escaped)
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *a, **k: pytest.fail("slot claimed"))
+    monkeypatch.setattr(server, "_schedule_agent_build", lambda *a, **k: pytest.fail("runtime built"))
+
+    response = server._methods["session.create"]("r-seam", {"profile": name, "cols": 80})
+
+    assert "error" in response
+    assert response["error"]["code"] == 4004
+    assert not any(
+        str(session.get("profile_home")) == str(escaped)
+        for session in server._sessions.values()
+    )
+
+
 def test_resolve_profile_dir_rejects_path_traversal(monkeypatch, tmp_path):
     from hermes_cli import profiles as profiles_mod
 
