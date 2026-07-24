@@ -4,6 +4,16 @@
  * conflict on every update. Merge via defineLocale / catalog, not by inserting
  * into en/ja/zh mid-literal.
  */
+import type { Locale } from './types'
+
+/**
+ * Locale-robust lookup for carry copy: upstream adds locales (2026-07-24: ar)
+ * faster than carry strings get translated, and a plain `[locale]` index is a
+ * tsc error the moment `Locale` grows. English is the always-present fallback.
+ */
+export function localCarryFor<T>(map: { en: T } & Partial<Record<Locale, T>>, locale: Locale): T {
+  return map[locale] ?? map.en
+}
 export const localCarryComposer = {
   draftPendingNotice: {
     en: 'Draft only — press Send to queue it after the current run.',

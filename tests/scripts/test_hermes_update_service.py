@@ -830,6 +830,19 @@ def test_start_request_validates_curated_override() -> None:
         assert resp["ok"] is True
         assert new_run.call_args.kwargs["curated_override"] == "inspected"
 
+        # pin_upstream must be a full 40-hex sha.
+        for bad in ("main", "fb8d824", "z" * 40, 7):
+            with _pytest.raises(ValueError):
+                SERVICE.handle_request(
+                    Path("."), Path("."), {**base, "pin_upstream": bad}, None
+                )
+        sha = "fb8d824bcb75" + "0" * 28
+        resp = SERVICE.handle_request(
+            Path("."), Path("."), {**base, "pin_upstream": f" {sha} "}, None
+        )
+        assert resp["ok"] is True
+        assert new_run.call_args.kwargs["pin_upstream"] == sha
+
 
 def test_resolver_escalation_is_language_scoped() -> None:
     # JS/TS/i18n-only resolver output rides the JS lane (run-10 2026-07-24:

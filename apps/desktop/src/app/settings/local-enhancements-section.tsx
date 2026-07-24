@@ -1,13 +1,13 @@
 import { type ReactNode, useState } from 'react'
 
 import { useI18n } from '@/i18n'
-import { localCarrySettings } from '@/i18n/local-carry'
+import { localCarryFor, localCarrySettings } from '@/i18n/local-carry'
 import { ChevronDown } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 
 export function LocalEnhancementsSection({ children }: { children: ReactNode }) {
   const { locale } = useI18n()
-  const copy = localCarrySettings.localEnhancements[locale]
+  const copy = localCarryFor(localCarrySettings.localEnhancements, locale)
   const [open, setOpen] = useState(true)
 
   return (

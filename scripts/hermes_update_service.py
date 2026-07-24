@@ -610,6 +610,7 @@ def new_run(
     mode: str,
     origin_pid: int | None,
     curated_override: str | None = None,
+    pin_upstream: str | None = None,
 ) -> str:
     stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     run_id = f"{stamp}-{uuid.uuid4().hex[:12]}"
@@ -639,6 +640,12 @@ def new_run(
     }
     if curated_override:
         ledger["curated_override"] = curated_override
+    if pin_upstream:
+        # Pre-recording upstream_sha makes the worker skip its fetch and merge
+        # exactly this commit — the operator pin for busy upstream days. The
+        # sha must already be reachable locally (a prior run fetched it).
+        ledger["upstream_sha"] = pin_upstream
+        ledger["upstream_pinned"] = True
     atomic_json(ledger_path(root, run_id), ledger)
     return run_id
 
@@ -761,7 +768,7 @@ def spawn_worker(repo: Path, root: Path, run_id: str) -> None:
 
 
 def handle_request(repo: Path, root: Path, payload: dict[str, Any], peer_pid: int | None) -> dict[str, Any]:
-    if set(payload) - {"verb", "mode", "run_id", "nonce", "timestamp", "curated_override"}:
+    if set(payload) - {"verb", "mode", "run_id", "nonce", "timestamp", "curated_override", "pin_upstream"}:
         raise ValueError("unknown request field")
     verb = payload.get("verb")
     if verb not in {"start", "status", "abort", "resume"}:
@@ -773,7 +780,7 @@ def handle_request(repo: Path, root: Path, payload: dict[str, Any], peer_pid: in
     if not nonce_valid(root, nonce, timestamp):
         raise PermissionError("stale or replayed request")
     if verb == "start":
-        if set(payload) - {"verb", "mode", "nonce", "timestamp", "curated_override"}:
+        if set(payload) - {"verb", "mode", "nonce", "timestamp", "curated_override", "pin_upstream"}:
             raise ValueError("start payload is invalid")
         mode = payload.get("mode")
         if mode not in {"rehearse", "update"}:
@@ -787,10 +794,24 @@ def handle_request(repo: Path, root: Path, payload: dict[str, Any], peer_pid: in
             ):
                 raise ValueError("curated_override must be a short non-empty reason")
             curated_override = curated_override.strip()
+        pin_upstream = payload.get("pin_upstream")
+        if pin_upstream is not None:
+            if not isinstance(pin_upstream, str) or not re.fullmatch(
+                r"[0-9a-f]{40}", pin_upstream.strip()
+            ):
+                raise ValueError("pin_upstream must be a full 40-hex commit sha")
+            pin_upstream = pin_upstream.strip()
         prior = active_run(root)
         if prior:
             raise RuntimeError(f"run already active: {prior}")
-        run_id = new_run(repo, root, mode, peer_pid, curated_override=curated_override)
+        run_id = new_run(
+            repo,
+            root,
+            mode,
+            peer_pid,
+            curated_override=curated_override,
+            pin_upstream=pin_upstream,
+        )
         spawn_worker(repo, root, run_id)
         return {"ok": True, "run_id": run_id}
     run_id = payload.get("run_id")
@@ -876,6 +897,8 @@ def request(args: argparse.Namespace) -> int:
         payload["mode"] = args.mode
         if getattr(args, "curated_override", None):
             payload["curated_override"] = args.curated_override
+        if getattr(args, "pin_upstream", None):
+            payload["pin_upstream"] = args.pin_upstream
     else:
         payload["run_id"] = args.run_id
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -2589,6 +2612,12 @@ def parser() -> argparse.ArgumentParser:
         dest="curated_override",
         help="Operator-inspected reason to keep this run on the curated lane "
         "despite a full-suite escalation (recorded in the ledger).",
+    )
+    requesting.add_argument(
+        "--pin-upstream",
+        dest="pin_upstream",
+        help="Merge exactly this upstream commit (full 40-hex sha, already "
+        "fetched) instead of fetching origin/main head.",
     )
     requesting.set_defaults(func=request)
     worker = sub.add_parser("run-worker")
