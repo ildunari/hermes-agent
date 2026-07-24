@@ -368,33 +368,37 @@ async function remotePidAlive(ssh, pid) {
 
 // A pid is "provably ours" only if its remote cmdline carries our dashboard
 // args — never kill a pid we can't positively identify as our dashboard.
+function buildPidOwnershipProbeScript(pid, spawnNonce, hermesPath) {
+  return (
+    'import os,shlex,subprocess,sys\n' +
+    `pid=${Number(pid)}\n` +
+    `expected=os.path.expanduser(${shq(hermesPath)})\n` +
+    `nonce=${shq(spawnNonce)}\n` +
+    'try:\n' +
+    ' raw=open(f"/proc/{pid}/cmdline","rb").read()\n' +
+    ' args=[x.decode("utf-8","surrogateescape") for x in raw.split(b"\\0") if x]\n' +
+    'except OSError:\n' +
+    ' try:line=subprocess.check_output(["ps","-o","command=","-p",str(pid)],text=True).strip();args=shlex.split(line)\n' +
+    ' except subprocess.CalledProcessError:args=[]\n' +
+    'ok=False\n' +
+    'try:\n' +
+    ' serve=args.index("serve")\n' +
+    ' owner=args.index("--ssh-owner-nonce",serve+1)\n' +
+    ' direct=args[0]==expected\n' +
+    ' python_entry=len(args)>1 and args[1]==expected and os.path.basename(args[0]).startswith("python")\n' +
+    ' ok=(direct or python_entry) and "--isolated" in args[serve+1:] and args[owner+1]==nonce\n' +
+    'except (ValueError,IndexError):pass\n' +
+    'print("OWNED" if ok else "FOREIGN")'
+  )
+}
+
 async function pidIsOurDashboard(ssh, pid, spawnNonce, hermesPath = '') {
   if (!pid || !/^[0-9a-f]{16}$/.test(String(spawnNonce || '')) || !hermesPath) {
     return false
   }
 
   try {
-    const script =
-      'import os,shlex,subprocess,sys\n' +
-      `pid=${Number(pid)}\n` +
-      `expected=os.path.expanduser(${shq(hermesPath)})\n` +
-      `nonce=${shq(spawnNonce)}\n` +
-      'try:\n' +
-      ' raw=open(f"/proc/{pid}/cmdline","rb").read()\n' +
-      ' args=[x.decode("utf-8","surrogateescape") for x in raw.split(b"\\0") if x]\n' +
-      'except OSError:\n' +
-      ' line=subprocess.check_output(["ps","-o","command=","-p",str(pid)],text=True).strip()\n' +
-      ' args=shlex.split(line)\n' +
-      'ok=False\n' +
-      'try:\n' +
-      ' serve=args.index("serve")\n' +
-      ' owner=args.index("--ssh-owner-nonce",serve+1)\n' +
-      ' direct=args[0]==expected\n' +
-      ' python_entry=len(args)>1 and args[1]==expected and os.path.basename(args[0]).startswith("python")\n' +
-      ' ok=(direct or python_entry) and "--isolated" in args[serve+1:] and args[owner+1]==nonce\n' +
-      'except (ValueError,IndexError):pass\n' +
-      'print("OWNED" if ok else "FOREIGN")'
-
+    const script = buildPidOwnershipProbeScript(pid, spawnNonce, hermesPath)
     const out = await ssh.exec(`python3 -c ${shq(script)}`)
 
     return String(out || '').trim() === 'OWNED'
@@ -872,6 +876,7 @@ async function connect(deps) {
 
 export {
   adoptOwnedServedToken,
+  buildPidOwnershipProbeScript,
   buildSpawnCommand,
   cleanupStale,
   connect,

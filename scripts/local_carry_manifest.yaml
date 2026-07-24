@@ -232,6 +232,10 @@ features:
       - tools/in_app_browser_relay.py
       - tools/browser_session_state.py
       - apps/desktop/README.md
+      - apps/desktop/electron/remote-lifecycle.ts
+      - apps/desktop/electron/remote-lifecycle.test.ts
+      - apps/desktop/scripts/browser-dev-connection.mjs
+      - apps/desktop/scripts/browser-dev-connection.test.mjs
       - apps/desktop/scripts/browser-dev.mjs
       - apps/desktop/scripts/bundle-electron-main.mjs
       - apps/desktop/src/app/artifacts/index.tsx
@@ -283,6 +287,8 @@ features:
       - tools/browser_tool.py
     tests:
       - apps/desktop/electron/browser-guest-security.test.ts
+      - apps/desktop/electron/remote-lifecycle.test.ts
+      - apps/desktop/scripts/browser-dev-connection.test.mjs
       - apps/desktop/src/app/browser/browser-annotations-layout.test.ts
       - apps/desktop/src/components/assistant-ui/tool/fallback-preview-status.test.tsx
     checks:

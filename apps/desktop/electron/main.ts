@@ -151,9 +151,9 @@ import { runNativeLogin } from './native-oauth-login'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { createKeepAwake } from './power-save'
 import { decideProfileDeleteAction, profileNameFromDeleteRequest, resolveRouteProfile } from './profile-delete-routing'
-import { resolveRepoVenvRoot } from './runtime-paths'
 import * as remoteLifecycle from './remote-lifecycle'
 import { RemoteLivenessTracker, RemoteRevalidationCoordinator, revalidateRemoteConnection } from './remote-liveness'
+import { resolveRepoVenvRoot } from './runtime-paths'
 import {
   buildSessionWindowUrl,
   chatWindowWebPreferences,
@@ -7680,10 +7680,10 @@ function effectiveSshConfigFingerprint(sshConfig) {
   return crypto.createHash('sha256').update(output).digest('hex')
 }
 
-async function bootstrapSshConnection(profile, sshConfig, reuseToken, source) {
+async function bootstrapSshConnection(profile, sshConfig, reuseToken, source, launchProfile = connectionScopeKey(profile) || '') {
   const scope = sshScopeKey(profile)
   const effectiveConfigFingerprint = effectiveSshConfigFingerprint(sshConfig)
-  const resolvedConfig = { ...sshConfig, effectiveConfigFingerprint }
+  const resolvedConfig = { ...sshConfig, effectiveConfigFingerprint, launchProfile }
   const fingerprint = sshConfigFingerprint(scope, resolvedConfig)
 
   return sshBootstrapCoordinator.start(scope, fingerprint, lease =>
@@ -7738,7 +7738,10 @@ async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, sourc
     const lifecycle = platform.os === 'Windows' ? connectWindowsRemote : remoteLifecycle.connect
     result = await lifecycle({
       ssh,
-      profile: connectionScopeKey(profile) || '',
+      // Connection scope and remote launch profile are intentionally separate:
+      // global SSH stays under the global map key while its dashboard is pinned
+      // to the root/default home rather than a remote sticky active profile.
+      profile: sshConfig.launchProfile,
       remoteHermesPath: sshConfig.remoteHermesPath || '',
       ownershipId: sshOwnershipKey(profile),
       reuseToken: reuseToken || '',
@@ -7906,7 +7909,10 @@ async function resolveRemoteBackend(profile) {
 
     const reuseToken = decryptDesktopSecret(config.remote?.token)
 
-    return bootstrapSshConnection(null, ssh, reuseToken, 'settings')
+    // A global SSH connection is one remote installation serving every
+    // profile. Keep its connection scope global (null), but pin the remote
+    // process to the root/default home instead of inheriting active_profile.
+    return bootstrapSshConnection(null, ssh, reuseToken, 'settings', 'default')
   }
 
   // Cloud resolves through the existing URL/OAuth path.

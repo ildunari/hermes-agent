@@ -10,7 +10,9 @@ Browser Dev uses its own Electron data directory:
 ~/Library/Application Support/Hermes Browser Dev
 ```
 
-It has a separate process, browser session/cookies, window state, local backend process, log, PID file, and CDP port (`9231`). The coordinator pins this disposable shell to local mode, using the MacBook's Hermes checkout for backend APIs; it does not copy credentials or share the installed app's mutable Electron data directory.
+It has a separate process, browser session/cookies, window state, log, PID file, and CDP port (`9231`). At launch the coordinator writes an isolated SSH connection that targets the Mac Studio Hermes host. Desktop's existing SSH lifecycle mints Browser Dev its own dashboard token, so the dev shell can use the real Hermes backend, profiles, and sessions without copying the installed app's token or sharing its mutable Electron data directory and browser cookies.
+
+Browser Dev requests are real: messages, tool calls, session changes, and other backend mutations affect the selected Hermes backend. Only the Electron/browser UI state is disposable.
 
 The staged MacBook source lives under:
 
@@ -89,6 +91,12 @@ HERMES_BROWSER_DEV_SSH_KEY
 HERMES_BROWSER_DEV_REMOTE_ROOT
 HERMES_BROWSER_DEV_REMOTE_MODULES
 HERMES_BROWSER_DEV_USER_DATA
+HERMES_BROWSER_DEV_BACKEND_HOST
+HERMES_BROWSER_DEV_BACKEND_USER
+HERMES_BROWSER_DEV_BACKEND_PORT
+HERMES_BROWSER_DEV_BACKEND_KEY_PATH
+HERMES_BROWSER_DEV_BACKEND_HERMES_PATH
+HERMES_BROWSER_DEV_PROFILE
 ```
 
 Example:

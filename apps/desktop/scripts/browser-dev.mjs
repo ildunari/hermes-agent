@@ -11,6 +11,8 @@ import { existsSync, watch } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { buildConnectionBootstrapScript, shellQuote } from './browser-dev-connection.mjs'
+
 const here = dirname(fileURLToPath(import.meta.url))
 export const desktopRoot = resolve(here, '..')
 export const repoRoot = resolve(desktopRoot, '../..')
@@ -22,7 +24,13 @@ export const defaults = Object.freeze({
   remoteRoot: process.env.HERMES_BROWSER_DEV_REMOTE_ROOT || '/Users/kosta/.cache/hermes-browser-dev/hermes-agent',
   remoteModules:
     process.env.HERMES_BROWSER_DEV_REMOTE_MODULES || '/Users/kosta/.cache/hermes-browser-dev/hermes-agent/node_modules',
-  userData: process.env.HERMES_BROWSER_DEV_USER_DATA || '/Users/kosta/Library/Application Support/Hermes Browser Dev'
+  userData: process.env.HERMES_BROWSER_DEV_USER_DATA || '/Users/kosta/Library/Application Support/Hermes Browser Dev',
+  backendHost: process.env.HERMES_BROWSER_DEV_BACKEND_HOST || 'macstudio.tailf7342a.ts.net',
+  backendUser: process.env.HERMES_BROWSER_DEV_BACKEND_USER || 'Kosta',
+  backendPort: Number(process.env.HERMES_BROWSER_DEV_BACKEND_PORT || 22),
+  backendKeyPath: process.env.HERMES_BROWSER_DEV_BACKEND_KEY_PATH || '',
+  backendHermesPath: process.env.HERMES_BROWSER_DEV_BACKEND_HERMES_PATH || '',
+  backendProfile: process.env.HERMES_BROWSER_DEV_PROFILE || ''
 })
 
 const sshArgs = [
@@ -39,10 +47,6 @@ const sshArgs = [
   '-i',
   process.env.HERMES_BROWSER_DEV_SSH_KEY || `${process.env.HOME}/.ssh/termius_key`
 ]
-
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", `'\\''`)}'`
-}
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', stdio: options.capture ? 'pipe' : 'inherit', ...options })
@@ -172,15 +176,26 @@ export function startRemote(devServerUrl) {
   const electron = `${defaults.remoteModules}/electron/dist/Electron.app/Contents/MacOS/Electron`
   const log = `${userData}/browser-dev.log`
   const pidFile = `${userData}/browser-dev.pid`
+  const connectionBootstrap = buildConnectionBootstrapScript({
+    activeProfile: defaults.backendProfile,
+    backend: {
+      host: defaults.backendHost,
+      user: defaults.backendUser,
+      port: defaults.backendPort,
+      keyPath: defaults.backendKeyPath,
+      remoteHermesPath: defaults.backendHermesPath
+    },
+    userData
+  })
   const script = `
 set -eu
 ROOT=${shellQuote(root)}
 USER_DATA=${shellQuote(userData)}
 mkdir -p "$USER_DATA"
-printf '%s\n' '{"mode":"local","profiles":{}}' > "$USER_DATA/connection.json"
+${connectionBootstrap}
 cd "$ROOT/apps/desktop"
 nohup env \
-  HERMES_DESKTOP_APP_NAME='Hermes' \
+  HERMES_DESKTOP_APP_NAME='Hermes Browser Dev' \
   HERMES_DESKTOP_DEV_SERVER=${shellQuote(devServerUrl)} \
   HERMES_DESKTOP_USER_DATA_DIR="$USER_DATA" \
   HERMES_DESKTOP_HERMES_ROOT="$HOME/.hermes/hermes-agent" \
