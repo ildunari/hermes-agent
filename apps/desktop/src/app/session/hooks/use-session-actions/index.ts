@@ -83,6 +83,7 @@ import {
   patchSessionWorkspace,
   preserveLocalPendingTurnMessages,
   reconcileResumeMessages,
+  resolveSessionProfile,
   resolveStoredSession,
   sessionMatchesStoredId,
   sessionShouldHaveTranscript,
@@ -1063,17 +1064,26 @@ export function useSessionActions({
       branchMessages: BranchMessage[],
       parentStoredId: null | string,
       cwd?: string,
-      profile?: string | null
+      profile?: null | string
     ): Promise<boolean> => {
       creatingSessionRef.current = true
 
       try {
+        // A branch belongs to its parent's OWNING profile. Swapping the live
+        // gateway first AND passing `profile` on the create mirrors
+        // desktopSessionCreateParams/resumeSession: in app-global remote mode
+        // one backend serves every profile, so an omitted profile silently
+        // lands the branch on the launch (default) profile — the "session
+        // jumps between profiles after branching" bug. The swap also makes
+        // upsertOptimisticSession's $activeGatewayProfile stamp correct.
+        await ensureGatewayProfile(profile)
+
         // No title: the backend auto-names the branch from its parent's lineage.
         const branched = await requestGateway<SessionCreateResponse>('session.create', {
           cols: 96,
           source: 'desktop',
           ...(cwd && { cwd }),
-          ...(profile && { profile }),
+          ...(profile ? { profile } : {}),
           messages: branchMessages.map(({ content, role }) => ({ content, role })),
           ...(parentStoredId && { parent_session_id: parentStoredId })
         })
@@ -1175,10 +1185,12 @@ export function useSessionActions({
 
       clearNotifications()
 
-      const parentStoredId = selectedStoredSessionIdRef.current
-      const parent = parentStoredId ? await resolveStoredSession(parentStoredId) : null
+      // The open chat's owning profile, NOT the picker's / launch profile —
+      // /profile only retargets new chats, so a branch of an existing thread
+      // must stay on that thread's backend (cache hit for an open session).
+      const profile = await resolveSessionProfile(selectedStoredSessionIdRef.current)
 
-      return forkBranch(branchMessages, parentStoredId, $currentCwd.get().trim(), parent?.profile)
+      return forkBranch(branchMessages, selectedStoredSessionIdRef.current, $currentCwd.get().trim(), profile)
     },
     [activeSessionIdRef, busyRef, copy, forkBranch, selectedStoredSessionIdRef]
   )

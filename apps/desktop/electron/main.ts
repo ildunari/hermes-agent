@@ -101,6 +101,8 @@ import {
 } from './desktop-uninstall'
 import { installEmbedReferer } from './embed-referer'
 import { createEventDeduper } from './event-dedupe'
+import { findGitBash as _findGitBash } from './find-git-bash'
+import { createFirstRunSetupGate } from './first-run-setup-gate'
 import { readDirForIpc } from './fs-read-dir'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
 import { scanGitRepos } from './git-repo-scan'
@@ -150,6 +152,8 @@ import {
 import { runNativeLogin } from './native-oauth-login'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { createKeepAwake } from './power-save'
+import { FirstRunSetupResetError, runPrimaryBackendStartup } from './primary-backend-startup'
+import { rehomePrimaryConnection } from './primary-connection-rehome'
 import { decideProfileDeleteAction, profileNameFromDeleteRequest, resolveRouteProfile } from './profile-delete-routing'
 import * as remoteLifecycle from './remote-lifecycle'
 import { RemoteLivenessTracker, RemoteRevalidationCoordinator, revalidateRemoteConnection } from './remote-liveness'
@@ -1903,13 +1907,17 @@ let bootstrapState = {
   log: [],
   startedAt: null,
   completedAt: null,
+  setupChoice: null,
   unsupportedPlatform: null
 }
+
+let firstRunSetupGate = null
 
 function broadcastBootstrapEvent(ev) {
   if (ev.type === 'manifest') {
     bootstrapState.manifest = ev
     bootstrapState.active = true
+    bootstrapState.setupChoice = null
     bootstrapState.startedAt = bootstrapState.startedAt || Date.now()
     bootstrapState.stages = {}
 
@@ -1937,14 +1945,30 @@ function broadcastBootstrapEvent(ev) {
   } else if (ev.type === 'failed') {
     bootstrapState.active = false
     bootstrapState.error = ev.error || 'unknown error'
+    bootstrapState.setupChoice = null
   } else if (ev.type === 'unsupported-platform') {
     bootstrapState.active = false
+    bootstrapState.setupChoice = null
     bootstrapState.unsupportedPlatform = {
       platform: ev.platform,
       activeRoot: ev.activeRoot,
       installCommand: ev.installCommand,
       docsUrl: ev.docsUrl
     }
+  } else if (ev.type === 'setup-choice') {
+    bootstrapState.active = false
+    bootstrapState.error = null
+    bootstrapState.manifest = null
+    bootstrapState.stages = {}
+    bootstrapState.setupChoice = ev.active
+      ? {
+          platform: ev.platform,
+          activeRoot: ev.activeRoot
+        }
+      : null
+    bootstrapState.unsupportedPlatform = null
+  } else if (ev.type === 'dismissed') {
+    resetBootstrapSnapshot()
   }
 
   if (!mainWindow || mainWindow.isDestroyed()) {
@@ -1962,6 +1986,100 @@ function broadcastBootstrapEvent(ev) {
 
 function getBootstrapState() {
   return bootstrapState
+}
+
+function resetBootstrapSnapshot() {
+  bootstrapState = {
+    active: false,
+    manifest: null,
+    stages: {},
+    error: null,
+    log: [],
+    startedAt: null,
+    completedAt: null,
+    setupChoice: null,
+    unsupportedPlatform: null
+  }
+}
+
+function promptFirstRunSetupChoice(backend) {
+  broadcastBootstrapEvent({
+    type: 'setup-choice',
+    active: true,
+    platform: backend.platform || process.platform,
+    activeRoot: backend.activeRoot || ACTIVE_HERMES_ROOT
+  })
+}
+
+function hideFirstRunSetupChoice() {
+  if (bootstrapState.setupChoice) {
+    broadcastBootstrapEvent({ type: 'setup-choice', active: false })
+  }
+}
+
+function getFirstRunSetupGate() {
+  if (!firstRunSetupGate) {
+    firstRunSetupGate = createFirstRunSetupGate({
+      hideChoice: hideFirstRunSetupChoice,
+      log: rememberLog,
+      onStuck: (_backend, stuckAfterMs) => {
+        updateBootProgress(
+          {
+            error: null,
+            message: `Still waiting for first-run setup choice after ${Math.round(stuckAfterMs / 1000)} seconds`,
+            phase: 'bootstrap.choice',
+            progress: 12,
+            running: true
+          },
+          { allowDecrease: true }
+        )
+      },
+      promptChoice: promptFirstRunSetupChoice
+    })
+  }
+
+  return firstRunSetupGate
+}
+
+async function waitForFirstRunSetupChoice(backend) {
+  const gate = getFirstRunSetupGate()
+
+  if (!gate.shouldGate(backend)) {
+    return 'continue-local'
+  }
+
+  updateBootProgress(
+    {
+      error: null,
+      message: 'Waiting for first-run setup choice',
+      phase: 'bootstrap.choice',
+      progress: 12,
+      running: true
+    },
+    { allowDecrease: true }
+  )
+
+  return gate.wait(backend)
+}
+
+function continueFirstRunLocalBootstrap() {
+  getFirstRunSetupGate().continueLocal()
+}
+
+function abandonFirstRunSetupChoiceForRemoteApply() {
+  const gate = getFirstRunSetupGate()
+
+  if (!gate.hasWaiter()) {
+    return false
+  }
+
+  const resumedGatedConnection = gate.abandonForRemoteApply()
+
+  if (resumedGatedConnection) {
+    broadcastBootstrapEvent({ type: 'dismissed' })
+  }
+
+  return resumedGatedConnection
 }
 
 function updateBootProgress(update, options: { allowDecrease?: boolean } = {}) {
@@ -2420,48 +2538,16 @@ function findSystemPython() {
   return null
 }
 
-// findGitBash — locate bash.exe on Windows. Hermes' terminal tool requires
-// bash (POSIX shell), and on Windows that's almost always Git for Windows'
-// bundled Git Bash. We check the same set of locations tools/environments/
-// local.py:_find_bash() checks at runtime, so a positive result here means
-// the agent will be able to start a terminal too.
-//
-// On non-Windows hosts bash is part of the OS and this just returns the
-// first bash on PATH.
+// findGitBash — locate bash.exe on Windows. Resolves HERMES_GIT_BASH_PATH
+// first (mirrors tools/environments/local.py:_find_bash), then PortableGit,
+// standard install locations, and finally PATH.
 function findGitBash() {
-  if (!IS_WINDOWS) {
-    return findOnPath('bash')
-  }
-
-  // install.ps1 drops PortableGit at %LOCALAPPDATA%\hermes\git\... — checked
-  // first so users who installed via install.ps1 are detected before we
-  // start probing system-wide locations.
-  const localAppData = process.env.LOCALAPPDATA || ''
-  const candidates = []
-
-  if (localAppData) {
-    candidates.push(path.join(localAppData, 'hermes', 'git', 'bin', 'bash.exe'))
-    candidates.push(path.join(localAppData, 'hermes', 'git', 'usr', 'bin', 'bash.exe'))
-  }
-
-  // Standard Git for Windows install locations.
-  candidates.push(path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Git', 'bin', 'bash.exe'))
-  candidates.push(path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Git', 'bin', 'bash.exe'))
-
-  if (localAppData) {
-    candidates.push(path.join(localAppData, 'Programs', 'Git', 'bin', 'bash.exe'))
-  }
-
-  for (const candidate of candidates) {
-    if (fileExists(candidate)) {
-      return candidate
-    }
-  }
-
-  // Last resort — bash on PATH (covers WSL bash, MSYS2, custom installs).
-  // On WSL hosts findOnPath itself filters out Windows-binary paths via
-  // isWindowsBinaryPathInWsl, so we won't hand back a wsl.exe shim either.
-  return findOnPath('bash')
+  return _findGitBash({
+    isWindows: IS_WINDOWS,
+    env: process.env,
+    fileExists,
+    findOnPath
+  })
 }
 
 function getVenvPython(venvRoot) {
@@ -8688,14 +8774,7 @@ async function startHermes() {
   let attemptedRemote = primaryBackendIsRemote()
 
   const connectionPromise = (async () => {
-    await advanceBootProgress('backend.resolve', 'Resolving Hermes backend', 8)
-    // Resolve for the desktop's primary profile so a per-profile remote
-    // override on the active profile is honored (falls back to env / global).
-    // Re-read once resolved so the classification tracks the value actually used.
-    attemptedRemote = primaryBackendIsRemote()
-    const remote = await resolveRemoteBackend(primaryProfileKey())
-
-    if (remote) {
+    const connectRemote = async remote => {
       await advanceBootProgress('backend.remote', `Connecting to remote Hermes backend at ${remote.baseUrl}`, 24)
       await waitForHermes(remote.baseUrl, remote.token)
       updateBootProgress({
@@ -8721,14 +8800,9 @@ async function startHermes() {
       }
     }
 
-    // Mutual exclusion with an in-app update (#50238). If this instance was
-    // relaunched while the Tauri updater is still applying an update, spawning
-    // a local backend now re-locks the venv shim and gets killed by the
-    // updater's straggler cleanup — looping. Park until the update finishes (or
-    // is detected stale), THEN start the backend. Local backends only; remote
-    // connections returned above and never touch the install tree.
-    await waitForUpdateToFinish()
-
+    await advanceBootProgress('backend.resolve', 'Resolving Hermes backend', 8)
+    // Resolve for the desktop's primary profile so a per-profile remote
+    // override on the active profile is honored (falls back to env / global).
     const token = crypto.randomBytes(32).toString('base64url')
     // --port 0: the OS assigns an ephemeral port; the child announces it on stdout.
     const backendArgs = ['serve', '--host', '127.0.0.1', '--port', '0']
@@ -8743,8 +8817,32 @@ async function startHermes() {
       backendArgs.unshift('--profile', activeProfile)
     }
 
-    await advanceBootProgress('backend.runtime', 'Resolving Hermes runtime', 28)
-    const backend = await ensureRuntime(resolveHermesBackend(backendArgs))
+    const setup = await runPrimaryBackendStartup({
+      connectRemote,
+      ensureLocalRuntime: ensureRuntime,
+      prepareLocalBackend: async () => {
+        await advanceBootProgress('backend.runtime', 'Resolving Hermes runtime', 28)
+
+        return resolveHermesBackend(backendArgs)
+      },
+      resolveRemote: () => {
+        // Classify immediately before each throwing resolve. This callback runs
+        // both for an already-saved remote and after first-run remote Apply.
+        attemptedRemote = primaryBackendIsRemote()
+
+        return resolveRemoteBackend(primaryProfileKey())
+      },
+      waitForDecision: waitForFirstRunSetupChoice,
+      // Mutual exclusion with an in-app update (#50238). Remote connections
+      // return before this waiter; local starts park until the updater exits.
+      waitForLocalStart: waitForUpdateToFinish
+    })
+
+    if (setup.kind === 'remote') {
+      return setup.connection
+    }
+
+    const backend = setup.backend
     // Route old runtimes (no `serve`) through the legacy `dashboard --no-open`.
     backend.args = getBackendArgsForRuntime(backend)
     const hermesCwd = resolveHermesCwd()
@@ -8901,6 +8999,10 @@ async function startHermes() {
     }
   })().catch(error => {
     if (!backendConnectionState.clearPromiseForAttempt(connectionAttempt)) {
+      throw error
+    }
+
+    if (error instanceof FirstRunSetupResetError) {
       throw error
     }
 
@@ -9746,16 +9848,8 @@ ipcMain.handle('hermes:bootstrap:reset', async () => {
   await teardownPrimaryBackendAndWait()
   bootstrapFailure = null
   backendStartFailure = null
-  bootstrapState = {
-    active: false,
-    manifest: null,
-    stages: {},
-    error: null,
-    log: [],
-    startedAt: null,
-    completedAt: null,
-    unsupportedPlatform: null
-  }
+  getFirstRunSetupGate().resetForRetry()
+  resetBootstrapSnapshot()
 
   return { ok: true }
 })
@@ -9776,7 +9870,14 @@ ipcMain.handle('hermes:bootstrap:repair', async () => {
 
   bootstrapFailure = null
   backendStartFailure = null
+  getFirstRunSetupGate().resetForRepair()
   resetHermesConnection()
+
+  return { ok: true }
+})
+ipcMain.handle('hermes:bootstrap:continue-local', async () => {
+  rememberLog('[bootstrap] local install selected by renderer; continuing first-launch bootstrap')
+  continueFirstRunLocalBootstrap()
 
   return { ok: true }
 })
@@ -9958,6 +10059,18 @@ ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
   await applyConnectionChange({
     cancelAndWait: value => sshBootstrapCoordinator.cancelAndWait(value),
     isPrimary: !key || key === primaryProfileKey(),
+    rehomePrimary: () =>
+      rehomePrimaryConnection({
+        clearLocalBootstrapFailure: () => {
+          // A remote connection bypasses local runtime/bootstrap failures. Clear
+          // the local-install latch so unsupported/failure escape paths can re-home.
+          bootstrapFailure = null
+        },
+        mode: config.mode,
+        notifyConnectionApplied: sendConnectionApplied,
+        resumeFirstRunRemote: abandonFirstRunSetupChoiceForRemoteApply,
+        teardownPrimaryBackend: teardownPrimaryBackendAndWait
+      }),
     scope,
     sendApplied: sendConnectionApplied,
     stopPool: stopPoolBackend,

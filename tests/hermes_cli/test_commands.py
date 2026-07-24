@@ -1317,6 +1317,7 @@ class TestTelegramMenuCommands:
         assert len(names) == 30
         assert hidden > 0
         for name in (
+            "egress",
             "debug",
             "restart_gateways",
             "restart_hermes",

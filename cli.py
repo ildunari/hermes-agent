@@ -468,6 +468,7 @@ def load_cli_config() -> Dict[str, Any]:
         "compression": {
             "enabled": True,      # Auto-compress when approaching context limit
             "threshold": 0.50,    # Compress at 50% of model's context limit
+            "min_tail_user_messages": 1,  # Real user messages guaranteed in the tail (1 = existing single anchor)
         },
         "agent": {
             "max_turns": 90,  # Default max tool-calling iterations (shared with subagents)
@@ -1971,6 +1972,16 @@ def _run_state_db_auto_maintenance(session_db) -> None:
             logger.debug("Orphan compression finalize skipped: %s", _finalize_exc)
 
         cfg = (_load_full_config().get("sessions") or {})
+
+        # Auto-archive (soft-hide stale sessions) is independent of the
+        # destructive auto_prune sweep — run it first, before prune's early
+        # return, so enabling one doesn't require the other.
+        if cfg.get("auto_archive", False):
+            session_db.maybe_auto_archive(
+                idle_days=float(cfg.get("auto_archive_days", 3)),
+                min_interval_hours=int(cfg.get("min_interval_hours", 24)),
+            )
+
         if not cfg.get("auto_prune", False):
             return
         session_db.maybe_auto_prune_and_vacuum(
@@ -3854,6 +3865,28 @@ def save_config_value(key_path: str, value: any) -> bool:
 # HermesCLI Class
 # ============================================================================
 
+
+def _normalize_moa_model(model: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Map a ``moa:<preset>`` model string to ``(provider, preset)``.
+
+    Returns ``("moa", "<preset>")`` when *model* selects the MoA virtual
+    provider, otherwise ``(None, model)`` unchanged. This gives non-interactive
+    ``hermes chat -Q -m moa:<preset>`` the same routing the interactive
+    ``/moa`` command and the model picker already use: ``resolve_runtime_provider``
+    handles ``requested_provider == "moa"`` and ``agent_init`` builds the
+    MoAClient off ``provider == "moa"``. Without this the raw ``moa:<preset>``
+    string is sent to the real provider and rejected with a 401/400 "model not
+    supported" (#56828).
+    """
+    if isinstance(model, str):
+        stripped = model.strip()
+        if stripped.lower().startswith("moa:"):
+            preset = stripped.split(":", 1)[1].strip()
+            if preset:
+                return "moa", preset
+    return None, model
+
+
 class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
     """
     Interactive CLI for the Hermes Agent.
@@ -3989,6 +4022,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         _config_model = (_model_config.get("default") or _model_config.get("model") or "") if isinstance(_model_config, dict) else (_model_config or "")
         _DEFAULT_CONFIG_MODEL = ""
         self.model = model or _config_model or _DEFAULT_CONFIG_MODEL
+        # A ``moa:<preset>`` model string selects the MoA virtual provider in
+        # one shot (parity with interactive ``/moa`` and the model picker). Do
+        # this before provider resolution so ``-Q -m moa:<preset>`` routes
+        # through MoA instead of hitting the real provider with an unknown
+        # model (#56828). A ``moa:`` prefix wins over an explicit ``--provider``.
+        _moa_provider_override, self.model = _normalize_moa_model(self.model)
         # Read max_tokens from config (env var override: HERMES_MAX_TOKENS)
         _env_mt = os.environ.get("HERMES_MAX_TOKENS")
         if _env_mt:
@@ -4024,7 +4063,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         # Provider selection is resolved lazily at use-time via _ensure_runtime_credentials().
         self.requested_provider = (
-            provider
+            _moa_provider_override
+            or provider
             or CLI_CONFIG["model"].get("provider")
             or os.getenv("HERMES_INFERENCE_PROVIDER")
             or "auto"
@@ -9365,6 +9405,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             print(enqueue_detached_restart(scope, delay=1.0, dry_run=dry_run))
         elif canonical == "status":
             self._show_session_status()
+        elif canonical == "egress":
+            from hermes_cli.proxy_cli import format_status_text
+
+            self._console_print(format_status_text(), highlight=False, markup=False)
         elif canonical == "statusbar":
             self._status_bar_visible = not self._status_bar_visible
             state = "visible" if self._status_bar_visible else "hidden"

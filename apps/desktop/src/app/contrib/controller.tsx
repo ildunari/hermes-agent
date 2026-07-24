@@ -54,6 +54,7 @@ import {
 import { $filePreviewTarget, $previewTarget, closeRightRail } from '@/store/preview'
 import { $reviewOpen, closeReview, REVIEW_PANE_ID } from '@/store/review'
 import { $currentCwd, $selectedStoredSessionId, $sessions, sessionMatchesStoredId } from '@/store/session'
+import { watchSessionPins } from '@/store/session-pin-sync'
 
 import { BROWSER_PANE_ID, BrowserPane } from '../browser/browser-pane'
 import { $browserPaneOpen, closeBrowserPane, openBrowserPane } from '../browser/browser-store'
@@ -417,6 +418,10 @@ watchContributedPanes()
 // main.
 watchSessionTiles()
 watchRouteTiles()
+
+// Mirror sidebar pins into the backend keep-flag so the auto-archive sweep
+// never hides a pinned chat (and pre-existing pins migrate transparently).
+watchSessionPins()
 
 // The main tab reads as its SESSION (the loaded title, "New session" on a
 // fresh draft) — a stack of main + tiles is then just a row of session names.

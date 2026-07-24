@@ -60,7 +60,11 @@
     "test:browser-e0:unsafe": "electron electron/fixtures/browser-e0 --unsafe-policy",
     "test": "vitest run --exclude electron/runtime-paths.test.ts --exclude electron/autoplay-policy.test.ts && tsx --test electron/runtime-paths.test.ts electron/autoplay-policy.test.ts electron/fixtures/browser-e0/verdicts.test.mjs",
     "preview": "node scripts/assert-root-install.mjs && vite preview --host 127.0.0.1 --port 4174",
-    "check": "npm run typecheck && npm run test && npm run test:desktop:all",
+    "check:test:desktop:platforms": "npm run test:desktop:platforms",
+    "check:test:ui": "npm run test:ui",
+    "check:test:desktop:all": "npm run test:desktop:all",
+    "check:lint": "npm run typecheck && npm run lint",
+    "check": "npm run check:lint && npm run check:test:ui && npm run test:desktop:platforms && npm run test:desktop:all",
     "test:e2e": "npm run build && playwright test e2e/",
     "test:e2e:visual": "npm run build && WLR_BACKENDS=headless WLR_NO_HARDWARE_CURSORS=1 cage -- npx playwright test e2e/ --reporter=list",
     "test:e2e:update-snapshots": "npm run build && WLR_BACKENDS=headless WLR_NO_HARDWARE_CURSORS=1 cage -- npx playwright test e2e/ --reporter=list --update-snapshots"

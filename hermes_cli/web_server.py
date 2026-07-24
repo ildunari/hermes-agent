@@ -27,6 +27,7 @@ import inspect
 import importlib.util
 import json
 import logging
+import math
 import mimetypes
 import os
 import queue
@@ -47,7 +48,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Tuple
 
 import yaml
 
@@ -105,7 +106,7 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel, ConfigDict, SecretStr
+    from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
     from starlette.concurrency import run_in_threadpool
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually
@@ -121,7 +122,7 @@ except ImportError:
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
         from fastapi.staticfiles import StaticFiles
-        from pydantic import BaseModel, ConfigDict, SecretStr
+        from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
         from starlette.concurrency import run_in_threadpool
     except Exception:
         raise SystemExit(
@@ -223,11 +224,16 @@ async def _lifespan(app: "FastAPI"):
     # /api/status).  The loop exits immediately when httpx is unavailable.
     selftest_task = asyncio.create_task(_dashboard_selftest_loop())
 
+    # Live auto-archive timer — keeps a backend that stays up for days
+    # sweeping stale sessions on schedule, independent of list requests.
+    auto_archive_task = asyncio.create_task(_auto_archive_ticker_loop())
+
     try:
         yield
     finally:
         pty_reaper_task.cancel()
         selftest_task.cancel()
+        auto_archive_task.cancel()
         await PTY_REGISTRY.close_all()
         browser_grants = getattr(app.state, "browser_resource_grants", None)
         if browser_grants is not None:
@@ -980,6 +986,25 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Modal sandbox mode",
         "options": ["sandbox", "function"],
     },
+    "proxy.enabled": {
+        "type": "boolean",
+        "description": (
+            "Docker-only egress credential firewall. Requires `hermes egress setup` "
+            "and `hermes egress start`; Modal/SSH/Daytona are not wired yet."
+        ),
+        "category": "security",
+    },
+    "proxy.credential_source": {
+        "type": "select",
+        "description": "Where iron-proxy loads real upstream secrets at start time",
+        "options": ["env", "bitwarden"],
+        "category": "security",
+    },
+    "proxy.enforce_on_docker": {
+        "type": "boolean",
+        "description": "Refuse Docker sandboxes when egress is enabled but not configured/running",
+        "category": "security",
+    },
     "tts.provider": {
         "type": "select",
         "description": "Text-to-speech provider",
@@ -1523,9 +1548,35 @@ class MoaModelSlot(BaseModel):
     # Optional per-slot reasoning effort. Declared so a client round-tripping
     # the GET payload doesn't have it stripped at parse time and wiped on save.
     reasoning_effort: Optional[str] = None
+    enabled: bool = True
 
 
-class MoaPresetPayload(BaseModel):
+class _MoaReferenceControls(BaseModel):
+    # None = no per-preset override; the fan-out inherits
+    # auxiliary.moa_reference.timeout (900s default).
+    reference_timeout: Optional[float] = None
+    degraded_reference_policy: Literal["loud", "silent"] = "loud"
+
+    @field_validator("reference_timeout", mode="before")
+    @classmethod
+    def _validate_reference_timeout(cls, value: Any) -> Optional[float]:
+        """Reject JSON booleans/non-finite values before float coercion."""
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            raise ValueError("reference_timeout must be a finite positive number")
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "reference_timeout must be a finite positive number"
+            ) from exc
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("reference_timeout must be a finite positive number")
+        return timeout
+
+
+class MoaPresetPayload(_MoaReferenceControls):
     reference_models: list[MoaModelSlot] = []
     aggregator: MoaModelSlot = MoaModelSlot()
     # None = temperature omitted from API calls (provider default), matching
@@ -1541,7 +1592,7 @@ class MoaPresetPayload(BaseModel):
     enabled: bool = True
 
 
-class MoaConfigPayload(BaseModel):
+class MoaConfigPayload(_MoaReferenceControls):
     default_preset: str = "default"
     active_preset: str = ""
     presets: dict[str, MoaPresetPayload] = {}
@@ -3994,15 +4045,16 @@ def _record_completed_action(name: str, message: str, exit_code: int = 1) -> Non
 
 
 def _dashboard_spawn_executable() -> str:
-    """Prefer pythonw.exe for detached dashboard actions on Windows."""
-    if sys.platform != "win32":
-        return sys.executable
-    exe = sys.executable
-    if exe.lower().endswith("python.exe"):
-        pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
-        if os.path.isfile(pythonw):
-            return pythonw
-    return exe
+    """Interpreter for detached dashboard actions.
+
+    Returns ``sys.executable`` on every platform.  On Windows the spawn
+    below carries ``windows_detach_flags()`` (CREATE_NO_WINDOW), so the
+    console python owns a single hidden console that its own subprocess
+    spawns inherit — the action stays invisible without resorting to
+    console-less pythonw.exe, which would make every console-subsystem
+    descendant flash its own conhost (#54220/#56747).
+    """
+    return sys.executable
 
 
 def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
@@ -4377,6 +4429,12 @@ def _recent_upstream_commits(n: int = 20) -> List[Dict[str, Any]]:
             ],
             capture_output=True,
             text=True,
+            # git log emits UTF-8 (commit subjects can carry emoji/CJK). On
+            # Windows text=True defaults to the ANSI code page — a byte like
+            # 0x90 (3rd byte of 🐛) is undefined in cp1252 and crashed the
+            # stdlib _readerthread, killing the desktop backend (#52649).
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         if out.returncode != 0:
@@ -5031,6 +5089,10 @@ def get_sessions(
     try:
         db = _open_session_db_for_profile(profile)
         try:
+            # Opportunistic, config-gated, double-throttled stale-session
+            # sweep — the only auto_archive hook that fires for Desktop's
+            # `hermes serve` backend. No-op when disabled or run recently.
+            _maybe_auto_archive_for_profile(db, profile)
             min_message_count = max(0, min_messages)
             archived_only = archived == "only"
             include_archived = archived == "include"
@@ -6092,6 +6154,10 @@ def _run_setup_command(
         env=_memory_provider_setup_env(),
         capture_output=True,
         text=True,
+        # Lossy UTF-8 decode — setup tools emit UTF-8; never let a
+        # locale-mismatched byte raise in the reader thread (#52649).
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         check=False,
     )
@@ -6807,6 +6873,14 @@ async def get_schema(profile: Optional[str] = None):
     return {"fields": fields, "category_order": _CATEGORY_ORDER}
 
 
+@app.get("/api/egress/status")
+async def get_egress_status():
+    """Dashboard/Desktop-readable egress proxy status and remediation text."""
+    from hermes_cli.proxy_cli import format_status_text
+
+    return {"text": format_status_text()}
+
+
 _EMPTY_MODEL_INFO: dict = {
     "model": "",
     "provider": "",
@@ -7131,6 +7205,8 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
                 "aggregator": _slot_dict(preset.aggregator),
                 "reference_temperature": preset.reference_temperature,
                 "aggregator_temperature": preset.aggregator_temperature,
+                "reference_timeout": preset.reference_timeout,
+                "degraded_reference_policy": preset.degraded_reference_policy,
                 "max_tokens": preset.max_tokens,
                 "reference_max_tokens": preset.reference_max_tokens,
                 "fanout": preset.fanout,
@@ -7152,6 +7228,8 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
                         aggregator=body.aggregator,
                         reference_temperature=body.reference_temperature,
                         aggregator_temperature=body.aggregator_temperature,
+                        reference_timeout=body.reference_timeout,
+                        degraded_reference_policy=body.degraded_reference_policy,
                         max_tokens=body.max_tokens,
                         reference_max_tokens=body.reference_max_tokens,
                         fanout=body.fanout,
@@ -7171,9 +7249,11 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
                     status_code=422,
                     detail="Invalid MoA config: " + "; ".join(problems),
                 )
-
             normalized = normalize_moa_config(raw)
-            cfg["moa"] = normalized
+            # Merge instead of overwrite so that hand-edited keys not declared
+            # in MoaConfigPayload (e.g. save_traces, trace_dir) survive a GUI
+            # save.  See issue #58819.
+            cfg.setdefault("moa", {}).update(normalized)
             save_config(cfg)
             return {"ok": True, **normalized}
     except HTTPException:
@@ -9028,6 +9108,10 @@ def _ensure_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
             cwd=str(bridge_dir),
             capture_output=True,
             text=True,
+            # npm output is UTF-8; guard the Windows ANSI-code-page default
+            # against undefined bytes crashing the reader thread (#52649).
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             env=with_hermes_node_path(),
             creationflags=windows_hide_flags(),
@@ -11772,6 +11856,71 @@ def _open_session_db_for_profile(profile: Optional[str]):
     return SessionDB(db_path=Path(home) / "state.db")
 
 
+# In-process throttle for the opportunistic auto-archive trigger, keyed by
+# profile. Bounds the config.yaml read to at most once per this window per
+# profile; the actual sweep is throttled far more coarsely by state_meta
+# (sessions.min_interval_hours) inside maybe_auto_archive.
+_AUTO_ARCHIVE_CHECK_INTERVAL_S = 300.0
+_last_auto_archive_check: Dict[str, float] = {}
+
+
+def _maybe_auto_archive_for_profile(db, profile: Optional[str]) -> None:
+    """Run the config-gated stale-session auto-archive for ``profile``.
+
+    The Desktop backend is spawned as ``hermes serve`` — it runs neither the
+    interactive CLI nor the messaging gateway, so neither of those startup
+    hooks fire for Desktop users. Triggering the (double-throttled, config-off
+    by default) sweep from the session-list path is what makes
+    ``sessions.auto_archive`` take effect there. Never raises.
+    """
+    try:
+        key = profile or ""
+        now = time.monotonic()
+        last = _last_auto_archive_check.get(key)
+        if last is not None and now - last < _AUTO_ARCHIVE_CHECK_INTERVAL_S:
+            return
+        _last_auto_archive_check[key] = now
+
+        from hermes_cli.config import load_config as _load_full_config
+        cfg = (_load_full_config().get("sessions") or {})
+        if not cfg.get("auto_archive", False):
+            return
+        db.maybe_auto_archive(
+            idle_days=float(cfg.get("auto_archive_days", 3)),
+            min_interval_hours=int(cfg.get("min_interval_hours", 24)),
+        )
+    except Exception as exc:
+        _log.debug("opportunistic auto-archive skipped: %s", exc)
+
+
+async def _auto_archive_ticker_loop(
+    interval_s: float = 3600.0, initial_delay_s: float = 90.0
+) -> None:
+    """Live timer for the stale-session auto-archive (primary profile).
+
+    A long-running Desktop/serve backend must keep sweeping on schedule even
+    when no ``/api/sessions`` request arrives to fire the opportunistic
+    trigger — e.g. the app sits open for days on an idle chat. The real
+    cadence is still owned by state_meta (``sessions.min_interval_hours``)
+    inside ``maybe_auto_archive``; this loop is only the poll rate.
+    """
+
+    def _sweep() -> None:
+        db = _open_session_db_for_profile(None)
+        try:
+            _maybe_auto_archive_for_profile(db, None)
+        finally:
+            db.close()
+
+    await asyncio.sleep(initial_delay_s)
+    while True:
+        try:
+            await asyncio.to_thread(_sweep)
+        except Exception as exc:
+            _log.debug("auto-archive tick skipped: %s", exc)
+        await asyncio.sleep(interval_s)
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None):
     db = _open_session_db_for_profile(profile)
@@ -11876,6 +12025,9 @@ async def delete_session_endpoint(session_id: str, profile: Optional[str] = None
 class SessionRename(BaseModel):
     title: Optional[str] = None
     archived: Optional[bool] = None
+    # Durable "keep" flag mirrored from the Desktop sidebar's pins; pinned
+    # sessions are exempt from the sessions.auto_archive stale sweep.
+    pinned: Optional[bool] = None
     # Mutate a session belonging to another profile (opens its state.db). Omit
     # for the current/default profile.
     profile: Optional[str] = None
@@ -11883,21 +12035,22 @@ class SessionRename(BaseModel):
 
 @app.patch("/api/sessions/{session_id}")
 async def rename_session_endpoint(session_id: str, body: SessionRename):
-    """Update a session: rename (or clear its title) and/or archive it.
+    """Update a session: rename, archive, and/or pin it.
 
     ``title`` renames (empty/null clears the title); ``archived`` soft-hides or
-    restores the session. Either field may be omitted. ``profile`` targets
-    another profile's session.
+    restores the session; ``pinned`` sets the durable keep flag (exempts the
+    session from the auto-archive sweep). Any field may be omitted. ``profile``
+    targets another profile's session.
     """
     db = _open_session_db_for_profile(body.profile)
     try:
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
-        if body.title is None and body.archived is None:
+        if body.title is None and body.archived is None and body.pinned is None:
             raise HTTPException(
                 status_code=400,
-                detail="Nothing to update; provide 'title' and/or 'archived'.",
+                detail="Nothing to update; provide 'title', 'archived', and/or 'pinned'.",
             )
         if body.title is not None:
             try:
@@ -11907,9 +12060,13 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
                 raise HTTPException(status_code=400, detail=str(e))
         if body.archived is not None:
             db.set_session_archived(sid, body.archived)
+        if body.pinned is not None:
+            db.set_session_pinned(sid, body.pinned)
         result = {"ok": True, "title": db.get_session_title(sid) or ""}
         if body.archived is not None:
             result["archived"] = bool(body.archived)
+        if body.pinned is not None:
+            result["pinned"] = bool(body.pinned)
         return result
     finally:
         db.close()
@@ -16443,6 +16600,8 @@ def _probe_docker_backend() -> tuple:
             ["docker", "info", "--format", "{{.ServerVersion}}"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
         )
         if proc.returncode == 0:

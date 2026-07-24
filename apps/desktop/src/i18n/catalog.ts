@@ -1,3 +1,4 @@
+import { ar } from './ar'
 import { en } from './en'
 import { ja } from './ja'
 import type { Locale, Translations } from './types'
@@ -18,7 +19,10 @@ function withLocalCarry(locale: Locale, base: Translations): TranslationsWithLoc
     ...base,
     composer: {
       ...base.composer,
-      draftPendingNotice: localCarryComposer.draftPendingNotice[locale],
+      draftPendingNotice:
+        locale === 'ar'
+          ? localCarryComposer.draftPendingNotice.en
+          : localCarryComposer.draftPendingNotice[locale],
     },
   }
 }
@@ -28,4 +32,5 @@ export const TRANSLATIONS: Record<Locale, TranslationsWithLocal> = {
   zh: withLocalCarry('zh', zh),
   'zh-hant': withLocalCarry('zh-hant', zhHant),
   ja: withLocalCarry('ja', ja),
+  ar: withLocalCarry('ar', ar)
 }
