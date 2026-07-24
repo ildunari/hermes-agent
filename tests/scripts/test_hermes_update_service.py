@@ -1311,3 +1311,29 @@ def test_stamp_terminal_ledger_rejects_non_retirement_fields(tmp_path: Path) -> 
     make_terminal_ledger(root, run_id, "FAILED")
     with pytest.raises(RuntimeError, match="non-retirement"):
         SERVICE.stamp_terminal_ledger(root, run_id, status="ACTIVE")
+
+
+def test_full_validation_not_required_for_js_manifests_only() -> None:
+    """2026-07-24: five package.json changes escalated an ~8h python-full run
+    that validated nothing those manifests touch. JS manifests ride the JS
+    lane; only python manifests escalate the python suite."""
+    required, reason = SERVICE.full_validation_required(
+        {"merge_conflicts": []},
+        ["apps/desktop/package.json", "tests-js/package.json", "ui-tui/package.json"],
+        [],
+    )
+    assert required is False, reason
+
+
+def test_full_validation_required_for_python_manifests() -> None:
+    required, reason = SERVICE.full_validation_required(
+        {"merge_conflicts": []},
+        ["uv.lock"],
+        [],
+    )
+    assert required is True
+    assert "python dependency manifests" in reason
+
+
+def test_js_manifest_change_still_triggers_npm_ci_predicate() -> None:
+    assert SERVICE.dependency_manifests_changed(["apps/desktop/package.json"])

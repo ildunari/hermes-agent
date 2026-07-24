@@ -1093,14 +1093,32 @@ NODE_DEPENDENCY_TREES = (
 )
 
 
-DEPENDENCY_MANIFEST_PATHS = {
+# Language-scoped: a JS manifest bump must escalate the JS validation lane,
+# never the ~45k-test python suite (2026-07-24: five package.json changes
+# triggered an ~8h python-full run that validated nothing those manifests
+# touch). Python manifests escalate python-full as before.
+PYTHON_DEPENDENCY_MANIFEST_PATHS = {
+    "pyproject.toml",
+    "uv.lock",
+    "requirements.txt",
+}
+JS_DEPENDENCY_MANIFEST_SUFFIXES = ("package.json", "package-lock.json")
+DEPENDENCY_MANIFEST_PATHS = PYTHON_DEPENDENCY_MANIFEST_PATHS | {
     "package.json",
     "package-lock.json",
     "web/package.json",
     "apps/desktop/package.json",
-    "pyproject.toml",
-    "uv.lock",
 }
+
+
+def js_dependency_manifests_changed(changed: list[str]) -> list[str]:
+    return sorted(
+        path for path in changed if path.endswith(JS_DEPENDENCY_MANIFEST_SUFFIXES)
+    )
+
+
+def python_dependency_manifests_changed(changed: list[str]) -> list[str]:
+    return sorted(set(changed) & PYTHON_DEPENDENCY_MANIFEST_PATHS)
 FULL_VALIDATION_CONFLICT_PREFIXES = ("agent/", "gateway/", "hermes_cli/", "tools/")
 FULL_VALIDATION_HARNESS_PATHS = {
     "tests/conftest.py",
@@ -1133,11 +1151,13 @@ def full_validation_required(
     ]
     if hot:
         return True, "conflicts touch core paths: " + ", ".join(hot[:5])
-    if dependency_sensitive or dependency_manifests_changed(changed):
-        touched = dependency_sensitive or sorted(
-            set(changed) & DEPENDENCY_MANIFEST_PATHS
-        )
-        return True, "dependency manifests changed: " + ", ".join(touched[:5])
+    python_manifests = python_dependency_manifests_changed(changed)
+    if dependency_sensitive or python_manifests:
+        touched = dependency_sensitive or python_manifests
+        return True, "python dependency manifests changed: " + ", ".join(touched[:5])
+    # JS manifests do NOT justify the python suite: the JS lane (npm ci +
+    # desktop/web batches) already runs whenever the diff touches those
+    # surfaces, and package.json cannot regress python behavior.
     harness = sorted(FULL_VALIDATION_HARNESS_PATHS.intersection(changed))
     if harness:
         return True, "validation harness changed: " + ", ".join(harness)
