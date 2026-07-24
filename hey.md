@@ -1,0 +1,1 @@
+Browser-dev live-state commit 7864351fb cherry-picked to local/studio-slim as 34d763298 (2026-07-23 late evening), tests green (66 pass), pushed. Browser Dev worktree can rebase/retire its branch when convenient.

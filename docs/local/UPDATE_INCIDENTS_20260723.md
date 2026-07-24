@@ -204,3 +204,55 @@ plugins repo). Verdicts and dispositions:
     Mini. Also noted: standalone sends to a raw phone number take the slow
     create-chat fallback and can false-timeout while still delivering —
     normal GUID flows unaffected.
+
+## 15. Stage-2 Telegram/Discord cutover (2026-07-23 late evening)
+
+Executed per `~/.hermes/plugins/docs/telegram-discord-cutover.md`. Core adapters
+reverted to merge-base 65d42e35 (−3,158 lines incl. rich_ui.py deletion); plugins
+`telegram`/`discord` (dirs telegram_override/discord_override) enabled in root
+config + all 9 profiles; gateway restarted 22:23 via `hermes --profile default
+gateway restart`. Registry verified in-process: telegram/discord resolve to
+`hermes_plugins.{telegram,discord}.adapter._build_adapter` (user plugin beats
+bundled deferred loader, same as BlueBubbles). NOTE: live log lines from
+inherited pristine methods still log under `plugins.platforms.telegram.adapter`
+— logger name is NOT proof of adapter class for subclass-style plugins; use
+registry introspection.
+
+Fixed en route:
+- run.py:23181 streamer hazard: resolves DiscordVoiceReplyStreamer via the live
+  adapter's module, core import fallback (commit f9d9b3257).
+- Upstream 8da98ce08 removed tools.tts_tool._SENTENCE_BOUNDARY_RE; carried +
+  plugin streamers lazily imported it → live-voice chunking ImportError since
+  yesterday's update. Inlined the regex both places (f15158a51 / plugins
+  a28c5b8). Lesson: never import private core symbols from carried/plugin code.
+- carry.py test classifier: apps/desktop *.test.mjs now routed to the vitest
+  batch (44cc77d19) — gate failed the browser-dev cherry-pick with
+  "unsupported carry test paths" despite vitest passing.
+- Thinning baseline re-pinned for browser-dev remote-lifecycle hotspots
+  (intentional new carry, manifest-declared by that commit).
+
+Carried-test reconciliation: 5 carried-only gateway test files ported to the
+plugins repo (324 pass there); carried deltas reverted in thread_fallback /
+rich_messages; restart_notification's carried delta KEPT (tests run.py carry).
+The single surviving run.py→plugin seam is `metadata["chat_type"]="dm"` in
+_thread_metadata_for_target (consumed by plugin _reply_to_message_id_for_send)
+— asserted as explicit minimal carry in thread_fallback + restart_notification
+tests. restart_notification's carried tests had been silently stale (never ran
+in the push gate; pytest isn't part of carry verify).
+
+Known/pre-existing, NOT cutover regressions: `pytest tests/gateway -k
+"telegram or discord"` has ~12 order-dependent failures (15 pre-revert); every
+touched file passes in isolation; test_telegram_topic_mode has 2 pre-existing
+isolated failures. Follow-ups: gateway/platforms/telegram.py 8-line carry shim
+still needed by carried run.py/send_message_tool imports; retire with those
+carries. Cosmetic model_labels hunk in Discord view classes dropped, not
+ported.
+
+## 16. BlueBubbles owner-identity bug (live find by Kosta, 2026-07-23 ~21:25)
+
+Owner-routed BB DMs carried only routing metadata; the model had no visible
+identity context and treated Kosta as an unknown/guest contact (poke profile).
+Fixed f9d9b3257: OWNER branch now injects an owner-context block mirroring the
+guest pattern. Follow-ups on the list: vague tapback ingress ("Liked an
+image" without target resolution — plugin adapter) and the guest
+attachment-policy hole (direct processing blocked, /tmp copy allowed).
