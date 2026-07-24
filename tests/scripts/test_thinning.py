@@ -106,6 +106,18 @@ def test_check_tolerance_band(tmp_path: Path) -> None:
     assert _check(repo, baseline_path, tolerance_pct=150.0) == 0
 
 
+def test_check_refuses_baseline_without_upstream_sha(tmp_path: Path) -> None:
+    import json
+
+    repo = _make_carry_repo(tmp_path)
+    baseline_path = _write_baseline(repo)
+    data = json.loads(baseline_path.read_text())
+    del data["upstream_sha"]
+    baseline_path.write_text(json.dumps(data))
+
+    assert _check(repo, baseline_path) == 1
+
+
 def test_check_new_hotspot_always_fails(tmp_path: Path) -> None:
     repo = _make_carry_repo(tmp_path)
     baseline_path = _write_baseline(repo)

@@ -111,8 +111,18 @@ def check(args: argparse.Namespace) -> int:
     # Score against the upstream commit the baseline was computed from, not
     # the live ref: otherwise every upstream fetch inflates the churn
     # multiplier on all hotspots and the ratchet fails pushes whose local
-    # carry did not grow at all.
-    upstream = str(prior.get("upstream_sha") or prior["upstream"])
+    # carry did not grow at all. A baseline without upstream_sha predates
+    # this fix — refuse it rather than silently reverting to the
+    # nondeterministic live-ref behavior.
+    upstream_sha = prior.get("upstream_sha")
+    if not upstream_sha:
+        print(
+            "Thinning ratchet: baseline has no upstream_sha (pre-pin format). "
+            "Regenerate it: ./scripts/thinning.py baseline",
+            file=sys.stderr,
+        )
+        return 1
+    upstream = str(upstream_sha)
     current = compute(root, upstream)
     prior_paths = {item["path"] for item in prior["hotspots"]}
     current_paths = {item["path"] for item in current["hotspots"]}

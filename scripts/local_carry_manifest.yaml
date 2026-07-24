@@ -654,6 +654,23 @@ features:
           - 'className="flex min-w-0 flex-col gap-(--conversation-turn-gap) pb-(--conversation-turn-gap) [contain-intrinsic-size:auto_37.5rem] [content-visibility:auto]"'
         description: sticky user bubbles stay paintable while off-screen tails retain content skipping
 
+  - id: models.vibeproxy-alias-priority
+    title: VibeProxy wins bare Claude-family aliases under provider auto
+    owner_paths:
+      - tests/test_tui_gateway_server.py
+    collision_paths:
+      - hermes_cli/models.py
+    tests:
+      - tests/test_tui_gateway_server.py
+    checks:
+      - id: vibeproxy-ahead-of-anthropic
+        path: hermes_cli/models.py
+        needles: [POSITION IS LOAD-BEARING]
+        description: >-
+          needle guards the comment; real order enforcement is behavioral —
+          the tests above (short-alias resolves to vibeproxy without network)
+          run whenever hermes_cli/models.py changes, so reordering the
+          _PROVIDER_MODELS dict fails the gate, not just the needle scan
   - id: models.gemini-36-auxiliary
     title: Gemini 3.6 native auxiliary and curated provider default
     owner_paths:
