@@ -79,7 +79,10 @@ class TestActiveApiRunCount:
         runner.adapters = {Platform.DISCORD: other}
         assert runner._active_api_run_count() == 0
 
-    def test_never_raises_on_broken_adapter(self):
+    def test_raises_on_broken_adapter_never_false_idle(self):
+        """Codex fix-lane review P1-3: a FAILED count is unknown, never idle.
+        Swallowing a raise as 0 let a cron-thread race publish
+        active_agents=0 while a live /v1/runs task was in flight."""
         runner, _adapter = make_restart_runner()
 
         class Bad:
@@ -90,7 +93,8 @@ class TestActiveApiRunCount:
                 raise RuntimeError("boom")
 
         runner.adapters = {Platform.API_SERVER: Bad()}
-        assert runner._active_api_run_count() == 0
+        with pytest.raises(RuntimeError):
+            runner._active_api_run_count()
 
 
 class TestAPIServerAdapterWorkCount:
@@ -357,7 +361,9 @@ class TestPersistActiveAgentsNowThrottle:
         with patch("gateway.status.write_runtime_status") as write_mock:
             run_mod.persist_active_agents_now()
 
-        write_mock.assert_called_once_with(active_agents=1)
+        write_mock.assert_called_once()
+        passed = write_mock.call_args.kwargs["active_agents"]
+        assert (passed() if callable(passed) else passed) == 1
 
     def test_repeat_calls_within_window_are_throttled(self, monkeypatch):
         run_mod, _state = self._isolated_state(monkeypatch)
@@ -385,7 +391,8 @@ class TestPersistActiveAgentsNowThrottle:
             run_mod.persist_active_agents_now()  # must NOT be throttled
 
         assert write_mock.call_count == 2
-        assert write_mock.call_args_list[-1].kwargs == {"active_agents": 0}
+        passed = write_mock.call_args_list[-1].kwargs["active_agents"]
+        assert (passed() if callable(passed) else passed) == 0
 
     def test_transition_from_zero_always_persists_even_within_window(self, monkeypatch):
         run_mod, _state = self._isolated_state(monkeypatch)
@@ -398,7 +405,8 @@ class TestPersistActiveAgentsNowThrottle:
             run_mod.persist_active_agents_now()  # must NOT be throttled
 
         assert write_mock.call_count == 2
-        assert write_mock.call_args_list[-1].kwargs == {"active_agents": 1}
+        passed = write_mock.call_args_list[-1].kwargs["active_agents"]
+        assert (passed() if callable(passed) else passed) == 1
 
     def test_after_window_elapses_repeat_call_persists(self, monkeypatch):
         run_mod, state = self._isolated_state(monkeypatch)

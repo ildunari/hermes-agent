@@ -302,17 +302,65 @@ def _command_absolute_path_escape(command: str, root: Path) -> str | None:
     for match in _ABSOLUTE_PATH_TOKEN_RE.finditer(command):
         start = match.start()
         if start > 0 and command[start - 1] == "/":
-            # Second slash of a "//" sequence (scheme://host, file://, ...)
+            # Second slash of a "//" sequence (scheme://host, https://, ...)
             # -- not a filesystem path token, just a URL guests may
             # legitimately reference (e.g. inside `curl`/execute_code).
+            # file:// is NOT exempt: it IS local filesystem access and is
+            # rejected wholesale by _guest_command_dynamic_escape below.
             continue
         token = match.group(0).rstrip(",;:")
         if not token or token == "~":
             continue
         if any(token.startswith(prefix) for prefix in _READ_ONLY_SYSTEM_PATH_PREFIXES):
-            continue
+            # Prefix match alone is spoofable (/usr/bin/../../tmp/x), so the
+            # allowlist only holds if the RESOLVED path stays under the
+            # allowlisted prefix too.
+            try:
+                resolved = Path(token).expanduser().resolve()
+            except Exception:
+                return token
+            if any(
+                str(resolved).startswith(prefix)
+                for prefix in _READ_ONLY_SYSTEM_PATH_PREFIXES
+            ):
+                continue
+            return token
         if resolve_under_sandbox(token, root) is None:
             return token
+    return None
+
+
+# Lexical dynamic-escape tripwires for guest terminal commands. A regex can
+# never fully contain a shell (documented residual risk — the durable fix is
+# a real filesystem sandbox); these close the cheap, known holes: relative
+# traversal out of the sandbox, environment/command expansion smuggling a
+# path past the token scan, and file:// scheme access to the local fs.
+_GUEST_TERMINAL_DYNAMIC_ESCAPES: tuple[tuple[str, str], ...] = (
+    (r"(^|[\s\"'=:])\.\./", "relative path traversal (../)"),
+    (r"/\.\.(/|[\s\"']|$)", "relative path traversal (/..)"),
+    (r"\$\{?[A-Za-z_]", "environment variable expansion"),
+    (r"\$\(", "command substitution"),
+    (r"`", "backtick command substitution"),
+    (r"file://", "file:// scheme local filesystem access"),
+    (r"<<-?\s*['\"]?\w", "heredoc"),
+)
+# execute_code bodies are real programs where $, backticks, and heredoc-like
+# text are legitimate syntax; only traversal and file:// are tripwires there.
+_GUEST_CODE_DYNAMIC_ESCAPES: tuple[tuple[str, str], ...] = (
+    (r"(^|[\s\"'=(:])\.\./", "relative path traversal (../)"),
+    (r"/\.\.(/|[\s\"')]|$)", "relative path traversal (/..)"),
+    (r"file://", "file:// scheme local filesystem access"),
+)
+
+
+def _guest_command_dynamic_escape(
+    text: str, patterns: tuple[tuple[str, str], ...]
+) -> str | None:
+    """Return a human-readable reason when *text* trips a dynamic-escape
+    pattern, else ``None``."""
+    for pattern, reason in patterns:
+        if re.search(pattern, text):
+            return reason
     return None
 
 
@@ -543,6 +591,12 @@ def evaluate_guest_tool_call(function_name: str, function_args: Mapping[str, Any
                 False,
                 f"terminal command references a path outside the guest sandbox {root}: {escape}",
             )
+        dynamic = _guest_command_dynamic_escape(command, _GUEST_TERMINAL_DYNAMIC_ESCAPES)
+        if dynamic is not None:
+            return GuestToolDecision(
+                False,
+                f"terminal command uses {dynamic}, which is disabled for guest sessions",
+            )
         return GuestToolDecision(True)
 
     if function_name == "execute_code":
@@ -560,6 +614,12 @@ def evaluate_guest_tool_call(function_name: str, function_args: Mapping[str, Any
             return GuestToolDecision(
                 False,
                 f"execute_code references a path outside the guest sandbox {root}: {escape}",
+            )
+        dynamic = _guest_command_dynamic_escape(code, _GUEST_CODE_DYNAMIC_ESCAPES)
+        if dynamic is not None:
+            return GuestToolDecision(
+                False,
+                f"execute_code uses {dynamic}, which is disabled for guest sessions",
             )
         return GuestToolDecision(True)
 

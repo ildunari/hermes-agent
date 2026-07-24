@@ -842,7 +842,16 @@ def _gateway_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
         restart_requested = bool(payload.get("restart_requested"))
 
         if active_agents > 0:
-            file_age = _iso_age_seconds(payload.get("updated_at"))
+            # Age the COUNT's own stamp, not top-level updated_at: the
+            # watchdog identity restamp refreshes updated_at every ~30s
+            # without touching the count, which would keep re-blessing a
+            # stale phantom count and make this cross-check unreachable
+            # (Codex fix-lane review P1-1). Legacy files without the
+            # dedicated stamp fall back to updated_at.
+            file_age = _iso_age_seconds(
+                payload.get("active_agents_updated_at")
+                or payload.get("updated_at")
+            )
             if file_age is None or file_age > ACTIVE_AGENTS_TRUST_WINDOW_S:
                 live = _heartbeat_active_agents(target)
                 if live is None:

@@ -1246,10 +1246,16 @@ class APIServerAdapter(BasePlatformAdapter):
             return (
                 int(getattr(self, "_pending_agent_requests", 0))
                 + int(self._inflight_agent_runs)
-                + sum(not task.done() for task in self._active_run_tasks.values())
+                # tuple() snapshots first: cron worker threads call this while
+                # the event loop mutates the dict, and a mid-iteration
+                # "dictionary changed size" here used to be swallowed as 0.
+                + sum(not task.done() for task in tuple(self._active_run_tasks.values()))
             )
         except Exception:
-            return 0
+            # A failed count is UNKNOWN, never idle. Raising lets callers
+            # (persist paths, drain checks) skip rather than publish a false
+            # zero that a restart helper would trust mid-run.
+            raise
 
     @staticmethod
     def _gateway_is_draining() -> bool:

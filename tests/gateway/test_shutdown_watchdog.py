@@ -262,3 +262,35 @@ def test_gateway_runner_exposes_shutdown_watchdog_state():
     runner._shutdown_watchdog_done.set()
     assert runner._shutdown_watchdog_done.is_set()
     assert runner._loop_heartbeat_task is None
+
+
+def test_count_write_stamps_dedicated_freshness_field(tmp_path, monkeypatch):
+    """write_runtime_status must stamp active_agents_updated_at when (and
+    only when) it writes the count, and accept a callable re-snapshotted at
+    write time (Codex fix-lane review P1-1/P1-2)."""
+    import json as _json
+
+    from gateway import status as status_mod
+
+    path = tmp_path / "gateway_state.json"
+    monkeypatch.setattr(status_mod, "_get_runtime_status_path", lambda: path)
+    monkeypatch.setattr(status_mod, "_process_owns_runtime_status", lambda existing: True)
+
+    status_mod.write_runtime_status(gateway_state="running", active_agents=lambda: 2)
+    payload = _json.loads(path.read_text())
+    assert payload["active_agents"] == 2
+    first_stamp = payload["active_agents_updated_at"]
+    assert first_stamp
+
+    # Identity-style write without a count must NOT refresh the count stamp.
+    status_mod.write_runtime_status(gateway_state="running")
+    payload = _json.loads(path.read_text())
+    assert payload["active_agents_updated_at"] == first_stamp
+
+    # A failing counter callable skips the count write (unknown, never idle).
+    def boom():
+        raise RuntimeError("dictionary changed size during iteration")
+
+    status_mod.write_runtime_status(active_agents=boom)
+    payload = _json.loads(path.read_text())
+    assert payload["active_agents"] == 2

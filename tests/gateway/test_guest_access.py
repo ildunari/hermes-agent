@@ -347,3 +347,55 @@ def test_guest_policy_guard_fails_closed_before_tool_dispatch(monkeypatch, tmp_p
     result = json.loads(handle_function_call("send_message", {"target": "telegram", "message": "hi"}))
     assert result["guest_policy"] is True
     assert result["requires_approval"] is True
+
+
+def test_guest_terminal_blocks_dynamic_escapes(tmp_path):
+    """Codex fix-lane review P1-4: lexical bypasses of the absolute-path scan
+    must trip the dynamic-escape guard instead."""
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+    blocked_commands = [
+        "cp payload ../../../../tmp/x",           # relative traversal
+        "cp payload /usr/bin/../../tmp/x",        # allowlist-prefix spoof
+        'cp payload "$TMPDIR/x"',                 # env expansion
+        "cp payload $(mktemp -d)/x",              # command substitution
+        "cp payload `mktemp -d`/x",               # backtick substitution
+        "curl file:///etc/passwd",                # file:// local fs access
+        "bash <<'EOS'\ncp payload /tmp/x\nEOS",   # heredoc
+    ]
+    for command in blocked_commands:
+        decision = evaluate_guest_tool_call(
+            "terminal", {"command": command, "workdir": str(root)}, root
+        )
+        assert decision.allowed is False, command
+
+
+def test_guest_terminal_still_allows_plain_sandbox_work(tmp_path):
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+    for command in [
+        "python -V",
+        "ls -la",
+        "curl -s https://example.com/api/data",
+        f"cp a.txt {root}/b.txt",
+    ]:
+        decision = evaluate_guest_tool_call(
+            "terminal", {"command": command, "workdir": str(root)}, root
+        )
+        assert decision.allowed is True, command
+
+
+def test_guest_execute_code_blocks_traversal_and_file_scheme(tmp_path):
+    root = tmp_path / "guest-workspace"
+    root.mkdir()
+    for code in [
+        "open('../../../tmp/x', 'w').write('d')",
+        "import urllib.request; urllib.request.urlopen('file:///etc/passwd')",
+    ]:
+        decision = evaluate_guest_tool_call("execute_code", {"code": code}, root)
+        assert decision.allowed is False, code
+    # $ and backticks are legitimate program syntax in code bodies.
+    ok = evaluate_guest_tool_call(
+        "execute_code", {"code": "x = f'{1+1}$'; print(x)"}, root
+    )
+    assert ok.allowed is True

@@ -3923,6 +3923,10 @@ _gateway_runner_ref: _weakref.ref = lambda: None
 # import with gateway.run.
 _ACTIVE_AGENTS_PERSIST_MIN_INTERVAL = 0.25  # seconds
 _active_agents_persist_state: Dict[str, float] = {"ts": 0.0, "count": -1.0}
+# Claim/release callers race from the event loop, API threads, and cron
+# worker threads; the throttle decision must read/update its state atomically
+# or two racers can both skip (or both take) the crossing-zero fast path.
+_active_agents_persist_lock = threading.Lock()
 
 
 def persist_active_agents_now() -> None:
@@ -3943,14 +3947,18 @@ def persist_active_agents_now() -> None:
     if runner is None:
         return
     try:
-        count = runner._active_work_count()
-        now = time.monotonic()
-        state = _active_agents_persist_state
-        crossing_zero = (count == 0) != (state["count"] == 0)
-        if not crossing_zero and (now - state["ts"]) < _ACTIVE_AGENTS_PERSIST_MIN_INTERVAL:
-            return
-        state["ts"] = now
-        state["count"] = float(count)
+        with _active_agents_persist_lock:
+            count = runner._active_work_count()
+            now = time.monotonic()
+            state = _active_agents_persist_state
+            crossing_zero = (count == 0) != (state["count"] == 0)
+            if not crossing_zero and (now - state["ts"]) < _ACTIVE_AGENTS_PERSIST_MIN_INTERVAL:
+                return
+            state["ts"] = now
+            state["count"] = float(count)
+        # Outside the throttle lock: _persist_active_agents passes the counter
+        # CALLABLE to write_runtime_status, which re-snapshots it under the
+        # status write lock — the persisted value is always current-at-write.
         runner._persist_active_agents()
     except Exception:
         pass
@@ -5740,12 +5748,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         profiles cannot create an ``api_server`` adapter because it binds a port,
         so only the primary registry is a supported source of this work.
         """
-        try:
-            adapter = getattr(self, "adapters", {}).get(Platform.API_SERVER)
-            helper = getattr(adapter, "active_agent_work_count", None)
-            return max(0, int(helper())) if callable(helper) else 0
-        except Exception:
+        adapter = getattr(self, "adapters", {}).get(Platform.API_SERVER)
+        helper = getattr(adapter, "active_agent_work_count", None)
+        if not callable(helper):
             return 0
+        # No blanket except: a FAILED count is unknown, never idle. Swallowing
+        # a raise here as 0 let a cron-thread race publish active_agents=0
+        # while a live /v1/runs task was in flight (Codex fix-lane review P1-3).
+        return max(0, int(helper()))
 
     # ── scale-to-zero idle detection / dormant-quiesce (Phase 0) ──────────────
     # The gateway-side BEHAVIOUR that consumes the relay scale-to-zero primitives
@@ -6134,7 +6144,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 gateway_state=gateway_state,
                 exit_reason=exit_reason,
                 restart_requested=self._restart_requested,
-                active_agents=self._active_work_count(),
+                # Callable: re-snapshotted under the status write lock; a
+                # failed count skips only the count, not the lifecycle write.
+                active_agents=self._active_work_count,
             )
         except Exception:
             pass
@@ -6157,7 +6169,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(active_agents=self._active_work_count())
+            # Pass the counter itself: write_runtime_status re-snapshots it
+            # under its write lock, so a delayed writer can never persist a
+            # count captured before a newer claim/release landed.
+            write_runtime_status(active_agents=self._active_work_count)
         except Exception:
             pass
 
@@ -6181,10 +6196,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if self._external_drain_active:
             return
         self._external_drain_active = True
+        try:
+            _drain_count_display: Any = self._active_work_count()
+        except Exception:
+            _drain_count_display = "?"
         logger.info(
             "External drain ENGAGED (.drain_request.json present) — refusing "
-            "new turns; %d in-flight turn(s) will finish. Process stays up.",
-            self._active_work_count(),
+            "new turns; %s in-flight turn(s) will finish. Process stays up.",
+            _drain_count_display,
         )
         # Flip the persisted lifecycle state so /api/status.gateway_busy /
         # gateway_drainable track the drain. Preserve active_agents (the

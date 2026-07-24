@@ -1035,7 +1035,54 @@ def write_runtime_status(
     their legitimate writers run inside the gateway process. Non-owner callers
     (detached helpers, dashboards, imported platform adapters) merge only their
     named ``platform`` payload.
+
+    Concurrency: the whole read-merge-write is serialized under a process-wide
+    lock. Claim/release writers race from the event loop, API threads, and
+    cron worker threads; atomic file replacement alone prevents corruption but
+    not lost updates (a delayed writer holding a stale snapshot can clobber a
+    newer count). ``active_agents`` may be passed as a CALLABLE, which is
+    invoked under the lock so the persisted count is re-snapshotted after
+    serialization — a captured-early stale value can never overwrite a newer
+    one.
     """
+    with _RUNTIME_STATUS_WRITE_LOCK:
+        _write_runtime_status_locked(
+            gateway_state=gateway_state,
+            exit_reason=exit_reason,
+            restart_requested=restart_requested,
+            active_agents=active_agents,
+            platform=platform,
+            platform_state=platform_state,
+            error_code=error_code,
+            error_message=error_message,
+            platform_metadata=platform_metadata,
+            served_profiles=served_profiles,
+        )
+
+
+_RUNTIME_STATUS_WRITE_LOCK = threading.Lock()
+
+
+def _write_runtime_status_locked(
+    *,
+    gateway_state: Any = _UNSET,
+    exit_reason: Any = _UNSET,
+    restart_requested: Any = _UNSET,
+    active_agents: Any = _UNSET,
+    platform: Any = _UNSET,
+    platform_state: Any = _UNSET,
+    error_code: Any = _UNSET,
+    error_message: Any = _UNSET,
+    platform_metadata: Any = _UNSET,
+    served_profiles: Any = _UNSET,
+) -> None:
+    if callable(active_agents):
+        try:
+            active_agents = active_agents()
+        except Exception:
+            # A failed count is UNKNOWN, never idle: skip the write rather
+            # than persist a fabricated value a drain poller would trust.
+            active_agents = _UNSET
     path = _get_runtime_status_path()
     existing = _read_json_file(path)
     is_owner = _process_owns_runtime_status(existing)
@@ -1067,6 +1114,11 @@ def write_runtime_status(
             payload["restart_requested"] = bool(restart_requested)
         if active_agents is not _UNSET:
             payload["active_agents"] = parse_active_agents(active_agents)
+            # Dedicated freshness stamp: the watchdog's identity restamp
+            # refreshes top-level updated_at every ~30s WITHOUT touching the
+            # count, so updated_at cannot serve as count freshness (a healthy
+            # loop would keep re-blessing a stale phantom count forever).
+            payload["active_agents_updated_at"] = _utc_now_iso()
         if served_profiles is not _UNSET:
             # Profiles this gateway multiplexes (multi-profile mode). Absent/empty
             # for a single-profile gateway. Lets `hermes status` show per-profile

@@ -1814,3 +1814,46 @@ def test_restart_scope_rechecks_webui_immediately_before_kick(monkeypatch, tmp_p
         "kick:ai.hermes.webui",
         "kick:ai.hermes.after-webui",
     ]
+
+
+def test_active_agents_freshness_uses_dedicated_stamp(monkeypatch, tmp_path):
+    """Codex fix-lane review P1-1: the watchdog identity restamp refreshes
+    top-level updated_at every ~30s WITHOUT touching active_agents, so count
+    freshness must come from active_agents_updated_at. A file whose
+    updated_at is fresh but whose count stamp is stale must trigger the
+    heartbeat cross-check."""
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+
+    from hermes_cli import restart_surfaces
+
+    import os as _os
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "pid": _os.getpid(),
+        "gateway_state": "running",
+        "active_agents": 3,
+        # identity restamp keeps this fresh...
+        "updated_at": now.isoformat(),
+        # ...but the count itself has not been rewritten for 10 minutes.
+        "active_agents_updated_at": (now - timedelta(seconds=600)).isoformat(),
+    }
+    status_path = tmp_path / "gateway_state.json"
+    status_path.write_text(_json.dumps(payload), encoding="utf-8")
+
+    consulted = {}
+
+    def fake_heartbeat(target):
+        consulted["hit"] = True
+        return (0, 5.0)
+
+    monkeypatch.setattr(restart_surfaces, "_heartbeat_active_agents", fake_heartbeat)
+
+    target = restart_surfaces.GATEWAY_TARGETS[0]
+    monkeypatch.setattr(
+        restart_surfaces, "_gateway_status_path_for_target", lambda t: status_path
+    )
+    busy = restart_surfaces._gateway_busy_details([target])
+    assert consulted.get("hit") is True
+    assert not busy  # heartbeat said 0 -> not busy
