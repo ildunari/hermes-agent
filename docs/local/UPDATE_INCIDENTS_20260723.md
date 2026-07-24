@@ -145,6 +145,19 @@ plugins repo). Verdicts and dispositions:
   settle) and D HOLD (change-detector tests) — sent back to the PR worker
   for fixes + rebase onto moved origin/main (69365109b); re-review before
   any push.
+- **PR batch round 2**: all four rebased onto origin/main 74a56b76b
+  (clean, no conflicts); D's change-detector tests replaced with the
+  durable lockstep invariant (SHIP-ready); B's three P1s fixed and verified
+  (501 tests) but the focused re-review HELD B a second time — the on-open
+  reconciliation added for mixed-version-writer safety has its own P1s
+  (detector misses delete-drift and fresh-descendant/stale-ancestor shapes,
+  read-only cross-profile handles never reconcile, ~40ms unbounded scan per
+  writable open at 25k messages, double repair during v24 migration).
+  Recommended path: narrow B's contract — keep the clean parts (column,
+  index, triggers, helpers, destructive-path + import fixes), drop the
+  per-open reconciliation, document mixed-version ordering staleness as a
+  known self-healing limitation with an explicit maintenance-command repair
+  hook. Awaiting Kosta's call before a round 3.
 
 ## Evening addendum (BlueBubbles de-carry stage 2, 2026-07-23 ~18:00-19:00)
 
