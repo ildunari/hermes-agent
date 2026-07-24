@@ -69,9 +69,6 @@ exemptions:
 - path_glob: agent/memory_recall_policy.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
-- path_glob: agent/moa_loop.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
 - path_glob: agent/prompt_builder.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
@@ -580,9 +577,6 @@ exemptions:
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
 - path_glob: hermes_cli/main.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: hermes_cli/moa_config.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
 - path_glob: hermes_cli/model_display.py
