@@ -256,3 +256,26 @@ Fixed f9d9b3257: OWNER branch now injects an owner-context block mirroring the
 guest pattern. Follow-ups on the list: vague tapback ingress ("Liked an
 image" without target resolution — plugin adapter) and the guest
 attachment-policy hole (direct processing blocked, /tmp copy allowed).
+
+## 17. Codex adversarial review of post-compaction work (2026-07-23 ~23:00)
+
+Verdict: HOLD → fixed → effectively PASS. Report: `~/.orch/logs/stage2-postcompact-review.md`.
+Two P1s confirmed and fixed in 2c9c68b34 (live after 23:09 restart):
+- Owner-context injection turned owner slash commands (/stop, /new, /approve)
+  into model text — injection now skips command-shaped text; regression test
+  captures the routed event at the dispatch hook. NOTE: the pre-existing GUEST
+  branch has the same shape by design (guests don't get gateway commands).
+- /api/status multiplex fallback ran fs walk + process probes on the event
+  loop — moved to asyncio.to_thread (get_hermes_home() captured on-loop:
+  contextvar-scoped).
+P2s: streamer resolution now walks the adapter MRO (fixed same commit);
+owner/guest context blocks are textually spoofable (model-confusion only,
+pre-existing pattern, scope stays authenticated metadata — accepted);
+event.text contamination for hooks/transcripts (same as guest pattern,
+source_text ordering verified correct — accepted); ported "deduplicates
+playback" test bypasses dedup (faithful port of the carried original — noted).
+Not fully cleared by the reviewer (interrupted first pass): 34d763298 (Browser
+Dev lane's own reviewed commit), 1e48f2529 (mechanical baseline), 44b0a22ae
+(docs-only). Review lane itself died silently mid-pass once; resumed via
+`codex exec ... resume <thread_id>` (exec resume --last grabs the wrong
+session when multi-agent v2 threads exist).
