@@ -312,3 +312,19 @@ creates; guard opens/closes the session's own profile state.db. Verified both
 sides: 502 tests on live tree, 450 on the merged worktree (upstream's new
 tests included). Run-4's separate failure was a load flake (auxiliary_client
 hang under concurrent desktop build; passes 340/340 in 25s standalone x3).
+
+## 20. Stale pinned service bundle + resolver-escalation scoping (runs 8-10)
+
+Run-8 escalated with the OLD package.json message: the daemon and every run
+bundle pin from ~/.hermes/update-service/versions/<hash>/ (the launchd plist
+executes it directly) — repo edits to scripts/hermes_update_service.py never
+reach runs until `setup_update_service.py install` re-pins. kickstart alone
+does not help. Runs 4-7 "passing" the gate was survivorship: their changed
+sets never hit the broken branch. Fixed: aborted/retired run-8/9, reinstalled
+(bb438fe2), verified the next run's bundle sha. Run-10 then showed the last
+gap: upstream's ar-locale catalog.ts conflict (resolver output correct and
+rerere-banked) escalated python-full via the unconditional resolver rule.
+Language-scoped it: resolver resolutions confined to .ts/.tsx/.js/.jsx/.css/
+.scss/.md ride the JS lane (tsc/build) + carry-verify; anything else or an
+empty conflict list still escalates. Tests added; reinstall performed before
+run-11.

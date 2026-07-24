@@ -773,6 +773,36 @@ def test_full_validation_required_gates() -> None:
         {"resolver_attempted": True}, [], []
     ) == (True, "merge resolver was attempted")
 
+
+def test_resolver_escalation_is_language_scoped() -> None:
+    # JS/TS/i18n-only resolver output rides the JS lane (run-10 2026-07-24:
+    # an ar-locale catalog.ts resolution escalated the ~8h python suite).
+    js_only = {
+        "resolver_attempted": True,
+        "merge_conflicts": ["apps/desktop/src/i18n/catalog.ts"],
+    }
+    assert SERVICE.full_validation_required(js_only, [], []) == (False, "")
+
+    mixed = {
+        "resolver_attempted": True,
+        "merge_conflicts": ["apps/desktop/src/i18n/catalog.ts", "gateway/run.py"],
+    }
+    required, reason = SERVICE.full_validation_required(mixed, [], [])
+    assert required and "resolver" in reason
+
+    # Empty conflict list with resolver flagged = unknown scope → escalate.
+    assert SERVICE.full_validation_required(
+        {"resolver_attempted": True, "merge_conflicts": []}, [], []
+    ) == (True, "merge resolver was attempted")
+
+    # A python-file resolution still escalates even when not on a hot prefix.
+    py_conflict = {
+        "resolver_attempted": True,
+        "merge_conflicts": ["scripts/thinning.py"],
+    }
+    required, reason = SERVICE.full_validation_required(py_conflict, [], [])
+    assert required and "resolver" in reason
+
     many = [f"docs/f{index}.md" for index in range(6)]
     required, reason = SERVICE.full_validation_required(
         {"merge_conflicts": many}, [], []

@@ -1103,6 +1103,9 @@ PYTHON_DEPENDENCY_MANIFEST_PATHS = {
     "requirements.txt",
 }
 JS_DEPENDENCY_MANIFEST_SUFFIXES = ("package.json", "package-lock.json")
+# Resolver-authored resolutions confined to these suffixes ride the JS lane
+# (tsc/build) + carry-verify instead of escalating the ~45k-test python suite.
+RESOLVER_JS_SAFE_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".md")
 DEPENDENCY_MANIFEST_PATHS = PYTHON_DEPENDENCY_MANIFEST_PATHS | {
     "package.json",
     "package-lock.json",
@@ -1138,12 +1141,24 @@ def full_validation_required(
 ) -> tuple[bool, str]:
     """Escalate the curated validation to the full suite when the merge was
     risky enough that scoping is no longer trustworthy."""
-    if ledger.get("resolver_attempted"):
-        return True, "merge resolver was attempted"
     conflicts = [
         str(path)
         for path in (ledger.get("merge_conflicts") or ledger.get("conflict_files") or [])
     ]
+    if ledger.get("resolver_attempted"):
+        # Language-scope the resolver escalation like the manifest gate: a
+        # resolver-authored resolution in JS/TS/i18n/docs cannot regress
+        # python, and those surfaces are exercised by the JS lane (npm ci,
+        # desktop/web builds incl. tsc) plus carry-verify. Escalate to the
+        # python suite only when a resolved conflict touches anything else —
+        # or when the conflict list is empty (unknown scope, trust nothing).
+        unsafe = [
+            path
+            for path in conflicts
+            if not path.endswith(RESOLVER_JS_SAFE_SUFFIXES)
+        ]
+        if unsafe or not conflicts:
+            return True, "merge resolver was attempted"
     if len(conflicts) > 5:
         return True, f"resolved conflict count {len(conflicts)} exceeds 5"
     hot = [
