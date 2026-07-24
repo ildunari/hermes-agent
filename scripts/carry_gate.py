@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sys
 import subprocess
 import tempfile
 from pathlib import Path
@@ -154,6 +155,17 @@ def pushed(args: argparse.Namespace) -> int:
             continue
         target, holder = isolated_tree(root, local_sha)
         try:
+            # Branches based on pristine upstream (e.g. PR branches for
+            # NousResearch) carry none of the local gate tooling — there is
+            # no carry to validate. Skip them instead of failing on the
+            # missing script.
+            if not (target / "scripts" / "carry.py").is_file():
+                print(
+                    f"carry gate: {local_sha[:9]} has no carry tooling "
+                    "(upstream-based branch); skipping carry checks",
+                    file=sys.stderr,
+                )
+                continue
             python = python_for(root)
             checks = [
                 [
