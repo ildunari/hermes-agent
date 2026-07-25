@@ -109,13 +109,15 @@ def test_health_reports_idle_dashboard_turns(monkeypatch):
 
 
 def test_health_is_distinct_from_unchanged_api_status():
-    """The cheap probe must not replace or alias the detailed status handler."""
+    """Each liveness/status route must retain its own handler identity."""
     routes = {
         path: getattr(route, "endpoint", None)
         for route in web_server.app.routes
-        if (path := getattr(route, "path", None)) in {"/health", "/api/status"}
+        if (path := getattr(route, "path", None))
+        in {"/health", "/api/health", "/api/status"}
     }
 
     assert routes["/health"] is web_server.get_health
+    assert routes["/api/health"] is web_server.get_api_health
     assert routes["/api/status"] is web_server.get_status
-    assert routes["/health"] is not routes["/api/status"]
+    assert len(set(routes.values())) == 3
