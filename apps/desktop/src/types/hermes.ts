@@ -502,7 +502,11 @@ export interface SessionMessage {
   reasoning_content?: null | string
   reasoning_details?: unknown
   display_kind?: 'async_delegation_complete' | 'hidden' | 'model_switch' | string
-  display_metadata?: TimelineDisplayMetadata
+  /**
+   * A backend older than this app can still serve this as unparsed JSON text,
+   * so readers must narrow before indexing into it.
+   */
+  display_metadata?: string | TimelineDisplayMetadata
   role: 'assistant' | 'system' | 'tool' | 'user'
   text?: unknown
   timestamp?: number
@@ -752,6 +756,46 @@ export interface CronJobUpdates {
   prompt?: string
   provider?: null | string
   schedule?: string
+}
+
+// A cron delivery target from GET /api/cron/delivery-targets — the single
+// source of truth (cron.scheduler.cron_delivery_targets) for where a cron job
+// can auto-deliver. Only 'local' plus configured gateway platforms appear; a
+// configured platform without a cron home channel comes back with
+// home_target_set=false so the UI can flag it.
+export interface CronDeliveryTarget {
+  home_env_var: null | string
+  home_target_set: boolean
+  id: string
+  name: string
+}
+
+// Automation Blueprints — parameterized cron templates with typed slots. The
+// backend (cron/blueprint_catalog.py) is the single source of truth; the
+// desktop renders each slot as a form field, then instantiates a real cron job
+// via the same create_job path as everything else. Shapes mirror the JSON from
+// GET /api/cron/blueprints (blueprint_catalog_entry).
+export interface AutomationBlueprintField {
+  name: string
+  type: 'enum' | 'text' | 'time' | 'weekdays'
+  label: string
+  default: null | string
+  options: string[]
+  optional: boolean
+  /** When false, options are suggestions — any value is accepted. */
+  strict?: boolean
+  help: string
+}
+
+export interface AutomationBlueprint {
+  key: string
+  title: string
+  description: string
+  category: string
+  tags: string[]
+  fields: AutomationBlueprintField[]
+  command: string
+  appUrl: string
 }
 
 export interface ProfileCreatePayload {

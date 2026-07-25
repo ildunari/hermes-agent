@@ -1260,6 +1260,22 @@ except Exception:  # pragma: no cover - scanner is optional hardening
     _scan_cron_prompt = None
 
 
+class _ProviderAuthResolutionError(RuntimeError):
+    """Raised only when gateway.run._resolve_runtime_agent_kwargs() fails
+    to resolve provider credentials.
+
+    That function is the sole raiser of RuntimeError(format_runtime_
+    provider_error(...)) anywhere in _create_agent()'s call graph.
+    Re-raising it as this dedicated subclass -- instead of catching bare
+    RuntimeError around the much wider _create_agent()+run_conversation()
+    span -- lets callers distinguish "provider auth/credential failure"
+    from any other RuntimeError a provider adapter or run_conversation()
+    might legitimately raise (e.g. run_agent.py's "Failed to recreate
+    closed OpenAI client"), which a bare `except RuntimeError` there would
+    otherwise mislabel as an auth failure.
+    """
+
+
 class APIServerAdapter(BasePlatformAdapter):
     """
     OpenAI-compatible HTTP API server adapter.
@@ -1358,6 +1374,13 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        # Last-known-good resolved model per session (keyed by gateway_session_key
+        # ONLY — never session_id, which rotates/is ephemeral for one-off API
+        # server requests; "*" is the process-wide fallback), mirroring
+        # GatewayRunner._last_resolved_model in run.py — recovers from a
+        # transient empty model resolution (#35314) instead of building an
+        # agent with model="" that 400s every call until manual retry.
+        self._last_resolved_model: Dict[str, str] = {}
         self._session_db_lock: Optional[asyncio.Lock] = None  # Single-flight for lazy init
         # Per-session token usage cache. Read by /api/session-usage and
         # _get_session_usage; populated on session-create paths and during run
@@ -1955,6 +1978,7 @@ class APIServerAdapter(BasePlatformAdapter):
             ("GET", "/health/detailed", self._handle_health_detailed),
             ("GET", "/v1/health", self._handle_health),
             ("GET", "/v1/models", self._handle_models),
+            ("GET", "/api/model/options", self._handle_model_options),
             ("GET", "/v1/capabilities", self._handle_capabilities),
             ("GET", "/v1/skills", self._handle_skills),
             ("GET", "/v1/toolsets", self._handle_toolsets),
@@ -1967,6 +1991,7 @@ class APIServerAdapter(BasePlatformAdapter):
             ("POST", "/api/sessions/{session_id}/fork", self._handle_fork_session),
             ("POST", "/api/sessions/{session_id}/chat", self._handle_session_chat),
             ("POST", "/api/sessions/{session_id}/chat/stream", self._handle_session_chat_stream),
+            ("POST", "/api/sessions/{session_id}/model", self._handle_session_model_lock),
             ("POST", "/v1/chat/completions", self._handle_chat_completions),
             ("POST", "/v1/responses", self._handle_responses),
             ("GET", "/v1/responses/{response_id}", self._handle_get_response),
@@ -2264,6 +2289,232 @@ class APIServerAdapter(BasePlatformAdapter):
             return None
         return self._model_routes.get(model_alias)
 
+    @staticmethod
+    def _clean_runtime_id(value: Any, *, max_len: int = 200) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if not text or len(text) > max_len:
+            return ""
+        if re.search(r"[\r\n\x00]", text):
+            return ""
+        return text
+
+    @classmethod
+    def _split_provider_prefixed_model(cls, model: str) -> tuple[str, str]:
+        text = cls._clean_runtime_id(model)
+        if "::" in text:
+            provider, raw = text.split("::", 1)
+            if re.match(r"^[a-zA-Z0-9_.-]{2,64}$", provider) and raw.strip():
+                return provider, raw.strip()
+        return "", text
+
+    @classmethod
+    def _runtime_options_from_model_options(cls, model_options: Any) -> Dict[str, Any]:
+        if not isinstance(model_options, dict):
+            return {}
+        runtime_options: Dict[str, Any] = {}
+        reasoning = model_options.get("reasoning")
+        if isinstance(reasoning, dict):
+            enabled = reasoning.get("enabled")
+            effort = cls._clean_runtime_id(reasoning.get("effort"), max_len=32)
+            if enabled is False:
+                runtime_options["reasoning_config"] = {"enabled": False}
+            elif effort:
+                runtime_options["reasoning_config"] = {"enabled": True, "effort": effort}
+            elif enabled is True:
+                runtime_options["reasoning_config"] = {"enabled": True}
+        service_tier = cls._clean_runtime_id(model_options.get("service_tier"), max_len=32)
+        if service_tier:
+            runtime_options["service_tier"] = service_tier
+        elif _coerce_request_bool(model_options.get("fast"), default=False):
+            runtime_options["service_tier"] = "priority"
+        return runtime_options
+
+    def _session_runtime_request_from_body(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        raw_model = self._clean_runtime_id(body.get("model") or body.get("model_id"))
+        raw_provider = self._clean_runtime_id(body.get("provider") or body.get("provider_id"), max_len=80)
+        prefixed_provider, split_model = self._split_provider_prefixed_model(raw_model)
+        provider = raw_provider or prefixed_provider
+        model = split_model or raw_model
+        alias_route = self._resolve_route(raw_model) or self._resolve_route(model)
+        route = dict(alias_route) if isinstance(alias_route, dict) else None
+        route_source = "model_routes" if route else "global"
+        if not route and model and model != self._model_name:
+            route = {"model": model}
+            if provider:
+                route["provider"] = provider
+            route_source = "raw_request"
+        elif not route and provider and model:
+            route = {"model": model, "provider": provider}
+            route_source = "raw_request"
+        runtime_options = self._runtime_options_from_model_options(body.get("model_options"))
+        requested = {"provider": provider, "model": model, "raw_model": raw_model}
+        return {
+            "requested": requested,
+            "route": route,
+            "route_source": route_source,
+            "runtime_options": runtime_options,
+            "require_model_lock": _coerce_request_bool(body.get("require_model_lock"), default=False),
+            "model_options": body.get("model_options") if isinstance(body.get("model_options"), dict) else {},
+        }
+
+    def _runtime_lock_error(self, runtime_request: Dict[str, Any]) -> Optional["web.Response"]:
+        if not runtime_request.get("require_model_lock"):
+            return None
+        requested = runtime_request.get("requested") or {}
+        model = self._clean_runtime_id(requested.get("model"))
+        provider = self._clean_runtime_id(requested.get("provider"), max_len=80)
+        route = runtime_request.get("route")
+        if not model and not provider:
+            return web.json_response(
+                _openai_error("require_model_lock was set but no model/provider was provided", code="missing_model"),
+                status=400,
+            )
+        if not route or runtime_request.get("route_source") == "global":
+            return web.json_response(
+                _openai_error("Requested Browser model lock cannot be routed; refusing silent global fallback", code="model_lock_unavailable"),
+                status=409,
+            )
+        return None
+
+    def _persist_session_runtime_lock(self, session_id: str, runtime_request: Dict[str, Any]) -> bool:
+        # Persist only a newly confirmed lock. Reusing a stored lock should not
+        # rewrite its timestamp/prompt state on every turn, and an ordinary
+        # one-off request override must not erase a previously confirmed lock.
+        if runtime_request.get("persisted_lock") or not runtime_request.get("require_model_lock"):
+            return True
+        requested = runtime_request.get("requested") or {}
+        model = self._clean_runtime_id(requested.get("model"))
+        provider = self._clean_runtime_id(requested.get("provider"), max_len=80)
+        if not model and not provider:
+            return False
+        db = self._ensure_session_db()
+        if db is None:
+            return False
+        try:
+            db.update_session_runtime_lock(
+                session_id,
+                model=model or None,
+                provider=provider or None,
+                model_options=runtime_request.get("model_options") or {},
+                route_source=runtime_request.get("route_source") or "",
+                confirmed=bool(runtime_request.get("require_model_lock")),
+            )
+            return True
+        except Exception:
+            logger.warning("[%s] failed to persist session runtime lock for %s", self.name, session_id, exc_info=True)
+            return False
+
+    @staticmethod
+    def _parse_session_model_config(raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, dict):
+            return dict(raw)
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                return {}
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    def _runtime_request_from_persisted_session_lock(
+        self,
+        session: Optional[Dict[str, Any]],
+        body: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(session, dict):
+            return None
+        model_config = self._parse_session_model_config(session.get("model_config"))
+        lock = model_config.get("browser_model_lock")
+        if not isinstance(lock, dict) or not _coerce_request_bool(lock.get("confirmed"), default=False):
+            return None
+        model = self._clean_runtime_id(lock.get("model"))
+        provider = self._clean_runtime_id(lock.get("provider"), max_len=80)
+        if not model and not provider:
+            return None
+        persisted_route_source = self._clean_runtime_id(
+            lock.get("route_source"),
+            max_len=64,
+        ).lower()
+        route: Optional[Dict[str, Any]] = None
+        if persisted_route_source == "model_routes":
+            route = self._resolve_route(model) if model else None
+        else:
+            route = {"model": model} if model else {}
+            if provider:
+                route["provider"] = provider
+        model_options = (
+            body.get("model_options")
+            if isinstance(body.get("model_options"), dict)
+            else lock.get("model_options")
+        )
+        return {
+            "requested": {
+                "provider": provider,
+                "model": model,
+                "raw_model": model,
+            },
+            "route": route or None,
+            "route_source": "session_model_lock",
+            "runtime_options": self._runtime_options_from_model_options(model_options),
+            "require_model_lock": True,
+            "model_options": model_options if isinstance(model_options, dict) else {},
+            "persisted_lock": True,
+        }
+
+    def _effective_session_runtime_request(
+        self,
+        *,
+        session: Optional[Dict[str, Any]],
+        body: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        runtime_request = self._session_runtime_request_from_body(body)
+        requested = runtime_request.get("requested") or {}
+        if requested.get("model") or requested.get("provider"):
+            return runtime_request
+        persisted = self._runtime_request_from_persisted_session_lock(session, body)
+        return persisted or runtime_request
+
+    @classmethod
+    def _sanitize_runtime_metadata(
+        cls,
+        *,
+        runtime: Optional[Dict[str, Any]] = None,
+        requested_runtime: Optional[Dict[str, Any]] = None,
+        route_source: str = "global",
+        model_lock: str = "",
+    ) -> Dict[str, Any]:
+        payload = dict(runtime or {})
+        provider = cls._clean_runtime_id(
+            payload.get("provider") or payload.get("provider_id") or payload.get("effective_provider"),
+            max_len=80,
+        )
+        model = cls._clean_runtime_id(payload.get("model") or payload.get("model_id") or payload.get("effective_model"))
+        result: Dict[str, Any] = {
+            "provider": provider,
+            "model": model,
+            "route_source": cls._clean_runtime_id(payload.get("route_source") or route_source, max_len=64) or "global",
+        }
+        if requested_runtime or payload.get("requested"):
+            req = requested_runtime or payload.get("requested") or {}
+            result["requested"] = {
+                "provider": cls._clean_runtime_id(req.get("provider"), max_len=80),
+                "model": cls._clean_runtime_id(req.get("model")),
+            }
+        if model_lock or payload.get("model_lock"):
+            result["model_lock"] = cls._clean_runtime_id(model_lock or payload.get("model_lock"), max_len=32)
+        return result
+
+    @staticmethod
+    def _normalize_session_source(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        allowed = {"api_server", "hermes_browser", "browser", "cli", "telegram", "discord", "slack", "desktop", "dashboard"}
+        if text in allowed:
+            return "hermes_browser" if text == "browser" else text
+        return "api_server"
+
     def _session_model_override_for(self, session_key: Optional[str]) -> Optional[Dict[str, Any]]:
         """Return the gateway's session ``/model`` override for *session_key*, if any.
 
@@ -2346,6 +2597,8 @@ class APIServerAdapter(BasePlatformAdapter):
         model_options: Optional[Dict[str, Any]] = None,
         route: Optional[Dict[str, Any]] = None,
         reasoning_override: Optional[Dict[str, Any]] = None,
+        session_model: Optional[str] = None,
+        confirmed_runtime_lock: bool = False,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -2366,6 +2619,19 @@ class APIServerAdapter(BasePlatformAdapter):
         routing).  When set — and no session ``/model`` override exists for
         this session — its model/provider/api_key/base_url override the
         global defaults for this agent instance only.
+
+        ``session_model`` is the raw model persisted on a native API session
+        row at creation time (``POST /api/sessions {"model": ...}``) when
+        that value does not resolve to a ``model_routes`` alias.  Session-chat
+        handlers pass either ``route`` (alias hit) or ``session_model`` (raw
+        model), never both.  Precedence: session ``/model`` override →
+        ``session_model`` → route alias / per-request selection → global.
+
+        ``confirmed_runtime_lock`` marks a backend-acknowledged Browser model
+        lock (POST /api/sessions/{id}/model).  A confirmed lock beats the
+        session ``/model`` override, disables the global fallback model
+        chain, and fails closed if the locked provider's credentials cannot
+        be resolved.
         """
         from run_agent import AIAgent
         from gateway.run import (
@@ -2378,7 +2644,18 @@ class APIServerAdapter(BasePlatformAdapter):
         )
         from hermes_cli.tools_config import _get_platform_tools
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        # Catch RuntimeError ONLY around this call, not the wider
+        # _create_agent()+run_conversation() span --
+        # _resolve_runtime_agent_kwargs() is the sole raiser of
+        # RuntimeError(format_runtime_provider_error(...)) for provider
+        # auth/credential failure.  Re-raising as
+        # _ProviderAuthResolutionError lets _run_agent() (and
+        # _handle_runs()) distinguish this from an unrelated RuntimeError
+        # elsewhere in the call graph.
+        try:
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
+        except RuntimeError as exc:
+            raise _ProviderAuthResolutionError(str(exc)) from exc
         reasoning_config = reasoning_override or GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
 
@@ -2415,7 +2692,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     provider_name,
                     target_model=target_model or None,
                 )
-            except Exception:
+            except Exception as exc:
                 try:
                     from gateway.run import _resolve_runtime_agent_kwargs_for_provider
 
@@ -2423,7 +2700,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 except Exception:
                     pass
                 if required:
-                    raise
+                    # Surface as the typed provider-auth failure so
+                    # _run_agent()/_handle_runs() return the controlled
+                    # response shape instead of a raw 500.
+                    raise _ProviderAuthResolutionError(str(exc)) from exc
                 logger.debug(
                     "api_server provider-runtime refresh failed for provider=%s model=%s",
                     provider_name,
@@ -2432,33 +2712,38 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
                 return None
 
-        # Final precedence mirrors the gateway contract while preserving the
-        # registered background-run carry:
-        # session /model override → API-run model_override → model_routes mapping
-        # selected by the request model alias → direct per-request provider/model
-        # → global defaults.
+        # Final precedence mirrors the gateway contract:
+        # confirmed Browser model lock → session /model override →
+        # API-run model_override → session-persisted model (POST /api/sessions
+        # {"model": ...}) → model_routes mapping selected by the request model
+        # alias → direct per-request provider/model → global defaults.
         # model_options stay request-scoped regardless of which selection wins.
+        # A confirmed lock is an execution contract: it bypasses both overrides
+        # and fails closed if its provider cannot be resolved.
         session_key = gateway_session_key or session_id
-        session_override = self._session_model_override_for(session_key)
+        session_row_model = _clean_request_string(session_model)
+        session_override = None
+        if not confirmed_runtime_lock:
+            session_override = self._session_model_override_for(session_key)
         if session_override:
-            session_model = _clean_request_string(session_override.get("model")) or model
+            override_model = _clean_request_string(session_override.get("model")) or model
             session_provider = _clean_request_string(session_override.get("provider"))
             current_provider = _clean_request_string(runtime_kwargs.get("provider"))
             provider_runtime = _resolve_provider_runtime(
                 session_provider or current_provider,
-                target_model=session_model,
+                target_model=override_model,
                 required=False,
             )
             if provider_runtime:
                 _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
             _apply_runtime_agent_overrides(runtime_kwargs, session_override)
-            model = session_model
+            model = override_model
             if route or request_model or request_provider:
                 logger.debug(
                     "api_server request selection skipped: session /model override wins for %s",
                     session_key or "",
                 )
-        elif model_override:
+        elif model_override and not confirmed_runtime_lock:
             override_model = _clean_request_string(model_override.get("model")) or model
             override_provider = _clean_request_string(model_override.get("provider"))
             current_provider = _clean_request_string(runtime_kwargs.get("provider"))
@@ -2476,6 +2761,25 @@ class APIServerAdapter(BasePlatformAdapter):
                 model,
                 runtime_kwargs.get("provider"),
             )
+        elif session_row_model and not confirmed_runtime_lock:
+            # Session-persisted model (raw string that resolved to no route
+            # alias).  Pins this session's turns ahead of per-request body
+            # values — a session's chosen model is a standing selection,
+            # matching the native gateway's session-model semantics.
+            current_provider = _clean_request_string(runtime_kwargs.get("provider"))
+            provider_runtime = _resolve_provider_runtime(
+                current_provider,
+                target_model=session_row_model,
+                required=False,
+            )
+            if provider_runtime:
+                _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
+            model = session_row_model
+            if request_model or request_provider:
+                logger.debug(
+                    "api_server request selection skipped: session-persisted model wins for %s",
+                    session_key or "",
+                )
         else:
             if route is not None:
                 # The request's ``model`` field selected this route, so its
@@ -2494,7 +2798,10 @@ class APIServerAdapter(BasePlatformAdapter):
                 provider_runtime = _resolve_provider_runtime(
                     effective_provider,
                     target_model=effective_model,
-                    required=bool(request_provider),
+                    # A confirmed Browser lock fails closed: if the locked
+                    # provider cannot be resolved, never fall through to
+                    # the previous global provider's credentials.
+                    required=bool(request_provider) or confirmed_runtime_lock,
                 )
             if provider_runtime:
                 _apply_runtime_agent_overrides(runtime_kwargs, provider_runtime)
@@ -2515,6 +2822,56 @@ class APIServerAdapter(BasePlatformAdapter):
                     route_provider or "",
                     request_provider or "",
                 )
+
+        # When the config has no model.default but a provider was resolved
+        # (e.g. user ran `hermes auth add openai-codex` without `hermes model`),
+        # fall back to the provider's first catalog model so the API call
+        # doesn't fail with "model must be a non-empty string". Mirrors
+        # run.py::_resolve_session_agent_runtime. Runs after the selection
+        # block above so a route/session/request override that already
+        # resolved a model is never treated as "empty" here.
+        if not model and runtime_kwargs.get("provider"):
+            try:
+                from hermes_cli.models import get_default_model_for_provider
+                model = get_default_model_for_provider(runtime_kwargs["provider"])
+                if model:
+                    logger.info(
+                        "No model configured — defaulting to %s for provider %s",
+                        model, runtime_kwargs["provider"],
+                    )
+            except Exception:
+                pass
+
+        # Final safety net (#35314): if resolution still produced an empty
+        # model — e.g. a transient config-cache miss — reuse the last model
+        # successfully resolved for this session (or, failing that, the most
+        # recent one resolved process-wide). Building an agent with model=""
+        # makes every API call fail HTTP 400 until a manual retry. Mirrors
+        # run.py::_resolve_session_agent_runtime.
+        #
+        # Cache key is gateway_session_key ONLY, never session_id — unlike
+        # run.py's native gateway (stable, long-lived chat scopes), the API
+        # server hands out a fresh UUID session_id per one-off request
+        # (/v1/responses, /v1/runs when no explicit session is supplied).
+        # Keying on session_id would leave one permanent dict entry per
+        # stateless request, growing unbounded for the life of the process.
+        _resolved_key = gateway_session_key or ""
+        if not model:
+            _recovered = (self._last_resolved_model.get(_resolved_key)
+                          or self._last_resolved_model.get("*"))
+            if _recovered:
+                logger.warning(
+                    "Empty model resolved for session=%s — recovering "
+                    "last-known-good model %s (config read likely returned "
+                    "empty; see #35314)",
+                    _resolved_key, _recovered,
+                )
+                model = _recovered
+        elif model:
+            if _resolved_key:
+                self._last_resolved_model[_resolved_key] = model
+            self._last_resolved_model["*"] = model
+
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
@@ -2527,7 +2884,11 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Load fallback provider chain so the API server platform has the
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
-        fallback_model = GatewayRunner._load_fallback_model()
+        fallback_model = (
+            None
+            if confirmed_runtime_lock
+            else GatewayRunner._load_fallback_model()
+        )
 
         agent_kwargs = {
             "model": model,
@@ -2554,6 +2915,19 @@ class APIServerAdapter(BasePlatformAdapter):
             agent_kwargs["service_tier"] = request_service_tier
 
         agent = AIAgent(**agent_kwargs)
+        agent._hermes_api_runtime = {
+            "provider": runtime_kwargs.get("provider") or getattr(agent, "provider", "") or "",
+            "model": getattr(agent, "model", None) or model,
+            "route_source": (
+                "session_model_lock"
+                if confirmed_runtime_lock
+                else "session_model_override"
+                if session_override
+                else "raw_request"
+                if route or request_model or request_provider
+                else "global"
+            ),
+        }
         return agent
 
     @staticmethod
@@ -2738,7 +3112,7 @@ class APIServerAdapter(BasePlatformAdapter):
     def _enabled_codexbar_providers(self) -> list[str]:
         config_path = Path.home() / '.codexbar' / 'config.json'
         providers: list[str] = []
-        raw = json.loads(config_path.read_text())
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
         for item in raw.get('providers', []):
             if not isinstance(item, dict) or not item.get('enabled'):
                 continue
@@ -3131,6 +3505,43 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return web.json_response({"object": "list", "data": models})
 
+    async def _handle_model_options(self, request: "web.Request") -> "web.Response":
+        """GET /api/model/options — return Hermes provider/model inventory.
+
+        This mirrors the dashboard/TUI model picker inventory endpoint so
+        external clients using the API server can sync to the user's configured
+        Hermes provider catalog instead of scraping the single OpenAI-compatible
+        `/v1/models` alias.
+        """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        refresh = _coerce_request_bool(request.query.get("refresh"), default=False)
+        try:
+            from hermes_cli.inventory import build_model_options_payload, load_picker_context
+
+            def _build_payload() -> Dict[str, Any]:
+                return build_model_options_payload(
+                    load_picker_context(),
+                    include_unconfigured=True,
+                    refresh=refresh,
+                )
+
+            # Inventory enrichment can fetch pricing and provider catalogs.
+            # Keep all synchronous picker work off aiohttp's event loop.
+            payload = await asyncio.to_thread(_build_payload)
+            return web.json_response(payload)
+        except Exception:
+            logger.exception("[%s] GET /api/model/options failed", self.name)
+            return web.json_response(
+                _openai_error(
+                    "Failed to list model options.",
+                    code="model_options_failed",
+                ),
+                status=500,
+            )
+
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — advertise the stable API surface.
 
@@ -3175,9 +3586,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 "tool_progress_events": True,
                 "approval_events": True,
                 "session_resources": True,
+                "model_options": True,
                 "session_chat": True,
                 "session_chat_streaming": True,
                 "session_fork": True,
+                "session_model_lock": True,
                 "admin_config_rw": False,
                 "jobs_admin": False,
                 "memory_write_api": False,
@@ -3192,6 +3605,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "health": {"method": "GET", "path": "/health"},
                 "health_detailed": {"method": "GET", "path": "/health/detailed"},
                 "models": {"method": "GET", "path": "/v1/models"},
+                "model_options": {"method": "GET", "path": "/api/model/options"},
                 "chat_completions": {"method": "POST", "path": "/v1/chat/completions"},
                 "responses": {"method": "POST", "path": "/v1/responses"},
                 "runs": {"method": "POST", "path": "/v1/runs"},
@@ -3212,6 +3626,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "session_fork": {"method": "POST", "path": "/api/sessions/{session_id}/fork"},
                 "session_chat": {"method": "POST", "path": "/api/sessions/{session_id}/chat"},
                 "session_chat_stream": {"method": "POST", "path": "/api/sessions/{session_id}/chat/stream"},
+                "session_model_lock": {"method": "POST", "path": "/api/sessions/{session_id}/model"},
             },
         })
 
@@ -3464,6 +3879,25 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_prompt")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_prompt must be a string", code="invalid_system_prompt"), status=400)
+        source = self._normalize_session_source(body.get("source") or "api_server")
+        runtime_request = self._session_runtime_request_from_body(body)
+        lock_error = self._runtime_lock_error(runtime_request)
+        if lock_error is not None:
+            return lock_error
+        requested = runtime_request.get("requested") or {}
+        model_name = self._clean_runtime_id(requested.get("model")) or (str(model) if model else None)
+        model_config = None
+        if requested.get("model") or requested.get("provider"):
+            model_config = {
+                "browser_model_lock": {
+                    "provider": requested.get("provider") or "",
+                    "model": requested.get("model") or "",
+                    "model_options": runtime_request.get("model_options") or {},
+                    "route_source": runtime_request.get("route_source") or "",
+                    "confirmed": bool(runtime_request.get("require_model_lock")),
+                    "updated_at": time.time(),
+                }
+            }
         title = body.get("title")
 
         # Run the entire check-insert-title sequence inside a single
@@ -3481,12 +3915,13 @@ class APIServerAdapter(BasePlatformAdapter):
                 import time as _time
                 conn.execute(
                     """INSERT INTO sessions (
-                       id, source, model, system_prompt, started_at
-                    ) VALUES (?, ?, ?, ?, ?)""",
+                       id, source, model, model_config, system_prompt, started_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
-                        "api_server",
-                        str(model) if model else None,
+                        source,
+                        model_name,
+                        json.dumps(model_config) if model_config else None,
                         system_prompt,
                         _time.time(),
                     ),
@@ -3511,8 +3946,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     "SELECT * FROM sessions WHERE id = ?", (session_id,)
                 ).fetchone()
                 return (dict(session_row) if session_row else {
-                    "id": session_id, "source": "api_server",
-                    "model": model, "title": title,
+                    "id": session_id, "source": source,
+                    "model": model_name, "title": title,
                 }), None
             return db._execute_write(_atomic)
 
@@ -3646,7 +4081,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
         session_id = request.match_info["session_id"]
-        _, err = await self._get_existing_session_or_404(session_id)
+        session, err = await self._get_existing_session_or_404(session_id)
         if err:
             return err
         body, err = await self._read_json_body(request)
@@ -3658,18 +4093,58 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
-        route = self._resolve_route(body.get("model"))
-        reasoning_override = self._reasoning_override_for_request(body, route)
-        agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
-        selection_error = self._request_route_conflict_error(
-            session_id=session_id,
-            gateway_session_key=gateway_session_key,
-            requested_model=agent_overrides.get("requested_model"),
-            requested_provider=agent_overrides.get("requested_provider"),
-            route=route,
+        # Runtime selection. A backend-acknowledged Browser model lock
+        # (require_model_lock in the body, or a previously confirmed lock
+        # persisted on the session row) is an execution contract and wins.
+        # Otherwise: session-persisted model (POST /api/sessions
+        # {"model": ...}) — previously fetched and discarded here — routes
+        # through model_routes when it is an alias (route
+        # provider/credentials come along) or threads through as
+        # session_model when it is a raw string; per-request body values
+        # come after that.
+        runtime_request = self._effective_session_runtime_request(
+            session=session,
+            body=body,
         )
-        if selection_error:
-            return web.json_response(_openai_error(selection_error), status=400)
+        lock_error = self._runtime_lock_error(runtime_request)
+        if lock_error is not None:
+            return lock_error
+        if not self._persist_session_runtime_lock(session_id, runtime_request):
+            return web.json_response(
+                _openai_error(
+                    "Could not persist the requested session model lock",
+                    code="model_lock_persistence_failed",
+                ),
+                status=500,
+            )
+        lock_active = bool(runtime_request.get("require_model_lock"))
+        if lock_active:
+            route = runtime_request.get("route")
+            session_model = None
+            requested = runtime_request.get("requested") or {}
+            agent_overrides: Dict[str, Any] = {}
+            if requested.get("model"):
+                agent_overrides["requested_model"] = requested["model"]
+            if requested.get("provider"):
+                agent_overrides["requested_provider"] = requested["provider"]
+            if runtime_request.get("model_options"):
+                agent_overrides["model_options"] = runtime_request["model_options"]
+        else:
+            stored_model = session.get("model") if isinstance(session, dict) else None
+            stored_route = self._resolve_route(stored_model)
+            route = stored_route or self._resolve_route(body.get("model"))
+            session_model = stored_model if (stored_model and stored_route is None) else None
+            agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
+            selection_error = self._request_route_conflict_error(
+                session_id=session_id,
+                gateway_session_key=gateway_session_key,
+                requested_model=agent_overrides.get("requested_model"),
+                requested_provider=agent_overrides.get("requested_provider"),
+                route=route,
+            )
+            if selection_error:
+                return web.json_response(_openai_error(selection_error), status=400)
+        reasoning_override = self._reasoning_override_for_request(body, route)
         history = await self._conversation_history_for_session(session_id)
         result, usage = await self._run_agent(
             user_message=user_message,
@@ -3679,6 +4154,10 @@ class APIServerAdapter(BasePlatformAdapter):
             gateway_session_key=gateway_session_key,
             route=route,
             reasoning_override=reasoning_override,
+            session_model=session_model,
+            requested_runtime=runtime_request.get("requested") or {},
+            route_source=runtime_request.get("route_source") or "global",
+            confirmed_runtime_lock=lock_active,
             **agent_overrides,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
@@ -3698,12 +4177,30 @@ class APIServerAdapter(BasePlatformAdapter):
         headers = {"X-Hermes-Session-Id": effective_session_id or session_id}
         if gateway_session_key:
             headers["X-Hermes-Session-Key"] = gateway_session_key
+        runtime = {}
+        if isinstance(result, dict):
+            runtime = result.get("runtime") or {}
+        if not runtime and isinstance(usage, dict):
+            runtime = usage.get("runtime") or {}
+        runtime = self._sanitize_runtime_metadata(
+            runtime=runtime,
+            requested_runtime=runtime_request.get("requested"),
+            route_source=runtime_request.get("route_source") or "global",
+            model_lock=(
+                "confirmed"
+                if runtime and runtime_request.get("require_model_lock")
+                else "accepted"
+                if runtime_request.get("require_model_lock")
+                else ""
+            ),
+        )
         return web.json_response(
             {
                 "object": "hermes.session.chat.completion",
                 "session_id": effective_session_id or session_id,
                 "message": {"role": "assistant", "content": final_response},
                 "usage": usage,
+                "runtime": runtime,
             },
             headers=headers,
         )
@@ -3715,7 +4212,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if key_err is not None:
             return key_err
         session_id = request.match_info["session_id"]
-        _, err = await self._get_existing_session_or_404(session_id)
+        session, err = await self._get_existing_session_or_404(session_id)
         if err:
             return err
         body, err = await self._read_json_body(request)
@@ -3727,18 +4224,56 @@ class APIServerAdapter(BasePlatformAdapter):
         system_prompt = body.get("system_message") or body.get("instructions")
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
-        route = self._resolve_route(body.get("model"))
-        reasoning_override = self._reasoning_override_for_request(body, route)
-        agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
-        selection_error = self._request_route_conflict_error(
-            session_id=session_id,
-            gateway_session_key=gateway_session_key,
-            requested_model=agent_overrides.get("requested_model"),
-            requested_provider=agent_overrides.get("requested_provider"),
-            route=route,
+        # Runtime selection — mirrors _handle_session_chat (lock wins,
+        # otherwise session-persisted model then per-request values).
+        runtime_request = self._effective_session_runtime_request(
+            session=session,
+            body=body,
         )
-        if selection_error:
-            return web.json_response(_openai_error(selection_error), status=400)
+        lock_error = self._runtime_lock_error(runtime_request)
+        if lock_error is not None:
+            return lock_error
+        if not self._persist_session_runtime_lock(session_id, runtime_request):
+            return web.json_response(
+                _openai_error(
+                    "Could not persist the requested session model lock",
+                    code="model_lock_persistence_failed",
+                ),
+                status=500,
+            )
+        lock_active = bool(runtime_request.get("require_model_lock"))
+        if lock_active:
+            route = runtime_request.get("route")
+            session_model = None
+            requested = runtime_request.get("requested") or {}
+            agent_overrides: Dict[str, Any] = {}
+            if requested.get("model"):
+                agent_overrides["requested_model"] = requested["model"]
+            if requested.get("provider"):
+                agent_overrides["requested_provider"] = requested["provider"]
+            if runtime_request.get("model_options"):
+                agent_overrides["model_options"] = runtime_request["model_options"]
+        else:
+            stored_model = session.get("model") if isinstance(session, dict) else None
+            stored_route = self._resolve_route(stored_model)
+            route = stored_route or self._resolve_route(body.get("model"))
+            session_model = stored_model if (stored_model and stored_route is None) else None
+            agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
+            selection_error = self._request_route_conflict_error(
+                session_id=session_id,
+                gateway_session_key=gateway_session_key,
+                requested_model=agent_overrides.get("requested_model"),
+                requested_provider=agent_overrides.get("requested_provider"),
+                route=route,
+            )
+            if selection_error:
+                return web.json_response(_openai_error(selection_error), status=400)
+        runtime_meta = self._sanitize_runtime_metadata(
+            requested_runtime=runtime_request.get("requested"),
+            route_source=runtime_request.get("route_source") or "global",
+            model_lock=("accepted" if lock_active else ""),
+        )
+        reasoning_override = self._reasoning_override_for_request(body, route)
 
         loop = asyncio.get_running_loop()
         queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
@@ -3782,7 +4317,10 @@ class APIServerAdapter(BasePlatformAdapter):
 
         async def _run_and_signal() -> None:
             try:
-                await queue.put(_event_payload("run.started", {"user_message": {"role": "user", "content": user_message}}))
+                await queue.put(_event_payload("run.started", {
+                    "user_message": {"role": "user", "content": user_message},
+                    "runtime": runtime_meta,
+                }))
                 await queue.put(_event_payload("message.started", {"message": {"id": message_id, "role": "assistant"}}))
                 history = await self._conversation_history_for_session(session_id)
                 result, usage = await self._run_agent(
@@ -3795,6 +4333,10 @@ class APIServerAdapter(BasePlatformAdapter):
                     gateway_session_key=gateway_session_key,
                     route=route,
                     reasoning_override=reasoning_override,
+                    session_model=session_model,
+                    requested_runtime=runtime_request.get("requested") or {},
+                    route_source=runtime_request.get("route_source") or "global",
+                    confirmed_runtime_lock=lock_active,
                     **agent_overrides,
                 )
                 final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
@@ -3812,6 +4354,23 @@ class APIServerAdapter(BasePlatformAdapter):
                         final_response,
                         history,
                     )
+                effective_runtime = {}
+                if isinstance(result, dict):
+                    effective_runtime = result.get("runtime") or {}
+                if not effective_runtime and isinstance(usage, dict):
+                    effective_runtime = usage.get("runtime") or {}
+                effective_runtime = self._sanitize_runtime_metadata(
+                    runtime=effective_runtime,
+                    requested_runtime=runtime_request.get("requested"),
+                    route_source=runtime_request.get("route_source") or "global",
+                    model_lock=(
+                        "confirmed"
+                        if effective_runtime and runtime_request.get("require_model_lock")
+                        else "accepted"
+                        if runtime_request.get("require_model_lock")
+                        else ""
+                    ),
+                )
                 await queue.put(_event_payload("assistant.completed", {
                     "session_id": effective_session_id,
                     "message_id": message_id,
@@ -3819,6 +4378,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     "completed": True,
                     "partial": False,
                     "interrupted": False,
+                    "runtime": effective_runtime,
                 }))
                 await queue.put(_event_payload("run.completed", {
                     "session_id": effective_session_id,
@@ -3826,6 +4386,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     "completed": True,
                     "messages": turn_messages,
                     "usage": usage,
+                    "runtime": effective_runtime,
                 }))
             except Exception as exc:
                 logger.exception("[api_server] session chat stream failed")
@@ -3874,6 +4435,48 @@ class APIServerAdapter(BasePlatformAdapter):
             logger.debug("[api_server] session SSE stream error: %s", exc)
         return response
 
+    async def _handle_session_model_lock(self, request: "web.Request") -> "web.Response":
+        """POST /api/sessions/{session_id}/model — backend-ack a Browser model lock."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        session_id = request.match_info["session_id"]
+        _, err = await self._get_existing_session_or_404(session_id)
+        if err:
+            return err
+        body, err = await self._read_json_body(request)
+        if err:
+            return err
+        runtime_request = self._session_runtime_request_from_body(body)
+        runtime_request["require_model_lock"] = True
+        lock_error = self._runtime_lock_error(runtime_request)
+        if lock_error is not None:
+            return lock_error
+        if not self._persist_session_runtime_lock(session_id, runtime_request):
+            return web.json_response(
+                _openai_error(
+                    "Could not persist the requested session model lock",
+                    code="model_lock_persistence_failed",
+                ),
+                status=500,
+            )
+        requested = runtime_request.get("requested") or {}
+        route = runtime_request.get("route") or {}
+        runtime = self._sanitize_runtime_metadata(
+            runtime={
+                "provider": route.get("provider") or requested.get("provider") or "",
+                "model": route.get("model") or requested.get("model") or "",
+                "route_source": runtime_request.get("route_source") or "raw_request",
+            },
+            requested_runtime=requested,
+            route_source=runtime_request.get("route_source") or "raw_request",
+            model_lock="accepted",
+        )
+        return web.json_response({
+            "object": "hermes.session.model_lock",
+            "session_id": session_id,
+            "runtime": runtime,
+        })
     @_admit_api_agent_request
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
@@ -5975,6 +6578,10 @@ class APIServerAdapter(BasePlatformAdapter):
         model_options: Optional[Dict[str, Any]] = None,
         route: Optional[Dict[str, Any]] = None,
         reasoning_override: Optional[Dict[str, Any]] = None,
+        session_model: Optional[str] = None,
+        requested_runtime: Optional[Dict[str, Any]] = None,
+        route_source: str = "global",
+        confirmed_runtime_lock: bool = False,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -5985,6 +6592,16 @@ class APIServerAdapter(BasePlatformAdapter):
         *route* is an optional ``model_routes`` entry (resolved from the
         request's ``model`` field) that overrides the global model/provider
         for this specific request.
+
+        *session_model* is a raw model persisted on a native API session
+        row.  It is used only when the persisted value did not resolve to a
+        ``model_routes`` alias — see ``_create_agent`` for precedence.
+
+        *requested_runtime* / *route_source* / *confirmed_runtime_lock*
+        carry the Browser model-lock contract: when a confirmed lock is
+        active the completed agent's actual provider/model must match the
+        locked selection or the turn fails, and the response carries
+        sanitized ``runtime`` metadata reporting actual vs requested.
 
         If *agent_ref* is a one-element list, the AIAgent instance is stored
         at ``agent_ref[0]`` before ``run_conversation`` begins.  This allows
@@ -6020,6 +6637,8 @@ class APIServerAdapter(BasePlatformAdapter):
                         model_options=model_options,
                         route=route,
                         reasoning_override=reasoning_override,
+                        session_model=session_model,
+                        confirmed_runtime_lock=confirmed_runtime_lock,
                     )
                     if agent_ref is not None:
                         agent_ref[0] = agent
@@ -6052,7 +6671,99 @@ class APIServerAdapter(BasePlatformAdapter):
                     )
                     if _compacted_in_place or _session_rotated:
                         result["_compressed"] = True
+                    include_runtime = bool(
+                        requested_runtime
+                        or route
+                        or confirmed_runtime_lock
+                        or (route_source and route_source != "global")
+                    )
+                    if include_runtime:
+                        runtime = dict(getattr(agent, "_hermes_api_runtime", {}) or {})
+                        raw_provider = getattr(agent, "provider", "")
+                        raw_model = getattr(agent, "model", "")
+                        actual_provider = (
+                            self._clean_runtime_id(raw_provider, max_len=80)
+                            if isinstance(raw_provider, str)
+                            else ""
+                        )
+                        actual_model = (
+                            self._clean_runtime_id(raw_model)
+                            if isinstance(raw_model, str)
+                            else ""
+                        )
+                        if actual_provider:
+                            runtime["provider"] = actual_provider
+                        else:
+                            runtime.setdefault("provider", "")
+                        if actual_model:
+                            runtime["model"] = actual_model
+                        else:
+                            runtime.setdefault("model", "")
+                        if confirmed_runtime_lock:
+                            expected_provider = self._clean_runtime_id(
+                                (route or {}).get("provider")
+                                or (requested_runtime or {}).get("provider"),
+                                max_len=80,
+                            )
+                            expected_model = self._clean_runtime_id(
+                                (route or {}).get("model")
+                                or (requested_runtime or {}).get("model")
+                            )
+                            mismatched = (
+                                (expected_provider and actual_provider != expected_provider)
+                                or (expected_model and actual_model != expected_model)
+                            )
+                            if mismatched:
+                                raise RuntimeError(
+                                    "confirmed model lock runtime mismatch: "
+                                    f"expected provider={expected_provider or '<unspecified>'} "
+                                    f"model={expected_model or '<unspecified>'}; "
+                                    f"actual provider={actual_provider or '<unknown>'} "
+                                    f"model={actual_model or '<unknown>'}"
+                                )
+                        if requested_runtime:
+                            runtime["requested"] = {
+                                "provider": self._clean_runtime_id((requested_runtime or {}).get("provider"), max_len=80),
+                                "model": self._clean_runtime_id((requested_runtime or {}).get("model")),
+                            }
+                        runtime["route_source"] = route_source or runtime.get("route_source") or "global"
+                        runtime = self._sanitize_runtime_metadata(
+                            runtime=runtime,
+                            requested_runtime=requested_runtime,
+                            route_source=route_source or "global",
+                            model_lock=("confirmed" if confirmed_runtime_lock else ""),
+                        )
+                        if isinstance(result, dict):
+                            result["runtime"] = runtime
+                        usage["runtime"] = runtime
                     return result, usage
+                except _ProviderAuthResolutionError as exc:
+                    # Only _ProviderAuthResolutionError — raised exclusively
+                    # where _resolve_runtime_agent_kwargs() is called inside
+                    # _create_agent() — means a provider auth/credential
+                    # failure.  Catching bare RuntimeError here would
+                    # mislabel unrelated RuntimeErrors from
+                    # run_conversation() (e.g. "Failed to recreate closed
+                    # OpenAI client") as auth failures.  Matches run.py's
+                    # response shape (final_response text, no HTTP error).
+                    # Previously this propagated unhandled:
+                    # /v1/chat/completions caught it as an undifferentiated
+                    # "Internal server error" 500, and
+                    # /api/sessions/{id}/chat[/stream] didn't catch it at
+                    # all (raw aiohttp 500, no JSON body).  Handling it
+                    # here, once, covers every _run_agent() caller;
+                    # /v1/runs has its own branch in its executor.
+                    logger.warning("Provider authentication failed for session=%s: %s",
+                                   session_id or "", exc)
+                    return (
+                        {
+                            "final_response": f"⚠️ Provider authentication failed: {exc}",
+                            "messages": [],
+                            "api_calls": 0,
+                            "tools": [],
+                        },
+                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    )
                 finally:
                     clear_session_vars(tokens)
 
@@ -6675,6 +7386,31 @@ class APIServerAdapter(BasePlatformAdapter):
                 except Exception:
                     pass
                 raise
+            except _ProviderAuthResolutionError as exc:
+                # /v1/runs builds its own agent via _create_agent() and does
+                # not route through _run_agent() (see that method's own
+                # _ProviderAuthResolutionError branch), so it needs its own
+                # handling to surface the same distinguished, controlled
+                # message the other endpoints give a provider auth/credential
+                # failure, instead of falling through to the generic
+                # except-Exception branch below.
+                logger.warning("Provider authentication failed for run=%s: %s", run_id, exc)
+                error_msg = f"⚠️ Provider authentication failed: {exc}"
+                self._set_run_status(
+                    run_id,
+                    "failed",
+                    error=error_msg,
+                    last_event="run.failed",
+                )
+                try:
+                    _put_event_if_active({
+                        "event": "run.failed",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                        "error": error_msg,
+                    })
+                except Exception:
+                    pass
             except Exception as exc:
                 logger.exception("[api_server] run %s failed", run_id)
                 settled_routing = self._settled_run_routing(run_id, agent=agent)

@@ -1666,8 +1666,7 @@ export const en: Translations = {
     toggleFailed: (name: string) => `Failed to update "${name}"`,
     newSubscription: 'New subscription',
     restarting: 'Gateway restarting...',
-    restartNeeded:
-      'Webhooks are enabled, but the gateway still needs a restart before the receiver can come online.',
+    restartNeeded: 'Webhooks are enabled, but the gateway still needs a restart before the receiver can come online.',
     restartGateway: 'Restart gateway',
     restartingGateway: 'Restarting...',
     restartFailed: (detail: string) => `Gateway restart failed${detail}`,
@@ -1889,6 +1888,7 @@ export const en: Translations = {
     promptPlaceholder: 'Summarize my unread Slack threads and email me the top 5...',
     frequencyLabel: 'Frequency',
     deliverLabel: 'Deliver to',
+    deliverNeedsHomeChannel: 'set a home channel first',
     modelLabel: 'Model',
     modelDefault: 'Default (global model)',
     customScheduleLabel: 'Custom schedule',
@@ -1900,7 +1900,25 @@ export const en: Translations = {
     scheduleRequired: 'Schedule is required.',
     scriptOnlyEditHint: 'Script-only job (no AI prompt). Job id:',
     saveChanges: 'Save changes',
-    createAction: 'Create cron'
+    createAction: 'Create cron',
+    tabs: {
+      jobs: 'Jobs',
+      blueprints: 'Blueprints'
+    },
+    blueprints: {
+      tab: 'Blueprints',
+      startFrom: 'Start from',
+      custom: 'Custom',
+      subtitle: 'Ready-made automations',
+      dialogDesc: 'Fill in the details and schedule it.',
+      scheduleIt: 'Schedule it',
+      scheduling: 'Scheduling...',
+      scheduled: 'Blueprint scheduled',
+      loading: 'Loading blueprints...',
+      failedLoad: 'Failed to load blueprints',
+      emptyTitle: 'No blueprints available',
+      emptyDesc: 'No automation blueprints are available on this backend.'
+    }
   },
 
   artifacts: {

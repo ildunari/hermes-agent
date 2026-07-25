@@ -3260,7 +3260,9 @@ async def get_status(profile: Optional[str] = None):
     # skills-module attributes that a concurrent request would cross-restore
     # across that await. Status only resolves get_hermes_home() at call time
     # (config/env/gateway state), which the task-local contextvar covers.
+    profile_dir: Optional[Path] = None
     if requested_profile and requested_profile.lower() != "current":
+        profile_dir = _resolve_profile_dir(requested_profile)
         status_scope = _config_profile_scope(requested_profile)
         status_scope.__enter__()
 
@@ -3270,7 +3272,17 @@ async def get_status(profile: Optional[str] = None):
         # Try local PID check first (same-host).  If that fails and a remote
         # GATEWAY_HEALTH_URL is configured, probe the gateway over HTTP so the
         # dashboard works when the gateway runs in a separate container.
-        gateway_pid = get_running_pid_cached()
+        #
+        # When ?profile=<name> was given, scope PID and state reads to that
+        # profile's directory — gateway identity files (PID, lock, runtime
+        # status) are written to the per-profile home, not the process-level
+        # HERMES_HOME (see issue #69143). Plain /api/status keeps the exact
+        # zero-arg call so its behavior (and cache signature) is unchanged.
+        gateway_pid = (
+            get_running_pid_cached(pid_path=profile_dir / "gateway.pid")
+            if profile_dir
+            else get_running_pid_cached()
+        )
         gateway_running = gateway_pid is not None
         remote_health_body: dict | None = None
 
@@ -3310,7 +3322,17 @@ async def get_status(profile: Optional[str] = None):
 
         # Prefer the detailed health endpoint response (has full state) when the
         # local runtime status file is absent or stale (cross-container).
-        local_runtime = read_runtime_status()
+        #
+        # When ?profile=<name> was given, read from the profile's directory so
+        # the state file resolves to the per-profile gateway_state.json, not
+        # the fixed process-level HERMES_HOME (see issue #69143). Plain
+        # /api/status keeps the exact zero-arg call so existing behavior
+        # (and monkeypatched call shapes) are unchanged.
+        local_runtime = (
+            read_runtime_status(path=profile_dir / "gateway_state.json")
+            if profile_dir
+            else read_runtime_status()
+        )
         runtime = local_runtime
         if runtime is None and remote_health_body and remote_health_body.get("gateway_state"):
             runtime = remote_health_body
@@ -3320,7 +3342,16 @@ async def get_status(profile: Optional[str] = None):
         # is display-only. (Running os.kill on a remote PID is both wrong and
         # trips the test live-system guard.)
         if not gateway_running and local_runtime is not None:
-            runtime_pid = get_runtime_status_running_pid(local_runtime)
+            # expected_home scopes the OS-identity check to the requested
+            # profile so a recycled PID belonging to a different profile's
+            # live gateway is not reported running for this one.
+            runtime_pid = (
+                get_runtime_status_running_pid(
+                    local_runtime, expected_home=profile_dir
+                )
+                if profile_dir
+                else get_runtime_status_running_pid(local_runtime)
+            )
             if runtime_pid is not None:
                 gateway_running = True
                 gateway_pid = runtime_pid
@@ -7007,7 +7038,7 @@ _AUX_TASK_SLOTS: Tuple[str, ...] = (
 
 
 @app.get("/api/model/options")
-def get_model_options(
+async def get_model_options(
     profile: Optional[str] = None,
     refresh: bool = False,
     include_unconfigured: bool = False,
@@ -7029,25 +7060,21 @@ def get_model_options(
     Models" control. Normal opens leave it false to stay on the 1h cache.
     """
     try:
-        from hermes_cli.inventory import build_models_payload, load_picker_context
+        from hermes_cli.inventory import build_model_options_payload, load_picker_context
 
-        # Most desktop surfaces should only list providers the user has already
-        # configured. Onboarding opts into the full provider universe via
-        # include_unconfigured=1 so it can still render setup affordances for
-        # providers that are not yet authenticated.
-        with _profile_scope(profile):
-            return build_models_payload(
-                load_picker_context(),
-                explicit_only=bool(explicit_only),
-                include_unconfigured=bool(include_unconfigured),
-                picker_hints=True,
-                canonical_order=True,
-                pricing=True,
-                capabilities=True,
-                refresh=bool(refresh),
-                probe_custom_providers=bool(refresh),
-                probe_current_custom_provider=not bool(refresh),
-            )
+        def _build_payload_scoped() -> dict:
+            # Keep the profile override inside the worker thread so the full
+            # sync picker build (config load, pricing, refresh probes) runs
+            # off the event loop under the requested profile.
+            with _profile_scope(profile):
+                return build_model_options_payload(
+                    load_picker_context(),
+                    explicit_only=bool(explicit_only),
+                    include_unconfigured=bool(include_unconfigured),
+                    refresh=bool(refresh),
+                )
+
+        return await run_in_threadpool(_build_payload_scoped)
     except HTTPException:
         raise
     except Exception:

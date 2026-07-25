@@ -260,7 +260,7 @@ def terminate_pid(pid: int, *, force: bool = False) -> None:
             result = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 timeout=10,
                 creationflags=windows_hide_flags(),
             )
@@ -346,7 +346,7 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
             result = subprocess.run(
                 ["ps", "-p", str(pid), "-o", "command="],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
@@ -626,7 +626,7 @@ def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
         return None
 
     try:
-        raw = pid_path.read_text().strip()
+        raw = pid_path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
         # File was deleted between exists() and read_text(), permission
         # flipped, or it holds non-UTF-8 / binary garbage.
@@ -836,7 +836,7 @@ def _pid_exists(pid: int) -> bool:
                 r = subprocess.run(
                     ["ps", "-o", "state=", "-p", str(int(pid))],
                     capture_output=True,
-                    text=True,
+                    text=True, encoding='utf-8', errors='replace',
                     timeout=5,
                 )
                 if r.returncode == 0 and r.stdout.strip().startswith("Z"):

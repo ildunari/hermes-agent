@@ -2067,6 +2067,7 @@ export const zh: Translations = {
     promptPlaceholder: '总结我未读的 Slack 话题，并把前 5 条邮件发给我…',
     frequencyLabel: '频率',
     deliverLabel: '投递至',
+    deliverNeedsHomeChannel: '请先设置主频道',
     modelLabel: '模型',
     modelDefault: '默认（全局模型）',
     customScheduleLabel: '自定义排程',
@@ -2078,7 +2079,25 @@ export const zh: Translations = {
     scheduleRequired: '排程为必填项。',
     scriptOnlyEditHint: '仅脚本任务（无 AI 提示词）。任务 ID：',
     saveChanges: '保存更改',
-    createAction: '创建定时任务'
+    createAction: '创建定时任务',
+    tabs: {
+      jobs: '任务',
+      blueprints: '蓝图'
+    },
+    blueprints: {
+      tab: '蓝图',
+      startFrom: '从此开始',
+      custom: '自定义',
+      subtitle: '现成的自动化',
+      dialogDesc: '填写详细信息并进行排程。',
+      scheduleIt: '安排任务',
+      scheduling: '安排中...',
+      scheduled: '蓝图已安排',
+      loading: '正在加载蓝图...',
+      failedLoad: '加载蓝图失败',
+      emptyTitle: '没有可用的蓝图',
+      emptyDesc: '此后端上没有可用的自动化蓝图。'
+    }
   },
 
   artifacts: {
@@ -2515,8 +2534,7 @@ export const zh: Translations = {
     installTo: '将安装到',
     retryAfterRun: '我已运行 -- 重试',
     setupChoiceTitle: '设置 Hermes Desktop',
-    setupChoiceDesc:
-      '将此应用连接到你已运行的 Hermes 网关，或在这台电脑上本地安装 Hermes。',
+    setupChoiceDesc: '将此应用连接到你已运行的 Hermes 网关，或在这台电脑上本地安装 Hermes。',
     connectExistingTitle: '连接到现有 Hermes',
     connectExistingShort: '连接现有环境',
     connectExistingDesc: '使用会话令牌或浏览器登录连接远程后端。不会启动本地安装。',

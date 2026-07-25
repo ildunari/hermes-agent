@@ -2097,7 +2097,7 @@ def git(*args, cwd=None):
     """Run a git command and return stdout."""
     result = subprocess.run(
         ["git"] + list(args),
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
         cwd=cwd or str(REPO_ROOT),
     )
     if result.returncode != 0:
@@ -2111,7 +2111,7 @@ def git_result(*args, cwd=None):
     return subprocess.run(
         ["git"] + list(args),
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         cwd=cwd or str(REPO_ROOT),
     )
 
@@ -2138,7 +2138,7 @@ def next_available_tag(base_tag: str) -> tuple[str, str]:
 
 def get_current_version():
     """Read current semver from __init__.py."""
-    content = VERSION_FILE.read_text()
+    content = VERSION_FILE.read_text(encoding="utf-8")
     match = re.search(r'__version__\s*=\s*"([^"]+)"', content)
     return match.group(1) if match else "0.0.0"
 
@@ -2168,7 +2168,7 @@ def bump_version(current: str, part: str) -> str:
 def update_version_files(semver: str, calver_date: str):
     """Update version strings in source files."""
     # Update __init__.py
-    content = VERSION_FILE.read_text()
+    content = VERSION_FILE.read_text(encoding="utf-8")
     content = re.sub(
         r'__version__\s*=\s*"[^"]+"',
         f'__version__ = "{semver}"',
@@ -2179,17 +2179,17 @@ def update_version_files(semver: str, calver_date: str):
         f'__release_date__ = "{calver_date}"',
         content,
     )
-    VERSION_FILE.write_text(content)
+    VERSION_FILE.write_text(content, encoding="utf-8")
 
     # Update pyproject.toml
-    pyproject = PYPROJECT_FILE.read_text()
+    pyproject = PYPROJECT_FILE.read_text(encoding="utf-8")
     pyproject = re.sub(
         r'^version\s*=\s*"[^"]+"',
         f'version = "{semver}"',
         pyproject,
         flags=re.MULTILINE,
     )
-    PYPROJECT_FILE.write_text(pyproject)
+    PYPROJECT_FILE.write_text(pyproject, encoding="utf-8")
 
     # Keep the desktop Electron app's package.json version in lockstep with the
     # Python package version. The desktop About panel reads the live Hermes
@@ -2591,7 +2591,7 @@ def main():
         if gh_bin:
             result = subprocess.run(
                 gh_cmd,
-                capture_output=True, text=True,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=str(REPO_ROOT),
             )
         else:

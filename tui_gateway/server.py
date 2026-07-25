@@ -1965,15 +1965,15 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # override is still active here.
             current["config_model_seen"] = _config_model_target()
 
-            try:
-                worker = _SlashWorker(
-                    key,
-                    getattr(agent, "model", _resolve_model()),
-                    profile_home=current.get("profile_home"),
-                )
-                _attach_worker(sid, current, worker)
-            except Exception:
-                pass
+            # No eager slash-worker pre-warm: slash.exec spawns one on demand
+            # (its error path already relies on that respawn to recover from a
+            # dead worker). Each worker child runs its own MCP discovery
+            # (#61891), so pre-warming one per session forks the full stdio
+            # MCP fleet — ~20 OS processes per retained session on a config
+            # with a few stdio servers — even for sessions that never run a
+            # worker-routed command. Sessions held by a live transport are
+            # never reaped, so with the desktop app open for days those
+            # fleets accumulate until the OS refuses new process spawns.
 
             try:
                 from tools.approval import (
@@ -3595,11 +3595,16 @@ def _tool_lifecycle_required_for_ui(name: str) -> bool:
 
 def _restart_slash_worker(sid: str, session: dict):
     worker = session.get("slash_worker")
-    if worker:
-        try:
-            worker.close()
-        except Exception:
-            pass
+    # A session that never spawned a worker has nothing stale to replace —
+    # the next slash.exec builds one with the current session key/model.
+    # Spawning here would fork the per-worker stdio MCP fleet for sessions
+    # that never use worker-routed commands.
+    if worker is None:
+        return
+    try:
+        worker.close()
+    except Exception:
+        pass
     try:
         new_worker = _SlashWorker(
             session["session_key"],
@@ -5886,19 +5891,10 @@ def _init_session(
             except Exception:
                 pass
     _register_session_cwd(_sessions[sid])
-    try:
-        _attach_worker(
-            sid,
-            _sessions[sid],
-            _SlashWorker(
-                key,
-                getattr(agent, "model", _resolve_model()),
-                profile_home=_sessions[sid].get("profile_home"),
-            ),
-        )
-    except Exception:
-        # Defer hard-failure to slash.exec; chat still works without slash worker.
-        _sessions[sid]["slash_worker"] = None
+    # No eager slash-worker pre-warm — the session dict already carries
+    # slash_worker=None and slash.exec builds one on demand. See the
+    # deferred-build path in _start_agent_build for the full rationale
+    # (per-worker MCP fleets accumulating across retained sessions).
     try:
         from tools.approval import register_gateway_notify, load_permanent_allowlist
 
@@ -15850,7 +15846,7 @@ def _model_picker_context(agent):
 @method("model.options")
 def _(rid, params: dict) -> dict:
     try:
-        from hermes_cli.inventory import build_models_payload
+        from hermes_cli.inventory import build_model_options_payload
 
         session = _sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
@@ -15859,25 +15855,11 @@ def _(rid, params: dict) -> dict:
         # agent attributes must NOT clobber disk config (with_overrides
         # is truthy-only).
         ctx = _model_picker_context(agent)
-        # picker_hints + canonical_order produce the TUI/desktop picker shape:
-        # `authenticated`/`auth_type`/`key_env`/`warning` per row, in
-        # CANONICAL_PROVIDERS declaration order. Desktop pickers default to the
-        # configured subset; callers that need setup affordances can pass
-        # include_unconfigured=true explicitly.
-        # Curated model lists are preserved — list_authenticated_providers
-        # populates `models` from the curated catalog, not provider_model_ids
-        # (which would pull non-agentic models like TTS/embeddings/etc.).
-        payload = build_models_payload(
+        payload = build_model_options_payload(
             ctx,
             explicit_only=bool(params.get("explicit_only")),
             include_unconfigured=bool(params.get("include_unconfigured")),
-            picker_hints=True,
-            canonical_order=True,
-            pricing=True,
-            capabilities=True,
             refresh=bool(params.get("refresh")),
-            probe_custom_providers=bool(params.get("refresh")),
-            probe_current_custom_provider=not bool(params.get("refresh")),
         )
         return _ok(rid, payload)
     except Exception as e:
@@ -16523,15 +16505,26 @@ def _(rid, params: dict) -> dict:
 
     worker = session.get("slash_worker")
     if not worker:
-        try:
-            worker = _SlashWorker(
-                session["session_key"],
-                getattr(session.get("agent"), "model", _resolve_model()),
-                profile_home=session.get("profile_home"),
-            )
-            _attach_worker(params.get("session_id", ""), session, worker)
-        except Exception as e:
-            return _err(rid, 5030, f"slash worker start failed: {e}")
+        # On-demand spawn is now the ONLY spawn path for a fresh session
+        # (eager pre-warm removed), and slash.exec handlers run on the RPC
+        # thread pool — two concurrent slash commands on the same session
+        # could both observe slash_worker=None and each fork a full
+        # MCP-fleet worker (the loser of the _attach_worker race would leak
+        # unclosed). Serialize first-use spawn per session.
+        with _sessions_lock:
+            spawn_lock = session.setdefault("_slash_spawn_lock", threading.Lock())
+        with spawn_lock:
+            worker = session.get("slash_worker")
+            if not worker:
+                try:
+                    worker = _SlashWorker(
+                        session["session_key"],
+                        getattr(session.get("agent"), "model", _resolve_model()),
+                        profile_home=session.get("profile_home"),
+                    )
+                    _attach_worker(params.get("session_id", ""), session, worker)
+                except Exception as e:
+                    return _err(rid, 5030, f"slash worker start failed: {e}")
 
     try:
         output = worker.run(cmd)

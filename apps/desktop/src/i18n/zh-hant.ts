@@ -1697,6 +1697,7 @@ export const zhHant = defineLocale({
     promptPlaceholder: '代理每次執行時應做什麼？',
     frequencyLabel: '頻率',
     deliverLabel: '傳遞至',
+    deliverNeedsHomeChannel: '請先設定主頻道',
     modelLabel: '模型',
     modelDefault: '預設（全域模型）',
     customScheduleLabel: '自訂排程',
@@ -1708,7 +1709,25 @@ export const zhHant = defineLocale({
     scheduleRequired: '排程為必填項目。',
     scriptOnlyEditHint: '僅腳本任務（無 AI 提示詞）。任務 ID：',
     saveChanges: '儲存變更',
-    createAction: '建立排程工作'
+    createAction: '建立排程工作',
+    tabs: {
+      jobs: '工作',
+      blueprints: '藍圖'
+    },
+    blueprints: {
+      tab: '藍圖',
+      startFrom: '從此開始',
+      custom: '自訂',
+      subtitle: '現成的自動化',
+      dialogDesc: '填寫詳細資訊並進行排程。',
+      scheduleIt: '安排工作',
+      scheduling: '安排中...',
+      scheduled: '藍圖已安排',
+      loading: '正在載入藍圖...',
+      failedLoad: '載入藍圖失敗',
+      emptyTitle: '沒有可用的藍圖',
+      emptyDesc: '此後端上沒有可用的自動化藍圖。'
+    }
   },
 
   artifacts: {
@@ -2138,8 +2157,7 @@ export const zhHant = defineLocale({
     installTo: '將安裝至',
     retryAfterRun: '我已執行 -- 重試',
     setupChoiceTitle: '設定 Hermes Desktop',
-    setupChoiceDesc:
-      '將此應用程式連線到您已執行的 Hermes 閘道，或在這台電腦上本機安裝 Hermes。',
+    setupChoiceDesc: '將此應用程式連線到您已執行的 Hermes 閘道，或在這台電腦上本機安裝 Hermes。',
     connectExistingTitle: '連線到現有 Hermes',
     connectExistingShort: '連線現有環境',
     connectExistingDesc: '使用工作階段權杖或瀏覽器登入連線遠端後端。不會啟動本機安裝。',
