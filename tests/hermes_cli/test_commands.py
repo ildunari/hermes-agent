@@ -1311,6 +1311,7 @@ class TestTelegramMenuCommands:
         for name in (
             "egress",
             "debug",
+            "restart_webui",
             "restart_gateways",
             "restart_hermes",
             "update",

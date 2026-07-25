@@ -598,6 +598,7 @@ _TELEGRAM_MENU_PRIORITY = (
     "model",
     # Maintenance / diagnostics — the ones that prompted this priority list.
     "debug",
+    "restart-webui",
     "restart-gateways",
     "restart-hermes",
     "update-smart",
