@@ -678,14 +678,16 @@ class TestProfileScopedGateway:
             return None
 
         monkeypatch.setattr(web_server, "check_config_version", lambda: (1, 1))
-        monkeypatch.setattr(web_server, "get_running_pid_cached", lambda: None)
+        monkeypatch.setattr(
+            web_server, "get_running_pid_cached", lambda *args, **kwargs: None
+        )
         monkeypatch.setattr(
             web_server, "read_runtime_status", fake_read_runtime_status
         )
         monkeypatch.setattr(
             web_server,
             "get_runtime_status_running_pid",
-            lambda payload: 777 if payload is mux_runtime else None,
+            lambda payload, **kwargs: 777 if payload is mux_runtime else None,
         )
         monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", None)
         monkeypatch.setattr(
