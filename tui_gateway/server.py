@@ -16485,15 +16485,20 @@ def _(rid, params: dict) -> dict:
         pass
 
     try:
-        from agent.skill_commands import get_skill_commands
+        from agent.skill_commands import resolve_skill_command_key
 
-        _cmd_key = f"/{_cmd_base}"
-        if _cmd_key in get_skill_commands():
-            return _err(
-                rid, 4018, f"skill command: use command.dispatch for {_cmd_key}"
-            )
+        _cmd_key = resolve_skill_command_key(_cmd_base)
     except Exception:
-        pass
+        _cmd_key = None
+    if _cmd_key is not None:
+        return _methods["command.dispatch"](
+            rid,
+            {
+                "name": _cmd_base,
+                "arg": _cmd_arg,
+                "session_id": params.get("session_id", ""),
+            },
+        )
 
     plugin_handler = None
     resolve_plugin_command_result = None

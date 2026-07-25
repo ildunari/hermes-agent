@@ -1453,26 +1453,33 @@ def test_cli_exec_allowed(server, argv):
 # ── slash.exec skill command interception ────────────────────────────
 
 
-def test_slash_exec_rejects_skill_commands(server):
-    """slash.exec must reject skill commands so the TUI falls through to command.dispatch."""
+@pytest.mark.parametrize("typed_name", ["update-smart", "update_smart"])
+def test_slash_exec_routes_skill_commands_through_shared_resolver(server, typed_name):
+    """slash.exec routes canonical and underscore skill aliases without a worker."""
     # Register a mock session
     sid = "test-session"
     server._sessions[sid] = {"session_key": sid, "agent": None}
 
-    # Mock scan_skill_commands to return a known skill
-    fake_skills = {"/hermes-agent-dev": {"name": "hermes-agent-dev", "description": "Dev workflow"}}
+    fake_skills = {
+        "/update-smart": {"name": "update-smart", "description": "Update workflow"}
+    }
+    fake_msg = "Loaded update skill"
 
-    with patch("agent.skill_commands.get_skill_commands", return_value=fake_skills):
+    with patch("agent.skill_commands.scan_skill_commands", return_value=fake_skills), \
+         patch("agent.skill_commands.resolve_skill_command_key", return_value="/update-smart"), \
+         patch("agent.skill_commands.build_skill_invocation_message", return_value=fake_msg):
         resp = server.handle_request({
             "id": "r1",
             "method": "slash.exec",
-            "params": {"command": "hermes-agent-dev", "session_id": sid},
+            "params": {"command": f"{typed_name} verify it", "session_id": sid},
         })
 
-    # Should return an error so the TUI's .catch() fires command.dispatch
-    assert "error" in resp
-    assert resp["error"]["code"] == 4018
-    assert "skill command" in resp["error"]["message"]
+    assert "error" not in resp
+    assert resp["result"] == {
+        "type": "skill",
+        "message": fake_msg,
+        "name": "update-smart",
+    }
 
 
 def test_slash_exec_routes_custom_skill_bundle_away_from_worker(server):

@@ -170,6 +170,29 @@ async def test_non_admin_denied_for_unlisted_command():
 
 
 @pytest.mark.asyncio
+async def test_non_admin_denied_for_unlisted_skill_alias(monkeypatch):
+    """De-carried workflow aliases remain subject to slash access policy."""
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": ["111"],
+            "user_allowed_commands": ["status"],
+        }
+    )
+    monkeypatch.setattr(
+        "agent.skill_commands.resolve_skill_command_key",
+        lambda command: "/update-smart" if command == "update_smart" else None,
+    )
+
+    result = await runner._handle_message(
+        _make_event("/update_smart", _make_source(user_id="999"))
+    )
+
+    assert result is not None
+    assert "⛔" in result
+    assert "/update-smart is admin-only here" in result
+
+
+@pytest.mark.asyncio
 async def test_non_admin_with_empty_user_commands_gets_floor_only():
     runner = _make_runner(
         platform_extra={
@@ -413,6 +436,31 @@ async def test_running_agent_fastpath_blocks_non_admin_command():
     assert result is not None
     assert "⛔" in result
     assert "/restart is admin-only here" in result
+
+
+@pytest.mark.asyncio
+async def test_running_agent_fastpath_blocks_non_admin_skill_alias(monkeypatch):
+    """A busy session cannot turn a de-carried skill alias into ungated text."""
+    runner = _make_runner(
+        platform_extra={
+            "allow_admin_from": ["111"],
+            "user_allowed_commands": [],
+        }
+    )
+    src = _make_source(user_id="999")
+    sk = build_session_key(src)
+    runner._running_agents[sk] = MagicMock()
+    runner._running_agents_ts[sk] = 0
+    monkeypatch.setattr(
+        "agent.skill_commands.resolve_skill_command_key",
+        lambda command: "/update-smart" if command == "update_smart" else None,
+    )
+
+    result = await runner._handle_message(_make_event("/update_smart", src))
+
+    assert result is not None
+    assert "⛔" in result
+    assert "/update-smart is admin-only here" in result
 
 
 @pytest.mark.asyncio

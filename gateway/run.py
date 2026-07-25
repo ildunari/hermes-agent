@@ -13032,6 +13032,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             _evt_cmd = event.get_command()
             _cmd_def_inner = _resolve_cmd_inner(_evt_cmd) if _evt_cmd else None
+            _skill_cmd_key_inner = None
+            if _evt_cmd and _cmd_def_inner is None:
+                try:
+                    from agent.skill_commands import resolve_skill_command_key
+
+                    _skill_cmd_key_inner = resolve_skill_command_key(_evt_cmd)
+                except Exception:
+                    logger.debug(
+                        "Skill command resolution failed on active-session path",
+                        exc_info=True,
+                    )
 
             # Slash command access control on the running-agent fast-path.
             # Mirrors the cold-path gate further below so non-admin users
@@ -13039,8 +13050,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # /status above is intentionally pre-gate so users always see
             # session state. /help and /whoami fall under the always-allowed
             # floor inside _check_slash_access.
-            if _evt_cmd and _cmd_def_inner is not None:
-                _denied = self._check_slash_access(source, _cmd_def_inner.name)
+            _access_cmd_inner = (
+                _cmd_def_inner.name
+                if _cmd_def_inner is not None
+                else (_skill_cmd_key_inner or "").lstrip("/")
+            )
+            if _evt_cmd and _access_cmd_inner:
+                _denied = self._check_slash_access(source, _access_cmd_inner)
                 if _denied is not None:
                     return _denied
 
@@ -13501,14 +13517,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _cmd_def = _resolve_cmd(command) if command else None
                         canonical = _cmd_def.name if _cmd_def else command
 
+        _skill_cmd_key_for_access = None
+        if command and _cmd_def is None:
+            try:
+                from agent.skill_commands import resolve_skill_command_key
+
+                _skill_cmd_key_for_access = resolve_skill_command_key(command)
+            except Exception:
+                logger.debug("Skill command resolution failed for access gate", exc_info=True)
+
         # Per-platform slash command access control. Only kicks in when the
         # operator has set ``allow_admin_from`` for the source's scope (DM
         # vs group). When unset → backward-compat: every allowed user can
         # run every command. When set → non-admins can run only commands in
         # ``user_allowed_commands`` (plus the always-allowed floor: /help,
         # /whoami). Plain chat is unaffected — only slash commands gate.
-        if command and canonical and is_gateway_known_command(canonical):
-            _denied = self._check_slash_access(source, canonical)
+        _access_cmd = (
+            (_skill_cmd_key_for_access or "").lstrip("/")
+            if _skill_cmd_key_for_access is not None
+            else canonical
+        )
+        if command and _access_cmd and (
+            is_gateway_known_command(canonical)
+            or _skill_cmd_key_for_access is not None
+        ):
+            _denied = self._check_slash_access(source, _access_cmd)
             if _denied is not None:
                 return _denied
 
