@@ -204,6 +204,10 @@ def test_child_process_cannot_exceed_fd_limit(tmp_path: Path) -> None:
 def test_scoped_child_fd_limit_can_be_raised_for_desktop_signing(
     tmp_path: Path,
 ) -> None:
+    _, hard_limit = SERVICE.resource.getrlimit(SERVICE.resource.RLIMIT_NOFILE)
+    if hard_limit <= 300:
+        pytest.skip("inherited hard FD limit cannot exercise a raised child limit")
+    child_fd_limit = min(512, hard_limit)
     result = SERVICE.owned_command(
         [
             sys.executable,
@@ -215,7 +219,7 @@ def test_scoped_child_fd_limit_can_be_raised_for_desktop_signing(
         30,
         None,
         SERVICE.FD_LIMIT,
-        child_fd_limit=512,
+        child_fd_limit=child_fd_limit,
     )
     assert result == 0
 
