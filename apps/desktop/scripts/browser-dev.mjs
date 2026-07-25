@@ -7,7 +7,7 @@
  * HMR while Electron/preload changes are rsynced, rebuilt, and relaunched.
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, watch } from 'node:fs'
+import { existsSync, realpathSync, watch } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -166,7 +166,145 @@ fi
 rm -f "$PID_FILE"
 ${quiet ? '' : 'echo "Hermes Browser Dev stopped"'}
 `
-  ssh(script)
+  try {
+    ssh(script)
+  } catch (error) {
+    if (!quiet) throw error
+  }
+}
+
+async function terminateProcess(pid, { graceMs = 2000, label = 'process' } = {}) {
+  if (!pid || isNaN(pid)) return
+  try {
+    process.kill(pid, 0)
+  } catch {
+    return
+  }
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch (err) {
+    console.warn(`[browser-dev] Failed to send SIGTERM to ${label} (PID ${pid}): ${err.message}`)
+    return
+  }
+
+  const deadline = Date.now() + graceMs
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+
+  try {
+    process.kill(pid, 0)
+    process.kill(pid, 'SIGKILL')
+  } catch {
+    // Process exited before or during SIGKILL
+  }
+}
+
+function getLocalPortListenerPids(port) {
+  const result = spawnSync('lsof', ['-tiTCP:' + port, '-sTCP:LISTEN'], { encoding: 'utf8' })
+  if (result.status !== 0 || !result.stdout) return []
+  const pids = []
+  for (const rawLine of result.stdout.trim().split('\n')) {
+    const pid = Number(rawLine.trim())
+    if (!pid || isNaN(pid) || pid === process.pid) continue
+    const psRes = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' })
+    if (psRes.status !== 0 || !psRes.stdout) continue
+    const cmd = psRes.stdout.trim()
+    if (cmd.includes('vite') && cmd.includes(repoRoot)) {
+      pids.push(pid)
+    } else {
+      console.warn(`[browser-dev] Refusing to kill PID ${pid} holding local port ${port}: identity mismatch (${cmd})`)
+    }
+  }
+  return pids
+}
+
+function getLocalTunnelPids(port) {
+  const result = spawnSync('ps', ['-A', '-o', 'pid=,command='], { encoding: 'utf8' })
+  if (result.status !== 0 || !result.stdout) return []
+  const expectedPattern = `-R ${port}:127.0.0.1:${port}`
+  const pids = []
+  for (const line of result.stdout.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    const match = trimmed.match(/^(\d+)\s+(.+)$/)
+    if (!match) continue
+    const [, pidStr, cmd] = match
+    const pid = Number(pidStr)
+    if (!pid || isNaN(pid) || pid === process.pid) continue
+    if (cmd.includes(expectedPattern) && (cmd.includes('ssh ') || cmd.startsWith('ssh '))) {
+      pids.push(pid)
+    }
+  }
+  return pids
+}
+
+export async function reapOrphans({ port = defaults.port, quiet = false } = {}) {
+  try {
+    // 1. Clear remote port forwarding listener on MacBook if present
+    const remoteScript = `
+PORT=${port}
+PIDS=$(lsof -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null || true)
+if [ -n "$PIDS" ]; then
+  for PID in $PIDS; do
+    CMD=$(ps -p "$PID" -o command= 2>/dev/null || true)
+    case "$CMD" in
+      *sshd*)
+        kill -TERM "$PID" 2>/dev/null || true
+        ;;
+      *)
+        echo "Refusing to stop remote port $PORT listener PID $PID: identity mismatch ($CMD)" >&2
+        ;;
+    esac
+  done
+  for _ in $(seq 1 20); do
+    STALE=$(lsof -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null || true)
+    if [ -z "$STALE" ]; then break; fi
+    sleep 0.1
+  done
+  STALE=$(lsof -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null || true)
+  if [ -n "$STALE" ]; then
+    for PID in $STALE; do
+      CMD=$(ps -p "$PID" -o command= 2>/dev/null || true)
+      case "$CMD" in
+        *sshd*) kill -KILL "$PID" 2>/dev/null || true ;;
+      esac
+    done
+  fi
+fi
+`
+    try {
+      ssh(remoteScript)
+    } catch (err) {
+      if (!quiet) console.warn(`[browser-dev] Remote orphan cleanup warning for port ${port}: ${err.message}`)
+    }
+
+    // 2. Kill local processes listening on port
+    const localPortPids = getLocalPortListenerPids(port)
+    for (const pid of localPortPids) {
+      if (!quiet) console.log(`[browser-dev] Reaping stale local port ${port} listener PID ${pid}`)
+      await terminateProcess(pid, { label: `local port ${port} listener` })
+    }
+
+    // 3. Kill local ssh reverse tunnel processes matching port
+    const localTunnelPids = getLocalTunnelPids(port)
+    for (const pid of localTunnelPids) {
+      if (!quiet) console.log(`[browser-dev] Reaping stale local SSH tunnel PID ${pid}`)
+      await terminateProcess(pid, { label: `local SSH tunnel (port ${port})` })
+    }
+  } catch (err) {
+    if (!quiet) console.warn(`[browser-dev] Local orphan cleanup warning: ${err.message}`)
+  }
+}
+
+export async function stopAll({ quiet = false } = {}) {
+  stopRemote({ quiet })
+  await reapOrphans({ quiet })
 }
 
 export function startRemote(devServerUrl) {
@@ -257,6 +395,8 @@ async function start() {
     throw new Error('Dependencies are missing. Run npm install at the repository root.')
   }
 
+  await reapOrphans({ port: defaults.port, quiet: true })
+
   const host = '127.0.0.1'
   const url = `http://${host}:${defaults.port}`
   const vite = spawn(viteBin, ['--host', host, '--port', String(defaults.port), '--strictPort'], {
@@ -339,15 +479,21 @@ async function start() {
   })
 }
 
-const action = process.argv[2] || 'start'
-try {
-  if (action === 'start') await start()
-  else if (action === 'sync') syncRemoteSource()
-  else if (action === 'stop') stopRemote()
-  else if (action === 'status') console.log(remoteStatus())
-  else if (action === 'print-config') console.log(JSON.stringify(defaults, null, 2))
-  else throw new Error(`Unknown action: ${action}`)
-} catch (error) {
-  console.error(`[browser-dev] ${error.message}`)
-  process.exitCode = 1
+// Only run the CLI when this file is executed directly. Importing it (tests,
+// tooling, `node -e "import(...)"`) must never start or relaunch the dev shell.
+const invokedDirectly = process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
+
+if (invokedDirectly) {
+  const action = process.argv[2] || 'start'
+  try {
+    if (action === 'start') await start()
+    else if (action === 'sync') syncRemoteSource()
+    else if (action === 'stop') await stopAll()
+    else if (action === 'status') console.log(remoteStatus())
+    else if (action === 'print-config') console.log(JSON.stringify(defaults, null, 2))
+    else throw new Error(`Unknown action: ${action}`)
+  } catch (error) {
+    console.error(`[browser-dev] ${error.message}`)
+    process.exitCode = 1
+  }
 }
