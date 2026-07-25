@@ -13823,14 +13823,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Core-command collision protection excludes those skills from the
             # generic slash-skill registry, so load them explicitly by canonical
             # frontmatter name and then continue through the normal agent path.
-            from agent.skill_commands import build_named_skill_invocation_message
+            from agent.skill_commands import (
+                build_named_skill_invocation_message,
+                resolve_skill_backed_core_command,
+            )
 
-            skill_name = {
-                "codex": "codex-cli-lane",
-                "claude": "claude_KM",
-                "cc": "claude_KM",
-                "antigravity": "antigravity",
-            }.get(canonical, canonical)
+            skill_name = resolve_skill_backed_core_command(canonical)
+            if not skill_name:
+                return f"The `/{canonical}` workflow has no configured skill mapping."
             skill_message = build_named_skill_invocation_message(
                 skill_name,
                 event.get_command_args().strip(),

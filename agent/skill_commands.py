@@ -663,6 +663,25 @@ def build_named_skill_invocation_message(
     )
 
 
+# These commands are advertised as core slash commands so every client can
+# expose them consistently, while their behavior remains profile-owned. Keep
+# the command-to-skill mapping here so CLI/TUI/Desktop and gateway dispatch do
+# not drift apart.
+_SKILL_BACKED_CORE_COMMANDS = {
+    "update-smart": "update-smart",
+    "update-desktop": "update-desktop",
+    "codex": "codex-cli-lane",
+    "claude": "claude_KM",
+    "cc": "claude_KM",
+    "antigravity": "antigravity",
+}
+
+
+def resolve_skill_backed_core_command(command: str) -> Optional[str]:
+    """Return the profile-owned skill for a skill-backed core command."""
+    return _SKILL_BACKED_CORE_COMMANDS.get((command or "").strip().lower())
+
+
 # ---------------------------------------------------------------------------
 # Stacked slash-skill invocations — `/skill-a /skill-b do XYZ` loads every
 # leading skill (up to _MAX_STACKED_SKILLS), not just the first.

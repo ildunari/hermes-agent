@@ -9139,9 +9139,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # Resolve aliases via central registry so adding an alias is a one-line
         # change in hermes_cli/commands.py instead of touching every dispatch site.
         from hermes_cli.commands import resolve_command as _resolve_cmd
+        from agent.skill_commands import resolve_skill_backed_core_command
+
         _base_word = cmd_lower.split()[0].lstrip("/")
         _cmd_def = _resolve_cmd(_base_word)
         canonical = _cmd_def.name if _cmd_def else _base_word
+        skill_backed_name = resolve_skill_backed_core_command(canonical)
 
         # A bare `/resume` prompt is one-shot: any command other than the
         # resume/sessions handlers (which manage the pending state themselves)
@@ -9444,6 +9447,29 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         elif canonical == "update":
             if self._handle_update_command():
                 return False
+        elif skill_backed_name:
+            # These commands are registered as built-ins so clients can expose
+            # them consistently, but their implementation is profile-owned.
+            # Load by explicit skill name because collision protection omits
+            # them from the generic slash-skill command map.
+            from agent.skill_commands import build_named_skill_invocation_message
+
+            parts = cmd_original.split(None, 1)
+            user_instruction = parts[1].strip() if len(parts) > 1 else ""
+            msg = build_named_skill_invocation_message(
+                skill_backed_name,
+                user_instruction,
+                task_id=self.session_id,
+            )
+            if msg:
+                print(f"\n⚡ Loading skill: {skill_backed_name}")
+                if hasattr(self, "_pending_input"):
+                    self._pending_input.put(msg)
+            else:
+                ChatConsole().print(
+                    f"[bold red]The `{skill_backed_name}` workflow skill is "
+                    "unavailable in this profile. Install or enable it, then retry.[/]"
+                )
         elif canonical == "version":
             from hermes_cli.main import _print_version_info
 
