@@ -13810,39 +13810,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "bgnotify":
             return await self._handle_bgnotify_command(event)
 
-        if canonical in (
-            "update-smart",
-            "update-desktop",
-            "codex",
-            "claude",
-            "cc",
-            "antigravity",
-        ):
-            # These are core commands so they can be advertised consistently,
-            # but their behavior intentionally lives in profile-owned skills.
-            # Core-command collision protection excludes those skills from the
-            # generic slash-skill registry, so load them explicitly by canonical
-            # frontmatter name and then continue through the normal agent path.
-            from agent.skill_commands import (
-                build_named_skill_invocation_message,
-                resolve_skill_backed_core_command,
-            )
-
-            skill_name = resolve_skill_backed_core_command(canonical)
-            if not skill_name:
-                return f"The `/{canonical}` workflow has no configured skill mapping."
-            skill_message = build_named_skill_invocation_message(
-                skill_name,
-                event.get_command_args().strip(),
-                task_id=_quick_key,
-            )
-            if not skill_message:
-                return (
-                    f"The `{skill_name}` workflow skill is unavailable in this profile. "
-                    "Install or enable it, then retry."
-                )
-            event.text = skill_message
-            command = None
 
         if canonical == "version":
             return await self._handle_version_command(event)

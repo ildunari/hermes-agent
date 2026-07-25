@@ -14833,11 +14833,12 @@ def _(rid, params: dict) -> dict:
         from agent.skill_commands import (
             scan_skill_commands,
             build_skill_invocation_message,
+            resolve_skill_command_key,
         )
 
         cmds = scan_skill_commands()
-        key = f"/{name}"
-        if key in cmds:
+        key = resolve_skill_command_key(name)
+        if key is not None:
             msg = build_skill_invocation_message(
                 key, arg, task_id=session.get("session_key", "") if session else ""
             )

@@ -7349,6 +7349,39 @@ def test_command_dispatch_exec_nonzero_surfaces_error(monkeypatch):
     assert "failed" in resp["error"]["message"]
 
 
+def test_command_dispatch_resolves_skill_aliases(monkeypatch):
+    commands = {
+        "/claude-km": {
+            "name": "claude_KM",
+            "description": "Claude lane",
+        }
+    }
+    monkeypatch.setattr("agent.skill_commands.scan_skill_commands", lambda: commands)
+    monkeypatch.setattr(
+        "agent.skill_commands.resolve_skill_command_key",
+        lambda name: "/claude-km" if name in {"claude", "cc"} else None,
+    )
+    monkeypatch.setattr(
+        "agent.skill_commands.build_skill_invocation_message",
+        lambda key, arg, task_id="": f"loaded:{key}:{arg}:{task_id}",
+    )
+
+    resp = server.handle_request(
+        {
+            "id": "1",
+            "method": "command.dispatch",
+            "params": {"name": "cc", "arg": "review it"},
+        }
+    )
+
+    assert resp is not None
+    assert resp["result"] == {
+        "type": "skill",
+        "message": "loaded:/claude-km:review it:",
+        "name": "claude_KM",
+    }
+
+
 def test_plugins_list_surfaces_loader_error(monkeypatch):
     with patch("hermes_cli.plugins.get_plugin_manager", side_effect=Exception("boom")):
         resp = server.handle_request(

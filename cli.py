@@ -9139,12 +9139,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # Resolve aliases via central registry so adding an alias is a one-line
         # change in hermes_cli/commands.py instead of touching every dispatch site.
         from hermes_cli.commands import resolve_command as _resolve_cmd
-        from agent.skill_commands import resolve_skill_backed_core_command
-
         _base_word = cmd_lower.split()[0].lstrip("/")
         _cmd_def = _resolve_cmd(_base_word)
         canonical = _cmd_def.name if _cmd_def else _base_word
-        skill_backed_name = resolve_skill_backed_core_command(canonical)
 
         # A bare `/resume` prompt is one-shot: any command other than the
         # resume/sessions handlers (which manage the pending state themselves)
@@ -9447,29 +9444,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         elif canonical == "update":
             if self._handle_update_command():
                 return False
-        elif skill_backed_name:
-            # These commands are registered as built-ins so clients can expose
-            # them consistently, but their implementation is profile-owned.
-            # Load by explicit skill name because collision protection omits
-            # them from the generic slash-skill command map.
-            from agent.skill_commands import build_named_skill_invocation_message
-
-            parts = cmd_original.split(None, 1)
-            user_instruction = parts[1].strip() if len(parts) > 1 else ""
-            msg = build_named_skill_invocation_message(
-                skill_backed_name,
-                user_instruction,
-                task_id=self.session_id,
-            )
-            if msg:
-                print(f"\n⚡ Loading skill: {skill_backed_name}")
-                if hasattr(self, "_pending_input"):
-                    self._pending_input.put(msg)
-            else:
-                ChatConsole().print(
-                    f"[bold red]The `{skill_backed_name}` workflow skill is "
-                    "unavailable in this profile. Install or enable it, then retry.[/]"
-                )
         elif canonical == "version":
             from hermes_cli.main import _print_version_info
 
@@ -9657,6 +9631,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             base_cmd = cmd_lower.split()[0]
             skill_commands = _ensure_skill_commands()
             skill_bundles = get_skill_bundles()
+            from agent.skill_commands import resolve_skill_command_key
+
+            resolved_skill_key = resolve_skill_command_key(base_cmd)
             quick_commands = self.config.get("quick_commands", {})
             if base_cmd.lstrip("/") in quick_commands:
                 qcmd = quick_commands[base_cmd.lstrip("/")]
@@ -9744,8 +9721,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     ChatConsole().print(
                         f"[bold red]Failed to load bundle for {base_cmd}[/]"
                     )
-            # Check for skill slash commands (/gif-search, /axolotl, etc.)
-            elif base_cmd in skill_commands:
+            # Check for skill slash commands (/gif-search, /axolotl, etc.).
+            # Use the shared resolver so aliases and Telegram-style underscore
+            # spellings behave the same in CLI, TUI, Desktop, and gateways.
+            elif resolved_skill_key is not None:
                 rest = cmd_original[len(base_cmd):].strip()
                 # Stacked slash-skill invocations: `/skill-a /skill-b do XYZ`
                 # loads every leading skill (up to 5), not just the first.
@@ -9757,7 +9736,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 extra_keys, user_instruction = split_stacked_skill_commands(rest)
                 if extra_keys:
                     stacked_result = build_stacked_skill_invocation_message(
-                        [base_cmd, *extra_keys],
+                        [resolved_skill_key, *extra_keys],
                         user_instruction,
                         task_id=self.session_id,
                     )
@@ -9780,10 +9759,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     return True
                 user_instruction = rest
                 msg = build_skill_invocation_message(
-                    base_cmd, user_instruction, task_id=self.session_id
+                    resolved_skill_key, user_instruction, task_id=self.session_id
                 )
                 if msg:
-                    skill_name = skill_commands[base_cmd]["name"]
+                    skill_name = skill_commands[resolved_skill_key]["name"]
                     print(f"\n⚡ Loading skill: {skill_name}")
                     if hasattr(self, '_pending_input'):
                         self._pending_input.put(msg)

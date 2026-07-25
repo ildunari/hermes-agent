@@ -142,9 +142,6 @@ class TestCommandRegistry:
         assert missing == []
         assert "sessions" not in telegram_names
         assert "curator" not in telegram_names
-        assert "codex" in telegram_names
-        assert "cc" in telegram_names
-        assert "antigravity" in telegram_names
 
 
 # ---------------------------------------------------------------------------
@@ -168,11 +165,6 @@ class TestResolveCommand:
         assert resolve_command("reload_mcp").name == "reload-mcp"
         assert resolve_command("codex_runtime").name == "codex-runtime"
         assert resolve_command("tasks").name == "agents"
-        assert resolve_command("codex").name == "codex"
-        cc = resolve_command("cc")
-        antigravity = resolve_command("antigravity")
-        assert cc is not None and cc.name == "cc"
-        assert antigravity is not None and antigravity.name == "antigravity"
 
     def test_topic_is_gateway_command(self):
         topic = resolve_command("topic")
@@ -682,7 +674,7 @@ class TestSlashCommandCompleter:
         assert len(completions) == 1
         assert "Skill command" in completions[0].display_meta_text
 
-    def test_skill_backed_update_commands_do_not_duplicate_builtin_aliases(self):
+    def test_skill_commands_do_not_duplicate_normalized_aliases(self):
         completer = SlashCommandCompleter(
             skill_commands_provider=lambda: {
                 "/update-smart": {"description": "Smart update skill"},

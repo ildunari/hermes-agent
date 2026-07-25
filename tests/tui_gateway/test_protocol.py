@@ -1897,6 +1897,7 @@ def test_command_dispatch_returns_skill_payload(server):
     fake_msg = "Loaded skill content here"
 
     with patch("agent.skill_commands.scan_skill_commands", return_value=fake_skills), \
+         patch("agent.skill_commands.resolve_skill_command_key", return_value="/hermes-agent-dev"), \
          patch("agent.skill_commands.build_skill_invocation_message", return_value=fake_msg):
         resp = server.handle_request({
             "id": "r2",
