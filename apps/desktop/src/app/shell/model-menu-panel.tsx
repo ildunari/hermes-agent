@@ -328,7 +328,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
                     const effortLabel =
                       normalize(group.provider.slug) === 'openai-codex' && normalizedEffort === 'low'
                         ? t.shell.modelOptions.light
-                        : reasoningEffortLabel(normalizedEffort) || copy.medium
+                        : reasoningEffortLabel(normalizedEffort) || t.shell.modelOptions.medium
 
                     const fastControl = resolveFastControl(
                       activeId ?? family.id,
