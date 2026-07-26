@@ -1557,12 +1557,15 @@ async def test_hygiene_slow_but_streaming_worker_survives_past_timeout(
             type(self).last_instance = self
 
         def _compress_context(self, messages, *_args, commit_fence=None, **_kwargs):
-            # 6 idle windows of work, ticking progress the whole way.
-            deadline = time.monotonic() + 0.6
+            # Run for twice the inactivity budget while ticking progress. Keep
+            # the budget large enough that a busy CI host can schedule this
+            # executor thread before the first check; the contract under test
+            # is progress-aware extension, not sub-100ms thread scheduling.
+            deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline:
                 if commit_fence is not None:
                     commit_fence.touch_progress()
-                time.sleep(0.02)
+                time.sleep(0.05)
             if commit_fence is not None and not commit_fence.begin_commit():
                 return (messages, None)
             try:
@@ -1576,7 +1579,7 @@ async def test_hygiene_slow_but_streaming_worker_survives_past_timeout(
         monkeypatch, tmp_path, SlowStreamingCompressAgent,
         "compression:\n"
         "  enabled: true\n"
-        "  hygiene_timeout_seconds: 0.1\n"       # << worker runtime (0.6s)
+        "  hygiene_timeout_seconds: 1.0\n"       # << worker runtime (2.0s)
         "  hygiene_total_ceiling_seconds: 10\n"
         "  hygiene_failure_cooldown_seconds: 120\n",
     )
