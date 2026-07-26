@@ -338,6 +338,67 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
 _recovery_times: list[float] = []
 
 
+
+def _has_configured_mcp_servers() -> bool:
+    """Return whether startup should attempt MCP discovery.
+
+    Keep this cheap so non-MCP users do not pay the MCP SDK import cost.
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+
+        mcp_servers = (read_raw_config() or {}).get("mcp_servers")
+        return isinstance(mcp_servers, dict) and len(mcp_servers) > 0
+    except Exception:
+        # Be conservative: if we can't decide, fall back to attempting
+        # discovery. The caller starts it in the background.
+        return True
+
+
+def ensure_mcp_discovery_started() -> None:
+    """Start background MCP discovery once for gateway entrypoints.
+
+    ``main()`` covers the stdio/TUI path. WebSocket/Desktop entrypoints can
+    accept sessions without running ``main()``, so they must call this helper
+    before the first agent snapshots its tool list.
+    """
+    global _mcp_discovery_thread
+
+    from hermes_constants import (
+        get_hermes_home_override,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    if _mcp_discovery_thread is not None:
+        return
+
+    if not _has_configured_mcp_servers():
+        return
+
+    home_override = get_hermes_home_override()
+
+    def _discover_mcp_background() -> None:
+        token = set_hermes_home_override(home_override)
+        try:
+            from tools.mcp_tool import discover_mcp_tools
+
+            discover_mcp_tools()
+        except Exception:
+            logger.warning("Background MCP tool discovery failed", exc_info=True)
+        finally:
+            reset_hermes_home_override(token)
+
+    import threading as _mcp_threading
+
+    _mcp_discovery_thread = _mcp_threading.Thread(
+        target=_discover_mcp_background,
+        name="tui-mcp-discovery",
+        daemon=True,
+    )
+    _mcp_discovery_thread.start()
+
+
 def main():
     _install_sidecar_publisher()
 
