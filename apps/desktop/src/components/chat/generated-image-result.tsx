@@ -119,7 +119,7 @@ export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({
   if (failed && image) {
     return (
       <button
-        className="mt-2 inline-block font-semibold text-foreground underline underline-offset-4 decoration-current/20 wrap-anywhere"
+        className="mt-2 link-chip inline-block font-semibold wrap-anywhere"
         onClick={() => {
           void openFailedGeneratedImage(image).catch(error => {
             notifyError(error, copy.openImage)

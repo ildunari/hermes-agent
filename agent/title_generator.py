@@ -123,7 +123,10 @@ def _title_transcript_context(
         # user's actual task and the final assistant answer.
         if role == "assistant" and message.get("tool_calls"):
             continue
-        text = _trim_snippet(_content_text(message.get("content")), per_message_chars)
+        text = _content_text(message.get("content"))
+        if role == "user":
+            text = _summarize_user_message(text)
+        text = _trim_snippet(text, per_message_chars)
         if not text:
             continue
         key = (str(role), text)
@@ -229,7 +232,11 @@ _TITLE_JARGON_REWRITES = (
 
 def _clean_generated_title(title: str) -> str:
     """Normalize common LLM title shapes into user-readable list labels."""
-    clean = " ".join((title or "").split()).strip('"\'')
+    # A title is one line. If the model answers the prompt instead of obeying
+    # "return ONLY the label", keep the first non-empty line rather than joining
+    # a shell transcript or bulleted plan into one long pseudo-title.
+    first_line = next((line.strip() for line in (title or "").splitlines() if line.strip()), "")
+    clean = " ".join(first_line.split()).strip('"\'')
     lower = clean.lower()
     for prefix in ("title:", "label:", "session label:"):
         if lower.startswith(prefix):
@@ -270,6 +277,27 @@ def _auto_title_enabled() -> bool:
     except Exception:
         logger.debug("Failed to read title_generation.enabled", exc_info=True)
         return True
+
+
+def _summarize_user_message(user_message: str) -> str:
+    """Collapse a slash-skill-expanded turn back to what the user typed.
+
+    A ``/skill`` invocation expands into a message that embeds the whole skill
+    body, so feeding it to the titler verbatim titles the session after the
+    *skill's* prose — "Kick off a task in a fresh isolated git worktree" — not
+    after the user's request. Reuse the canonical scaffolding parser so the
+    model sees ``/work — fix the title leak`` instead.
+    """
+    if not user_message:
+        return ""
+    try:
+        from agent.skill_commands import describe_skill_invocation
+
+        described = describe_skill_invocation(user_message)
+    except Exception:
+        logger.debug("Skill-scaffolding summary failed; titling raw", exc_info=True)
+        return user_message
+    return described if described is not None else user_message
 
 
 def generate_title(

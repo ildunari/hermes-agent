@@ -24,9 +24,9 @@ import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import {
   currentPickerSelection,
   displayModelName,
-  modelDisplayParts,
-  reasoningEffortLabel
+  modelDisplayParts
 } from '@/lib/model-status-label'
+import { DEFAULT_REASONING_EFFORT, reasoningEffortLabel } from '@/lib/reasoning-effort'
 import { isRuntimeFallback } from '@/lib/runtime-routing'
 import { normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
@@ -41,6 +41,7 @@ import {
   setModelVisibilityOpen
 } from '@/store/model-visibility'
 import { $collapsedProviders, toggleCollapsedProvider } from '@/store/provider-collapse'
+import { $defaultReasoningEffort } from '@/store/session'
 import { $sessionStates } from '@/store/session-states'
 import type { ModelOptionProvider, ModelOptionsResponse } from '@/types/hermes'
 
@@ -89,6 +90,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
   const sessionStates = useStore($sessionStates)
   const routing = activeSessionId ? sessionStates[activeSessionId]?.runtimeRouting : undefined
   const modelPresets = useStore($modelPresets)
+  const defaultEffort = useStore($defaultReasoningEffort) || DEFAULT_REASONING_EFFORT
   const visibleModels = useStore($visibleModels)
   const collapsedProviders = useStore($collapsedProviders)
 
@@ -101,7 +103,6 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
   })
 
   const { model: optionsModel, provider: optionsProvider } = currentPickerSelection(
-    !!activeSessionId,
     { model: currentModel, provider: currentProvider },
     modelOptions.data
   )
@@ -195,7 +196,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
 
     await applyModelPreset(
       {
-        effort: (caps?.reasoning ?? true) ? nextEffort : undefined,
+        effort: (caps?.reasoning ?? true) ? (nextEffort ?? defaultEffort) : undefined,
         fast: (caps?.fast ?? false) ? (preset.fast ?? false) : undefined
       },
       {
@@ -321,7 +322,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
                     const effEffort = isCurrent ? currentReasoningEffort : (preset.effort ?? '')
                     const effFast = isCurrent ? currentFastMode : (preset.fast ?? false)
                     const normalizedEffort = normalizeReasoningEffort(
-                      effEffort,
+                      effEffort || defaultEffort,
                       caps?.reasoning_efforts,
                       caps?.reasoning_always_on
                     )

@@ -13,7 +13,7 @@ import { displayProviderName } from '@/lib/model-display-name'
 import { formatModelStatusLabel } from '@/lib/model-status-label'
 import { isRuntimeFallback } from '@/lib/runtime-routing'
 import { cn } from '@/lib/utils'
-import { $currentModelSource, setModelPickerOpen } from '@/store/session'
+import { $currentModelSource, $defaultReasoningEffort, setModelPickerOpen } from '@/store/session'
 import { $sessionStates } from '@/store/session-states'
 
 import type { ChatBarState } from './types'
@@ -51,6 +51,7 @@ export function ModelPill({
   const fastMode = useStore(view.$fast)
   const reasoningEffort = useStore(view.$reasoningEffort)
   const modelSource = useStore($currentModelSource)
+  const defaultEffort = useStore($defaultReasoningEffort)
   const runtimeId = useStore(view.$runtimeId)
   const sessionStates = useStore($sessionStates)
   const [open, setOpen] = useState(false)
@@ -89,11 +90,11 @@ export function ModelPill({
     <>
       {currentModel.trim() ? (
         <span className="min-w-0 truncate">
-          <span>{formatModelStatusLabel(currentModel, { fastMode, reasoningEffort })}</span>
+          <span>{formatModelStatusLabel(currentModel, { defaultEffort, fastMode, reasoningEffort })}</span>
           {routedFallback && (
             <span className="ml-1 opacity-60">
               · {routeLabel} · {displayProviderName(routedFallback.runtime.provider)}:{' '}
-              {formatModelStatusLabel(routedFallback.runtime.model)}
+              {formatModelStatusLabel(routedFallback.runtime.model, { defaultEffort })}
             </span>
           )}
         </span>

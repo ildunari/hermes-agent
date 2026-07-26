@@ -13,23 +13,24 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Switch } from '@/components/ui/switch'
 import { useI18n } from '@/i18n'
+import {
+  DEFAULT_REASONING_EFFORT,
+  isThinkingEnabled,
+  REASONING_EFFORTS
+} from '@/lib/reasoning-effort'
 import { normalize } from '@/lib/text'
 import { setModelPreset } from '@/store/model-presets'
 import { notifyError } from '@/store/notifications'
-import { markComposerSelectionManual, setCurrentFastMode, setCurrentReasoningEffort } from '@/store/session'
+import {
+  $defaultReasoningEffort,
+  markComposerSelectionManual,
+  setCurrentFastMode,
+  setCurrentReasoningEffort
+} from '@/store/session'
 import { sessionTileDelegate } from '@/store/session-states'
 
-// Hermes' real reasoning levels (see VALID_REASONING_EFFORTS); `none` is owned
+// Hermes' real reasoning levels live in lib/reasoning-effort; `none` is owned
 // by the Thinking toggle, not the radio.
-const EFFORT_OPTIONS = [
-  { value: 'minimal', labelKey: 'minimal' },
-  { value: 'low', labelKey: 'low' },
-  { value: 'medium', labelKey: 'medium' },
-  { value: 'high', labelKey: 'high' },
-  { value: 'xhigh', labelKey: 'xhigh' },
-  { value: 'max', labelKey: 'max' },
-  { value: 'ultra', labelKey: 'ultra' }
-] as const
 
 /** How "fast" is achieved for a given model — two different mechanisms:
  *  - `param`: the Anthropic/OpenAI `speed=fast` request parameter.
@@ -99,7 +100,20 @@ interface ModelEditSubmenuProps {
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
 }
 
-export function ModelEditSubmenu({
+export function ModelEditSubmenu(props: ModelEditSubmenuProps) {
+  // The panel mounts one of these per model row; only the hovered row's
+  // submenu is ever open. Keep this wrapper hook-free and render the body as
+  // a CHILD of SubContent so Radix's Presence gate leaves it unrendered until
+  // the sub actually opens — eagerly running the body's hooks/JSX for every
+  // row made opening the menu itself lag on large catalogs.
+  return (
+    <DropdownMenuSubContent className="w-52 p-0" sideOffset={4}>
+      <ModelEditSubmenuBody {...props} />
+    </DropdownMenuSubContent>
+  )
+}
+
+function ModelEditSubmenuBody({
   effort,
   fastControl,
   isActive,
@@ -117,10 +131,11 @@ export function ModelEditSubmenu({
   const activeSessionId = useStore(view.$runtimeId)
   const touchesPrimary = view.kind === 'primary'
 
+  const defaultEffort = useStore($defaultReasoningEffort) || DEFAULT_REASONING_EFFORT
   const effortOptions = supportedEffortOptions(reasoningEfforts)
-  const normalizedEffort = normalizeReasoningEffort(effort, reasoningEfforts, reasoningAlwaysOn)
+  const normalizedEffort = normalizeReasoningEffort(effort || defaultEffort, reasoningEfforts, reasoningAlwaysOn)
   const effortValue = normalizedEffort === 'none' ? '' : normalizedEffort
-  const thinkingOn = reasoningAlwaysOn || isThinkingEnabled(effort)
+  const thinkingOn = reasoningAlwaysOn || isThinkingEnabled(effort, defaultEffort)
 
   // Editing always records the model's global preset (keyed by provider::model,
   // not per-surface — a tile edit re-applies to that model everywhere); the
@@ -219,70 +234,58 @@ export function ModelEditSubmenu({
   const hasFast = fastControl.kind !== 'none'
   const fastOn = fastControl.kind === 'none' ? false : fastControl.on
 
-  return (
-    <DropdownMenuSubContent className="w-52 p-0" sideOffset={4}>
-      {!hasFast && !reasoning ? (
-        <div className="px-2.5 py-3 text-xs text-(--ui-text-tertiary)">{copy.noOptions}</div>
-      ) : (
+  return !hasFast && !reasoning ? (
+    <div className="px-2.5 py-3 text-xs text-(--ui-text-tertiary)">{copy.noOptions}</div>
+  ) : (
+    <>
+      <DropdownMenuLabel className={dropdownMenuSectionLabel}>{copy.options}</DropdownMenuLabel>
+      {reasoning ? (
+        <DropdownMenuItem className={dropdownMenuRow} onSelect={event => event.preventDefault()}>
+          {copy.thinking}
+          <Switch
+            checked={thinkingOn}
+            className="ml-auto"
+            disabled={reasoningAlwaysOn}
+            onCheckedChange={checked => void patchReasoning(checked ? effortValue || defaultEffort : 'none')}
+            size="xs"
+          />
+        </DropdownMenuItem>
+      ) : null}
+      {hasFast ? (
+        <DropdownMenuItem className={dropdownMenuRow} onSelect={event => event.preventDefault()}>
+          {copy.fast}
+          <Switch checked={fastOn} className="ml-auto" onCheckedChange={toggleFast} size="xs" />
+        </DropdownMenuItem>
+      ) : null}
+      {reasoning ? (
         <>
-          <DropdownMenuLabel className={dropdownMenuSectionLabel}>{copy.options}</DropdownMenuLabel>
-          {reasoning ? (
-            <DropdownMenuItem className={dropdownMenuRow} onSelect={event => event.preventDefault()}>
-              {copy.thinking}
-              <Switch
-                checked={thinkingOn}
-                className="ml-auto"
-                disabled={reasoningAlwaysOn}
-                onCheckedChange={checked => void patchReasoning(checked ? effortValue || 'medium' : 'none')}
-                size="xs"
-              />
-            </DropdownMenuItem>
-          ) : null}
-          {hasFast ? (
-            <DropdownMenuItem className={dropdownMenuRow} onSelect={event => event.preventDefault()}>
-              {copy.fast}
-              <Switch checked={fastOn} className="ml-auto" onCheckedChange={toggleFast} size="xs" />
-            </DropdownMenuItem>
-          ) : null}
-          {reasoning ? (
-            <>
-              <DropdownMenuSeparator className="mx-0" />
-              <DropdownMenuLabel className={dropdownMenuSectionLabel}>{copy.effort}</DropdownMenuLabel>
-              <DropdownMenuRadioGroup onValueChange={value => void patchReasoning(value)} value={effortValue}>
-                {effortOptions.map(option => (
-                  <DropdownMenuRadioItem
-                    className={dropdownMenuRow}
-                    key={option.value}
-                    onSelect={event => event.preventDefault()}
-                    value={option.value}
-                  >
-                    {normalize(provider) === 'openai-codex' && option.value === 'low'
-                      ? copy.light
-                      : copy[option.labelKey]}
-                  </DropdownMenuRadioItem>
-                ))}
-              </DropdownMenuRadioGroup>
-            </>
-          ) : null}
+          <DropdownMenuSeparator className="mx-0" />
+          <DropdownMenuLabel className={dropdownMenuSectionLabel}>{copy.effort}</DropdownMenuLabel>
+          <DropdownMenuRadioGroup onValueChange={value => void patchReasoning(value)} value={effortValue}>
+            {effortOptions.map(value => (
+              <DropdownMenuRadioItem
+                className={dropdownMenuRow}
+                key={value}
+                onSelect={event => event.preventDefault()}
+                value={value}
+              >
+                {normalize(provider) === 'openai-codex' && value === 'low' ? copy.light : copy[value]}
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
         </>
-      )}
-    </DropdownMenuSubContent>
+      ) : null}
+    </>
   )
 }
-
-function isThinkingEnabled(effort: string): boolean {
-  // Empty = Hermes default (medium) = on; only an explicit "none" is off.
-  return normalize(effort || 'medium') !== 'none'
-}
-
 function supportedEffortOptions(supported?: readonly string[]) {
   if (!supported?.length) {
-    return EFFORT_OPTIONS
+    return REASONING_EFFORTS
   }
 
   const allowed = new Set(supported.map(normalize))
 
-  return EFFORT_OPTIONS.filter(option => allowed.has(option.value))
+  return REASONING_EFFORTS.filter(value => allowed.has(value))
 }
 
 export function normalizeReasoningEffort(
@@ -299,17 +302,21 @@ export function normalizeReasoningEffort(
   }
 
   if (!supported?.length) {
-    return EFFORT_OPTIONS.some(option => option.value === value) ? value : 'medium'
+    return REASONING_EFFORTS.includes(value as (typeof REASONING_EFFORTS)[number]) ? value : DEFAULT_REASONING_EFFORT
   }
 
   const options = supportedEffortOptions(supported)
-  const allowed = new Set<string>(options.map(option => option.value))
+  const allowed = new Set<string>(options)
   const aliases: Record<string, string> = { minimal: 'low', ultra: 'max' }
-  const aliased = aliases[value] ?? value
 
-  if (allowed.has(aliased)) {
+  if (allowed.has(value)) {
+    return value
+  }
+
+  const aliased = aliases[value]
+  if (aliased && allowed.has(aliased)) {
     return aliased
   }
 
-  return allowed.has('medium') ? 'medium' : (options[0]?.value ?? 'medium')
+  return allowed.has(DEFAULT_REASONING_EFFORT) ? DEFAULT_REASONING_EFFORT : (options[0] ?? DEFAULT_REASONING_EFFORT)
 }

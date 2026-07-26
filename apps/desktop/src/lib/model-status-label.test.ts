@@ -1,11 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import {
-  currentPickerSelection,
-  displayModelName,
-  formatModelStatusLabel,
-  reasoningEffortLabel
-} from './model-status-label'
+import { currentPickerSelection, displayModelName, formatModelStatusLabel } from './model-status-label'
+import { reasoningEffortLabel } from './reasoning-effort'
 
 describe('model-status-label', () => {
   it('formats display names consistently', () => {
@@ -34,9 +30,16 @@ describe('model-status-label', () => {
     )
   })
 
-  it('always surfaces the effort (default medium) so the level is visible', () => {
+  it('falls back to the profile default effort, then to medium', () => {
     expect(formatModelStatusLabel('openai/gpt-5.6-sol', { reasoningEffort: 'medium' })).toBe('GPT 5.6 Sol · Med')
     expect(formatModelStatusLabel('openai/gpt-5.6-sol')).toBe('GPT 5.6 Sol · Med')
+    // No session-level effort → the configured profile default is advertised,
+    // not Hermes' built-in medium.
+    expect(formatModelStatusLabel('openai/gpt-5.6-sol', { defaultEffort: 'high' })).toBe('GPT 5.6 Sol · High')
+    // An explicit session effort still wins over the profile default.
+    expect(formatModelStatusLabel('openai/gpt-5.6-sol', { defaultEffort: 'high', reasoningEffort: 'low' })).toBe(
+      'GPT 5.6 Sol · Low'
+    )
   })
 
   it('returns just the placeholder name when there is no model', () => {
@@ -48,19 +51,23 @@ describe('model-status-label', () => {
     const options = { model: 'hermes-4', provider: 'nous' }
 
     it('prefers the sticky composer pick over the profile default pre-session', () => {
-      expect(currentPickerSelection(false, store, options)).toEqual(store)
+      expect(currentPickerSelection(store, options)).toEqual(store)
     })
 
-    it('lets the live session model.options win when a session exists', () => {
-      expect(currentPickerSelection(true, store, options)).toEqual(options)
+    it('keeps the SessionView selection when a stale options response disagrees', () => {
+      expect(currentPickerSelection(store, options)).toEqual(store)
     })
 
     it('falls back to options when the store is empty', () => {
-      expect(currentPickerSelection(false, { model: '', provider: '' }, options)).toEqual(options)
+      expect(currentPickerSelection({ model: '', provider: '' }, options)).toEqual(options)
+    })
+
+    it('uses the complete options pair instead of mixing a partial store selection', () => {
+      expect(currentPickerSelection({ model: 'opus', provider: '' }, options)).toEqual(options)
     })
 
     it('falls back to the store while options are still loading', () => {
-      expect(currentPickerSelection(true, store, undefined)).toEqual(store)
+      expect(currentPickerSelection(store, undefined)).toEqual(store)
     })
   })
 })

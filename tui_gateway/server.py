@@ -29,6 +29,11 @@ from utils import is_truthy_value
 from tools.environments.local import hermes_subprocess_env
 from agent.replay_cleanup import sanitize_replay_history
 from tui_gateway import git_probe
+from tui_gateway.turn_marker import (
+    clear_turn_marker,
+    read_turn_marker,
+    record_turn_start,
+)
 from tui_gateway.transport import (
     StdioTransport,
     Transport,
@@ -1872,6 +1877,124 @@ def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     return _err(rid, 5032, err) if err else None
 
 
+# The deferred prompt path waits in short slices so a cancel is honored
+# promptly and a slow build can be reported to the client exactly once.
+_AGENT_BUILD_WAIT_SLICE = 5.0
+_AGENT_BUILD_SLOW_NOTICE_AFTER = 30.0
+_AGENT_BUILD_SLOW_NOTICE_KEY = "agent-build-slow"
+
+
+def _agent_build_wait_cap() -> float:
+    """Upper bound (seconds) a submitted prompt waits for the deferred agent
+    build before failing permanently. ``agent.build_wait_timeout`` in
+    config.yaml overrides the 600s default (raise it for deployments with
+    many slow/unreachable MCP servers or high-latency provider metadata)."""
+    try:
+        agent_cfg = _load_cfg().get("agent") or {}
+        raw = agent_cfg.get("build_wait_timeout")
+        if raw is not None:
+            value = float(raw)
+            if value > 0:
+                return value
+    except Exception:
+        pass
+    return 600.0
+
+
+def _wait_agent_for_prompt(session: dict, rid: str, sid: str) -> dict | None:
+    """Patient variant of ``_wait_agent`` for the deferred prompt.submit path.
+
+    The flat 30s ``_wait_agent`` ceiling was a message-eating cliff (#63078):
+    ``prompt.submit`` has already returned ``{"status": "streaming"}``, the
+    user's first message IS the turn in flight, and the deferred agent build
+    (MCP discovery with per-server retry backoff, synchronous model-metadata
+    HTTP, skills scanning) routinely outlives 30 seconds on cold starts. On
+    timeout the old path emitted an error EVENT and returned without ever
+    calling ``_run_prompt_submit`` — the first message was permanently
+    discarded while the build finished successfully in the background, leaving
+    the blank first session.
+
+    This wait instead:
+      - keeps the pending prompt attached to this (already off-RPC) thread and
+        delivers it the moment the still-running build completes;
+      - waits in short slices so a cancel (session.interrupt / session churn)
+        is honored promptly instead of after the full timeout;
+      - tells the client once, via a keyed notice, when the build outlives
+        ``_AGENT_BUILD_SLOW_NOTICE_AFTER`` — the wait is patient but never
+        silent;
+      - fails permanently only when the build itself fails: the build thread
+        died without signalling ready, or the bounded cap
+        (``agent.build_wait_timeout``, default 600s — no infinite waits)
+        expired on a genuinely hung build.
+
+    Returns ``None`` on success OR when the turn was cancelled mid-wait (the
+    caller's cancel branch owns that messaging), an ``_err`` dict otherwise.
+    """
+    ready = session.get("agent_ready")
+    if ready is None:
+        return None
+    start = time.monotonic()
+    cap = _agent_build_wait_cap()
+    notified_slow = False
+    while not ready.wait(timeout=_AGENT_BUILD_WAIT_SLICE):
+        with session["history_lock"]:
+            cancelled = session.get("_turn_cancel_requested") or not session.get(
+                "running"
+            )
+        if cancelled:
+            # The caller's cancel/not-running branch emits the user-visible
+            # event for this — bail without an error of our own.
+            return None
+        waited = time.monotonic() - start
+        if waited >= cap:
+            return _err(
+                rid,
+                5032,
+                f"agent initialization timed out after {int(waited)}s — "
+                "your message was not sent; retry once the session is ready",
+            )
+        build_thread = session.get("_agent_build_thread")
+        if (
+            build_thread is not None
+            and not build_thread.is_alive()
+            and not ready.is_set()
+        ):
+            # _build's ``finally`` guarantees ready.set(); a dead thread with
+            # ready still unset means the build died hard (interpreter-level
+            # kill) — don't wait on a corpse for the rest of the cap.
+            return _err(
+                rid,
+                5032,
+                session.get("agent_error")
+                or "agent initialization failed before completing",
+            )
+        if not notified_slow and waited >= _AGENT_BUILD_SLOW_NOTICE_AFTER:
+            # One keyed, replace-in-place notice: the desktop shows it as a
+            # toast, the TUI in its status bar. Without this the extended wait
+            # would be exactly the silent hang this function exists to fix.
+            notified_slow = True
+            _emit(
+                "notification.show",
+                sid,
+                {
+                    "text": (
+                        "Still starting the agent (tool discovery / model "
+                        "setup) — your message will be sent as soon as it's "
+                        "ready."
+                    ),
+                    "level": "info",
+                    "kind": "agent",
+                    "ttl_ms": None,
+                    "key": _AGENT_BUILD_SLOW_NOTICE_KEY,
+                    "id": _AGENT_BUILD_SLOW_NOTICE_KEY,
+                },
+            )
+    if notified_slow:
+        _emit("notification.clear", sid, {"key": _AGENT_BUILD_SLOW_NOTICE_KEY})
+    err = session.get("agent_error")
+    return _err(rid, 5032, err) if err else None
+
+
 def _start_agent_build(sid: str, session: dict) -> None:
     """Start building the real AIAgent for a TUI session, once.
 
@@ -2048,7 +2171,12 @@ def _start_agent_build(sid: str, session: dict) -> None:
                     pass
             ready.set()
 
-    threading.Thread(target=_build, daemon=True).start()
+    build_thread = threading.Thread(target=_build, daemon=True)
+    # Handle for _wait_agent_for_prompt: a dead build thread with agent_ready
+    # still unset means the build died hard — waiters must not sit out the
+    # full cap on a corpse.
+    session["_agent_build_thread"] = build_thread
+    build_thread.start()
 
 
 def _sess_nowait(params, rid):
@@ -2160,6 +2288,28 @@ def _session_cwd(session: dict | None) -> str:
     return _completion_cwd()
 
 
+# Sources whose launch directory is an artifact of how the app was started, not
+# a workspace the user picked. Everything else is terminal-started: the process
+# runs in a directory the user deliberately cd'd into.
+_LAUNCH_CWD_NOT_A_WORKSPACE = {"desktop"}
+
+
+def _persisted_session_cwd(session: dict) -> str | None:
+    """The cwd to stamp on the session's DB row, or None to leave it unset.
+
+    See :func:`_ensure_session_db_row` for why the launch directory counts as a
+    workspace for terminal sessions but not for the desktop.
+    """
+    if session.get("explicit_cwd"):
+        return _session_cwd(session)
+    if _session_source(session) in _LAUNCH_CWD_NOT_A_WORKSPACE:
+        return None
+    # Only the session's OWN directory. `_session_cwd` falls back to the
+    # gateway-wide completion cwd, which belongs to no session in particular —
+    # stamping that would invent a workspace for a session that never had one.
+    return str(session.get("cwd") or "") or None
+
+
 def _heal_dead_cwd(cwd: str) -> str:
     """Resolve a session cwd that points at a now-deleted directory.
 
@@ -2229,6 +2379,80 @@ def _display_session_cwd(session: dict | None) -> str:
     return healed
 
 
+def _reconcile_session_cwd_from_terminal(session: dict | None) -> bool:
+    """Re-anchor a session that SETTLED in another git checkout. Returns moved.
+
+    An agent told to work in a fresh worktree does exactly that — `git worktree
+    add`, `cd` into it, and every later command runs there — but the session
+    stayed pinned to wherever it started, so the desktop kept labelling the chat
+    with the primary checkout's branch while all the work landed elsewhere.
+
+    A plain `cd` is deliberately NOT a workspace move (see
+    ``_apply_project_workspace``): browsing to /tmp to read a log must not
+    re-home the chat. What we adopt here is narrower — the session's recorded
+    cwd is in a DIFFERENT git working tree than its workspace. That is a
+    relocation by any reading, and it is the only shape this reconciles.
+
+    Local backends only: a remote/SSH cwd names a path on the host, which this
+    gateway can neither stat nor probe with git.
+    """
+    if not session or not _is_local_terminal_backend():
+        return False
+
+    try:
+        from tools.terminal_tool import get_session_cwd
+
+        recorded = get_session_cwd(session.get("session_key") or "")
+    except Exception:
+        return False
+
+    if not recorded:
+        return False
+
+    resolved = os.path.abspath(os.path.expanduser(str(recorded)))
+    current = os.path.abspath(os.path.expanduser(_session_cwd(session)))
+    if resolved == current or not os.path.isdir(resolved):
+        return False
+
+    # The worktree ROOT, not the common repo root: folding worktrees together
+    # here is exactly what hides the move we're looking for.
+    landed = _git_repo_root_for_cwd(resolved)
+    if not landed or landed == _git_repo_root_for_cwd(current):
+        return False
+
+    session["cwd"] = resolved
+    # The session works here now, so this is its workspace — a desktop chat
+    # whose cwd was an unpersisted launch artifact earns a real row.
+    session["explicit_cwd"] = True
+    _register_session_cwd(session)
+
+    with _session_db(session) as db:
+        if db is not None:
+            try:
+                db.update_session_cwd(session.get("session_key", ""), resolved)
+            except Exception:
+                logger.debug("failed to persist settled session cwd", exc_info=True)
+
+    _persist_session_git_meta(session, resolved)
+    return True
+
+
+def _emit_settled_session_info(sid: str, session: dict, agent) -> None:
+    """Emit end-of-turn ``session.info``, reconciling a settled cwd first.
+
+    The turn is over, so the agent has stopped moving: this is the one moment
+    where its recorded cwd is a stable answer to "where does this session
+    work". Reconciling before building the payload means the same event that
+    already tells the desktop the turn ended also carries the new cwd/branch —
+    the client follows it with no new event type and no extra round trip.
+    """
+    try:
+        _reconcile_session_cwd_from_terminal(session)
+    except Exception:
+        logger.debug("failed to reconcile settled session cwd", exc_info=True)
+    _emit("session.info", sid, _session_info(agent, session))
+
+
 def _session_source(session: dict | None) -> str:
     if session:
         source = str(session.get("source") or "").strip()
@@ -2258,12 +2482,19 @@ def _ensure_session_db_row(session: dict) -> None:
     Uses INSERT OR IGNORE under the hood, so re-calls (and the AIAgent's own
     lazy create) are no-ops.
 
-    Only an *explicitly chosen* workspace is persisted as the session's cwd.
-    The agent still runs in the auto-detected directory (session["cwd"]), but
-    we don't stamp that onto the row — otherwise every session the user never
-    picked a folder for gets grouped under whatever directory the desktop
-    happened to launch in (e.g. "desktop"). Leaving it null groups them under
-    "No workspace", which is the desired default.
+    A cwd the user *chose* is always persisted. When they made no explicit
+    choice the launch directory stands in, and whether that is meaningful
+    depends on how the session was started:
+
+    * The desktop launches from wherever the app bundle was opened (often ``/``
+      or the user's home), so stamping that would file every unpicked chat under
+      a folder the user never chose. Those stay null and group under "No
+      workspace", which is the desired default.
+    * A terminal session (``hermes`` / ``hermes --tui`` / CLI) is started from a
+      directory the user deliberately ``cd``'d into — that IS the workspace, and
+      it is also where the agent's terminal actually runs. Dropping it stranded
+      the session with no cwd AND no git_repo_root, so the sidebar could never
+      place it under its project.
     """
     key = session.get("session_key")
     if not key:
@@ -2352,7 +2583,7 @@ def _ensure_session_db_row(session: dict) -> None:
             model=row_model,
             model_config=model_config or None,
             parent_session_id=parent_session_id,
-            cwd=_session_cwd(session) if session.get("explicit_cwd") else None,
+            cwd=_persisted_session_cwd(session),
             # Self-describing rows: aggregators that merge multiple profile DBs
             # into one list can't rely on which file a row came from alone. NULL
             # means the launch/default profile (matches run_agent's convention).
@@ -2647,13 +2878,27 @@ def _set_session_context(
         # it instead of falling back to the gateway launch dir.
         resolved = cwd if cwd is not None else _cwd_for_session_key(session_key)
         source = _resolve_session_platform()
+        # Derive the live conversation id so terminal/execute_code subprocesses
+        # can read HERMES_SESSION_ID. Without this, set_session_vars leaves the
+        # session-id contextvar as "" (explicitly empty), and the subprocess-env
+        # bridge treats that as authoritative — NOT falling back to os.environ —
+        # so every command in a dashboard/TUI/web session saw an empty
+        # HERMES_SESSION_ID even though agent_init set it via
+        # set_current_session_id(). Prefer the agent's durable session_id, then
+        # fall back to the session_key (matching the id derivation used at
+        # session-finalize), so an identified session is never left blank.
+        session_id = session_key
         with _sessions_lock:
             for sess in list(_sessions.values()):
                 if sess.get("session_key") == session_key:
                     source = _session_source(sess)
+                    session_id = (
+                        getattr(sess.get("agent"), "session_id", None) or session_key
+                    )
                     break
         return set_session_vars(
             session_key=session_key,
+            session_id=session_id,
             source=source,
             cwd=resolved,
             ui_session_id=ui_session_id,
@@ -5994,6 +6239,49 @@ def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
     return text or "What do you see in this image?"
 
 
+def _build_persist_message_with_image_refs(user_text: str, image_paths: list[str]) -> str:
+    """Build the clean, UI-recognizable version of the user's message for
+    persisting to session history. Uses ``@image:<path>`` directives — the
+    format the desktop client (directive-text.tsx / HERMES_DIRECTIVE_RE)
+    actually parses and renders as an image — unlike
+    ``_enrich_with_attached_images``, which embeds a vision description and
+    an ``image_url:`` hint meant only for the model and must never be
+    persisted as-is (it silently breaks image rendering after a full
+    restart, and reorders image/text on live session-switch reconciliation).
+
+    The caption leads and the directives trail: session previews are the first
+    60 characters of the first user message (``list_sessions_rich``), so a
+    leading directive would label the session with a truncated file path in the
+    sidebar, switcher, and command palette. Clients lift the refs out of the
+    body by line, so their position does not affect how the turn renders.
+    """
+    from agent.context_references import format_reference_value
+
+    text = user_text or ""
+    refs = "\n".join(f"@image:{format_reference_value(p)}" for p in image_paths if Path(p).exists())
+    if not refs:
+        return text
+    return f"{text}\n{refs}" if text else refs
+
+
+def _build_persist_user_message(user_text: str, image_paths: list[str], run_message: Any) -> Any:
+    """Shape the persisted user turn to match what was sent to the model.
+
+    Native-vision turns send ``content`` as a parts list, and
+    ``_flush_messages_to_session_db`` deliberately ignores a plain-string
+    override for a list payload (a text override must not erase a turn's
+    image/audio summary). So mirror the shape: replace only the text part with
+    the ``@image:`` ref form and keep the image parts, so the model still has
+    the pixels for the rest of the session. Any API-only text part (the
+    barge-in note) is dropped along the way, which is the point of the override.
+    """
+    persist_text = _build_persist_message_with_image_refs(user_text, image_paths)
+    if not isinstance(run_message, list):
+        return persist_text
+    image_parts = [p for p in run_message if not (isinstance(p, dict) and p.get("type") == "text")]
+    return [{"type": "text", "text": persist_text}, *image_parts]
+
+
 def _content_display_text(content: Any) -> str:
     if content is None:
         return ""
@@ -6326,6 +6614,189 @@ def _clear_inflight_turn(session: dict) -> None:
     session["inflight_turn"] = None
 
 
+def _fail_inflight_turn(session: dict, error: Any) -> None:
+    """Mark the in-flight turn terminal-error but keep it replayable.
+
+    Normal completion clears ``inflight_turn`` because the response is now in
+    canonical history. Failures are different: the terminal frame can be lost
+    on a WS disconnect, and the failed turn may never have been committed.
+    Retaining a compact error snapshot lets ``session.resume`` replay the
+    user's prompt, any partial assistant text, and the error itself instead of
+    leaving the client stranded on a spinner or hydrating from stale DB state.
+    The snapshot lives until the next turn starts (``_start_inflight_turn``
+    overwrites it) or the session closes.
+
+    Caller must hold ``session["history_lock"]``.
+    """
+    message = str(error) if not isinstance(error, BaseException) else (str(error) or type(error).__name__)
+    now = time.time()
+    turn = session.get("inflight_turn")
+    if not isinstance(turn, dict):
+        turn = {"assistant": "", "user": "", "started_at": now}
+    turn["assistant"] = str(turn.get("assistant") or "")
+    turn["user"] = str(turn.get("user") or "")
+    turn["error"] = message or "turn failed"
+    turn["status"] = "error"
+    turn["recoverable"] = True
+    turn["streaming"] = False
+    turn["updated_at"] = now
+    session["inflight_turn"] = turn
+
+
+# ── Auto-continue: resume a turn killed by a process/machine death ────
+#
+# A turn that concludes — success, handled error, interrupt — clears its
+# durable marker (see tui_gateway/turn_marker.py) in _run_prompt_submit's
+# finally. Only a process death leaves the marker behind, so a marker found
+# at session.resume time is positive proof the turn never finished AND the
+# client never saw a terminal frame. If the interruption is fresh, re-submit
+# the interrupted prompt automatically (the messaging gateway has done this
+# for restart-interrupted sessions since #27856); if it's stale, clear the
+# marker and let the recovered partial transcript speak for itself — the
+# user can ask to continue manually.
+
+_AUTO_CONTINUE_ENABLED_DEFAULT = True
+_AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
+_AUTO_CONTINUE_MAX_ATTEMPTS_DEFAULT = 2
+
+
+def _auto_continue_config() -> tuple[bool, float, int]:
+    """(enabled, freshness window in seconds, max attempts) from config.yaml."""
+    desktop = _load_cfg().get("desktop")
+    cfg = desktop.get("auto_continue") if isinstance(desktop, dict) else None
+    if not isinstance(cfg, dict):
+        cfg = {}
+    try:
+        minutes = float(cfg.get("freshness_minutes", _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT))
+    except (TypeError, ValueError):
+        minutes = float(_AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT)
+    return (
+        is_truthy_value(cfg.get("enabled"), default=_AUTO_CONTINUE_ENABLED_DEFAULT),
+        max(0.0, minutes) * 60.0,
+        _coerce_int_config_value(
+            cfg.get("max_attempts"), _AUTO_CONTINUE_MAX_ATTEMPTS_DEFAULT, min_value=0
+        ),
+    )
+
+
+def _session_home(session: dict) -> Path:
+    """The HERMES_HOME the session's durable state lives in (profile-aware)."""
+    profile_home = session.get("profile_home")
+    return Path(profile_home) if profile_home else Path(_hermes_home)
+
+
+def _retire_turn_marker(session: dict, *keys: str) -> None:
+    """Drop the crash marker for a turn whose outcome is about to reach the client.
+
+    Called immediately before the terminal frame rather than at the end of the
+    turn thread: post-turn work (titles, memory sync, goal hooks) runs for a
+    second or more after the client has its answer, and quitting inside that
+    window would leave a marker that looks like a crash — re-running a finished
+    turn on the next launch. Extra ``keys`` cover a session_key that
+    compression rotated mid-turn.
+    """
+    home = _session_home(session)
+    for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
+        if key:
+            clear_turn_marker(home, key)
+
+
+def _auto_continue_note(prompt: str) -> str:
+    # Same opening as the messaging gateway's recovery notes so transcript
+    # tooling recognizes both. The original prompt is embedded because a hard
+    # crash persists nothing of the interrupted turn to the session DB — this
+    # note is the only copy the model will see.
+    return (
+        "[System note: Your previous turn was interrupted mid-run — the app or "
+        "its backend process stopped before the turn could finish. Some of the "
+        "work may already be complete; check the current state before redoing "
+        "anything, then finish the task. The interrupted request was:]\n\n"
+        f"{prompt}"
+    )
+
+
+def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
+    """Kick off a continuation turn for a crash-interrupted session.
+
+    Called from session.resume's cold paths after the live record is
+    registered. Returns a small descriptor for the resume payload when a
+    continuation was scheduled, else None. The turn itself runs on a
+    background thread after the (deferred) agent build finishes, through the
+    same _run_prompt_submit machinery as every other synthesized turn — so
+    the client that just resumed streams it live.
+    """
+    home = _session_home(session)
+    marker = read_turn_marker(home, session_key)
+    if marker is None:
+        return None
+    enabled, freshness_secs, max_attempts = _auto_continue_config()
+    age = time.time() - marker["started_at"]
+    if not enabled or age > freshness_secs or marker["attempts"] >= max_attempts:
+        # Stale, disabled, or crash-looping: stop trying. The journal/partial
+        # transcript still shows what happened; a manual message continues it.
+        clear_turn_marker(home, session_key)
+        return None
+    if session.get("_auto_continue_scheduled"):
+        return None
+    session["_auto_continue_scheduled"] = True
+    attempt = marker["attempts"] + 1
+    text = _auto_continue_note(marker["prompt"])
+
+    def kickoff() -> None:
+        rid = f"__auto_continue__{int(time.time() * 1000)}"
+        try:
+            _start_agent_build(sid, session)
+            err = _wait_agent(session, rid, timeout=120.0)
+        except Exception:
+            logger.warning("auto-continue agent build failed for %s", sid, exc_info=True)
+            err = {"error": {"message": "agent build failed"}}
+        if err:
+            # Leave the marker: the next resume retries (bounded by attempts).
+            session["_auto_continue_scheduled"] = False
+            return
+        with session["history_lock"]:
+            if session.get("running") or session.get("_turn_cancel_requested") or session.get("_finalized"):
+                # A real user prompt beat us to it — their turn wins, and its
+                # own conclusion clears the marker.
+                session["_auto_continue_scheduled"] = False
+                return
+            session["running"] = True
+            session["last_active"] = time.time()
+            # Hand this turn its own marker inputs (read back by
+            # _run_prompt_submit): count the attempt so a crash during the
+            # continuation trips the breaker, and re-record the ORIGINAL
+            # prompt so a second crash doesn't nest note inside note. Set
+            # here, not at schedule time, so a bail above leaves nothing
+            # behind for a racing user turn to inherit.
+            session["_auto_continue_attempt"] = attempt
+            session["_auto_continue_prompt"] = marker["prompt"]
+        try:
+            _emit(
+                "status.update",
+                sid,
+                {"kind": "process", "text": "Resuming interrupted turn…"},
+            )
+            _emit("message.start", sid)
+            _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue")
+        except Exception as exc:
+            print(
+                f"[tui_gateway] auto-continue dispatch failed: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            with session["history_lock"]:
+                session["running"] = False
+
+    threading.Thread(target=kickoff, daemon=True).start()
+    logger.info(
+        "auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago)",
+        session_key,
+        attempt,
+        age,
+    )
+    return {"attempt": attempt, "interrupted_at": marker["started_at"]}
+
+
 def _enqueue_prompt(session: dict, text: Any, transport: Any) -> None:
     """Stash a message to run as the very next turn once the live one ends.
 
@@ -6490,13 +6961,58 @@ def _inflight_snapshot(session: dict) -> dict | None:
     user = str(turn.get("user") or "").strip()
     assistant = str(turn.get("assistant") or "")
     streaming = bool(turn.get("streaming"))
-    if not user and not assistant and not streaming:
+    error = str(turn.get("error") or "").strip()
+    if not user and not assistant and not streaming and not error:
         return None
-    return {
+    snapshot = {
         "assistant": assistant,
         "streaming": streaming,
         "user": user,
     }
+    if error:
+        # Retained failed turn (see _fail_inflight_turn): carry the error
+        # semantics so a resuming client can rebuild the failed-turn bubble
+        # instead of rendering the partial text as a healthy reply.
+        snapshot["error"] = error
+        snapshot["status"] = str(turn.get("status") or "error")
+        snapshot["recoverable"] = bool(turn.get("recoverable"))
+    return snapshot
+
+
+def _emit_terminal_turn_error(sid: str, session: dict, error: Any) -> None:
+    """Close a failed turn with a terminal ``message.complete`` frame.
+
+    Emits the same ``status: "error"`` frame shape the returned-error path in
+    ``_run_prompt_submit`` already produces (so TUI/desktop handling is
+    uniform), and retains the failed turn via ``_fail_inflight_turn`` so a
+    client that missed this frame (disconnect window) can recover it from
+    ``session.resume``'s ``inflight`` payload.
+    """
+    with session["history_lock"]:
+        _fail_inflight_turn(session, error)
+        turn = session.get("inflight_turn") or {}
+        message = str(turn.get("error") or "turn failed")
+        partial = str(turn.get("assistant") or "")
+        cols = int(session.get("cols", 80))
+    text = partial or f"Error: {message}"
+    agent = session.get("agent")
+    payload = {
+        "text": text,
+        "usage": _get_usage(agent) if agent is not None else {},
+        "status": "error",
+        "error": message,
+        "recoverable": True,
+    }
+    if partial:
+        payload["partial"] = True
+    try:
+        rendered = render_message(text, cols)
+    except Exception:
+        rendered = ""
+    if rendered:
+        payload["rendered"] = rendered
+    _retire_turn_marker(session)
+    _emit("message.complete", sid, payload)
 
 
 def _queued_prompt_snapshot(session: dict) -> dict | None:
@@ -7247,28 +7763,29 @@ def _(rid, params: dict) -> dict:
 
         _schedule_agent_build(sid)
         _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
+        auto_continue = _maybe_schedule_auto_continue(sid, record, target)
 
         messages = _history_to_messages(display_history)
-        return _ok(
-            rid,
-            {
-                "session_id": sid,
-                "resumed": target,
-                "message_count": len(messages),
-                "messages": messages,
-                "info": _lazy_resume_info(
-                    cwd,
-                    model=model_override.get("model") or "",
-                    provider=overrides.get("provider_override") or "",
-                    profile=profile,
-                ),
-                "inflight": None,
-                "running": False,
-                "session_key": target,
-                "started_at": record["created_at"],
-                "status": "idle",
-            },
-        )
+        payload = {
+            "session_id": sid,
+            "resumed": target,
+            "message_count": len(messages),
+            "messages": messages,
+            "info": _lazy_resume_info(
+                cwd,
+                model=model_override.get("model") or "",
+                provider=overrides.get("provider_override") or "",
+                profile=profile,
+            ),
+            "inflight": None,
+            "running": False,
+            "session_key": target,
+            "started_at": record["created_at"],
+            "status": "idle",
+        }
+        if auto_continue is not None:
+            payload["auto_continue"] = auto_continue
+        return _ok(rid, payload)
 
     # Build the agent OUTSIDE the lock — _make_agent can block for seconds
     # (MCP discovery, prompt/skill build, AIAgent construction). Holding
@@ -7387,21 +7904,24 @@ def _(rid, params: dict) -> dict:
                 lease.release()
             return _err(rid, 5000, f"resume failed: {e}")
         session = _sessions.get(sid) or {}
-    return _ok(
-        rid,
-        {
-            "session_id": sid,
-            "resumed": target,
-            "message_count": len(messages),
-            "messages": messages,
-            "info": _session_info(agent, session),
-            "inflight": None,
-            "running": False,
-            "session_key": target,
-            "started_at": float(session.get("created_at") or time.time()),
-            "status": "idle",
-        },
+    auto_continue = (
+        _maybe_schedule_auto_continue(sid, session, target) if session else None
     )
+    payload = {
+        "session_id": sid,
+        "resumed": target,
+        "message_count": len(messages),
+        "messages": messages,
+        "info": _session_info(agent, session),
+        "inflight": None,
+        "running": False,
+        "session_key": target,
+        "started_at": float(session.get("created_at") or time.time()),
+        "status": "idle",
+    }
+    if auto_continue is not None:
+        payload["auto_continue"] = auto_continue
+    return _ok(rid, payload)
 
 
 @method("session.cwd.set")
@@ -10653,25 +11173,45 @@ def _(rid, params: dict) -> dict:
     _start_agent_build(sid, session)
 
     def run_after_agent_ready() -> None:
-        err = _wait_agent(session, rid)
+        # Patient wait (#63078): the user's message is already the accepted
+        # in-flight turn, so a slow deferred build must not eat it. The wait
+        # delivers the prompt when the still-running build completes, honors a
+        # cancel promptly, notices the user once past the slow threshold, and
+        # only errors when the build itself fails or the bounded cap expires.
+        err = _wait_agent_for_prompt(session, rid, sid)
         if err:
-            _emit(
-                "error",
+            # Terminal frame + retained snapshot (not a bare "error" event +
+            # cleared inflight): if the client is disconnected right now, the
+            # retained snapshot is the only way resume can show this failure.
+            _emit_terminal_turn_error(
                 sid,
-                {
-                    "message": (err.get("error") or {}).get(
-                        "message", "agent initialization failed"
-                    )
-                },
+                session,
+                (err.get("error") or {}).get("message", "agent initialization failed"),
             )
             with session["history_lock"]:
                 session["running"] = False
-                _clear_inflight_turn(session)
+                session["last_active"] = time.time()
+            _emit("session.info", sid, _session_info(session.get("agent"), session))
             return
         with session["history_lock"]:
             if session.get("_turn_cancel_requested") or not session.get("running"):
                 session["running"] = False
                 _clear_inflight_turn(session)
+                # Surface the cancellation to the client. Without this emit the
+                # turn vanishes silently — the Desktop sees `prompt.submit`
+                # return `{"status": "streaming"}` but never receives a
+                # `message.start` or `error` event, so the composer shows no
+                # feedback (issue #63078 server-side half). Match the
+                # `_wait_agent` error branch above: emit, then bail.
+                _emit(
+                    "error",
+                    sid,
+                    {
+                        "message": "Turn cancelled before the agent was ready"
+                        if session.get("_turn_cancel_requested")
+                        else "Session no longer running before the agent was ready"
+                    },
+                )
                 return
         _run_prompt_submit(rid, sid, session, text)
 
@@ -11167,7 +11707,10 @@ def _run_prompt_submit(
         history_version = int(session.get("history_version", 0))
         images = list(session.get("attached_images", []))
         session["attached_images"] = []
-        if not isinstance(session.get("inflight_turn"), dict):
+        inflight = session.get("inflight_turn")
+        # A retained failed turn (see _fail_inflight_turn) is a stale leftover
+        # by the time a new turn starts — replace it, never append onto it.
+        if not isinstance(inflight, dict) or inflight.get("status") == "error":
             _start_inflight_turn(session, text)
     agent = session["agent"]
     if hasattr(agent, "clear_interrupt"):
@@ -11185,6 +11728,21 @@ def _run_prompt_submit(
         pending_steer_followup = None  # a /steer that landed after the last tool batch (below)
         tts_queue = None  # streaming-TTS feed for this turn (voice mode)
         one_turn_restore = session.pop("one_turn_model_restore", None)
+        # True once a failed turn's snapshot was retained for resume replay —
+        # tells the finally below to skip the normal inflight clear.
+        turn_error_retained = False
+        # Durable crash marker: written before the turn runs, retired the
+        # moment its outcome reaches the client (see _retire_turn_marker).
+        # Any concluded turn — success, handled error, interrupt — retires
+        # it, so a marker that survives means the process died mid-turn;
+        # session.resume auto-continues from it. Compression can rotate
+        # session_key mid-turn, so remember the key we wrote under.
+        marker_home = _session_home(session)
+        marker_key = str(session.get("session_key") or "")
+        marker_attempt = int(session.pop("_auto_continue_attempt", 0) or 0)
+        marker_text = session.pop("_auto_continue_prompt", None) or text
+        if isinstance(marker_text, str) and marker_text.strip():
+            record_turn_start(marker_home, marker_key, marker_text, attempts=marker_attempt)
         try:
             from tools.approval import (
                 reset_current_session_key,
@@ -11356,6 +11914,9 @@ def _run_prompt_submit(
             run_kwargs = {
                 "conversation_history": list(history),
                 "stream_callback": _stream,
+                "persist_user_message": (
+                    _build_persist_user_message(prompt, images, run_message) if images else prompt
+                ),
             }
             try:
                 if "task_id" in inspect.signature(agent.run_conversation).parameters:
@@ -11530,7 +12091,24 @@ def _run_prompt_submit(
             if rendered:
                 payload["rendered"] = rendered
             with session["history_lock"]:
-                _clear_inflight_turn(session)
+                if status == "error":
+                    # Returned-error result (provider 4xx, budget, etc.): retain
+                    # the failed turn for resume replay instead of clearing it.
+                    # If this terminal frame is lost to a disconnect, resume's
+                    # inflight payload is the only carrier of the failure.
+                    _fail_inflight_turn(
+                        session,
+                        result.get("error") if isinstance(result, dict) else raw,
+                    )
+                    turn_error_retained = True
+                else:
+                    _clear_inflight_turn(session)
+            if status == "error":
+                payload["error"] = str(
+                    (result.get("error") if isinstance(result, dict) else "") or raw
+                )
+                payload["recoverable"] = True
+            _retire_turn_marker(session, marker_key)
             _emit("message.complete", sid, payload)
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
@@ -11692,7 +12270,20 @@ def _run_prompt_submit(
             print(
                 f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True
             )
-            _emit("error", sid, {"message": str(e)})
+            try:
+                # Close the turn with the same terminal error frame shape as
+                # the returned-error path (uniform client handling), retaining
+                # the failed turn for resume replay.
+                _emit_terminal_turn_error(sid, session, e)
+                turn_error_retained = True
+            except Exception as emit_exc:
+                print(
+                    f"[gateway-turn] terminal error emit failed: "
+                    f"{type(emit_exc).__name__}: {emit_exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                _emit("error", sid, {"message": str(e)})
         finally:
             if tts_queue is not None:
                 tts_queue.put(None)  # end-of-text sentinel — flush + finish speaking
@@ -11727,8 +12318,13 @@ def _run_prompt_submit(
             with session["history_lock"]:
                 session["running"] = False
                 session["last_active"] = time.time()
-                _clear_inflight_turn(session)
-            _emit("session.info", sid, _session_info(agent, session))
+                if not turn_error_retained:
+                    _clear_inflight_turn(session)
+            # Backstop for turns that never reached a terminal frame (the
+            # frame paths retire the marker as they emit).
+            _retire_turn_marker(session, marker_key)
+            session.pop("_auto_continue_scheduled", None)
+            _emit_settled_session_info(sid, session, agent)
 
         # A user prompt that arrived mid-turn (interrupt + queue) wins over
         # every auto follow-up below — drain it first and skip them this cycle;
@@ -13624,7 +14220,12 @@ def _discover_repos_payload(
                 agg = _agg(root)
                 if entry.get("label"):
                     agg["label"] = entry["label"]
-                agg["last_active"] = max(agg["last_active"], float(entry.get("last_seen") or 0))
+                # NOTE: `last_seen` is when the disk scan last saw the directory,
+                # not when the user last worked in it. Folding it into
+                # `last_active` stamped every scanned repo with the scan time —
+                # i.e. "just now" — so a git checkout with zero Hermes sessions
+                # outranked the repos the user actually works in. Activity stays
+                # session-derived; a repo with no sessions has no activity.
 
         if conn is not None:
             _read(conn)
@@ -13821,12 +14422,34 @@ def _project_tree_inputs(
     return sessions, projects, discovered, active_id
 
 
+# Per-build memo for `_dir_exists_cached`. Cleared at the top of every
+# `_build_project_tree`, so a dir created or deleted between sidebar refreshes
+# is seen on the next one.
+_DIR_EXISTS_CACHE: dict[str, bool] = {}
+
+
+def _dir_exists_cached(path: str) -> bool:
+    """``os.path.isdir`` for the project tree, memoized per build.
+
+    ``build_tree`` asks per SESSION, not per distinct path, so a power user with
+    hundreds of sessions across a handful of dirs would otherwise fire hundreds
+    of redundant stats on every sidebar open. The memo is per build, so a dir
+    created or deleted between refreshes is picked up on the next one.
+    """
+    hit = _DIR_EXISTS_CACHE.get(path)
+    if hit is None:
+        hit = os.path.isdir(path)
+        _DIR_EXISTS_CACHE[path] = hit
+    return hit
+
+
 def _build_project_tree(
     db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool
 ) -> tuple[dict, str | None]:
     """Gather inputs and run the one authoritative builder. Returns (tree, active_id)."""
     from tui_gateway import project_tree
 
+    _DIR_EXISTS_CACHE.clear()
     sessions, projects, discovered, active_id = _project_tree_inputs(
         db, session_limit, include_discovered=include_discovered
     )
@@ -13839,6 +14462,7 @@ def _build_project_tree(
         hydrate=hydrate,
         is_junk_root=_is_repo_junk,
         is_junk_cwd=_is_session_cwd_junk,
+        exists=_dir_exists_cached,
     )
     return tree, active_id
 
@@ -15746,6 +16370,14 @@ def _(rid, params: dict) -> dict:
             skill_bundles_provider=lambda: get_skill_bundles(),
         )
         doc = Document(text, len(text))
+        # Skill commands and bundles are the only completions offered for an
+        # inline `/skill` reference typed mid-message, so the class has to
+        # reach the TUI as data. Derived from the same providers the completer
+        # uses — no sniffing the ⚡/▣ meta glyphs, which are display text.
+        skill_names = {
+            key.lstrip("/").lower()
+            for key in (*get_skill_commands(), *get_skill_bundles())
+        }
         items = [
             {
                 "text": c.text,
@@ -15756,6 +16388,11 @@ def _(rid, params: dict) -> dict:
                 # layout into 1-char truncation of the next column.
                 "display": to_plain_text(c.display) if c.display else c.text,
                 "meta": to_plain_text(c.display_meta) if c.display_meta else "",
+                "kind": (
+                    "skill"
+                    if c.text.strip().lstrip("/").lower() in skill_names
+                    else "command"
+                ),
             }
             for c in completer.get_completions(doc, None)
             # Keep the upstream command registry intact while hiding the removed
@@ -15768,21 +16405,25 @@ def _(rid, params: dict) -> dict:
                 "text": "/density",
                 "display": "/density",
                 "meta": "Toggle compact display mode",
+                "kind": "command",
             },
             {
                 "text": "/details",
                 "display": "/details",
                 "meta": "Control agent detail visibility",
+                "kind": "command",
             },
             {
                 "text": "/logs",
                 "display": "/logs",
                 "meta": "Show recent gateway log lines",
+                "kind": "command",
             },
             {
                 "text": "/mouse",
                 "display": "/mouse",
                 "meta": "Set mouse tracking preset [on|off|toggle|wheel|buttons|all]",
+                "kind": "command",
             },
         ]
         for extra in extras:
