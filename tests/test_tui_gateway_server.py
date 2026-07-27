@@ -847,6 +847,7 @@ def test_profile_scoped_agent_build_installs_secret_scope(monkeypatch, tmp_path)
     try:
         server._start_agent_build(sid, session)
         assert built.wait(timeout=2)
+        assert ready.wait(timeout=2)
     finally:
         server._sessions.pop(sid, None)
 
