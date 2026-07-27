@@ -419,6 +419,26 @@ class ProactiveOwnershipRegistry:
                 (reason[:120], now),
             )
 
+    def open_probe_circuit(self, reason: str, *, now: float) -> bool:
+        """Open or refresh a transient probe latch without replacing a hard safety latch."""
+        allowed = {"model_probe_unavailable", "alarm_sink_probe_unavailable"}
+        if reason not in allowed:
+            raise ValueError("probe circuit reason must be a transient readiness failure")
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            current = con.execute(
+                "SELECT state,reason FROM proactive_global_circuit WHERE singleton=1"
+            ).fetchone()
+            if current is not None and current["state"] == "open" and current["reason"] not in allowed:
+                con.execute("ROLLBACK")
+                return False
+            con.execute(
+                "INSERT INTO proactive_global_circuit VALUES(1,'open',?,1,?) ON CONFLICT(singleton) DO UPDATE SET state='open',reason=excluded.reason,generation=proactive_global_circuit.generation+1,updated_at=excluded.updated_at",
+                (reason, now),
+            )
+            con.execute("COMMIT")
+        return True
+
     def operator_reset_circuit(self, *, confirmed: bool, now: float) -> None:
         if not confirmed:
             raise PermissionError("explicit operator confirmation required")
@@ -427,6 +447,26 @@ class ProactiveOwnershipRegistry:
                 "INSERT INTO proactive_global_circuit VALUES(1,'closed','operator_reset',1,?) ON CONFLICT(singleton) DO UPDATE SET state='closed',reason='operator_reset',generation=proactive_global_circuit.generation+1,updated_at=excluded.updated_at",
                 (now,),
             )
+
+    def recover_probe_circuit(
+        self, *, model_ready: bool, alarm_ready: bool,
+        cooldown_seconds: int, now: float,
+    ) -> bool:
+        """Close only a cooled-down transient readiness latch after both probes recover."""
+        if not (model_ready and alarm_ready):
+            return False
+        cutoff = now - max(0, int(cooldown_seconds))
+        with self._connect() as con:
+            changed = con.execute(
+                """UPDATE proactive_global_circuit
+                   SET state='closed',reason='probe_auto_recovered',
+                       generation=generation+1,updated_at=?
+                   WHERE singleton=1 AND state='open'
+                     AND reason IN ('model_probe_unavailable','alarm_sink_probe_unavailable')
+                     AND updated_at<=?""",
+                (now, cutoff),
+            ).rowcount
+        return bool(changed)
 
 
 class ProactiveMode(str, Enum):

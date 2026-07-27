@@ -8815,13 +8815,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         not model_probe["ready"] or not alarm_probe["ready"]
                     ):
                         reason = "model_probe_unavailable" if not model_probe["ready"] else "alarm_sink_probe_unavailable"
-                        scheduler.ownership_registry.open_circuit(reason, now=time.time())
+                        scheduler.ownership_registry.open_probe_circuit(reason, now=time.time())
                         scheduler.record_health("watcher", {
                             "completed": False, "correlation_id": correlation_id,
                             "model_probe": model_probe, "alarm_probe": alarm_probe,
                             "failure": reason,
                         })
                         continue
+                    if cfg.mode.value == "live":
+                        scheduler.ownership_registry.recover_probe_circuit(
+                            model_ready=model_probe["ready"],
+                            alarm_ready=alarm_probe["ready"],
+                            cooldown_seconds=cfg.circuit_breaker_cooldown_seconds,
+                            now=time.time(),
+                        )
 
                     def _tick_profile() -> dict[str, int]:
                         db = SessionDB(Path(profile_home) / "state.db")

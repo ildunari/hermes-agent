@@ -211,6 +211,41 @@ def test_global_send_lease_and_operator_reset_are_durable(tmp_path: Path):
     assert ProactiveOwnershipRegistry(tmp_path/'ownership.db').reserve_global_send('three',now=NOW+503)
 
 
+def test_probe_circuit_recovers_after_cooldown_but_security_latches_do_not(tmp_path: Path):
+    registry = ProactiveOwnershipRegistry(tmp_path/'ownership.db')
+    registry.open_circuit('model_probe_unavailable', now=NOW)
+    assert not registry.recover_probe_circuit(
+        model_ready=True, alarm_ready=True, cooldown_seconds=300, now=NOW+299,
+    )
+    assert not registry.recover_probe_circuit(
+        model_ready=False, alarm_ready=True, cooldown_seconds=300, now=NOW+300,
+    )
+    assert registry.recover_probe_circuit(
+        model_ready=True, alarm_ready=True, cooldown_seconds=300, now=NOW+300,
+    )
+    assert registry.global_send_status(now=NOW+301)['circuit_state'] == 'closed'
+
+    registry.open_circuit('participant_auth_failed', now=NOW+400)
+    assert not registry.recover_probe_circuit(
+        model_ready=True, alarm_ready=True, cooldown_seconds=300, now=NOW+1000,
+    )
+    status = registry.global_send_status(now=NOW+1001)
+    assert status['circuit_state'] == 'open'
+    assert status['circuit_reason'] == 'participant_auth_failed'
+
+
+def test_probe_failure_cannot_overwrite_a_hard_safety_latch(tmp_path: Path):
+    registry = ProactiveOwnershipRegistry(tmp_path/'ownership.db')
+    registry.open_circuit('participant_auth_failed', now=NOW)
+    assert not registry.open_probe_circuit('model_probe_unavailable', now=NOW+1)
+    assert not registry.recover_probe_circuit(
+        model_ready=True, alarm_ready=True, cooldown_seconds=300, now=NOW+1000,
+    )
+    status = registry.global_send_status(now=NOW+1001)
+    assert status['circuit_state'] == 'open'
+    assert status['circuit_reason'] == 'participant_auth_failed'
+
+
 def test_transport_owner_conflict_opens_durable_global_circuit(tmp_path: Path):
     registry=ProactiveOwnershipRegistry(tmp_path/'ownership.db')
     registry.acquire_transport('runner-a','adapter-a',now=NOW)
