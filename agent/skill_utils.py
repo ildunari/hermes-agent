@@ -53,7 +53,7 @@ SKILL_SUPPORT_DIRS = frozenset(
 )
 
 
-def is_excluded_skill_path(path) -> bool:
+def is_excluded_skill_path(path, *, root: Optional[Path] = None) -> bool:
     """True if *path* should be skipped by active skill scanners.
 
     Use this on every ``SKILL.md`` path produced by direct ``rglob`` scans to
@@ -69,11 +69,11 @@ def is_excluded_skill_path(path) -> bool:
         from pathlib import PurePath
         parts = PurePath(str(path)).parts
     return any(part in EXCLUDED_SKILL_DIRS for part in parts) or is_skill_support_path(
-        path
+        path, root=root
     )
 
 
-def is_skill_support_path(path) -> bool:
+def is_skill_support_path(path, *, root: Optional[Path] = None) -> bool:
     """True if *path* is under a support dir of an actual skill root.
 
     ``reference/``, ``references/``, ``templates/``, ``assets/``, and ``scripts/`` are
@@ -95,6 +95,8 @@ def is_skill_support_path(path) -> bool:
         if part not in SKILL_SUPPORT_DIRS or idx == 0:
             continue
         skill_root = Path(*parts[:idx])
+        if root is not None and not path_obj.is_absolute():
+            skill_root = root / skill_root
         if (skill_root / "SKILL.md").exists():
             return True
     return False

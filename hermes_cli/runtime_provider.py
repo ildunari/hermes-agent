@@ -460,7 +460,9 @@ def _resolve_runtime_from_pool_entry(
     elif provider == "xai":
         api_mode = "codex_responses"
     elif provider == "nous":
-        api_mode = "chat_completions"
+        from hermes_cli.providers import nous_api_mode
+
+        api_mode = nous_api_mode(effective_model)
         base_url = _nous_inference_base_url_override() or base_url
     elif provider == "copilot":
         api_mode = _copilot_runtime_api_mode(
@@ -1525,6 +1527,8 @@ def _resolve_explicit_runtime(
         }
 
     if provider == "nous":
+        from hermes_cli.providers import nous_api_mode
+
         state = auth_mod.get_provider_auth_state("nous") or {}
         base_url = (
             explicit_base_url
@@ -1553,7 +1557,7 @@ def _resolve_explicit_runtime(
                 base_url = creds.get("base_url", "").rstrip("/") or base_url
         return {
             "provider": "nous",
-            "api_mode": "chat_completions",
+            "api_mode": nous_api_mode(target_model or model_cfg.get("default") or ""),
             "base_url": base_url,
             "api_key": api_key,
             "source": "explicit",
@@ -1950,12 +1954,14 @@ def resolve_runtime_provider(
 
     if provider == "nous":
         try:
+            from hermes_cli.providers import nous_api_mode
+
             creds = resolve_nous_runtime_credentials(
                 timeout_seconds=float(_getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")),
             )
             return {
                 "provider": "nous",
-                "api_mode": "chat_completions",
+                "api_mode": nous_api_mode(target_model or model_cfg.get("default") or ""),
                 "base_url": creds.get("base_url", "").rstrip("/"),
                 "api_key": creds.get("api_key", ""),
                 "source": creds.get("source", "portal"),

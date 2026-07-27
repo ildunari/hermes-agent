@@ -6,6 +6,7 @@ import { TUI_SESSION_MODEL_FLAG } from '../domain/slash.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { ModelOptionProvider, ModelOptionsResponse } from '../gatewayTypes.js'
 import { fuzzyRank } from '../lib/fuzzy.js'
+import { modelSearchText } from '../lib/model-search-text.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
 
@@ -139,7 +140,7 @@ export function ModelPicker({
 
     return fuzzyRank(allModels, filter, m => {
       const label = provider?.model_labels?.[m]
-      return label ? `${label} ${m}` : m
+      return label ? `${label} ${modelSearchText(m)}` : modelSearchText(m)
     }).map(r => r.item)
   }, [allModels, filter, provider, stage])
 

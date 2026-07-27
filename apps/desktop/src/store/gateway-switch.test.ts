@@ -6,16 +6,16 @@ import {
   $currentUsage,
   $freshDraftReady,
   $messagingSessions,
+  $sessionProfilesTruncated,
   $sessions,
   $sessionsLoading,
-  $sessionsTotal,
   setCronSessions,
   setCurrentUsage,
   setFreshDraftReady,
   setMessagingSessions,
+  setSessionProfilesTruncated,
   setSessions,
-  setSessionsLoading,
-  setSessionsTotal
+  setSessionsLoading
 } from '@/store/session'
 import { $stalledSessionIds } from '@/store/session-states'
 
@@ -29,7 +29,7 @@ describe('wipeSessionListsForGatewaySwitch', () => {
   beforeEach(() => {
     $gatewaySwitching.set(false)
     setSessions([{ id: 's1', title: 'old', profile: 'default' } as never])
-    setSessionsTotal(1)
+    setSessionProfilesTruncated({ default: true })
     setCronSessions([{ id: 'c1', title: 'cron', profile: 'default' } as never])
     setMessagingSessions([{ id: 'm1', title: 'tg', profile: 'default' } as never])
     $stalledSessionIds.set(['s1'])
@@ -62,7 +62,7 @@ describe('wipeSessionListsForGatewaySwitch', () => {
     wipeSessionListsForGatewaySwitch()
 
     expect($sessions.get()).toEqual([])
-    expect($sessionsTotal.get()).toBe(0)
+    expect($sessionProfilesTruncated.get()).toEqual({})
     expect($cronSessions.get()).toEqual([])
     expect($messagingSessions.get()).toEqual([])
     expect($stalledSessionIds.get()).toEqual([])
