@@ -7957,6 +7957,32 @@ def test_session_redirect_calls_capable_core_agent(monkeypatch):
     assert before is None or session["last_active"] >= before
 
 
+def test_session_redirect_queues_when_agent_rejects_during_running_preflight():
+    agent = types.SimpleNamespace(
+        _supports_active_turn_redirect=True,
+        redirect=lambda _text: False,
+    )
+    session = _session(agent=agent, running=True)
+    server._sessions["sid"] = session
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.redirect",
+                "params": {"session_id": "sid", "text": "answer this after summarizing"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert resp["result"] == {
+        "status": "queued",
+        "text": "answer this after summarizing",
+    }
+    assert session["queued_prompt"]["text"] == "answer this after summarizing"
+    assert session.get("last_active") is not None
+
+
 def test_session_redirect_records_correction_without_erasing_prompt():
     """A redirect must not overwrite the turn's original user text.
 

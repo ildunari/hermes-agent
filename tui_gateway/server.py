@@ -11255,10 +11255,19 @@ def _(rid, params: dict) -> dict:
         with session["history_lock"]:
             _record_inflight_correction(session, text)
             session["last_active"] = time.time()
-    return _ok(
-        rid,
-        {"status": "redirected" if accepted else "rejected", "text": text},
-    )
+        return _ok(rid, {"status": "redirected", "text": text})
+
+    # Preflight compression has no active model request to redirect. Keep the
+    # correction server-side as the next turn instead of handing a racy retry
+    # back to the renderer, where the visible message could receive no reply.
+    with session["history_lock"]:
+        if session.get("running"):
+            transport = current_transport() or session.get("transport") or _stdio_transport
+            _enqueue_prompt(session, text, transport)
+            session["last_active"] = time.time()
+            return _ok(rid, {"status": "queued", "text": text})
+
+    return _ok(rid, {"status": "rejected", "text": text})
 
 
 @method("terminal.resize")
