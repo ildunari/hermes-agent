@@ -1502,6 +1502,10 @@ protocol.registerSchemesAsPrivileged([
   {
     scheme: MEDIA_PROTOCOL,
     privileges: {
+      // DOCX rendering reads the streamed bytes with fetch(). The renderer's
+      // file:// origin is cross-origin to hermes-media://, so Electron rejects
+      // the request before the handler runs unless this scheme opts into CORS.
+      corsEnabled: true,
       secure: true,
       standard: true,
       stream: true,

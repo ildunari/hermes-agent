@@ -764,6 +764,7 @@ features:
     owner: kosta
     class: keep-core
     owner_paths:
+      - apps/desktop/electron/main.ts
       - apps/desktop/src/app/session/hooks/use-preview-routing.test.tsx
       - apps/desktop/src/app/chat/right-rail/preview-file.document.test.tsx
       - apps/desktop/src/app/chat/right-rail/preview-file.tsx
@@ -777,6 +778,7 @@ features:
       - apps/desktop/src/store/preview.ts
       - apps/desktop/src/vite-env.d.ts
     collision_paths:
+      - apps/desktop/electron/main.ts
       - apps/desktop/src/app/chat/right-rail/preview-file.tsx
       - apps/desktop/src/components/assistant-ui/markdown-text.tsx
       - apps/desktop/src/lib/local-preview.ts
@@ -800,3 +802,7 @@ features:
         path: apps/desktop/src/app/chat/right-rail/preview-file.tsx
         needles: [DocumentPreview, PdfPreview, mammoth.convertToHtml, DOMPurify.sanitize, mediaStreamUrl]
         description: side panel renders sanitized DOCX HTML and streamed local or authenticated remote PDFs
+      - id: desktop-document-preview-stream-fetch
+        path: apps/desktop/electron/main.ts
+        needles: [MEDIA_PROTOCOL, corsEnabled, supportFetchAPI, "'.docx'", "'.pdf'"]
+        description: local document streams remain fetchable across the renderer and media protocol origins
