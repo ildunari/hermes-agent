@@ -58,6 +58,7 @@ import {
   setYoloActive
 } from '@/store/session'
 import {
+  $sessionTiles,
   closeSessionTile,
   dropSessionState,
   openSessionTile,
@@ -69,7 +70,7 @@ import { broadcastSessionsChanged } from '@/store/session-sync'
 import { isWatchWindow } from '@/store/windows'
 import type { SessionCreateResponse, SessionMessage, SessionResumeResponse, UsageStats } from '@/types/hermes'
 
-import { NEW_CHAT_ROUTE, sessionRoute, SETTINGS_ROUTE } from '../../../routes'
+import { navigateToWorkspacePage, NEW_CHAT_ROUTE, sessionRoute, SETTINGS_ROUTE } from '../../../routes'
 import type { ClientSessionState, SidebarNavItem } from '../../../types'
 import { sessionContextDrift } from '../session-context-drift'
 
@@ -454,7 +455,7 @@ export function useSessionActions({
       }
 
       if (item.route) {
-        navigate(item.route)
+        navigateToWorkspacePage(navigate, item.route)
       }
     },
     [navigate, startFreshSessionDraft]
@@ -563,6 +564,13 @@ export function useSessionActions({
       // treated as background events.
       setActiveSessionId(null)
       activeSessionIdRef.current = null
+
+      // A session is either the main thread or a tile, never both. Drop a tile
+      // synchronously when its route takes ownership; its warm cache/runtime
+      // binding remains available for the main thread to reuse.
+      if ($sessionTiles.get().some(t => t.storedSessionId === storedSessionId)) {
+        closeSessionTile(storedSessionId)
+      }
       // Optimistically clear any prior resume-failure latch for this session:
       // we're attempting a fresh resume, so the self-heal in use-route-resume
       // must not keep treating it as stranded. It's re-armed below only if THIS

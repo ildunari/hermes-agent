@@ -2,12 +2,14 @@ import { type RefObject, useEffect, useRef } from 'react'
 
 import { SLASH_COMMAND_RE } from '@/lib/chat-runtime'
 import { triggerHaptic } from '@/lib/haptics'
+import { hasClarifyRequest, skipClarifyRequest } from '@/store/clarify'
 import { clearSessionDraft, type ComposerAttachment } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
 import { enqueueQueuedPrompt, type QueuedPromptEntry } from '@/store/composer-queue'
 
 import { cloneAttachments, type QueueEditState } from '../composer-utils'
 import { onComposerSubmitRequest } from '../focus'
+import { pathifyRefs } from '../path-refs'
 import { composerPlainText } from '../rich-editor'
 import { useComposerScope } from '../scope'
 import type { ChatBarProps } from '../types'
@@ -134,19 +136,41 @@ export function useComposerSubmit({
       }
     }
 
+    // A path that never got its committing space (`@apps/desktop/` left by a Tab
+    // descend, then Enter) is still the reference the user picked — promote it
+    // on the way out so it attaches instead of submitting as inert text.
+    const text = pathifyRefs(draftRef.current)
+
+    if (text !== draftRef.current) {
+      draftRef.current = text
+      setComposerText(text)
+    }
+
     // Gateway isn't open (a post-boot reconnect keeps the composer editable by
-    // design). Don't silently drop the Enter — queue the draft so it shows as
-    // pending and the bounded auto-drain flushes it the instant the socket
-    // reopens, instead of the message vanishing with no feedback.
+    // design). Don't silently drop the Enter — queue the normalized draft so it
+    // shows as pending and auto-drains when the socket reopens.
     if (disabled) {
       queueCurrentDraft()
       focusInput()
 
       return
     }
-
-    const text = draftRef.current
     const payloadPresent = text.trim().length > 0 || attachments.length > 0
+
+    // A clarify card parked on this session owns the turn: the agent is blocked
+    // inside its tool batch waiting on `clarify.respond`, so a follow-up routed
+    // through steer/queue sits undelivered until the clarify's own timeout
+    // (default 5 min) — the message looks sent and nothing happens. Typing a
+    // real message instead of picking an option IS the answer "none of these":
+    // skip the question so the tool returns, then route the words normally.
+    //
+    // Fire-and-forget, not awaited: the skip clears the card synchronously and
+    // both RPCs ride the same socket in call order, so the gateway resolves the
+    // clarify before it sees the follow-up. Awaiting first would leave the draft
+    // live for a tick — long enough for a second Enter to send it twice.
+    if (payloadPresent && !queueEdit && hasClarifyRequest(sessionId)) {
+      void skipClarifyRequest(sessionId)
+    }
 
     if (queueEdit) {
       exitQueuedEdit('save')

@@ -492,7 +492,7 @@ def finalize_turn(
         and not getattr(agent, "_annotation_isolated", False)
     ):
         try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            from hermes_cli.lifecycle import invoke_hook as _invoke_hook
             _transform_results = _invoke_hook(
                 "transform_llm_output",
                 response_text=final_response,
@@ -518,7 +518,7 @@ def finalize_turn(
         and not getattr(agent, "_annotation_isolated", False)
     ):
         try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            from hermes_cli.lifecycle import invoke_hook as _invoke_hook
             _invoke_hook(
                 "post_llm_call",
                 session_id=agent.session_id,
@@ -694,14 +694,16 @@ def finalize_turn(
     # annotation turns are body-isolated and do not expose lifecycle hooks.
     if not getattr(agent, "_annotation_isolated", False):
         try:
-            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            from hermes_cli.lifecycle import invoke_hook as _invoke_hook
             _invoke_hook(
                 "on_session_end",
                 session_id=agent.session_id,
                 task_id=effective_task_id,
                 turn_id=turn_id,
                 completed=completed,
+                failed=failed,
                 interrupted=interrupted,
+                turn_exit_reason=_turn_exit_reason,
                 model=agent.model,
                 platform=getattr(agent, "platform", None) or "",
             )

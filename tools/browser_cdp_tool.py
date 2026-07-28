@@ -773,7 +773,7 @@ def _browser_cdp_check() -> bool:
     """
     try:
         from tools.browser_tool import (  # type: ignore[import-not-found]
-            _get_cdp_override,
+            _get_cdp_override_raw,
             check_browser_requirements,
         )
     except ImportError as exc:  # pragma: no cover — defensive
@@ -781,7 +781,10 @@ def _browser_cdp_check() -> bool:
         return False
     if not check_browser_requirements():
         return False
-    if _get_cdp_override():
+    # Raw (no-I/O) gate: check_fns run during tool-schema assembly at every
+    # startup; resolving the endpoint over HTTP here would block launch when
+    # the configured endpoint is stale/unreachable.
+    if _get_cdp_override_raw():
         return True
     try:
         from hermes_cli.config import load_config

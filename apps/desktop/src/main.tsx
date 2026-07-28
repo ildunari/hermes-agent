@@ -3,6 +3,9 @@ import './styles.css'
 // the first app render so chat geometry never flashes through its defaults.
 import './store/chat-width'
 import './store/table-layout'
+// Side-effect: reports in-flight turns to the main process for the quit guard.
+import './store/active-work'
+// Side-effect: applies the persisted window translucency on load.
 import './store/translucency'
 // Dev-only render/state churn counters. MUST precede the `react-dom` import
 // below: react-dom captures the devtools hook at module init, so bippy has to
