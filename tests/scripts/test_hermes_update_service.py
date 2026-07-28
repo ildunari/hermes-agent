@@ -1104,13 +1104,12 @@ def test_live_dependency_refresh_success_waits_both(
     ]
 
 
-def test_desktop_build_overlaps_validation_in_source() -> None:
+def test_desktop_build_starts_only_after_validation_in_source() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
+    build = "desktop_build_child, desktop_build_output = start_owned_child("
 
-    assert "desktop_build_child, desktop_build_output = start_owned_child(" in source
-    assert source.index("desktop_build_child, desktop_build_output") < source.index(
-        '"curated-validation"'
-    )
+    assert build in source
+    assert source.index('"curated-validation"') < source.index(build)
     assert "kill_owned_child(desktop_build_child, desktop_build_output)" in source
 
 

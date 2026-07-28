@@ -1606,9 +1606,11 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
             if Path(path).name in DEP_MANIFEST_NAMES
             or Path(path).name.endswith(".lock")
         ]
-        # The Desktop build only depends on the merged tree, so it overlaps
-        # with validation; the phase ledger still transitions VERIFIED before
-        # BUILT because BUILT only reaps the child.
+        # Keep the Desktop build serialized behind validation.  Building and
+        # signing Electron saturates this host enough to make the large TUI
+        # gateway test file exceed its otherwise-generous timeout, creating a
+        # false validation failure.  Reliability is worth more than overlap in
+        # an unattended transactional update.
         desktop_build_child: subprocess.Popen[bytes] | None = None
         desktop_build_output: Any = None
         try:
@@ -1616,16 +1618,6 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 ensure_not_aborted(root, run_id)
                 if dependency_manifests_changed(changed):
                     materialize_node_dependencies(root, run_id, worktree)
-                if desktop_diff_changed:
-                    desktop_build_child, desktop_build_output = start_owned_child(
-                        ["npm", "run", "dist:mac"],
-                        worktree / "apps" / "desktop",
-                        run_dir(root, run_id) / "evidence" / "desktop-build.log",
-                        child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
-                    )
-                    track_owned_child(
-                        root, run_id, "desktop-build", desktop_build_child
-                    )
                 worker_command(
                     root,
                     run_id,
@@ -1682,6 +1674,16 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     changed_paths=changed,
                     dependency_sensitive_paths=dependency_sensitive,
                 )
+                if desktop_diff_changed:
+                    desktop_build_child, desktop_build_output = start_owned_child(
+                        ["npm", "run", "dist:mac"],
+                        worktree / "apps" / "desktop",
+                        run_dir(root, run_id) / "evidence" / "desktop-build.log",
+                        child_fd_limit=DESKTOP_BUILD_FD_LIMIT,
+                    )
+                    track_owned_child(
+                        root, run_id, "desktop-build", desktop_build_child
+                    )
             ledger = read_json(ledger_path(root, run_id))
             desktop_changed = bool(
                 ledger.get("desktop_changed") or desktop_diff_changed
