@@ -764,6 +764,7 @@ features:
     owner: kosta
     class: keep-core
     owner_paths:
+      - apps/desktop/src/app/session/hooks/use-preview-routing.test.tsx
       - apps/desktop/src/app/chat/right-rail/preview-file.document.test.tsx
       - apps/desktop/src/app/chat/right-rail/preview-file.tsx
       - apps/desktop/src/components/assistant-ui/markdown-text.media.test.tsx
@@ -771,6 +772,8 @@ features:
       - apps/desktop/src/components/chat/preview-attachment.tsx
       - apps/desktop/src/lib/local-preview.test.ts
       - apps/desktop/src/lib/local-preview.ts
+      - apps/desktop/src/lib/preview-target.ts
+      - apps/desktop/src/store/preview.test.ts
       - apps/desktop/src/store/preview.ts
       - apps/desktop/src/vite-env.d.ts
     collision_paths:
@@ -779,14 +782,20 @@ features:
       - apps/desktop/src/lib/local-preview.ts
       - apps/desktop/src/store/preview.ts
     tests:
+      - apps/desktop/src/app/session/hooks/use-preview-routing.test.tsx
       - apps/desktop/src/app/chat/right-rail/preview-file.document.test.tsx
       - apps/desktop/src/components/assistant-ui/markdown-text.media.test.tsx
       - apps/desktop/src/lib/local-preview.test.ts
+      - apps/desktop/src/store/preview.test.ts
     checks:
       - id: desktop-document-preview-kinds
-        path: apps/desktop/src/lib/local-preview.ts
+        path: apps/desktop/src/lib/preview-target.ts
         needles: [DOCUMENT_PREVIEW_KIND_BY_EXT, "'.docx': 'docx'", "'.pdf': 'pdf'"]
         description: PDF and DOCX paths retain visual preview classification
+      - id: desktop-document-preview-canonicalization
+        path: apps/desktop/src/store/preview.ts
+        needles: [normalizeDocumentPreviewKind, isSamePreviewTarget, a.previewKind]
+        description: stale and persisted document targets are canonicalized and rendering changes invalidate target identity
       - id: desktop-document-preview-renderers
         path: apps/desktop/src/app/chat/right-rail/preview-file.tsx
         needles: [DocumentPreview, PdfPreview, mammoth.convertToHtml, DOMPurify.sanitize, mediaStreamUrl]

@@ -16,7 +16,8 @@ import {
   getSessionPreviewRecord,
   type PreviewTarget,
   progressPreviewServerRestart,
-  setCurrentSessionPreviewTarget
+  setCurrentSessionPreviewTarget,
+  setPreviewTarget
 } from './preview'
 import { $activeSessionId, $selectedStoredSessionId } from './session'
 
@@ -134,5 +135,34 @@ describe('preview store', () => {
     expect($filePreviewTarget.get()).toBeNull()
     expect($rightRailActiveTabId.get()).toBe(RIGHT_RAIL_PREVIEW_TAB_ID)
     expect($previewTarget.get()).toEqual(withRenderMode(live, 'preview'))
+  })
+
+  it('replaces a stale binary target when the same URL is reclassified as DOCX', () => {
+    const stale = {
+      ...previewTarget('/work/report.docx'),
+      binary: true,
+      previewKind: 'binary' as const
+    }
+
+    const corrected = { ...stale, previewKind: 'docx' as const }
+
+    $previewTarget.set(stale)
+    setPreviewTarget(corrected)
+
+    expect($previewTarget.get()).toEqual(corrected)
+  })
+
+  it('canonicalizes stale document classification before persisting it', () => {
+    const stale = {
+      ...previewTarget('/work/report.docx'),
+      binary: true,
+      previewKind: 'binary' as const
+    }
+
+    const record = setCurrentSessionPreviewTarget(stale, 'tool-result')
+
+    expect(record?.normalized.previewKind).toBe('docx')
+    expect(getSessionPreviewRecord('session-1')?.normalized.previewKind).toBe('docx')
+    expect($previewTarget.get()?.previewKind).toBe('docx')
   })
 })

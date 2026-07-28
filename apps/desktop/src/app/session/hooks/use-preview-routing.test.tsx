@@ -142,6 +142,42 @@ describe('usePreviewRouting', () => {
     })
   })
 
+  it('repairs a stale binary DOCX returned by preview IPC', async () => {
+    vi.mocked(window.hermesDesktop.normalizePreviewTarget).mockResolvedValue({
+      binary: true,
+      kind: 'file',
+      label: 'report.docx',
+      path: '/tmp/report.docx',
+      previewKind: 'binary',
+      source: '/tmp/report.docx',
+      url: 'file:///tmp/report.docx'
+    })
+    render(
+      <PreviewRoutingHarness
+        onEvent={handler => {
+          handleEvent = handler
+        }}
+      />
+    )
+
+    act(() =>
+      handleEvent({
+        payload: { label: 'DOCX smoke test', url: '/tmp/report.docx' },
+        session_id: 'session-1',
+        type: 'preview.open'
+      })
+    )
+
+    await waitFor(() => {
+      expect($previewTarget.get()).toMatchObject({
+        binary: true,
+        label: 'DOCX smoke test',
+        path: '/tmp/report.docx',
+        previewKind: 'docx'
+      })
+    })
+  })
+
   it('ignores a preview.open event for a background session', async () => {
     render(
       <PreviewRoutingHarness

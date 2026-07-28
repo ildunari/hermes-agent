@@ -1,6 +1,7 @@
 import { atom, computed } from 'nanostores'
 
 import { persistentAtom } from '@/lib/persisted'
+import { normalizeDocumentPreviewKind } from '@/lib/preview-target'
 import { normalize } from '@/lib/text'
 
 import { $artifactTabs, type ArtifactTabId, closeAllArtifactTabs, closeArtifactTab } from './artifacts'
@@ -74,7 +75,11 @@ export const $filePreviewTabs = persistentAtom<FilePreviewTab[]>(TABS_STORAGE_KE
   decode: raw => {
     const parsed = JSON.parse(raw) as unknown
 
-    return Array.isArray(parsed) ? parsed.filter(isFilePreviewTab) : []
+    return Array.isArray(parsed)
+      ? parsed
+          .filter(isFilePreviewTab)
+          .map(tab => ({ ...tab, target: normalizeDocumentPreviewKind(tab.target) }))
+      : []
   },
   encode: tabs => JSON.stringify(tabs, (key, value) => (key === 'dataUrl' ? undefined : value))
 })
@@ -122,7 +127,15 @@ function isSamePreviewTarget(a: PreviewTarget | null, b: PreviewTarget | null): 
 
   return (
     a.kind === b.kind &&
+    a.binary === b.binary &&
+    a.byteSize === b.byteSize &&
+    a.dataUrl === b.dataUrl &&
     a.label === b.label &&
+    a.large === b.large &&
+    a.language === b.language &&
+    a.mimeType === b.mimeType &&
+    a.path === b.path &&
+    a.previewKind === b.previewKind &&
     a.renderMode === b.renderMode &&
     a.source === b.source &&
     a.url === b.url
@@ -135,17 +148,19 @@ function showLivePreviewTab() {
 }
 
 export function setPreviewTarget(target: PreviewTarget | null) {
-  if (isSamePreviewTarget($previewTarget.get(), target)) {
-    if (target) {
+  const normalizedTarget = target ? normalizeDocumentPreviewKind(target) : null
+
+  if (isSamePreviewTarget($previewTarget.get(), normalizedTarget)) {
+    if (normalizedTarget) {
       showLivePreviewTab()
     }
 
     return
   }
 
-  $previewTarget.set(target)
+  $previewTarget.set(normalizedTarget)
 
-  if (target) {
+  if (normalizedTarget) {
     showLivePreviewTab()
   }
 }
@@ -257,7 +272,13 @@ function loadSessionPreviewRegistry(): SessionPreviewRegistry {
         continue
       }
 
-      const valid = records.filter(isPreviewRecord).slice(0, MAX_RECORDS_PER_SESSION)
+      const valid = records
+        .filter(isPreviewRecord)
+        .slice(0, MAX_RECORDS_PER_SESSION)
+        .map(record => ({
+          ...record,
+          normalized: normalizeDocumentPreviewKind(record.normalized)
+        }))
 
       if (valid.length > 0) {
         out[sessionId] = valid
@@ -319,20 +340,21 @@ export function registerSessionPreview(
     return null
   }
 
+  const canonicalTarget = normalizeDocumentPreviewKind(target)
   const current = $sessionPreviewRegistry.get()
   const now = Date.now()
   const records = current[id] ?? []
-  const existing = records.find(record => record.normalized.url === target.url)
-  const normalized = previewTargetForSource(target, source)
+  const existing = records.find(record => record.normalized.url === canonicalTarget.url)
+  const normalized = previewTargetForSource(canonicalTarget, source)
 
   const nextRecord: SessionPreviewRecord = {
     autoOpen: true,
     createdAt: now,
-    id: existing?.id || recordId(id, target),
+    id: existing?.id || recordId(id, canonicalTarget),
     normalized,
     sessionId: id,
     source,
-    target: rawTarget || target.source
+    target: rawTarget || canonicalTarget.source
   }
 
   $sessionPreviewRegistry.set(
@@ -351,13 +373,15 @@ export function setSessionPreviewTarget(
   source: PreviewRecordSource,
   rawTarget = target.source
 ): SessionPreviewRecord | null {
-  if (tryOpenFilePreview(target, source)) {
+  const normalizedTarget = normalizeDocumentPreviewKind(target)
+
+  if (tryOpenFilePreview(normalizedTarget, source)) {
     return null
   }
 
-  const record = registerSessionPreview(sessionId, target, source, rawTarget)
+  const record = registerSessionPreview(sessionId, normalizedTarget, source, rawTarget)
 
-  setPreviewTarget(record?.normalized ?? previewTargetForSource(target, source))
+  setPreviewTarget(record?.normalized ?? previewTargetForSource(normalizedTarget, source))
 
   return record
 }
