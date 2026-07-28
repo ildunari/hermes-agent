@@ -57,6 +57,31 @@ checks:
     path: agent/transports/chat_completions.py
     needles: [_is_vibeproxy_claude_family, _normalize_mcp_wire_tool_name, finalize_api_kwargs]
     description: vibeproxy reasoning fallback, mcp__ wire-name reverse cloak (pairs with the vibeproxy-provider plugin's outbound cloak), and the finalize_api_kwargs profile seam the plugin depends on
+  - id: bundled-image-skill-host-neutral-baoyu-article
+    path: optional-skills/creative/baoyu-article-illustrator/SKILL.md
+    needles: [Verify the host before generating., 127.0.0.1 resolves to whatever machine the client runs on]
+    description: bundled image-generation skill stays host-neutral (upstream-PR candidate)
+  - id: bundled-image-skill-host-neutral-baoyu-comic
+    path: optional-skills/creative/baoyu-comic/SKILL.md
+    needles: [Verify the host before generating., 127.0.0.1 resolves to whatever machine the client runs on]
+    description: bundled image-generation skill stays host-neutral (upstream-PR candidate)
+  - id: bundled-image-skill-host-neutral-pixel-art
+    path: optional-skills/creative/pixel-art/SKILL.md
+    needles: [Verify the host before generating., "~/.hermes/skills/creative/pixel-art/scripts"]
+    description: bundled pixel-art skill stays host-neutral (upstream-PR candidate)
+  - id: bundled-image-skill-host-neutral-stable-diffusion
+    path: optional-skills/mlops/stable-diffusion/SKILL.md
+    needles: [Verify the host before generating., 127.0.0.1 resolves to whatever machine the client runs on]
+    description: bundled image-generation skill stays host-neutral (upstream-PR candidate)
+  - id: bundled-image-skill-host-neutral-infographic
+    path: skills/creative/baoyu-infographic/SKILL.md
+    needles: [Verify the host before generating., 127.0.0.1 resolves to whatever machine the client runs on]
+    description: bundled image-generation skill stays host-neutral (upstream-PR candidate)
+  - id: bundled-image-skill-host-neutral-comfyui
+    path: skills/creative/comfyui/SKILL.md
+    needles: [Verify the host before generating., 127.0.0.1 resolves to whatever machine the client runs on]
+    description: bundled image-generation skill stays host-neutral (upstream-PR candidate)
+
   - id: provider-profile-finalize-hook
     path: providers/base.py
     needles: [finalize_api_kwargs]

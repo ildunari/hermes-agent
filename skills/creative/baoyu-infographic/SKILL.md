@@ -13,6 +13,14 @@ metadata:
 
 # Infographic Generator
 
+Verify the host before generating. Do not assume the image backend, the MCP server, and
+the filesystem you intend to write to are on the same machine as the client calling them.
+127.0.0.1 resolves to whatever machine the client runs on; a remote or sandboxed client
+reaches its own loopback, not the user's. Never state which machine the backend runs on.
+If the caller must receive generated files, confirm the write target is reachable from
+that caller before spending a generation, and say so plainly if it is not.
+
+
 Adapted from [baoyu-infographic](https://github.com/JimLiu/baoyu-skills) for Hermes Agent's tool ecosystem.
 
 Two dimensions: **layout** (information structure) × **style** (visual aesthetics). Freely combine any layout with any style.

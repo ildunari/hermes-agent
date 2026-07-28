@@ -15,6 +15,16 @@ metadata:
 
 # Pixel Art
 
+Verify the host before generating. Do not assume the image backend, the MCP server, and
+the filesystem you intend to write to are on the same machine as the client calling them.
+127.0.0.1 resolves to whatever machine the client runs on; a remote or sandboxed client
+reaches its own loopback, not the user's. Never state which machine the backend runs on.
+If the caller must receive generated files, confirm the write target is reachable from
+that caller before spending a generation, and say so plainly if it is not.
+
+Resolve every placeholder and `~` on the machine executing that step before use; never reuse a path merely because it appeared in an example.
+
+
 Convert any image into retro pixel art, then optionally animate it into a short
 MP4 or GIF with era-appropriate effects (rain, fireflies, snow, embers).
 
@@ -136,7 +146,9 @@ pixel_art("in.png", "out.png", preset="snes", palette="PICO_8", block=6)
 
 ```python
 import sys
-sys.path.insert(0, "/home/teknium/.hermes/skills/creative/pixel-art/scripts")
+from pathlib import Path
+
+sys.path.insert(0, str(Path("~/.hermes/skills/creative/pixel-art/scripts").expanduser()))
 from pixel_art import pixel_art
 from pixel_art_video import pixel_art_video
 
@@ -158,7 +170,7 @@ pixel_art_video(
 ### CLI
 
 ```bash
-cd /home/teknium/.hermes/skills/creative/pixel-art/scripts
+cd ~/.hermes/skills/creative/pixel-art/scripts
 
 python pixel_art.py in.jpg out.png --preset gameboy
 python pixel_art.py in.jpg out.png --preset snes --palette PICO_8 --block 6
