@@ -733,3 +733,36 @@ features:
         path: tools/fuzzy_match.py
         needles: [exact_indent_adjusted, starts_inside_indent, match_start]
         description: whitespace-prefixed exact matches consume the complete indentation prefix without weakening replace-all or ambiguity semantics
+
+  - id: desktop.document-side-panel-preview
+    title: Render PDF and DOCX attachments in the Desktop side panel
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - apps/desktop/src/app/chat/right-rail/preview-file.document.test.tsx
+      - apps/desktop/src/app/chat/right-rail/preview-file.tsx
+      - apps/desktop/src/components/assistant-ui/markdown-text.media.test.tsx
+      - apps/desktop/src/components/assistant-ui/markdown-text.tsx
+      - apps/desktop/src/components/chat/preview-attachment.tsx
+      - apps/desktop/src/lib/local-preview.test.ts
+      - apps/desktop/src/lib/local-preview.ts
+      - apps/desktop/src/store/preview.ts
+      - apps/desktop/src/vite-env.d.ts
+    collision_paths:
+      - apps/desktop/src/app/chat/right-rail/preview-file.tsx
+      - apps/desktop/src/components/assistant-ui/markdown-text.tsx
+      - apps/desktop/src/lib/local-preview.ts
+      - apps/desktop/src/store/preview.ts
+    tests:
+      - apps/desktop/src/app/chat/right-rail/preview-file.document.test.tsx
+      - apps/desktop/src/components/assistant-ui/markdown-text.media.test.tsx
+      - apps/desktop/src/lib/local-preview.test.ts
+    checks:
+      - id: desktop-document-preview-kinds
+        path: apps/desktop/src/lib/local-preview.ts
+        needles: [DOCUMENT_PREVIEW_KIND_BY_EXT, "'.docx': 'docx'", "'.pdf': 'pdf'"]
+        description: PDF and DOCX paths retain visual preview classification
+      - id: desktop-document-preview-renderers
+        path: apps/desktop/src/app/chat/right-rail/preview-file.tsx
+        needles: [DocumentPreview, PdfPreview, mammoth.convertToHtml, DOMPurify.sanitize, mediaStreamUrl]
+        description: side panel renders sanitized DOCX HTML and streamed local or authenticated remote PDFs

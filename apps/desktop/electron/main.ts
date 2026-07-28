@@ -1304,6 +1304,12 @@ const MEDIA_MIME_TYPES = {
 }
 
 const PREVIEW_HTML_EXTENSIONS = new Set(['.html', '.htm'])
+
+const PREVIEW_DOCUMENT_KIND_BY_EXT = new Map([
+  ['.docx', 'docx'],
+  ['.pdf', 'pdf']
+])
+
 const PREVIEW_WATCH_DEBOUNCE_MS = 120
 const LOCAL_PREVIEW_HOSTS = new Set(['0.0.0.0', '127.0.0.1', '::1', '[::1]', 'localhost'])
 const TEXT_PREVIEW_MAX_BYTES = 512 * 1024
@@ -1425,10 +1431,12 @@ app.setAboutPanelOptions({
 // range-aware playback. Must be registered before the app is ready.
 const MEDIA_PROTOCOL = 'hermes-media'
 
-// Only audio/video may be streamed. Without this the handler would read any
-// non-blocklisted local file (no size cap) for any `fetch(hermes-media://…)`.
+// Only explicitly previewable binary formats may be streamed. Without this the
+// handler would read any non-blocklisted local file (no size cap) for any
+// `fetch(hermes-media://…)`.
 const STREAMABLE_MEDIA_EXTS = new Set([
   '.avi',
+  '.docx',
   '.flac',
   '.m4a',
   '.mkv',
@@ -1437,6 +1445,7 @@ const STREAMABLE_MEDIA_EXTS = new Set([
   '.mp4',
   '.ogg',
   '.opus',
+  '.pdf',
   '.wav',
   '.webm'
 ])
@@ -5205,7 +5214,10 @@ async function previewFileTarget(rawTarget, baseDir) {
   const metadata = previewFileMetadata(resolved, mimeType)
   const isHtml = PREVIEW_HTML_EXTENSIONS.has(ext)
   const isImage = mimeType.startsWith('image/')
-  const previewKind = isHtml ? 'html' : isImage ? 'image' : metadata.binary ? 'binary' : 'text'
+
+  const previewKind =
+    PREVIEW_DOCUMENT_KIND_BY_EXT.get(ext) ||
+    (isHtml ? 'html' : isImage ? 'image' : metadata.binary ? 'binary' : 'text')
 
   return {
     binary: metadata.binary,

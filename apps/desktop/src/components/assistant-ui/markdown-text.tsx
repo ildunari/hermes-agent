@@ -17,6 +17,7 @@ import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { detectArtifact } from '@/lib/artifact-detect'
 import { normalizeExternalUrl, openExternalLink, PrettyLink } from '@/lib/external-link'
 import { createMemoizedMathPlugin } from '@/lib/katex-memo'
+import { isVisualDocumentPath } from '@/lib/local-preview'
 import { parseMarkdownIntoBlocksCached } from '@/lib/markdown-blocks'
 import { preprocessMarkdown } from '@/lib/markdown-preprocess'
 import {
@@ -228,7 +229,11 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
   const mediaPath = mediaPathFromMarkdownHref(href)
 
   if (mediaPath) {
-    return <MediaAttachment path={mediaPath} />
+    return isVisualDocumentPath(mediaPath) ? (
+      <PreviewAttachment target={mediaPath} />
+    ) : (
+      <MediaAttachment path={mediaPath} />
+    )
   }
 
   const previewTarget = previewTargetFromMarkdownHref(href)

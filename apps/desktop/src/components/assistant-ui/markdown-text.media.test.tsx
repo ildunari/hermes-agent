@@ -50,3 +50,19 @@ describe('MarkdownTextContent remote images', () => {
     })
   })
 })
+
+describe('MarkdownTextContent document attachments', () => {
+  it.each(['report.docx', 'paper.pdf'])('offers %s in the preview side panel instead of opening it externally', name => {
+    const path = `/tmp/${name}`
+
+    render(
+      <MarkdownTextContent
+        isRunning={false}
+        text={`[File: ${name}](#media:${encodeURIComponent(path)})`}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'Open preview' })).toBeTruthy()
+    expect(screen.getByText(name)).toBeTruthy()
+  })
+})

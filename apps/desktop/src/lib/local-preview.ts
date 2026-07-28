@@ -4,6 +4,11 @@ import type { PreviewTarget } from '@/store/preview'
 const HTML_EXTENSIONS = new Set(['.htm', '.html'])
 const IMAGE_EXTENSIONS = new Set(['.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.webp'])
 
+const DOCUMENT_PREVIEW_KIND_BY_EXT = {
+  '.docx': 'docx',
+  '.pdf': 'pdf'
+} as const
+
 const LANGUAGE_BY_EXT: Record<string, string> = {
   '.c': 'c',
   '.conf': 'ini',
@@ -50,6 +55,10 @@ function extension(value: string) {
   return idx >= 0 ? clean.slice(idx).toLowerCase() : ''
 }
 
+export function isVisualDocumentPath(value: string): boolean {
+  return extension(value) in DOCUMENT_PREVIEW_KIND_BY_EXT
+}
+
 function joinPath(base: string, rel: string) {
   if (!base) {
     return rel
@@ -93,6 +102,7 @@ export function localPreviewTarget(rawTarget: string, cwd?: string | null): Prev
   const ext = extension(path)
   const isHtml = HTML_EXTENSIONS.has(ext)
   const isImage = IMAGE_EXTENSIONS.has(ext)
+  const documentKind = DOCUMENT_PREVIEW_KIND_BY_EXT[ext as keyof typeof DOCUMENT_PREVIEW_KIND_BY_EXT]
 
   return {
     kind: 'file',
@@ -102,7 +112,7 @@ export function localPreviewTarget(rawTarget: string, cwd?: string | null): Prev
     // Renderer fallback can't stat/sniff without reading; assume text unless
     // image/html extension says otherwise. LocalFilePreview still guards
     // binary/large files when readFileText/readFileDataUrl returns metadata.
-    previewKind: isHtml ? 'html' : isImage ? 'image' : 'text',
+    previewKind: documentKind || (isHtml ? 'html' : isImage ? 'image' : 'text'),
     source: raw,
     url: pathToFileUrl(path)
   }
