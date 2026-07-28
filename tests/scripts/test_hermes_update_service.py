@@ -636,6 +636,35 @@ def test_interrupted_desktop_swap_preserves_prior(tmp_path: Path) -> None:
     assert (prior / "marker").read_text(encoding="utf-8") == "old"
 
 
+def test_desktop_backup_pruning_keeps_only_current_rollback(tmp_path: Path) -> None:
+    applications = tmp_path / "Applications"
+    user_applications = tmp_path / "User Applications"
+    applications.mkdir()
+    user_applications.mkdir()
+    current = applications / ".Hermes.update-prior-current.app"
+    obsolete = [
+        applications / ".Hermes.update-prior-old.app",
+        applications / ".Hermes.app.old-20260722T012018Z",
+        applications / ".Hermes.prior-dup-fix.app",
+        applications / ".Hermes.app.pre-update-smart",
+        user_applications / "Hermes.app.backup-20260715-193110",
+    ]
+    live = applications / "Hermes.app"
+    for path in [current, *obsolete, live]:
+        path.mkdir()
+
+    removed = SERVICE.prune_desktop_backup_apps(
+        applications,
+        user_applications,
+        keep=frozenset({current}),
+    )
+
+    assert set(removed) == set(obsolete)
+    assert current.is_dir()
+    assert live.is_dir()
+    assert all(not path.exists() for path in obsolete)
+
+
 def test_abort_is_ignored_after_studio_activation(tmp_path: Path) -> None:
     run_id = "20260718T120000Z-333333333333"
     make_ledger(tmp_path, run_id)

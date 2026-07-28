@@ -1349,6 +1349,43 @@ def identity_matches(actual: dict[str, str], expected: dict[str, str]) -> bool:
     return all(actual.get(key) == value for key, value in expected.items())
 
 
+def prune_desktop_backup_apps(
+    applications_dir: Path,
+    user_applications_dir: Path,
+    *,
+    keep: frozenset[Path] = frozenset(),
+) -> list[Path]:
+    """Remove obsolete Desktop rollback bundles while preserving this run's.
+
+    A failed update keeps its rollback bundle for diagnosis. The next install
+    replaces that recovery point, so older update-service and legacy manual
+    backups only consume disk and must not accumulate indefinitely.
+    """
+    patterns = (
+        (applications_dir, ".Hermes.update-prior-*.app"),
+        (applications_dir, ".Hermes.app.old-*"),
+        (applications_dir, ".Hermes.prior-dup-fix.app"),
+        (applications_dir, ".Hermes.app.pre-update-smart"),
+        (user_applications_dir, "Hermes.app.backup-*"),
+    )
+    preserved = {path.resolve() for path in keep}
+    removed: list[Path] = []
+    for root, pattern in patterns:
+        if not root.is_dir():
+            continue
+        for path in root.glob(pattern):
+            if path.resolve() in preserved:
+                continue
+            if path.is_symlink():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+            else:
+                continue
+            removed.append(path)
+    return removed
+
+
 def swap_desktop_apps(staging: Path, installed: Path, prior: Path) -> None:
     if not staging.is_dir():
         raise RuntimeError("Desktop staging artifact missing")
@@ -2121,6 +2158,11 @@ def deploy(
         actual = desktop_identity(artifact)
         if not identity_matches(actual, expected_identity):
             raise RuntimeError("Desktop artifact identity changed after build")
+        prune_desktop_backup_apps(
+            Path("/Applications"),
+            Path.home() / "Applications",
+            keep=frozenset({prior}),
+        )
         staging = Path(f"/Applications/.Hermes.update-staging-{run_id}.app")
         if staging.exists():
             shutil.rmtree(staging)
