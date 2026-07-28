@@ -7559,11 +7559,11 @@ def test_command_dispatch_resolves_skill_aliases(monkeypatch):
     )
 
     assert resp is not None
-    assert resp["result"] == {
-        "type": "skill",
-        "message": "loaded:/claude-km:review it:",
-        "name": "claude_KM",
-    }
+    # Skill dispatch may also include presentation-only metadata for clients.
+    # This contract is about alias resolution and the model-facing invocation.
+    assert resp["result"]["type"] == "skill"
+    assert resp["result"]["message"] == "loaded:/claude-km:review it:"
+    assert resp["result"]["name"] == "claude_KM"
 
 
 def test_plugins_list_surfaces_loader_error(monkeypatch):
