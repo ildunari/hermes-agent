@@ -170,7 +170,7 @@ describe('desktop slash command curation', () => {
     expect(resolveDesktopCommand('/update-smart')?.surface).toEqual({ kind: 'exec' })
     // Free-form trailing text is an agent instruction, not a structured option
     // that should be folded into the non-editable slash-command pill.
-    expect(resolveDesktopCommand('/update-smart')?.args).not.toBe(true)
+    expect('args' in (resolveDesktopCommand('/update-smart') ?? {})).toBe(false)
 
     expect(isDesktopSlashCommand('/update_smart')).toBe(true)
     expect(isDesktopSlashSuggestion('/update_smart')).toBe(false)
