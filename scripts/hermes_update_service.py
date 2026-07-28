@@ -1179,20 +1179,25 @@ def dependency_manifests_changed(changed: list[str]) -> bool:
 def effective_validation(
     ledger: dict[str, Any], required: bool, reason: str
 ) -> tuple[bool, str]:
-    """Apply an operator's audited curated-override to a full-suite escalation.
+    """Keep service updates on bounded validation unless explicitly overridden.
 
-    ``curated_override`` is set only by an explicit ``request start
-    --curated-override <reason>`` from an attended operator who inspected the
-    escalation trigger (e.g. a 3-line conftest scrub-list addition on a busy
-    upstream day). The suppression and both reasons land in the ledger so the
-    decision is auditable; an empty/absent override never suppresses.
+    Automatic full-suite escalation has repeatedly turned routine updates into
+    multi-hour runs and then failed from host contention rather than product
+    regressions.  ``full_validation_required`` remains a risk classifier, but
+    the transactional service records its recommendation and stays on the
+    curated/carry/language-specific lanes.  A full suite is an attended,
+    separately-invoked diagnostic, never a hidden phase of an update.
+
+    ``curated_override`` remains useful as the operator's audited explanation;
+    absent one, the service records that its bounded-validation policy made the
+    decision.
     """
     if not required:
         return False, reason
     override = str(ledger.get("curated_override") or "").strip()
     if override:
         return False, f"CURATED-OVERRIDE({override}); suppressed: {reason}"
-    return True, reason
+    return False, f"CURATED-DEFAULT; full-suite recommendation suppressed: {reason}"
 
 
 def full_validation_required(

@@ -779,11 +779,13 @@ def test_full_validation_required_gates() -> None:
 
 
 def test_effective_validation_curated_override() -> None:
-    # No override → escalation passes through untouched.
-    assert SERVICE.effective_validation({}, True, "validation harness changed") == (
-        True,
-        "validation harness changed",
+    # Automatic risk classification is recorded but never launches the
+    # multi-hour suite as a hidden update phase.
+    required, reason = SERVICE.effective_validation(
+        {}, True, "validation harness changed"
     )
+    assert required is False
+    assert "CURATED-DEFAULT" in reason and "validation harness changed" in reason
     # Operator override suppresses but records both reasons for audit.
     required, reason = SERVICE.effective_validation(
         {"curated_override": "conftest change is 3 env names; inspected"},
@@ -792,10 +794,13 @@ def test_effective_validation_curated_override() -> None:
     )
     assert required is False
     assert "CURATED-OVERRIDE" in reason and "tests/conftest.py" in reason
-    # Blank override never suppresses.
-    assert SERVICE.effective_validation(
+    # Blank override falls back to the bounded default rather than reopening
+    # the accidental full-suite path.
+    required, reason = SERVICE.effective_validation(
         {"curated_override": "   "}, True, "x"
-    ) == (True, "x")
+    )
+    assert required is False
+    assert "CURATED-DEFAULT" in reason
     # Override is inert when no escalation fired.
     assert SERVICE.effective_validation(
         {"curated_override": "reason"}, False, ""
