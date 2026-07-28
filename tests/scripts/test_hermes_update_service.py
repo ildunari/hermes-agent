@@ -1134,6 +1134,16 @@ def test_validation_env_scoping_signals_in_source() -> None:
     assert bash_check.returncode == 0, bash_check.stderr
 
 
+def test_validation_isolates_tui_gateway_suite_from_parallel_group() -> None:
+    script = SCRIPT.parent / "run_update_smart_client_validation.sh"
+    shell_source = script.read_text(encoding="utf-8")
+
+    isolated = '"$TEST_RUNNER" -j 1 tests/test_tui_gateway_server.py -q'
+    assert shell_source.count("tests/test_tui_gateway_server.py") == 1
+    assert isolated in shell_source
+    assert shell_source.index(isolated) < shell_source.index('"$TEST_RUNNER" -j 2')
+
+
 def test_retire_refuses_non_terminal_run(tmp_path: Path) -> None:
     run_id = "20260723T120000Z-aaaaaaaaaaa1"
     make_ledger(tmp_path, run_id)  # status RUNNING

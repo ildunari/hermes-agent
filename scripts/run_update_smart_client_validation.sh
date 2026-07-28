@@ -56,12 +56,17 @@ if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' run_agent.py gateway/run.py gatewa
 fi
 
 echo "[4/8] session store and profile lineage tests"
+# Keep the large gateway-server suite out of the parallel group. It normally
+# finishes in under a minute by itself, but repeatedly stalled at ~80% while
+# sharing the validation host with another pytest subprocess and hit the
+# per-file timeout. Serial isolation removes that resource-contention path
+# without weakening coverage or globally slowing the test runner.
+"$TEST_RUNNER" -j 1 tests/test_tui_gateway_server.py -q
 "$TEST_RUNNER" -j 2 \
   tests/gateway/test_session_store_lock_io.py \
   tests/gateway/test_async_session_store.py \
   tests/gateway/test_session.py \
   tests/gateway/test_session_hygiene.py \
-  tests/test_tui_gateway_server.py \
   tests/tools/test_delegate.py \
   tests/tools/test_session_search.py \
   tests/agent/test_shell_hooks.py \
