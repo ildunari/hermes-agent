@@ -42,7 +42,7 @@ checks:
     needles: [POSITION IS LOAD-BEARING, "\"vibeproxy\": ["]
     description: vibeproxy dict position ahead of anthropic drives bare-alias routing to the local proxy; do not reorder or enroll in _BORROWED_MODEL_PROVIDERS (refuted 2026-07-23)
   - id: vibeproxy-alias-guard-tests
-    path: tests/test_tui_gateway_server.py
+    path: tests/test_vibeproxy_alias_priority.py
     needles: [test_startup_runtime_resolves_short_alias_without_network, test_startup_runtime_does_not_call_network_detector]
     description: guard tests for vibeproxy short-alias default routing
   - id: vibeproxy-credential-plumbing
@@ -663,11 +663,11 @@ features:
   - id: models.vibeproxy-alias-priority
     title: VibeProxy wins bare Claude-family aliases under provider auto
     owner_paths:
-      - tests/test_tui_gateway_server.py
+      - tests/test_vibeproxy_alias_priority.py
     collision_paths:
       - hermes_cli/models.py
     tests:
-      - tests/test_tui_gateway_server.py
+      - tests/test_vibeproxy_alias_priority.py
     checks:
       - id: vibeproxy-ahead-of-anthropic
         path: hermes_cli/models.py
