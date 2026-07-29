@@ -68,3 +68,23 @@ def test_prepare_spoken_text_polish_edge_cases():
     assert "and/or" in prepare_spoken_text("choose and/or option")
     assert "N/A" in prepare_spoken_text("status N/A here")
     assert "2026/06/02" in prepare_spoken_text("due 2026/06/02 ok")
+
+
+def test_prepare_spoken_text_removes_delivery_metadata_and_local_artifact_paths():
+    raw = """Fixed and verified.
+
+- output: `/Users/Kosta/.hermes/audio_cache/tts_20260701_075402.ogg`
+- voice-compatible delivery worked: `[[audio_as_voice]]`
+MEDIA:/Users/Kosta/.hermes/audio_cache/tts_20260701_075402.ogg
+- generated 10.0 seconds of audio in 2.69 seconds wall time
+"""
+
+    spoken = prepare_spoken_text(raw, max_chars=None)
+
+    assert "10.0 seconds" in spoken
+    assert "2.69 seconds" in spoken
+    assert "the generated audio file" in spoken
+    assert "/Users/Kosta" not in spoken
+    assert "tts_20260701_075402" not in spoken
+    assert "MEDIA:" not in spoken
+    assert "[[audio_as_voice]]" not in spoken

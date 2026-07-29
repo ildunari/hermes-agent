@@ -3064,50 +3064,6 @@ class TestWebServerEndpoints:
         # The handler streams the bytes back and removes the temp file.
         assert not audio_file.exists()
 
-    def test_speak_text_uses_spoken_formatter_only_when_enabled(self, monkeypatch, tmp_path):
-        import hermes_cli.web_server as web_server
-        import tools.tts_text_formatter as tts_text_formatter
-        import tools.tts_tool as tts_tool
-
-        audio_file = tmp_path / "speech.wav"
-        audio_file.write_bytes(b"RIFFfake-audio-bytes")
-        seen = {}
-
-        def fake_formatter(text, **kwargs):
-            seen["formatter"] = {"text": text, **kwargs}
-            return "formatted for speech"
-
-        def fake_tts(text):
-            seen["tts"] = text
-            return json.dumps({
-                "success": True,
-                "file_path": str(audio_file),
-                "provider": "test",
-            })
-
-        monkeypatch.setattr(
-            web_server,
-            "load_config",
-            lambda: {"tts": {"spoken_formatter": {"enabled": True, "timeout": "8.5"}}},
-        )
-        monkeypatch.setattr(tts_text_formatter, "prepare_spoken_text", fake_formatter)
-        monkeypatch.setattr(tts_tool, "text_to_speech_tool", fake_tts)
-
-        resp = self.client.post(
-            "/api/audio/speak",
-            json={"text": "raw markdown", "source": "read-aloud", "rewrite": "auto"},
-        )
-
-        assert resp.status_code == 200
-        assert seen["formatter"] == {
-            "text": "raw markdown",
-            "source": "read-aloud",
-            "rewrite": "auto",
-            "timeout": 8.5,
-            "model_enabled": True,
-        }
-        assert seen["tts"] == "formatted for speech"
-
     def test_speak_text_requires_nonempty_text(self):
         resp = self.client.post("/api/audio/speak", json={"text": "   "})
         assert resp.status_code == 400

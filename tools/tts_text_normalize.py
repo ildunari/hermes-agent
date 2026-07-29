@@ -33,6 +33,15 @@ _MD_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+", flags=re.MULTILINE)
 _MD_HR_RE = re.compile(r"^\s*[-*_]{3,}\s*$", flags=re.MULTILINE)
 _MD_TABLE_PIPE_RE = re.compile(r"\s*\|\s*")
 _URL_RE = re.compile(r"https?://\S+")
+_MEDIA_LINE_RE = re.compile(r"(?im)^\s*(?:\[\[audio_as_voice\]\]\s*)?MEDIA:\S+\s*$")
+_MEDIA_REF_RE = re.compile(r"\bMEDIA:\S+", flags=re.IGNORECASE)
+_MEDIA_TOKEN_RE = re.compile(r"\[\[(?:audio_as_voice|as_document)\]\]")
+_TTS_AUDIO_PATH_RE = re.compile(
+    r"(?:/Users/|~/)[^\s`'\")\]]*tts_\d{8}_\d{6}\.(?:mp3|wav|ogg|opus|flac)",
+    flags=re.IGNORECASE,
+)
+_TTS_FILENAME_RE = re.compile(r"\btts_\d{8}_\d{6}\.(?:mp3|wav|ogg|opus|flac)\b", flags=re.IGNORECASE)
+_LOCAL_PATH_RE = re.compile(r"(?:/Users/[^\s`'\")\]]+|~/(?:[^\s`'\")\]]+))")
 
 # Broad emoji / pictograph cleanup.  Voice providers vary a lot here; most read
 # emojis as awkward labels, so keep the speech script calm and literal.
@@ -238,6 +247,15 @@ def strip_nonspoken_blocks(text: str) -> str:
     text = _THINK_BLOCK_RE.sub(" ", text)
     text = _THINK_BLOCK_OPEN_RE.sub(" ", text)
     text = _VERIFIER_FOOTER_RE.sub(" ", text)
+    # Delivery directives and local artifact paths are UI/runtime metadata,
+    # not prose. Keep the useful surrounding sentence but never read the raw
+    # MEDIA token, generated filename, or host path aloud.
+    text = _MEDIA_LINE_RE.sub(" ", text)
+    text = _MEDIA_REF_RE.sub(" ", text)
+    text = _MEDIA_TOKEN_RE.sub(" ", text)
+    text = _TTS_AUDIO_PATH_RE.sub("the generated audio file", text)
+    text = _TTS_FILENAME_RE.sub("the generated audio file", text)
+    text = _LOCAL_PATH_RE.sub("the generated file", text)
     return text
 
 

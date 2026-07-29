@@ -116,8 +116,8 @@ checks:
     description: RETIRED 2026-07-23 — Discord live voice/barge-in/busy-audio carry moved to hermes-kosta-plugins discord_override; core file reverted to pristine upstream. Entry removable once the path drops out of changed_paths.
   - id: spoken-text-formatting
     path: hermes_cli/web_server.py
-    needles: [prepare_spoken_text, spoken_formatter]
-    description: feature-gated desktop spoken-text formatting
+    needles: []
+    description: RETIRED 2026-07-29 — upstream shared TTS normalization now owns deterministic spoken-text cleanup; the slim-only model rewrite layer and duplicate formatter were removed.
   - id: desktop-read-aloud-autoplay
     path: apps/desktop/electron/main.ts
     needles: [autoplay-policy, no-user-gesture-required]

@@ -493,7 +493,10 @@ class TestRunCommandTts:
 
         result = _run_command_tts(
             _shell_command(sys.executable, "-u", str(script)),
-            timeout=0.25,
+            # Each progress gap is 150 ms while total runtime is ~600 ms.
+            # Leave enough scheduler headroom for a loaded parallel test run;
+            # the test still proves that progress extends the idle deadline.
+            timeout=0.4,
         )
 
         assert result.returncode == 0

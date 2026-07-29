@@ -1574,23 +1574,12 @@ export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<Aud
   })
 }
 
-export type SpeechSource = 'read-aloud' | 'voice-conversation'
-
-export interface SpeakTextOptions {
-  rewrite?: 'auto' | 'off' | 'on'
-  source?: SpeechSource
-}
-
-export function speakText(text: string, options: SpeakTextOptions = {}): Promise<AudioSpeakResponse> {
+export function speakText(text: string): Promise<AudioSpeakResponse> {
   return window.hermesDesktop.api<AudioSpeakResponse>({
     ...profileScoped(),
     path: '/api/audio/speak',
     method: 'POST',
-    body: {
-      text,
-      ...(options.source ? { source: options.source } : {}),
-      ...(options.rewrite ? { rewrite: options.rewrite } : {})
-    },
+    body: { text },
     // TTS blocks until provider synthesis, file read, and base64 encoding
     // finish. Remote providers and large messages regularly exceed the
     // default 15s Electron backend timeout.

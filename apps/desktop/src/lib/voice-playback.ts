@@ -356,7 +356,7 @@ async function playSpeechDataUrl(
   options: VoicePlaybackOptions,
   isCurrent: () => boolean
 ): Promise<boolean> {
-  const response = await speakText(speakableText, { source: options.source })
+  const response = await speakText(speakableText)
 
   if (!isCurrent()) {
     return false

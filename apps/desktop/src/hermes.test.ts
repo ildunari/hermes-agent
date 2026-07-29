@@ -101,16 +101,16 @@ describe('Hermes REST helpers', () => {
     )
   })
 
-  it('uses a longer timeout and read-aloud metadata for speech synthesis', async () => {
+  it('uses a longer timeout for speech synthesis', async () => {
     api.mockResolvedValue({ ok: true, data_url: 'data:audio/wav;base64,AAAA' })
 
-    await speakText('hello there', { rewrite: 'auto', source: 'read-aloud' })
+    await speakText('hello there')
 
     expect(api).toHaveBeenCalledWith(
       expect.objectContaining({
         path: '/api/audio/speak',
         method: 'POST',
-        body: { text: 'hello there', source: 'read-aloud', rewrite: 'auto' },
+        body: { text: 'hello there' },
         timeoutMs: 180_000
       })
     )
