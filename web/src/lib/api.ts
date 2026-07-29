@@ -429,9 +429,6 @@ export const api = {
       ),
     );
   },
-      ),
-    );
-  },
   getSessionMessages: (id: string, profile = getManagementProfile()) =>
     fetchJSON<SessionMessagesResponse>(
       appendProfileParam(`/api/sessions/${encodeURIComponent(id)}/messages`, profile),
@@ -553,10 +550,6 @@ export const api = {
   getModelsAnalytics: (days: number, profile = getManagementProfile()) =>
     fetchJSON<ModelsAnalyticsResponse>(
       appendProfileParam(`/api/analytics/models?days=${days}`, profile),
-    ),
-  getSubscriptionUsage: (provider = "all") =>
-    fetchJSON<SubscriptionUsageResponse>(
-      `/api/subscription-usage?provider=${encodeURIComponent(provider)}`,
     ),
   getConfig: (profile = getManagementProfile()) =>
     fetchJSON<Record<string, unknown>>(appendProfileParam("/api/config", profile)),
@@ -2158,53 +2151,6 @@ export interface ProfileDescribeAutoResult {
   description_auto: boolean;
 }
 
-export interface SubscriptionUsageWindow {
-  usedPercent?: number | string | null;
-  used_percent?: number | string | null;
-  resetAt?: string | null;
-  reset_at?: string | null;
-  resetsAt?: string | null;
-  resets_at?: string | null;
-  label?: string | null;
-  detail?: string | null;
-  [key: string]: unknown;
-}
-
-export interface SubscriptionUsagePayload {
-  identity?: {
-    providerID?: string;
-    providerId?: string;
-    provider?: string;
-    [key: string]: unknown;
-  };
-  primary?: SubscriptionUsageWindow | null;
-  secondary?: SubscriptionUsageWindow | null;
-  tertiary?: SubscriptionUsageWindow | null;
-  windows?: SubscriptionUsageWindow[] | Record<string, SubscriptionUsageWindow>;
-  plan?: string | null;
-  title?: string | null;
-  [key: string]: unknown;
-}
-
-export interface SubscriptionUsageProvider {
-  provider?: string;
-  usage?: SubscriptionUsagePayload;
-  error?: string | { message?: string; [key: string]: unknown };
-  [key: string]: unknown;
-}
-
-export interface SubscriptionUsageResponse {
-  ok: boolean;
-  source: string;
-  provider?: string;
-  updatedAt?: string;
-  durationMs?: number;
-  okCount?: number;
-  errorCount?: number;
-  providers: SubscriptionUsageProvider[];
-  error?: string;
-  stderr?: string;
-}
 
 export interface ProfileInfo {
   name: string;

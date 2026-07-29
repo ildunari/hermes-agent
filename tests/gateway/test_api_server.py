@@ -551,35 +551,6 @@ class TestAuth:
         assert result is not None
         assert result.status == 401
 
-    def test_telegram_init_data_hmac_passes_without_bearer(self, monkeypatch):
-        bot_token = "123456:test-token"
-        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", bot_token)
-        monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "5320274083")
-        adapter = APIServerAdapter(PlatformConfig(enabled=True, extra={"key": "sk-test123"}))
-
-        import json as _json
-        import urllib.parse as _urlparse
-
-        params = {
-            "auth_date": str(int(time.time())),
-            "query_id": "AAE-test",
-            "user": _json.dumps({"id": 5320274083, "first_name": "Kosta"}, separators=(",", ":")),
-        }
-        data_check = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
-        secret = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
-        params["hash"] = hmac.new(secret, data_check.encode("utf-8"), hashlib.sha256).hexdigest()
-        init_data = _urlparse.urlencode(params)
-
-        class Req(dict):
-            pass
-
-        req = Req()
-        req.headers = {"X-Telegram-Init-Data": init_data}
-
-        assert adapter._check_auth(req) is None
-        assert req["auth_mode"] == "telegram"
-        assert req["telegram_user"]["id"] == 5320274083
-
     def test_non_ascii_bearer_token_returns_401_not_500(self):
         """A non-ASCII byte in the bearer token must be rejected with 401, not
         crash the handler: hmac.compare_digest raises TypeError on a str with

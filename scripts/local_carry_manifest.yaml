@@ -21,18 +21,14 @@ checks:
     path: hermes_cli/web_server.py
     needles: [register_instance, allowed_hosts, _configured_dashboard_allowed_hosts]
     description: dashboard callback and host allowlist
-  - id: provider-usage-component
-    path: web/src/components/ProviderUsagePanel.tsx
-    needles: []
-    description: provider usage component
   - id: provider-usage-mount
     path: web/src/App.tsx
-    needles: [ProviderUsagePanel]
-    description: provider usage mount
+    needles: []
+    description: RETIRED 2026-07-29 — dashboard plugin discovery now owns the provider usage tab.
   - id: subscription-usage-client
     path: web/src/lib/api.ts
-    needles: [subscription-usage]
-    description: subscription usage API client
+    needles: []
+    description: RETIRED 2026-07-29 — plugin UI uses the authenticated SDK fetch helper and namespaced backend.
   - id: rich-card-bluebubbles
     path: tools/send_message_tool.py
     needles: [rich_card, "platform_registry.get(\"bluebubbles\")"]
