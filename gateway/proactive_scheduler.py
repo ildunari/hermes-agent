@@ -51,6 +51,26 @@ _OUTCOME_VALENCE = {
 _OUTCOME_TEXT_LIMIT = 4000
 logger = logging.getLogger(__name__)
 
+_PROACTIVE_WAKE_MARKER = ".proactive-wake"
+
+
+def request_proactive_wake(profile_home: str | Path, *, slot_id: str) -> None:
+    """Wake the gateway watcher after externally arming immediate work."""
+    home = Path(profile_home)
+    temporary = home / f"{_PROACTIVE_WAKE_MARKER}.{uuid.uuid4().hex}.tmp"
+    temporary.write_text(f"{slot_id}\n", encoding="utf-8")
+    temporary.replace(home / _PROACTIVE_WAKE_MARKER)
+
+
+def consume_proactive_wake(profile_home: str | Path) -> bool:
+    """Consume one cross-process watcher wake request."""
+    marker = Path(profile_home) / _PROACTIVE_WAKE_MARKER
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS proactive_contact (
   contact_hash TEXT PRIMARY KEY,

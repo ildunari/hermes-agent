@@ -21,6 +21,7 @@ from gateway.proactive_scheduler import (
     ProactiveConfig,
     ProactiveScheduler,
     ProactiveStateStore,
+    request_proactive_wake,
 )
 
 _EXACT_CONTACT = {"poke": "kosta-owner"}
@@ -84,6 +85,7 @@ def arm_operator_smoke(
         replace_armed_slot=True,
         now=timestamp,
     )
+    request_proactive_wake(home, slot_id=slot_id)
     return {
         "armed": True,
         "slot_id": slot_id,
@@ -96,16 +98,24 @@ def arm_operator_smoke(
 
 def operator_smoke_status(*, profile_home: str | Path, slot_id: str) -> dict[str, Any]:
     home = Path(profile_home).expanduser().resolve()
-    with sqlite3.connect(home / "state.db") as con:
-        con.row_factory = sqlite3.Row
-        row = con.execute(
-            """SELECT s.status slot_status,s.reason slot_reason,
-                      d.state delivery_state,d.projection_state,d.transport_message_id,
-                      d.last_error_class
-               FROM proactive_slot s LEFT JOIN proactive_delivery d USING(slot_id)
-               WHERE s.slot_id=?""",
-            (slot_id,),
-        ).fetchone()
+    row = None
+    for attempt in range(5):
+        try:
+            with sqlite3.connect(home / "state.db", timeout=5) as con:
+                con.row_factory = sqlite3.Row
+                row = con.execute(
+                    """SELECT s.status slot_status,s.reason slot_reason,
+                              d.state delivery_state,d.projection_state,d.transport_message_id,
+                              d.last_error_class
+                       FROM proactive_slot s LEFT JOIN proactive_delivery d USING(slot_id)
+                       WHERE s.slot_id=?""",
+                    (slot_id,),
+                ).fetchone()
+            break
+        except sqlite3.OperationalError:
+            if attempt == 4:
+                raise
+            time.sleep(0.2 * (attempt + 1))
     if row is None:
         raise ValueError("operator smoke slot does not exist")
     result = {key: row[key] for key in row.keys()}

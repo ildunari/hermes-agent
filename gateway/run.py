@@ -9004,6 +9004,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+                from gateway.proactive_scheduler import consume_proactive_wake
+                if any(
+                    consume_proactive_wake(get_profile_dir(profile))
+                    for profile in ("poke", "guest")
+                ):
+                    break
 
     async def _run_startup_resume_event(
         self,

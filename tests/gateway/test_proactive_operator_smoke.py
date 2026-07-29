@@ -75,6 +75,7 @@ def test_command_arms_tagged_observe_slot_for_bound_exact_dm(tmp_path: Path):
     assert result["armed"] is True
     assert result["mode"] == "observe"
     assert result["operator_smoke"] is True
+    assert (tmp_path / ".proactive-wake").read_text(encoding="utf-8").strip() == result["slot_id"]
     slot = scheduler.get_slot(result["slot_id"])
     assert slot is not None
     assert slot["status"] == "armed"

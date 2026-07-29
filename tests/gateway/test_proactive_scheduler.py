@@ -31,8 +31,10 @@ from gateway.proactive_scheduler import (
     ProactiveStateStore,
     assert_no_profile_conflicts,
     classify_inbound_outcome,
+    consume_proactive_wake,
     handle_inbound,
     handle_inbound_async,
+    request_proactive_wake,
 )
 
 NOW = 1_800_000_000.0
@@ -43,6 +45,12 @@ ROUTE = {
     "user_id": "+15555550123",
     "session_id": "parent",
 }
+
+
+def test_proactive_wake_marker_is_cross_process_one_shot(tmp_path: Path):
+    request_proactive_wake(tmp_path, slot_id="operator-smoke-test")
+    assert consume_proactive_wake(tmp_path) is True
+    assert consume_proactive_wake(tmp_path) is False
 
 
 def config(**overrides) -> ProactiveConfig:
