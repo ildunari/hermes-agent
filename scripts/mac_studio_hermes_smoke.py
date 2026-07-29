@@ -188,9 +188,8 @@ def main() -> int:
         },
         "health": {
             "webui_deep": http_json("http://127.0.0.1:8787/health?deep=1"),
-            "default_gateway": http_json("http://127.0.0.1:8642/health/detailed"),
-            "gpt_gateway": http_json("http://127.0.0.1:8643/health/detailed"),
-            "api_auth_gate": http_json("http://127.0.0.1:8643/v1/models"),
+            "root_multiplex_gateway": http_json("http://127.0.0.1:8642/health/detailed"),
+            "api_auth_gate": http_json("http://127.0.0.1:8642/v1/models"),
             "chrome_cdp": http_json("http://127.0.0.1:9222/json/version"),
             "cli_proxy_8318": http_json("http://127.0.0.1:8318/v1/models"),
         },

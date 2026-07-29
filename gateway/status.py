@@ -1027,6 +1027,7 @@ def write_runtime_status(
     error_message: Any = _UNSET,
     platform_metadata: Any = _UNSET,
     served_profiles: Any = _UNSET,
+    status_path: Optional[Path] = None,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status.
 
@@ -1054,7 +1055,11 @@ def write_runtime_status(
     # an flock a non-owner reading count 0 could atomically replace a file the
     # owner just wrote count 1 into (Codex batch-2 review P1-1). The in-process
     # lock still guards the callable recount ordering within this process.
-    with _RUNTIME_STATUS_WRITE_LOCK, _runtime_status_file_lock():
+    path = status_path or _get_runtime_status_path()
+    # An explicit path is for multiplexed profile platform visibility only.
+    # Gateway identity/lifecycle remains owned by the process HERMES_HOME.
+    platform_only = status_path is not None and path != _get_runtime_status_path()
+    with _RUNTIME_STATUS_WRITE_LOCK, _runtime_status_file_lock(path):
         _write_runtime_status_locked(
             gateway_state=gateway_state,
             exit_reason=exit_reason,
@@ -1066,6 +1071,8 @@ def write_runtime_status(
             error_message=error_message,
             platform_metadata=platform_metadata,
             served_profiles=served_profiles,
+            path=path,
+            platform_only=platform_only,
         )
 
 
@@ -1073,7 +1080,7 @@ _RUNTIME_STATUS_WRITE_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
-def _runtime_status_file_lock():
+def _runtime_status_file_lock(path: Optional[Path] = None):
     """Cross-process exclusive lock guarding the runtime-status read-merge-write.
 
     Uses an flock on a sidecar ``.lock`` next to gateway_state.json so writers
@@ -1081,7 +1088,7 @@ def _runtime_status_file_lock():
     (unsupported FS, permission), fall back to no cross-process guard rather
     than blocking a status write — the in-process lock still applies.
     """
-    lock_path = _get_runtime_status_path().with_suffix(".lock")
+    lock_path = (path or _get_runtime_status_path()).with_suffix(".lock")
     handle = None
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1116,6 +1123,8 @@ def _write_runtime_status_locked(
     error_message: Any = _UNSET,
     platform_metadata: Any = _UNSET,
     served_profiles: Any = _UNSET,
+    path: Optional[Path] = None,
+    platform_only: bool = False,
 ) -> None:
     if callable(active_agents):
         try:
@@ -1124,9 +1133,9 @@ def _write_runtime_status_locked(
             # A failed count is UNKNOWN, never idle: skip the write rather
             # than persist a fabricated value a drain poller would trust.
             active_agents = _UNSET
-    path = _get_runtime_status_path()
+    path = path or _get_runtime_status_path()
     existing = _read_json_file(path)
-    is_owner = _process_owns_runtime_status(existing)
+    is_owner = False if platform_only else _process_owns_runtime_status(existing)
     if is_owner:
         payload = existing or _build_runtime_status_record()
     elif existing is not None:
@@ -1188,6 +1197,15 @@ def _write_runtime_status_locked(
         platform_payload["updated_at"] = _utc_now_iso()
         payload["platforms"][platform] = platform_payload
 
+    # A targeted multiplex-profile write must never preserve stale lifecycle
+    # claims from an old standalone gateway for that profile.
+    if platform_only:
+        payload = {
+            "pid": None,
+            "argv": None,
+            "start_time": None,
+            "platforms": payload.get("platforms", {}),
+        }
     _write_json_file(path, payload)
 
 

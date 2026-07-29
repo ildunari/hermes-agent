@@ -297,10 +297,18 @@ def _multiplex_gateway_config() -> Any | None:
     try:
         from hermes_cli import managed_scope
         from hermes_cli.config import load_config_readonly, read_raw_config
+        from hermes_cli.profiles import get_profile_dir
         from utils import is_truthy_value
 
-        config = load_config_readonly()
-        raw_config = managed_scope.apply_managed_overlay(read_raw_config())
+        # Restart topology belongs to the root gateway, not to whichever named
+        # profile happened to invoke the helper. WebUI/Desktop services export a
+        # profile-scoped HERMES_HOME; reading that path made multiplex installs
+        # resurrect retired named gateways and verify retired ports.
+        root_config_path = get_profile_dir("default") / "config.yaml"
+        config = load_config_readonly(config_path=root_config_path)
+        raw_config = managed_scope.apply_managed_overlay(
+            read_raw_config(config_path=root_config_path)
+        )
     except Exception as exc:
         _append_log(
             "restart topology config probe failed; preserving legacy profile targets "

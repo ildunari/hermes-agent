@@ -154,6 +154,7 @@ class _SecondaryRecoveryAdapter:
     platform = Platform.DISCORD
 
     def __init__(self, *, retryable=True):
+        self.has_fatal_error = True
         self.fatal_error_retryable = retryable
         self.fatal_error_code = "transport_stale" if retryable else "auth_failed"
         self.fatal_error_message = "Gateway transport stale"
@@ -165,6 +166,9 @@ class _SecondaryRecoveryAdapter:
 
     def set_message_handler(self, handler):
         self.message_handler = handler
+
+    def set_ingress_handler(self, handler):
+        self.ingress_handler = handler
 
     def set_fatal_error_handler(self, handler):
         self.fatal_error_handler = handler
@@ -225,6 +229,44 @@ def _install_secondary_reconnect_context(monkeypatch, runner, adapter, scoped_ho
 
 
 class TestSecondaryProfileFatalRecovery:
+    @pytest.mark.asyncio
+    async def test_reconnect_disabled_platform_persists_terminal_state(self, monkeypatch):
+        runner = _secondary_recovery_runner()
+        updates = []
+        runner._update_platform_runtime_status = lambda *a, **kw: updates.append((a, kw))
+        monkeypatch.setattr(
+            "hermes_cli.profiles.get_profile_dir", lambda name: Path("/profiles") / name
+        )
+        monkeypatch.setattr(
+            "gateway.config.load_gateway_config",
+            lambda: GatewayConfig(
+                multiplex_profiles=True,
+                platforms={Platform.DISCORD: PlatformConfig(enabled=False)},
+            ),
+        )
+
+        await runner._run_secondary_profile_reconnect("reviewer", Platform.DISCORD)
+
+        assert updates[-1][1]["platform_state"] == "disabled"
+
+    @pytest.mark.asyncio
+    async def test_nonretryable_reconnect_persists_failed_state(self, monkeypatch):
+        runner = _secondary_recovery_runner()
+        replacement = _SecondaryRecoveryAdapter(retryable=False)
+        updates = []
+        runner._update_platform_runtime_status = lambda *a, **kw: updates.append((a, kw))
+        _install_secondary_reconnect_context(monkeypatch, runner, replacement)
+
+        async def connect(*_args, **_kwargs):
+            return False
+
+        monkeypatch.setattr(runner, "_connect_adapter_with_timeout", connect)
+        await runner._run_secondary_profile_reconnect("reviewer", Platform.DISCORD)
+
+        assert replacement.disconnected is True
+        assert updates[-1][1]["platform_state"] == "failed"
+        assert updates[-1][1]["error_code"] == "auth_failed"
+
     @pytest.mark.asyncio
     async def test_retryable_secondary_fatal_reconnects_with_its_profile_scope(
         self, monkeypatch
@@ -589,6 +631,9 @@ class TestSecondaryProfileConfigHandling:
             def set_message_handler(self, handler):
                 self.message_handler = handler
 
+            def set_ingress_handler(self, handler):
+                self.ingress_handler = handler
+
             def set_fatal_error_handler(self, handler):
                 self.fatal_error_handler = handler
 
@@ -661,6 +706,9 @@ class TestSecondaryProfileConfigHandling:
             platform = Platform.RELAY
 
             def set_message_handler(self, handler):
+                pass
+
+            def set_ingress_handler(self, handler):
                 pass
 
             def set_fatal_error_handler(self, handler):

@@ -69,6 +69,39 @@ def _pretend_foreign_pid_is_live(monkeypatch):
 
 
 class TestWriteRuntimeStatusOwnershipGuard:
+    def test_targeted_profile_platform_write_is_platform_only(self, tmp_path, monkeypatch):
+        root = tmp_path / "root"
+        profile = tmp_path / "profile"
+        root.mkdir()
+        profile.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(root))
+        status.write_pid_file()
+        target = profile / "gateway_state.json"
+        target.write_text(
+            json.dumps({
+                "pid": _FOREIGN_PID,
+                "gateway_state": "running",
+                "active_agents": 9,
+                "platforms": {"telegram": {"state": "failed"}},
+            }),
+            encoding="utf-8",
+        )
+
+        status.write_runtime_status(
+            platform="telegram",
+            platform_state="connected",
+            gateway_state="draining",
+            active_agents=4,
+            status_path=target,
+        )
+
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        assert payload["platforms"]["telegram"]["state"] == "connected"
+        assert payload["pid"] is None
+        assert "gateway_state" not in payload
+        assert "active_agents" not in payload
+        assert "updated_at" not in payload
+
     def test_foreign_process_merges_platform_state_without_clobbering_identity(
         self, tmp_path, monkeypatch
     ):

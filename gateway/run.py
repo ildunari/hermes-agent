@@ -6598,6 +6598,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         platform_state: Optional[str] = None,
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
+        profile_home: Optional["Path"] = None,
     ) -> None:
         try:
             from gateway.status import write_runtime_status
@@ -6606,6 +6607,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 platform_state=platform_state,
                 error_code=error_code,
                 error_message=error_message,
+                status_path=(Path(profile_home) / "gateway_state.json") if profile_home else None,
             )
         except Exception:
             pass
@@ -11505,6 +11507,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     await self._bounded_adapter_teardown(
                         adapter, platform, profile=_prof
                     )
+                    try:
+                        from hermes_cli.profiles import get_profile_dir
+                        self._update_platform_runtime_status(
+                            platform.value,
+                            platform_state="disconnected",
+                            error_code=None,
+                            error_message=None,
+                            profile_home=get_profile_dir(_prof),
+                        )
+                    except Exception:
+                        pass
                 _amap.clear()
             if hasattr(self, "_profile_adapters"):
                 self._profile_adapters.clear()
@@ -11815,6 +11828,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         connected = 0
         for platform, platform_config in profile_cfg.platforms.items():
             if not platform_config.enabled:
+                self._update_platform_runtime_status(
+                    platform.value,
+                    platform_state="disabled",
+                    error_code=None,
+                    error_message=None,
+                    profile_home=profile_home,
+                )
                 continue
             # Relay is shared process-level ingress in multiplex mode. The
             # active profile owns the one connection; connector-stamped
@@ -11828,6 +11848,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 with _profile_runtime_scope(profile_home):
                     adapter = self._create_adapter(platform, platform_config)
             except Exception as e:
+                self._update_platform_runtime_status(
+                    platform.value,
+                    platform_state="failed",
+                    error_code=type(e).__name__,
+                    error_message=str(e),
+                    profile_home=profile_home,
+                )
                 logger.error(
                     "[MULTIPLEX] Profile '%s': _create_adapter('%s') raised %s",
                     profile_name,
@@ -11837,6 +11864,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 continue
             if not adapter:
+                self._update_platform_runtime_status(
+                    platform.value,
+                    platform_state="failed",
+                    error_code="adapter_unavailable",
+                    error_message="Adapter creation returned no adapter",
+                    profile_home=profile_home,
+                )
                 logger.warning(
                     "[MULTIPLEX] Profile '%s': skipping platform '%s' - adapter creation returned None",
                     profile_name,
@@ -11849,6 +11883,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if fp is not None:
                 owner = claimed.get((platform, fp))
                 if owner is not None:
+                    self._update_platform_runtime_status(
+                        platform.value,
+                        platform_state="failed",
+                        error_code="duplicate_credential",
+                        error_message=f"Credential is already owned by profile '{owner}'",
+                        profile_home=profile_home,
+                    )
                     logger.error(
                         "Profile '%s' and '%s' both configure %s with the same "
                         "credential — refusing to start the duplicate (a single "
@@ -11870,11 +11911,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if success:
                     profile_map[platform] = adapter
                     connected += 1
+                    self._update_platform_runtime_status(
+                        platform.value,
+                        platform_state="connected",
+                        error_code=None,
+                        error_message=None,
+                        profile_home=profile_home,
+                    )
                     logger.info("✓ %s connected (profile: %s)", platform.value, profile_name)
                 else:
+                    self._update_platform_runtime_status(
+                        platform.value,
+                        platform_state="failed",
+                        error_code=getattr(adapter, "fatal_error_code", None),
+                        error_message=getattr(adapter, "fatal_error_message", None),
+                        profile_home=profile_home,
+                    )
                     logger.warning("✗ %s failed to connect (profile: %s)", platform.value, profile_name)
                     await self._safe_adapter_disconnect(adapter, platform)
             except Exception as e:
+                self._update_platform_runtime_status(
+                    platform.value,
+                    platform_state="failed",
+                    error_code=type(e).__name__,
+                    error_message=str(e),
+                    profile_home=profile_home,
+                )
                 logger.error("✗ %s error (profile: %s): %s", platform.value, profile_name, e)
                 await self._safe_adapter_disconnect(adapter, platform)
         return connected
@@ -11919,9 +11981,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     with _profile_runtime_scope(profile_home):
                         profile_config = load_gateway_config().platforms.get(platform)
                         if profile_config is None or not profile_config.enabled:
+                            self._update_platform_runtime_status(
+                                platform.value,
+                                platform_state="disabled",
+                                error_code=None,
+                                error_message=None,
+                                profile_home=profile_home,
+                            )
                             return
                         adapter = self._create_adapter(platform, profile_config)
                         if adapter is None:
+                            self._update_platform_runtime_status(
+                                platform.value,
+                                platform_state="failed",
+                                error_code="adapter_unavailable",
+                                error_message="Adapter creation returned no adapter",
+                                profile_home=profile_home,
+                            )
                             logger.warning(
                                 "Secondary %s reconnect skipped: adapter unavailable (profile: %s)",
                                 platform.value,
@@ -11940,6 +12016,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if platform not in profile_map:
                             profile_map[platform] = adapter
                             self._sync_voice_mode_state_to_adapter(adapter)
+                            self._update_platform_runtime_status(
+                                platform.value,
+                                platform_state="connected",
+                                error_code=None,
+                                error_message=None,
+                                profile_home=profile_home,
+                            )
                             logger.info(
                                 "✓ %s reconnected (profile: %s)",
                                 platform.value,
@@ -11956,6 +12039,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # been drained; release its partial resources instead.
                     if success:
                         await self._safe_adapter_disconnect(adapter, platform)
+                        self._update_platform_runtime_status(
+                            platform.value,
+                            platform_state="disconnected",
+                            error_code=None,
+                            error_message=None,
+                            profile_home=profile_home,
+                        )
                         return
 
                     await self._safe_adapter_disconnect(adapter, platform)
@@ -11963,6 +12053,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         getattr(adapter, "has_fatal_error", False)
                         and not getattr(adapter, "fatal_error_retryable", True)
                     ):
+                        self._update_platform_runtime_status(
+                            platform.value,
+                            platform_state="failed",
+                            error_code=getattr(adapter, "fatal_error_code", None),
+                            error_message=getattr(adapter, "fatal_error_message", None),
+                            profile_home=profile_home,
+                        )
                         return
                 except asyncio.CancelledError:
                     if adapter is not None:
@@ -11988,6 +12085,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     backoff,
                     profile_name,
                 )
+                try:
+                    from hermes_cli.profiles import get_profile_dir
+                    self._update_platform_runtime_status(
+                        platform.value,
+                        platform_state="retrying",
+                        error_code=getattr(adapter, "fatal_error_code", None) if adapter else None,
+                        error_message=getattr(adapter, "fatal_error_message", None) if adapter else None,
+                        profile_home=get_profile_dir(profile_name),
+                    )
+                except Exception:
+                    pass
                 await asyncio.sleep(backoff)
         finally:
             pending = self._profile_failed_platforms
@@ -12057,6 +12165,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return
         profile_map.pop(platform, None)
         await self._safe_adapter_disconnect(adapter, platform)
+        try:
+            from hermes_cli.profiles import get_profile_dir
+            self._update_platform_runtime_status(
+                platform.value,
+                platform_state=("retrying" if adapter.fatal_error_retryable else "failed"),
+                error_code=adapter.fatal_error_code,
+                error_message=getattr(adapter, "fatal_error_message", None),
+                profile_home=get_profile_dir(profile_name),
+            )
+        except Exception:
+            pass
         if not self._running:
             return
         self._schedule_secondary_profile_reconnect(profile_name, platform, adapter)

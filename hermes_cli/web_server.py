@@ -48,7 +48,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Tuple
 
 import yaml
 
@@ -3377,8 +3377,19 @@ async def get_status(profile: Optional[str] = None):
         # multiplex gateway has no profile-local gateway process, so the local
         # PID/state checks above report "stopped" even while the multiplexer
         # is live and serving this profile (Desktop then renders the backend
-        # as down). Only consulted when the local checks found nothing.
-        if not gateway_running:
+        # as down). A platform-only profile snapshot also needs the root
+        # lifecycle even when a generic health probe already reported "up".
+        profile_needs_multiplex_lifecycle = bool(
+            profile_dir is not None
+            and (
+                not isinstance(local_runtime, dict)
+                or (
+                    local_runtime.get("pid") is None
+                    and local_runtime.get("gateway_state") is None
+                )
+            )
+        )
+        if not gateway_running or profile_needs_multiplex_lifecycle:
             # The scan walks the filesystem and probes the process table, so
             # keep it off the event loop (same reasoning as the topology scan
             # below).
@@ -3418,7 +3429,19 @@ async def get_status(profile: Optional[str] = None):
                 if _serving_runtime is not None:
                     gateway_running = True
                     gateway_pid = get_runtime_status_running_pid(_serving_runtime)
-                    runtime = _serving_runtime
+                    # Lifecycle/PID belongs to the root multiplexer, while
+                    # adapter state belongs to the selected profile. Preserve
+                    # the profile-local platform snapshot instead of replacing
+                    # it with the root profile's adapters.
+                    runtime = dict(_serving_runtime)
+                    local_platforms = (
+                        local_runtime.get("platforms")
+                        if isinstance(local_runtime, dict)
+                        else None
+                    )
+                    runtime["platforms"] = (
+                        local_platforms if isinstance(local_platforms, dict) else {}
+                    )
             except Exception:
                 _log.debug(
                     "multiplex gateway fallback probe failed", exc_info=True
@@ -5383,14 +5406,58 @@ def get_profiles_sessions_snapshot(
     return _read_profile_sessions(_profile_session_targets(), queries)
 
 
-@app.get("/api/profiles/sessions/sidebar")
-def get_profiles_sessions_sidebar(
+_SIDEBAR_CACHE_TTL_SECONDS = 1.0
+_SIDEBAR_CACHE_MAX_ENTRIES = 32
+_SIDEBAR_CACHE_COND = threading.Condition()
+_SIDEBAR_CACHE: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
+_SIDEBAR_INFLIGHT: set[Tuple[Any, ...]] = set()
+
+
+def _sidebar_cached_singleflight(
+    key: Tuple[Any, ...], compute: "Callable[[], Dict[str, Any]]"
+) -> Dict[str, Any]:
+    """Coalesce identical sidebar scans and briefly reuse the completed result."""
+    while True:
+        now = time.monotonic()
+        with _SIDEBAR_CACHE_COND:
+            expired = [
+                cache_key
+                for cache_key, (created_at, _value) in _SIDEBAR_CACHE.items()
+                if now - created_at > _SIDEBAR_CACHE_TTL_SECONDS
+            ]
+            for cache_key in expired:
+                _SIDEBAR_CACHE.pop(cache_key, None)
+            cached = _SIDEBAR_CACHE.get(key)
+            if cached is not None and now - cached[0] <= _SIDEBAR_CACHE_TTL_SECONDS:
+                return cached[1]
+            if key not in _SIDEBAR_INFLIGHT:
+                _SIDEBAR_INFLIGHT.add(key)
+                break
+            _SIDEBAR_CACHE_COND.wait(timeout=5.0)
+    try:
+        result = compute()
+    except BaseException:
+        with _SIDEBAR_CACHE_COND:
+            _SIDEBAR_INFLIGHT.discard(key)
+            _SIDEBAR_CACHE_COND.notify_all()
+        raise
+    with _SIDEBAR_CACHE_COND:
+        if key not in _SIDEBAR_CACHE and len(_SIDEBAR_CACHE) >= _SIDEBAR_CACHE_MAX_ENTRIES:
+            oldest_key = min(_SIDEBAR_CACHE, key=lambda item: _SIDEBAR_CACHE[item][0])
+            _SIDEBAR_CACHE.pop(oldest_key, None)
+        _SIDEBAR_CACHE[key] = (time.monotonic(), result)
+        _SIDEBAR_INFLIGHT.discard(key)
+        _SIDEBAR_CACHE_COND.notify_all()
+    return result
+
+
+def _compute_profiles_sessions_sidebar(
     recents_profile: str = "all",
     recents_limit: int = 20,
-    recents_exclude: str = None,
+    recents_exclude: Optional[str] = None,
     cron_limit: int = 50,
     messaging_limit: int = 100,
-    messaging_exclude: str = None,
+    messaging_exclude: Optional[str] = None,
 ):
     """Batched sidebar session slices — one profile-DB open per refresh.
 
@@ -5507,6 +5574,36 @@ def get_profiles_sessions_sidebar(
         },
         "errors": errors,
     }
+
+
+@app.get("/api/profiles/sessions/sidebar")
+def get_profiles_sessions_sidebar(
+    recents_profile: str = "all",
+    recents_limit: int = 20,
+    recents_exclude: Optional[str] = None,
+    cron_limit: int = 50,
+    messaging_limit: int = 100,
+    messaging_exclude: Optional[str] = None,
+):
+    key = (
+        (recents_profile or "all").strip() or "all",
+        recents_limit,
+        recents_exclude or "",
+        cron_limit,
+        messaging_limit,
+        messaging_exclude or "",
+    )
+    return _sidebar_cached_singleflight(
+        key,
+        lambda: _compute_profiles_sessions_sidebar(
+            recents_profile=recents_profile,
+            recents_limit=recents_limit,
+            recents_exclude=recents_exclude,
+            cron_limit=cron_limit,
+            messaging_limit=messaging_limit,
+            messaging_exclude=messaging_exclude,
+        ),
+    )
 
 
 @app.get("/api/sessions/search")

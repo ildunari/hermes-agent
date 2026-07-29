@@ -159,10 +159,13 @@ def test_multiplex_topology_probe_uses_readonly_config_without_gateway_discovery
     config = _multiplex_config()
 
     monkeypatch.delenv("GATEWAY_MULTIPLEX_PROFILES", raising=False)
-    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: config)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config_readonly",
+        lambda **_kwargs: config,
+    )
     monkeypatch.setattr(
         "hermes_cli.config.read_raw_config",
-        lambda: {"multiplex_profiles": True},
+        lambda **_kwargs: {"multiplex_profiles": True},
     )
     monkeypatch.setattr(
         "gateway.config.load_gateway_config",
@@ -170,6 +173,26 @@ def test_multiplex_topology_probe_uses_readonly_config_without_gateway_discovery
     )
 
     assert real_multiplex_gateway_config() is config
+
+
+def test_multiplex_topology_reads_root_config_from_named_profile(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "gpt"
+    root.mkdir(parents=True)
+    profile.mkdir(parents=True)
+    (root / "config.yaml").write_text("multiplex_profiles: true\n", encoding="utf-8")
+    (profile / "config.yaml").write_text("multiplex_profiles: false\n", encoding="utf-8")
+
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.delenv("GATEWAY_MULTIPLEX_PROFILES", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_profile_dir",
+        lambda name: root if name == "default" else profile,
+    )
+
+    config = real_multiplex_gateway_config()
+    assert config is not None
+    assert config["multiplex_profiles"] is True
 
 
 def test_multiplex_restart_bootstraps_required_services_before_drain(

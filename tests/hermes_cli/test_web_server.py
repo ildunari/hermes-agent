@@ -6,6 +6,7 @@ import json
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
@@ -396,6 +397,114 @@ class TestWebServerEndpoints:
         assert data["gateway_running"] is True
         assert data["gateway_pid"] == 4321
         assert data["gateway_state"] == "running"
+
+    def test_get_status_multiplex_uses_root_lifecycle_and_profile_platforms(
+        self, monkeypatch
+    ):
+        import gateway.config as gateway_config
+        import hermes_cli.web_server as web_server
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+        root_home = profiles_mod.get_profile_dir("default")
+        local_runtime = {
+            "pid": None,
+            "platforms": {"telegram": {"state": "connected"}},
+        }
+        root_runtime = {
+            "pid": 4321,
+            "gateway_state": "draining",
+            "active_agents": 2,
+            "served_profiles": ["default", "worker"],
+            "platforms": {"discord": {"state": "connected"}},
+        }
+
+        def _runtime(path=None):
+            if path == worker_home / "gateway_state.json":
+                return local_runtime
+            if path == root_home / "gateway_state.json":
+                return root_runtime
+            return None
+
+        class _GatewayConfig:
+            def get_connected_platforms(self):
+                return [SimpleNamespace(value="telegram")]
+
+        monkeypatch.setattr(web_server, "get_running_pid_cached", lambda *a, **k: None)
+        monkeypatch.setattr(web_server, "read_runtime_status", _runtime)
+        monkeypatch.setattr(
+            web_server,
+            "get_runtime_status_running_pid",
+            lambda runtime=None, **_kw: 4321 if runtime is root_runtime else None,
+        )
+        monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", "http://root:8642")
+        monkeypatch.setattr(
+            web_server,
+            "_probe_gateway_health",
+            lambda: (True, {"pid": 4321, "gateway_state": "running"}),
+        )
+        monkeypatch.setattr(
+            profiles_mod,
+            "profiles_to_serve",
+            lambda _enabled: [("default", root_home), ("worker", worker_home)],
+        )
+        monkeypatch.setattr(profiles_mod, "_check_gateway_running", lambda home: home == root_home)
+        monkeypatch.setattr(gateway_config, "load_gateway_config", lambda: _GatewayConfig())
+
+        resp = self.client.get("/api/status?profile=worker")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["gateway_running"] is True
+        assert data["gateway_pid"] == 4321
+        assert data["gateway_state"] == "draining"
+        assert data["active_agents"] == 2
+        assert data["gateway_platforms"] == {
+            "telegram": {"state": "connected"}
+        }
+
+    def test_get_status_multiplex_never_inherits_root_platforms(self, monkeypatch):
+        import gateway.config as gateway_config
+        import hermes_cli.web_server as web_server
+        from hermes_cli import profiles as profiles_mod
+
+        worker_home = profiles_mod.get_profile_dir("worker")
+        worker_home.mkdir(parents=True)
+        root_home = profiles_mod.get_profile_dir("default")
+        root_runtime = {
+            "pid": 4321,
+            "gateway_state": "running",
+            "served_profiles": ["default", "worker"],
+            "platforms": {"telegram": {"state": "failed", "error_code": "root"}},
+        }
+
+        def _runtime(path=None):
+            return root_runtime if path == root_home / "gateway_state.json" else None
+
+        class _GatewayConfig:
+            def get_connected_platforms(self):
+                return [SimpleNamespace(value="telegram")]
+
+        monkeypatch.setattr(web_server, "get_running_pid_cached", lambda *a, **k: None)
+        monkeypatch.setattr(web_server, "read_runtime_status", _runtime)
+        monkeypatch.setattr(
+            web_server,
+            "get_runtime_status_running_pid",
+            lambda runtime=None, **_kw: 4321 if runtime is root_runtime else None,
+        )
+        monkeypatch.setattr(web_server, "_GATEWAY_HEALTH_URL", None)
+        monkeypatch.setattr(
+            profiles_mod,
+            "profiles_to_serve",
+            lambda _enabled: [("default", root_home), ("worker", worker_home)],
+        )
+        monkeypatch.setattr(profiles_mod, "_check_gateway_running", lambda home: home == root_home)
+        monkeypatch.setattr(gateway_config, "load_gateway_config", lambda: _GatewayConfig())
+
+        data = self.client.get("/api/status?profile=worker").json()
+        assert data["gateway_running"] is True
+        assert data["gateway_platforms"] == {}
 
     def test_get_status_and_messaging_agree_on_cross_container_gateway(
         self, monkeypatch
@@ -2269,6 +2378,59 @@ class TestWebServerEndpoints:
         # Pagination reports "was this window capped?" per profile, not an exact
         # COUNT(*) — one row against a 20-row cap means nothing more to load.
         assert data["recents"]["profiles_truncated"]["default"] is False
+
+    def test_sidebar_identical_concurrent_requests_are_singleflight(self):
+        from hermes_cli import web_server
+
+        with web_server._SIDEBAR_CACHE_COND:
+            web_server._SIDEBAR_CACHE.clear()
+            web_server._SIDEBAR_INFLIGHT.clear()
+        calls = {"n": 0}
+        lock = threading.Lock()
+        barrier = threading.Barrier(16)
+        results = []
+
+        def compute():
+            with lock:
+                calls["n"] += 1
+            time.sleep(0.05)
+            return {"ok": True}
+
+        def worker():
+            barrier.wait()
+            results.append(
+                web_server._sidebar_cached_singleflight(("same",), compute)
+            )
+
+        threads = [threading.Thread(target=worker) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2.0)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert results == [{"ok": True}] * 16
+        assert calls["n"] == 1
+
+    def test_sidebar_cache_is_bounded_and_prunes_expired_entries(self, monkeypatch):
+        from hermes_cli import web_server
+
+        now = {"value": 10.0}
+        monkeypatch.setattr(web_server.time, "monotonic", lambda: now["value"])
+        monkeypatch.setattr(web_server, "_SIDEBAR_CACHE_MAX_ENTRIES", 3)
+        with web_server._SIDEBAR_CACHE_COND:
+            web_server._SIDEBAR_CACHE.clear()
+            web_server._SIDEBAR_INFLIGHT.clear()
+
+        for index in range(5):
+            web_server._sidebar_cached_singleflight(
+                (index,), lambda index=index: {"index": index}
+            )
+        assert len(web_server._SIDEBAR_CACHE) == 3
+
+        now["value"] += web_server._SIDEBAR_CACHE_TTL_SECONDS + 0.1
+        web_server._sidebar_cached_singleflight(("fresh",), lambda: {"fresh": True})
+        assert list(web_server._SIDEBAR_CACHE) == [("fresh",)]
 
     def test_sessions_endpoint_reads_requested_profile(self):
         """The machine dashboard's global profile switcher must retarget
