@@ -569,6 +569,22 @@ features:
           - '"name": resolved_name'
         description: category__skill aliases resolve to categorized skills while frontmatter names remain canonical
 
+  - id: desktop.runtime-theme-relaunch
+    title: Preserve late-bound runtime theme selections across relaunch
+    owner: kosta
+    owner_paths:
+      - apps/desktop/src/themes/context.tsx
+      - apps/desktop/src/themes/profile-theme.test.ts
+    collision_paths:
+      - apps/desktop/src/themes/context.tsx
+    tests:
+      - apps/desktop/src/themes/profile-theme.test.ts
+    checks:
+      - id: desktop-runtime-theme-stored-name
+        path: apps/desktop/src/themes/context.tsx
+        needles: [normalizeStoredSkin, normalizeSkin, registry reactivity]
+        description: stored runtime-plugin theme names survive startup until asynchronous contributions register
+
   - id: runtime.fallback-routing
     title: Backend-owned runtime fallback routing lifecycle
     owner_paths:

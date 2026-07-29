@@ -18,10 +18,6 @@ const SYSTEM_SANS =
 const SYSTEM_MONO =
   '"Cascadia Code", "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Monaco, Consolas, monospace, ' + EMOJI_FALLBACK
 
-const ANTHROPIC_SERIF = '"Anthropic Serif", Georgia, "Times New Roman", serif, ' + EMOJI_FALLBACK
-const ANTHROPIC_MONO =
-  '"Anthropic Mono", "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Monaco, Consolas, monospace, ' + EMOJI_FALLBACK
-
 export const DEFAULT_TYPOGRAPHY: DesktopThemeTypography = { fontSans: SYSTEM_SANS, fontMono: SYSTEM_MONO }
 
 const NOUS_BLUE = '#0053FD'
@@ -281,123 +277,13 @@ export const slateTheme: DesktopTheme = {
   }
 }
 
-/** Anthropic-inspired editorial cream/slate with a hand-tuned inverse mode. */
-export const anthropicTheme: DesktopTheme = {
-  name: 'anthropic',
-  label: 'Anthropic',
-  description: 'Editorial ivory and slate, with true-black inverse bands',
-  colors: {
-    background: '#faf9f5',
-    foreground: '#141413',
-    card: '#f0eee6',
-    cardForeground: '#141413',
-    muted: '#f0eee6',
-    mutedForeground: '#5e5d59',
-    popover: '#faf9f5',
-    popoverForeground: '#141413',
-    primary: '#141413',
-    primaryForeground: '#faf9f5',
-    secondary: '#e8e6dc',
-    secondaryForeground: '#3d3d3a',
-    accent: '#e3dacc',
-    accentForeground: '#141413',
-    border: '#d1cfc5',
-    input: '#e8e6dc',
-    ring: '#141413',
-    midground: '#141413',
-    midgroundForeground: '#faf9f5',
-    composerRing: '#141413',
-    destructive: '#c6613f',
-    destructiveForeground: '#faf9f5',
-    sidebarBackground: '#f0eee6',
-    sidebarBorder: '#d1cfc5',
-    userBubble: '#e3dacc',
-    userBubbleBorder: '#d1cfc5'
-  },
-  darkColors: {
-    background: '#000000',
-    foreground: '#faf9f5',
-    card: '#141413',
-    cardForeground: '#faf9f5',
-    muted: '#1f1f1d',
-    mutedForeground: '#b0aea5',
-    popover: '#141413',
-    popoverForeground: '#faf9f5',
-    primary: '#faf9f5',
-    primaryForeground: '#000000',
-    secondary: '#1f1f1d',
-    secondaryForeground: '#e8e6dc',
-    accent: '#2a2926',
-    accentForeground: '#faf9f5',
-    border: '#3d3d3a',
-    input: '#1f1f1d',
-    ring: '#faf9f5',
-    midground: '#faf9f5',
-    midgroundForeground: '#141413',
-    composerRing: '#faf9f5',
-    destructive: '#d97757',
-    destructiveForeground: '#000000',
-    sidebarBackground: '#000000',
-    sidebarBorder: '#3d3d3a',
-    userBubble: '#141413',
-    userBubbleBorder: '#3d3d3a'
-  },
-  typography: {
-    fontSans: ANTHROPIC_SERIF,
-    fontMono: ANTHROPIC_MONO
-  },
-  terminal: {
-    foreground: '#141413',
-    cursor: '#141413',
-    selectionBackground: '#d1cfc580',
-    black: '#141413',
-    red: '#c6613f',
-    green: '#788c5d',
-    yellow: '#d4a27f',
-    blue: '#6a9bcc',
-    magenta: '#c46686',
-    cyan: '#bcd1ca',
-    white: '#faf9f5',
-    brightBlack: '#5e5d59',
-    brightRed: '#d97757',
-    brightGreen: '#8fa56f',
-    brightYellow: '#ebdbbc',
-    brightBlue: '#8db4dc',
-    brightMagenta: '#cbcadb',
-    brightCyan: '#d1e1dc',
-    brightWhite: '#ffffff'
-  },
-  darkTerminal: {
-    foreground: '#faf9f5',
-    cursor: '#faf9f5',
-    selectionBackground: '#3d3d3a99',
-    black: '#000000',
-    red: '#d97757',
-    green: '#788c5d',
-    yellow: '#d4a27f',
-    blue: '#6a9bcc',
-    magenta: '#c46686',
-    cyan: '#bcd1ca',
-    white: '#faf9f5',
-    brightBlack: '#87867f',
-    brightRed: '#e08a6e',
-    brightGreen: '#9bae82',
-    brightYellow: '#ebdbbc',
-    brightBlue: '#8db4dc',
-    brightMagenta: '#cbcadb',
-    brightCyan: '#d1e1dc',
-    brightWhite: '#ffffff'
-  }
-}
-
 export const BUILTIN_THEMES: Record<string, DesktopTheme> = {
   nous: nousTheme,
   midnight: midnightTheme,
   ember: emberTheme,
   mono: monoTheme,
   cyberpunk: cyberpunkTheme,
-  slate: slateTheme,
-  anthropic: anthropicTheme
+  slate: slateTheme
 }
 
 export const BUILTIN_THEME_LIST = Object.values(BUILTIN_THEMES)
