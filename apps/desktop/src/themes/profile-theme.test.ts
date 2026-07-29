@@ -16,12 +16,21 @@ const cases = [
     fallback: DEFAULT_SKIN_NAME,
     a: 'ember',
     b: 'midnight',
-    junk: 'nope'
+    junk: 'nope',
+    preserveUnknown: true
   },
-  { name: 'mode', pref: modePref as unknown as Pref, fallback: 'light', a: 'dark', b: 'system', junk: 'dusk' }
+  {
+    name: 'mode',
+    pref: modePref as unknown as Pref,
+    fallback: 'light',
+    a: 'dark',
+    b: 'system',
+    junk: 'dusk',
+    preserveUnknown: false
+  }
 ]
 
-describe.each(cases)('per-profile $name', ({ pref, fallback, a, b, junk }) => {
+describe.each(cases)('per-profile $name', ({ pref, fallback, a, b, junk, preserveUnknown }) => {
   beforeEach(() => window.localStorage.clear())
 
   it('falls back to the default when unassigned', () => {
@@ -41,8 +50,8 @@ describe.each(cases)('per-profile $name', ({ pref, fallback, a, b, junk }) => {
     expect(pref.resolve('never-themed')).toBe(a)
   })
 
-  it('normalizes an unknown stored value back to the default', () => {
+  it('preserves or rejects unknown stored values according to the preference contract', () => {
     pref.assign('work', junk)
-    expect(pref.resolve('work')).toBe(fallback)
+    expect(pref.resolve('work')).toBe(preserveUnknown ? junk : fallback)
   })
 })

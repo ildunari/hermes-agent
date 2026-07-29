@@ -44,6 +44,13 @@ const INJECTED_FONT_URLS = new Set<string>()
 const resolveMode = (mode: ThemeMode, systemDark = matchesQuery('(prefers-color-scheme: dark)')): 'light' | 'dark' =>
   mode === 'system' ? (systemDark ? 'dark' : 'light') : mode
 
+// Persisted names may refer to runtime plugin themes that load asynchronously
+// after ThemeProvider mounts. Preserve those names so registry reactivity can
+// activate the theme when the plugin arrives; direct selections still pass
+// through normalizeSkin below and reject unknown values.
+const normalizeStoredSkin = (name: string | null): string =>
+  name && !RETIRED_SKINS.has(name) ? name : DEFAULT_SKIN_NAME
+
 const normalizeSkin = (name: string | null): string =>
   name && resolveTheme(name) && !RETIRED_SKINS.has(name) ? name : DEFAULT_SKIN_NAME
 
@@ -66,7 +73,7 @@ const profilePref = <T extends string>(record: string, legacy: string, normalize
   }
 })
 
-export const skinPref = profilePref(PROFILE_SKINS_KEY, SKIN_KEY, normalizeSkin)
+export const skinPref = profilePref(PROFILE_SKINS_KEY, SKIN_KEY, normalizeStoredSkin)
 export const modePref = profilePref(PROFILE_MODES_KEY, MODE_KEY, normalizeMode)
 
 // Last active profile — lets the boot paint pick its appearance before the
