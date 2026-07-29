@@ -18,7 +18,7 @@ import random
 import re
 import sqlite3
 import time
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 import uuid
 from enum import Enum
 
@@ -52,6 +52,17 @@ _OUTCOME_TEXT_LIMIT = 4000
 logger = logging.getLogger(__name__)
 
 _PROACTIVE_WAKE_MARKER = ".proactive-wake"
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """Commit or roll back a context-managed connection, then close its handle."""
+
+    def __exit__(self, exc_type, exc_value, traceback) -> Literal[False]:
+        try:
+            super().__exit__(exc_type, exc_value, traceback)
+            return False
+        finally:
+            self.close()
 
 
 def request_proactive_wake(profile_home: str | Path, *, slot_id: str) -> None:
@@ -321,7 +332,12 @@ class ProactiveOwnershipRegistry:
             con.executescript(_OWNERSHIP_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.path, timeout=self.timeout, isolation_level=None)
+        con = sqlite3.connect(
+            self.path,
+            timeout=self.timeout,
+            isolation_level=None,
+            factory=_ClosingConnection,
+        )
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA journal_mode=WAL")
         con.execute(f"PRAGMA busy_timeout={int(self.timeout * 1000)}")
@@ -709,7 +725,12 @@ class ProactiveStateStore:
             _initialize_schema(con)
 
     def _connect(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.path, timeout=self.timeout, isolation_level=None)
+        con = sqlite3.connect(
+            self.path,
+            timeout=self.timeout,
+            isolation_level=None,
+            factory=_ClosingConnection,
+        )
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA foreign_keys=ON")
         con.execute("PRAGMA journal_mode=WAL")
@@ -1006,7 +1027,12 @@ class ProactiveScheduler:
 
     def _connect(self) -> sqlite3.Connection:
         self.state_db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        con = sqlite3.connect(self.state_db_path, timeout=self.timeout, isolation_level=None)
+        con = sqlite3.connect(
+            self.state_db_path,
+            timeout=self.timeout,
+            isolation_level=None,
+            factory=_ClosingConnection,
+        )
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA foreign_keys=ON")
         con.execute("PRAGMA journal_mode=WAL")
