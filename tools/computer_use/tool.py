@@ -560,6 +560,10 @@ _DEFAULT_MAX_ELEMENTS = 100
 # call passing a very large integer would silently disable the safeguard and
 # reintroduce the original unbounded behavior.
 _MAX_ALLOWED_MAX_ELEMENTS = 1000
+# Per-element label cap for the JSON `elements` array. The human-readable
+# summary already truncates to 60 chars; this bounds the machine-readable
+# copy too (see _element_to_dict).
+_MAX_ELEMENT_LABEL_CHARS = 160
 _MIN_PROVIDER_IMAGE_DIMENSION = 8
 
 
@@ -1013,10 +1017,19 @@ def _format_elements(elements: List[UIElement], max_lines: int = 40) -> List[str
 
 
 def _element_to_dict(e: UIElement) -> Dict[str, Any]:
+    # Clamp label size. AX labels are unbounded upstream — Electron/Chromium
+    # apps can publish an entire document's text as one element's label, and
+    # 100 elements x multi-KB labels made single SOM captures ~82KB of tool
+    # result (~15-30k tokens each), outrunning context compression in long
+    # GUI-verification loops (live repro 2026-07-27). 160 chars keeps every
+    # label useful for element identification while bounding the payload.
+    label = e.label
+    if len(label) > _MAX_ELEMENT_LABEL_CHARS:
+        label = label[: _MAX_ELEMENT_LABEL_CHARS - 1] + "…"
     return {
         "index": e.index,
         "role": e.role,
-        "label": e.label,
+        "label": label,
         "bounds": list(e.bounds),
         "app": e.app,
     }

@@ -2013,6 +2013,29 @@ def run_conversation(
                 if pending_moa_prepared_request is _moa_prepared_request:
                     pending_moa_prepared_request = None
             else:
+                # A PRODUCTIVE compaction must not burn the shared per-turn
+                # overflow-recovery budget. Long autonomous turns can
+                # legitimately need many compressions (large tool results
+                # regrow the transcript between passes); counting successes
+                # against the cap meant three good preflight compactions
+                # banned a fourth that would have worked, killing the turn
+                # with compression_exhausted on the next overflow (live
+                # repro 2026-07-27: 3 successful compactions 17:56-18:14,
+                # then a recoverable 19:03 overflow returned exhausted).
+                # The cap now bounds CONSECUTIVE futile attempts only —
+                # thrash is still stopped by the insufficient-progress
+                # preflight blocker, the compression-failure cooldown, and
+                # the no-progress paths in the overflow/413 handlers, which
+                # keep incrementing without reset.
+                _preflight_progress, _ = _compression_progress(
+                    agent,
+                    _pre_api_input,
+                    messages,
+                    before_tokens=request_pressure_tokens,
+                    after_system_prompt=active_system_prompt,
+                )
+                if _preflight_progress:
+                    compression_attempts = 0
                 # Reset retry/empty-response state so the compacted request
                 # gets a fresh chance instead of inheriting stale recovery
                 # counters from the pre-compaction history.
@@ -4718,6 +4741,10 @@ def run_conversation(
                         approx_tokens = compressed_tokens
 
                     if made_progress:
+                        # Productive recovery — restore the per-turn budget so
+                        # the cap only bounds consecutive futile attempts (see
+                        # the preflight reset above for rationale).
+                        compression_attempts = 0
                         if compressed_tokens is not None and len(messages) >= original_len:
                             agent._buffer_status(
                                 COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE.format(
@@ -4986,6 +5013,10 @@ def run_conversation(
                         approx_tokens = compressed_tokens
 
                     if made_progress or (new_ctx and new_ctx < old_ctx):
+                        # Productive recovery — restore the per-turn budget so
+                        # the cap only bounds consecutive futile attempts (see
+                        # the preflight reset above for rationale).
+                        compression_attempts = 0
                         if compressed_tokens is not None and len(messages) >= original_len:
                             agent._buffer_status(
                                 COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE.format(
@@ -5006,9 +5037,13 @@ def run_conversation(
                         agent._flush_status_buffer()
                         agent._vprint(f"{agent.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
                         agent._vprint(f"{agent.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
-                        logger.error(f"{agent.log_prefix}Context length exceeded: {new_tokens:,} tokens. Cannot compress further.")
+                        # NOTE: this branch previously referenced an undefined
+                        # ``new_tokens`` and died with NameError instead of
+                        # returning the terminal result below (found by
+                        # test_compression_attempt_reset_on_progress).
+                        logger.error(f"{agent.log_prefix}Context length exceeded: ~{approx_tokens:,} tokens. Cannot compress further.")
                         agent._persist_session(messages, conversation_history)
-                        _final_response = f"Context length exceeded ({new_tokens:,} tokens). Cannot compress further."
+                        _final_response = f"Context length exceeded (~{approx_tokens:,} tokens). Cannot compress further."
                         return {
                             "final_response": _final_response,
                             "messages": messages,

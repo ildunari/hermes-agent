@@ -4048,3 +4048,55 @@ class TestStartupTimeoutPhaseDetail:
                 assert False, "expected RuntimeError"
             except RuntimeError as e:
                 assert "stuck in phase: unknown" in str(e)
+
+
+class TestElementLabelClamp:
+    """SOM/AX element labels are clamped in the JSON payload (2026-07-27).
+
+    Electron/Chromium apps can publish an entire document's text as one AX
+    element's label; 100 such elements made single captures ~82KB of tool
+    result, outrunning context compression in long GUI loops.
+    """
+
+    def test_long_label_is_clamped_with_ellipsis(self):
+        from tools.computer_use.backend import UIElement
+        from tools.computer_use.tool import (
+            _MAX_ELEMENT_LABEL_CHARS,
+            _element_to_dict,
+        )
+
+        e = UIElement(
+            index=1, role="AXStaticText",
+            label="x" * (_MAX_ELEMENT_LABEL_CHARS * 50),
+            bounds=(0, 0, 10, 10),
+        )
+        d = _element_to_dict(e)
+        assert len(d["label"]) == _MAX_ELEMENT_LABEL_CHARS
+        assert d["label"].endswith("…")
+
+    def test_short_label_is_untouched(self):
+        from tools.computer_use.backend import UIElement
+        from tools.computer_use.tool import _element_to_dict
+
+        e = UIElement(index=2, role="AXButton", label="Continue", bounds=(1, 2, 3, 4))
+        assert _element_to_dict(e)["label"] == "Continue"
+
+    def test_capture_payload_is_bounded_with_pathological_labels(self):
+        """End-to-end: a 100-element capture with huge labels stays small."""
+        from tools.computer_use.backend import CaptureResult, UIElement
+        from tools.computer_use.tool import _capture_response
+
+        cap = CaptureResult(
+            mode="ax", width=1920, height=1080, png_b64="",
+            elements=[
+                UIElement(index=i, role="AXStaticText", label="y" * 4000,
+                          bounds=(0, i, 10, 10))
+                for i in range(100)
+            ],
+            app="TestApp", window_title="Test",
+        )
+        raw = _capture_response(cap)
+        assert isinstance(raw, str)
+        # Pre-clamp this payload was ~400KB; post-clamp it must stay well
+        # under the size that outran compression (~82KB observed live).
+        assert len(raw) < 60_000
