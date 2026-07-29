@@ -188,7 +188,7 @@ describe('ModelMenuPanel current selection', () => {
     const { content } = renderPanel()
 
     const currentRow = (await content.findByText(/Gemini 3\.1 Pro/i)).closest('[role="menuitem"]')
-    const staleRow = content.getByText('Deepseek Chat').closest('[role="menuitem"]')
+    const staleRow = content.getByText('DeepSeek Chat').closest('[role="menuitem"]')
 
     expect(currentRow?.querySelector('.codicon-check')).not.toBeNull()
     expect(staleRow?.querySelector('.codicon-check')).toBeNull()

@@ -26,10 +26,8 @@ import {
   toggleSidebarOpen
 } from '@/store/layout'
 import {
-  $activeGatewayProfile,
   $newChatProfile,
   cycleProfile,
-  normalizeProfileKey,
   requestProfileCreate,
   switchProfileToSlot,
   switchToDefaultProfile,

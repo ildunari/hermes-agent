@@ -176,6 +176,7 @@ export function BrowserAnnotationsPanel({ guestGeneration, tab }: BrowserAnnotat
     }
   }, [guestGeneration, open, tab.id, tab.private, tab.profile, tab.workspaceId])
 
+  // eslint-disable-next-line no-restricted-syntax -- request generation is local async-lifecycle state, not a mirrored atom
   useEffect(() => {
     void refresh()
 

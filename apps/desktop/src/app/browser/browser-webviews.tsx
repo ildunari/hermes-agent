@@ -102,6 +102,7 @@ function BrowserWebview({ foreground, tab }: BrowserWebviewProps) {
 
   latestUrlRef.current = tab.url
 
+  // eslint-disable-next-line no-restricted-syntax -- webview handles and request generations are imperative lifecycle state
   useEffect(() => {
     const host = hostRef.current
 
@@ -335,6 +336,7 @@ function BrowserWebview({ foreground, tab }: BrowserWebviewProps) {
     }
   }, [tab.id, tab.private, tab.privatePartition, tab.profile, tab.surfaceEpoch, tab.workspaceId])
 
+  // eslint-disable-next-line no-restricted-syntax -- automation binding tracks an external guest resource, not a mirrored atom
   useEffect(() => {
     const guestGeneration = generationRef.current
     const previous = automationBindingRef.current
@@ -380,6 +382,7 @@ function BrowserWebview({ foreground, tab }: BrowserWebviewProps) {
     })
   }, [tab.id, tab.surfaceEpoch, taskBinding])
 
+  // eslint-disable-next-line no-restricted-syntax -- activation request refs serialize imperative guest navigation
   useEffect(() => {
     const generation = generationRef.current
 

@@ -1,10 +1,10 @@
 import { ar } from './ar'
 import { en } from './en'
 import { ja } from './ja'
+import { localCarryComposer } from './local-carry'
 import type { Locale, Translations } from './types'
 import { zh } from './zh'
 import { zhHant } from './zh-hant'
-import { localCarryComposer } from './local-carry'
 
 type ComposerWithLocal = Translations['composer'] & {
   draftPendingNotice: string

@@ -1,6 +1,6 @@
-import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { readDesktopFileDataUrl } from '@/lib/desktop-fs'
 import { capitalize } from '@/lib/text'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { $connection } from '@/store/session'
 
 export type MediaKind = 'audio' | 'image' | 'video' | 'file'

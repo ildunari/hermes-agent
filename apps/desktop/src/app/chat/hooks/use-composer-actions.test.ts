@@ -2,6 +2,7 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { readDesktopFileDataUrl, selectLocalDesktopPaths } from '@/lib/desktop-fs'
+import type * as DesktopFs from '@/lib/desktop-fs'
 import { $composerAttachments } from '@/store/composer'
 import { $connection } from '@/store/session'
 
@@ -16,7 +17,7 @@ import {
 } from './use-composer-actions'
 
 vi.mock('@/lib/desktop-fs', async importOriginal => {
-  const actual = await importOriginal<typeof import('@/lib/desktop-fs')>()
+  const actual = await importOriginal<typeof DesktopFs>()
 
   return {
     ...actual,

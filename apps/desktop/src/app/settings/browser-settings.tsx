@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
+import { PageLoader } from '@/components/page-loader'
 import { Button } from '@/components/ui/button'
 import { ErrorState } from '@/components/ui/error-state'
 import { Input } from '@/components/ui/input'
@@ -10,8 +11,6 @@ import { Clock, Globe, RefreshCw, Trash2 } from '@/lib/icons'
 import { $activeProfile, normalizeProfileKey } from '@/store/profile'
 
 import { reseedBrowserPersistence, resetBrowserWorkspaceDetailed, setBrowserRestoreEnabled } from '../browser/browser-persistence'
-
-import { PageLoader } from '@/components/page-loader'
 
 import { ListRow, SectionHeading, SettingsContent } from './primitives'
 
