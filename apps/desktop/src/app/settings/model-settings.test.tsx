@@ -270,7 +270,8 @@ describe('ModelSettings', () => {
 
     const modelSelect = (await screen.findAllByRole('combobox'))[1]
     fireEvent.click(modelSelect)
-    fireEvent.click(await screen.findByRole('option', { name: 'qwen3:latest' }))
+    // The Select presents a humanized label while retaining the exact route ID.
+    fireEvent.click(await screen.findByRole('option', { name: 'Qwen3:latest' }))
 
     fireEvent.click(await screen.findByRole('button', { name: 'Apply' }))
 
