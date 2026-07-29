@@ -1591,7 +1591,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         logger.warning("Job '%s': %s", job["id"], msg)
         return msg
 
-    from tools.send_message_tool import _send_to_platform, _send_ordered_rich_segments_to_platform
+    from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
 
     # Optionally wrap the content with a header/footer so the user knows this
@@ -1620,29 +1620,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     force_document_attachments = "[[as_document]]" in delivery_content
 
-    # Render explicit card artifact blocks before MEDIA extraction so cron
-    # deliveries share the same attachment pipeline as live replies.
-    try:
-        from gateway.rich_cards.artifacts import find_card_artifacts, markdown_table_auto_enabled, render_rich_cards_in_response, response_to_ordered_segments
-        first_platform = targets[0]["platform"] if targets else "cron"
-        original_delivery_content = delivery_content
-        table_auto = markdown_table_auto_enabled(first_platform)
-        explicit_cards = bool(find_card_artifacts(delivery_content))
-        if explicit_cards or table_auto:
-            delivery_content = render_rich_cards_in_response(delivery_content, platform=first_platform, markdown_table_auto=table_auto)
-        rich_segments = response_to_ordered_segments(delivery_content) if explicit_cards or (table_auto and "MEDIA:" in delivery_content and delivery_content != original_delivery_content) else None
-    except Exception as e:
-        rich_segments = None
-        logger.warning("Job '%s': rich-card pre-pass failed; preserving text fallback: %s", job.get("id", "?"), e)
-
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
-    if rich_segments:
-        media_files = []
-        cleaned_delivery_content = "\n\n".join(getattr(seg, "markdown", "").strip() for seg in rich_segments if getattr(seg, "markdown", "").strip())
-    else:
-        media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
-        media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+    media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
+    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
     # Resolve the delivery-mirror gate ONCE (default off). When on, each
     # successful delivery is also appended to the target chat's gateway session
@@ -1939,25 +1920,6 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # (#22773).
                 text_to_send = cleaned_delivery_content.strip()
                 adapter_ok = True
-                if rich_segments and hasattr(runtime_adapter, "_send_rendered_rich_response_ordered"):
-                    from agent.async_utils import safe_schedule_threadsafe
-                    future = safe_schedule_threadsafe(
-                        runtime_adapter._send_rendered_rich_response_ordered(
-                            chat_id=chat_id,
-                            rendered_response=delivery_content,
-                            metadata=route_metadata,
-                            force_document=force_document_attachments,
-                        ),
-                        loop,
-                    )
-                    if future is None:
-                        adapter_ok = False
-                    else:
-                        adapter_ok = bool(future.result(timeout=120))
-                    if adapter_ok:
-                        delivered = True
-                        logger.info("Job '%s': delivered rich card to %s:%s via live adapter", job["id"], platform_name, chat_id)
-                        continue
                 timed_out = False
                 if adapter_ok and text_to_send:
                     from agent.async_utils import safe_schedule_threadsafe
@@ -2196,10 +2158,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 delivery_errors.extend(target_errors)
                 continue
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
-            if rich_segments:
-                coro = _send_ordered_rich_segments_to_platform(platform, pconfig, chat_id, rich_segments, thread_id=thread_id, force_document=force_document_attachments)
-            else:
-                coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files, force_document=force_document_attachments)
+            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files, force_document=force_document_attachments)
             try:
                 result = asyncio.run(coro)
             except RuntimeError as run_err:
@@ -2227,18 +2186,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 try:
                     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                     try:
-                        retry_coro = (
-                            _send_ordered_rich_segments_to_platform(
-                                platform, pconfig, chat_id, rich_segments,
-                                thread_id=thread_id,
-                                force_document=force_document_attachments,
-                            )
-                            if rich_segments
-                            else _send_to_platform(
-                                platform, pconfig, chat_id, cleaned_delivery_content,
-                                thread_id=thread_id, media_files=media_files,
-                                force_document=force_document_attachments,
-                            )
+                        retry_coro = _send_to_platform(
+                            platform, pconfig, chat_id, cleaned_delivery_content,
+                            thread_id=thread_id, media_files=media_files,
+                            force_document=force_document_attachments,
                         )
                         future = pool.submit(asyncio.run, retry_coro)
                         result = future.result(timeout=30)

@@ -435,27 +435,6 @@ def _handle_send(args):
 
     from gateway.platforms.base import BasePlatformAdapter
 
-    # Render explicit message-card artifact blocks before media extraction so
-    # send_message reaches the same rich-card path as normal gateway replies.
-    try:
-        from gateway.rich_cards.artifacts import (
-            find_card_artifacts,
-            render_rich_cards_in_response,
-            response_to_ordered_segments,
-        )
-        _has_rich_cards = bool(find_card_artifacts(message))
-        message = render_rich_cards_in_response(
-            message,
-            platform=platform_name,
-            markdown_table_auto=False,
-        )
-        rich_segments = response_to_ordered_segments(message) if _has_rich_cards else None
-    except Exception as e:
-        rich_segments = None
-        logger.warning(
-            "send_message rich-card pre-pass failed; preserving text fallback: %s",
-            e,
-        )
 
     # Capture [[as_document]] directive before extract_media strips it.
     # Image-extension files in this batch will route through send_document
@@ -463,16 +442,8 @@ def _handle_send(args):
     # JPGs where Telegram's sendPhoto recompresses to 1280px).
     force_document_attachments = "[[as_document]]" in message
 
-    if rich_segments:
-        media_files = []
-        cleaned_message = "\n\n".join(
-            getattr(seg, "markdown", "").strip()
-            for seg in rich_segments
-            if getattr(seg, "markdown", "").strip()
-        )
-    else:
-        media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
-        media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+    media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
+    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
 
     used_home_channel = False
@@ -519,29 +490,17 @@ def _handle_send(args):
 
     try:
         from model_tools import _run_async
-        if rich_segments:
-            result = _run_async(
-                _send_ordered_rich_segments_to_platform(
-                    platform,
-                    pconfig,
-                    chat_id,
-                    rich_segments,
-                    thread_id=thread_id,
-                    force_document=force_document_attachments,
-                )
+        result = _run_async(
+            _send_to_platform(
+                platform,
+                pconfig,
+                chat_id,
+                cleaned_message,
+                thread_id=thread_id,
+                media_files=media_files,
+                force_document=force_document_attachments,
             )
-        else:
-            result = _run_async(
-                _send_to_platform(
-                    platform,
-                    pconfig,
-                    chat_id,
-                    cleaned_message,
-                    thread_id=thread_id,
-                    media_files=media_files,
-                    force_document=force_document_attachments,
-                )
-            )
+        )
         if used_home_channel and isinstance(result, dict) and result.get("success"):
             result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
 
@@ -1279,77 +1238,6 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         last_result["warnings"] = warnings
     return last_result
 
-
-async def _send_ordered_rich_segments_to_platform(
-    platform,
-    pconfig,
-    chat_id,
-    rich_segments,
-    thread_id=None,
-    force_document=False,
-):
-    """Standalone cron/send_message helper for ordered rich-card segments.
-
-    Cron delivery can render rich-card responses into an ordered sequence of
-    text and MEDIA segments before it reaches the normal platform send helper.
-    Keep the standalone path conservative: send each text segment in order and
-    route media segments through the existing _send_to_platform media handling
-    so platform-specific standalone senders stay the single attachment surface.
-    """
-    from gateway.rich_cards.artifacts import MediaSegment, TextSegment
-    from gateway.platforms.base import BasePlatformAdapter
-
-    last_result = None
-    delivered_any = False
-    for segment in rich_segments or []:
-        if isinstance(segment, TextSegment):
-            text = (segment.markdown or "").strip()
-            if not text:
-                continue
-            result = await _send_to_platform(
-                platform,
-                pconfig,
-                chat_id,
-                text,
-                thread_id=thread_id,
-                force_document=force_document,
-            )
-        elif isinstance(segment, MediaSegment):
-            media_path = BasePlatformAdapter.validate_media_delivery_path(str(segment.path))
-            if not media_path:
-                fallback = (segment.fallback_markdown or "").strip()
-                if not fallback:
-                    continue
-                result = await _send_to_platform(
-                    platform,
-                    pconfig,
-                    chat_id,
-                    fallback,
-                    thread_id=thread_id,
-                    force_document=force_document,
-                )
-            else:
-                media_files = [(media_path, bool(getattr(segment, "is_voice", False)))]
-                result = await _send_to_platform(
-                    platform,
-                    pconfig,
-                    chat_id,
-                    segment.alt or "",
-                    thread_id=thread_id,
-                    media_files=media_files,
-                    force_document=force_document or bool(getattr(segment, "force_document", False)),
-                )
-        else:
-            continue
-
-        if isinstance(result, dict) and result.get("error"):
-            return result
-        last_result = result
-        delivered_any = True
-
-    if not delivered_any:
-        return {"success": True, "delivered": False}
-    return last_result or {"success": True}
 
 
 def _is_telegram_thread_not_found(error: Exception) -> bool:

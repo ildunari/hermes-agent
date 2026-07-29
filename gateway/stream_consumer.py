@@ -1015,39 +1015,17 @@ class GatewayStreamConsumer:
                     # the next segment (tool progress, next chunk) creates a
                     # new message below it.  got_done has its own finalize
                     # path below so we don't finalize here for it.
-                    # Do not stream/edit rich-card artifact content. Even a
-                    # cleaned preview duplicates prose when the final rich-card
-                    # delivery path sends text/card/text.
-                    if self._has_rich_card_fence_candidate(self._accumulated, platform=getattr(self.adapter, "platform", "generic")):
-                        current_update_visible = False
-                    else:
-                        current_update_visible = await self._send_or_edit(
-                            display_text,
-                            finalize=(got_done or got_segment_break),
-                            # A segment-break finalize closes a preamble, not the
-                            # turn-final answer — only got_done marks delivered (#29346).
-                            is_turn_final=got_done,
-                        )
+                    current_update_visible = await self._send_or_edit(
+                        display_text,
+                        finalize=(got_done or got_segment_break),
+                        # A segment-break finalize closes a preamble, not the
+                        # turn-final answer — only got_done marks delivered (#29346).
+                        is_turn_final=got_done,
+                    )
                     self._last_edit_time = time.monotonic()
 
                 if got_done:
                     self._record_finalize()
-                    # Rich card artifacts need final-response rendering and
-                    # ordered media delivery. Streaming chunks may contain an
-                    # incomplete fence, so do not finalize them here; let the
-                    # normal gateway final-send path render the complete answer.
-                    try:
-                        from gateway.rich_cards.artifacts import find_card_artifacts
-                        if self._accumulated and (
-                            find_card_artifacts(self._accumulated)
-                            or self._has_rich_card_fence_candidate(self._accumulated, platform=getattr(self.adapter, "platform", "generic"))
-                        ):
-                            self._final_response_sent = False
-                            self._final_content_delivered = False
-                            self._completed = True
-                            return
-                    except Exception:
-                        pass
                     if self._accumulated or self._message_id is not None or self._already_sent:
                         await self._notify_before_finalize()
                     # Final edit without cursor. If progressive editing failed
@@ -1216,41 +1194,6 @@ class GatewayStreamConsumer:
     # treated identically whichever path delivered the text.
     _MEDIA_RE = MEDIA_TAG_CLEANUP_RE
 
-    @staticmethod
-    def _has_rich_card_fence_candidate(text: str, *, platform: str = "generic") -> bool:
-        """Return True once a stream appears to contain rich-card content."""
-        if not text:
-            return False
-        try:
-            from gateway.rich_cards.artifacts import find_card_artifacts
-            if find_card_artifacts(text):
-                return True
-            if GatewayStreamConsumer._markdown_table_auto_stream_enabled(platform):
-                from gateway.rich_cards.markdown_tables import has_markdown_table_candidate
-                if has_markdown_table_candidate(text):
-                    return True
-        except Exception:
-            pass
-        if "```" not in text and "~~~" not in text:
-            return False
-        for fence in ("```", "~~~"):
-            idx = text.rfind(fence)
-            if idx < 0 or text.find(fence, idx + len(fence)) >= 0:
-                continue
-            lines = text[idx + len(fence):].lstrip().splitlines()
-            info = lines[0].strip().lower() if lines else ""
-            prefixes = ("message-card", "card", "chart-card")
-            if info and (info in prefixes or (len(info) >= 3 and any(kind.startswith(info) for kind in prefixes))):
-                return True
-        return False
-
-    @staticmethod
-    def _markdown_table_auto_stream_enabled(platform: str = "generic") -> bool:
-        try:
-            from gateway.rich_cards.artifacts import markdown_table_auto_enabled
-            return markdown_table_auto_enabled(platform)
-        except Exception:
-            return os.getenv("HERMES_RICH_CARD_TABLE_AUTO", "").strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _clean_for_display(text: str) -> str:
@@ -1263,25 +1206,7 @@ class GatewayStreamConsumer:
         stream finishes — we just need to hide the raw directives from the
         user.
         """
-        if "MEDIA:" not in text and "[[audio_as_voice]]" not in text and "```" not in text and "~~~" not in text:
-            return text
-        cleaned = text.replace("[[audio_as_voice]]", "")
-        cleaned = GatewayStreamConsumer._MEDIA_RE.sub("", cleaned)
-        # Hide complete or currently-streaming rich-card fences. Rendering runs
-        # only at finalization via the base gateway delivery path.
-        cleaned = re.sub(r"(?s)(```+|~~~+)\s*(?:message-card|card|chart-card)\b.*?(?:\1|\Z)", "", cleaned)
-        for fence in ("```", "~~~"):
-            idx = cleaned.rfind(fence)
-            if idx >= 0 and cleaned.find(fence, idx + len(fence)) < 0:
-                lines = cleaned[idx + len(fence):].lstrip().splitlines()
-                info = lines[0].strip().lower() if lines else ""
-                prefixes = ("message-card", "card", "chart-card")
-                if info and (info in prefixes or (len(info) >= 3 and any(kind.startswith(info) for kind in prefixes))):
-                    cleaned = cleaned[:idx]
-        # Collapse excessive blank lines left behind by removed tags
-        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-        # Strip trailing whitespace/newlines but preserve leading content
-        return cleaned.rstrip()
+        return _BasePlatformAdapter.strip_media_directives_for_display(text)
 
     async def _send_new_chunk(
         self,

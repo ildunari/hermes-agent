@@ -2328,11 +2328,7 @@ class TestUtf16OverflowDetection:
 
 
 
-def test_unfinished_empty_fence_does_not_crash_rich_card_detection():
-    from gateway.stream_consumer import GatewayStreamConsumer
 
-    assert GatewayStreamConsumer._has_rich_card_fence_candidate("```") is False
-    assert GatewayStreamConsumer._clean_for_display("hello\n```") == "hello\n```"
 
 
 class TestFreshFinalRespectsAdapterDecline:

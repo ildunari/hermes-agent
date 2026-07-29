@@ -29,10 +29,10 @@ checks:
     path: web/src/lib/api.ts
     needles: []
     description: RETIRED 2026-07-29 — plugin UI uses the authenticated SDK fetch helper and namespaced backend.
-  - id: rich-card-bluebubbles
+  - id: bluebubbles-plugin-registry-hook
     path: tools/send_message_tool.py
-    needles: [rich_card, "platform_registry.get(\"bluebubbles\")"]
-    description: rich-card delivery and BlueBubbles plugin registry hook (adapter carry retired to hermes-kosta-plugins 2026-07-23)
+    needles: ["platform_registry.get(\"bluebubbles\")"]
+    description: BlueBubbles plugin registry hook (adapter carry retired to hermes-kosta-plugins 2026-07-23)
   - id: vibeproxy-alias-priority
     path: hermes_cli/models.py
     needles: [POSITION IS LOAD-BEARING, "\"vibeproxy\": ["]

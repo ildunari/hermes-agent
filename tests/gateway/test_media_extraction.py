@@ -185,6 +185,29 @@ caption
         assert tags == ["MEDIA:/tmp/gen/cat.png"]
         assert voice is False
 
+    def test_gateway_auto_append_message_card_media(self):
+        """Plugin-rendered cards use the standard tool-result media contract."""
+        from gateway.run import _collect_auto_append_media_tags
+
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "card-1", "function": {"name": "render_message_card"}}
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "card-1",
+                "content": '{"ok": true, "media": "MEDIA:/tmp/card.png"}',
+            },
+            {"role": "assistant", "content": "Here is the card."},
+        ]
+
+        tags, voice = _collect_auto_append_media_tags(messages)
+        assert tags == ["MEDIA:/tmp/card.png"]
+        assert voice is False
+
     def test_gateway_auto_append_image_generate_prefers_host_path(self):
         """When host and sandbox paths differ, the host-deliverable path wins."""
         from gateway.run import _collect_auto_append_media_tags
