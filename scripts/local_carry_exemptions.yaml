@@ -624,6 +624,9 @@ exemptions:
 - path_glob: plugins/model-providers/zai/__init__.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
+- path_glob: plugins/platforms/buzz/adapter.py
+  reason: upstream carries one trailing-whitespace-only line; keep the local tree diff-clean until upstream normalizes it
+  expires: '2026-10-01'
 - path_glob: plugins/platforms/discord/rich_ui.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
