@@ -94,6 +94,14 @@ checks:
     path: hermes_state.py
     needles: [_fts_trigram_disabled, disable_fts_trigram, last_active, idx_sessions_last_active]
     description: trigram-disable lifecycle and indexed session recents
+  - id: bounded-session-read-connections
+    path: hermes_state.py
+    needles: [_MAX_THREAD_READ_CONNECTIONS, bounded fallback for this thread]
+    description: cap long-lived per-thread SQLite readers so dashboard/profile fan-out cannot exhaust process file descriptors
+  - id: auth-store-io-classification
+    path: hermes_cli/auth.py
+    needles: [File-system/resource failures, json.JSONDecodeError, UnicodeDecodeError]
+    description: quarantine only malformed auth JSON; propagate permission, EMFILE, and storage I/O failures truthfully
   - id: detached-restart-cli
     path: cli.py
     needles: [restart-gateways, enqueue_detached_restart]

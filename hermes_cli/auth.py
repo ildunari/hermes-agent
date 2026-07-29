@@ -1148,9 +1148,14 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
     if not auth_file.exists():
         return {"version": AUTH_STORE_VERSION, "providers": {}}
 
+    # File-system/resource failures (permission denied, EMFILE, I/O errors)
+    # are not evidence that the credential store is corrupt.  Let those
+    # propagate so callers can report/retry the real failure instead of
+    # silently dropping every credential and writing a bogus .corrupt copy.
     try:
-        raw = json.loads(auth_file.read_text(encoding="utf-8"))
-    except Exception as exc:
+        text = auth_file.read_text(encoding="utf-8")
+        raw = json.loads(text)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         corrupt_path = auth_file.with_suffix(".json.corrupt")
         try:
             import shutil

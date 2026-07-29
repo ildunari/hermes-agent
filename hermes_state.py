@@ -2106,6 +2106,14 @@ class SessionDB:
     _IMPORT_MAX_TOTAL_MESSAGES = 50_000
     _IMPORT_MAX_SESSION_BYTES = 5 * 1024 * 1024
     _IMPORT_MAX_TOTAL_BYTES = 25 * 1024 * 1024
+    # A long-lived gateway/dashboard can dispatch the same SessionDB through
+    # dozens of AnyIO worker threads.  Keeping one SQLite connection forever
+    # for every thread multiplied the process FD count by (databases × worker
+    # threads) and exhausted launchd's default 256-FD soft limit.  Preserve
+    # lock-free reads for the common concurrent readers, but bound the number
+    # retained by each SessionDB; overflow threads use the locked writer
+    # connection instead.
+    _MAX_THREAD_READ_CONNECTIONS = 8
 
     def __init__(self, db_path: Path = None, read_only: bool = False):
         self.db_path = db_path or DEFAULT_DB_PATH
@@ -2328,6 +2336,12 @@ class SessionDB:
                     # close() already drained — don't register; close
                     # immediately so no tracked fd leaks.
                     conn.close()
+                    self._read_local.failed = True
+                    return None
+                if len(self._read_conns) >= self._MAX_THREAD_READ_CONNECTIONS:
+                    conn.close()
+                    # Remember the bounded fallback for this thread.  Retrying
+                    # every SELECT would churn descriptors and defeat the cap.
                     self._read_local.failed = True
                     return None
                 self._read_conns.add(conn)

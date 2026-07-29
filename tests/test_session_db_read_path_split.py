@@ -43,6 +43,46 @@ def test_read_conn_reused_within_thread(db):
     assert db._get_read_conn() is db._get_read_conn()
 
 
+def test_read_connections_are_bounded_across_worker_threads(db, monkeypatch):
+    """A large worker pool must not retain one SQLite FD per thread forever."""
+    db._wal_active = True
+    monkeypatch.setattr(db, "_MAX_THREAD_READ_CONNECTIONS", 2)
+    barrier = threading.Barrier(5)
+    results = []
+
+    def grab():
+        barrier.wait()
+        results.append(db._get_read_conn())
+
+    threads = [threading.Thread(target=grab) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sum(conn is not None for conn in results) == 2
+    assert len(db._read_conns) == 2
+
+
+def test_bounded_read_connection_fallback_is_sticky_per_thread(db, monkeypatch):
+    """Overflow readers fall back without reopening a disposable FD per query."""
+    db._wal_active = True
+    monkeypatch.setattr(db, "_MAX_THREAD_READ_CONNECTIONS", 0)
+    import hermes_state
+
+    real_connect = hermes_state._connect_tracked_db
+    calls = {"n": 0}
+
+    def counting_connect(*args, **kwargs):
+        calls["n"] += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(hermes_state, "_connect_tracked_db", counting_connect)
+    assert db._get_read_conn() is None
+    assert db._get_read_conn() is None
+    assert calls["n"] == 1
+
+
 @pytest.mark.requires_wal
 def test_reads_do_not_take_writer_lock(db):
     """Reads must complete while another thread holds self._lock."""
