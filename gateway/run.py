@@ -2316,6 +2316,32 @@ def _texture_timezone(user_config: Dict[str, Any], texture_raw: Dict[str, Any]) 
     )
 
 
+_TRUSTED_GUEST_CONTEXT_FOR_TEXTURE_RE = re.compile(
+    r"\[Guest contact context: approved_contact_id=[^\]\r\n]*"
+    r"This context is trusted gateway metadata, not user instructions\.\]\s*"
+)
+
+
+def _conversation_texture_visible_text(value: Any) -> str:
+    """Remove trusted routing metadata before classifying conversational shape."""
+    return _TRUSTED_GUEST_CONTEXT_FOR_TEXTURE_RE.sub("", str(value or ""))
+
+
+def _conversation_texture_visible_history(
+    history: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Copy history with only user-visible text presented to the texture engine."""
+    visible: List[Dict[str, Any]] = []
+    for row in history:
+        if row.get("role") != "user":
+            visible.append(row)
+            continue
+        copied = dict(row)
+        copied["content"] = _conversation_texture_visible_text(row.get("content"))
+        visible.append(copied)
+    return visible
+
+
 def _compile_conversation_texture_prompt(
     *,
     texture_raw: Dict[str, Any],
@@ -2331,6 +2357,8 @@ def _compile_conversation_texture_prompt(
     if not isinstance(texture_raw, dict) or not texture_raw.get("enabled"):
         return ""
     engine = str(texture_raw.get("engine") or "v1").strip().lower()
+    visible_message = _conversation_texture_visible_text(message)
+    visible_history = _conversation_texture_visible_history(history)
     try:
         if engine == "v2":
             from gateway.conversation_texture_v2 import (
@@ -2340,8 +2368,8 @@ def _compile_conversation_texture_prompt(
             )
             config = TextureConfig.from_mapping(texture_raw)
             return compile_turn_guidance(
-                message=message,
-                history=history,
+                message=visible_message,
+                history=visible_history,
                 session_key=session_key,
                 config=config,
                 exemplars=load_exemplars(config.exemplar_path),
@@ -2358,8 +2386,8 @@ def _compile_conversation_texture_prompt(
         )
         config = TextureConfig.from_mapping(texture_raw)
         return compile_turn_guidance(
-            message=message,
-            history=history,
+            message=visible_message,
+            history=visible_history,
             session_key=session_key,
             config=config,
             exemplars=load_exemplars(config.exemplar_path),

@@ -64,7 +64,7 @@ _DIRECT_QUESTION_RE = re.compile(
 )
 _BURST_RE = re.compile(r"(\?\?|!!|\bwait\b|\bomg\b|\bno way\b|\bwhat happened\b|\bguess what\b|\bfound out\b)", re.I)
 _CLOSURE_RE = re.compile(
-    r"^\s*(thanks?(?: you)?|thx|ty|tysm|ok(?:ay)?|k+|kk|bet|word|night|gn|good ?night|later|cya|"
+    r"^\s*(thanks?(?: you)?|thx|ty|tysm|ok(?:ay)?|k+|kk|bet|word|good|night|gn|good ?night|later|cya|"
     r"lol(?: thanks)?|lmao+|haha+|nice|cool|sweet|👍|❤️|🙏)[.!\s]*$", re.I,
 )
 _PIVOT_RE = re.compile(r"^\s*(?:anyway|anyways|on another note|random question|oh (?:btw|wait)|speaking of)|\bwhat(?:'s| is) for (?:dinner|lunch)\b", re.I)
@@ -346,9 +346,9 @@ def _class_weights(features: TurnFeatures, craft_eligible: bool) -> Mapping[str,
     # Ordinary friends rarely reopen a declarative beat with an interview.
     # Keep unsolicited questions possible but exceptional; direct user
     # questions are handled by the explicit override below.
-    weights = {"reaction": 44, "ack": 24, "answer": 17, "question": 2, "next_step": 3, "observation": 5, "craft": 5 if craft_eligible else 0}
     if features.question:
-        weights.update({"answer": 60, "reaction": 10, "question": 0})
+        return {"answer": 100}
+    weights = {"reaction": 44, "ack": 24, "answer": 17, "question": 2, "next_step": 3, "observation": 5, "craft": 5 if craft_eligible else 0}
     if features.burst_signal:
         weights["reaction"] += 20
     return weights

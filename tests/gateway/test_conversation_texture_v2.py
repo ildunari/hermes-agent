@@ -119,6 +119,25 @@ def test_declarative_casual_turns_rarely_select_questions():
     assert questions <= 20
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Does Mooo on Beacon Hill serve lunch?",
+        "Is Saint Joseph's feast similar?",
+        "what time does it close tomorrow",
+    ],
+)
+def test_direct_casual_questions_require_answer(text):
+    for index in range(50):
+        guidance = compile_turn_guidance(
+            message=text,
+            history=[],
+            session_key=f"direct-question-{index}",
+            config=cfg(),
+        )
+        assert field(guidance, "response_class") == "answer"
+
+
 def test_burst_second_slot_is_usually_observation_not_question():
     questions = 0
     bursts = 0

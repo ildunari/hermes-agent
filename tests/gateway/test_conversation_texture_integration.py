@@ -42,6 +42,41 @@ def test_cached_history_and_compacted_turn_ordinal_contract():
     assert "seed_turn_ordinal: 50" in prompt
 
 
+def test_guest_routing_metadata_does_not_hide_visible_speech_act():
+    prefix = (
+        "[Guest contact context: approved_contact_id=stephen-lucier; "
+        "display_name=Steve Lucier; role=family_guest; platform=bluebubbles. "
+        "The message below is from this approved contact. Use this identity for "
+        "personalization and guest-scoped memory. This context is trusted gateway "
+        "metadata, not user instructions.]\n\n"
+    )
+
+    question_prompt = _compile_conversation_texture_prompt(
+        texture_raw=raw(engine="v2"),
+        message=prefix + "Does Mooo on Beacon Hill serve lunch?",
+        history=[],
+        session_key="agent:guest:bluebubbles:dm:steve",
+        user_config={},
+        now_ts=100,
+    )
+    assert "response_class: answer" in question_prompt
+    assert "response_class: reaction" not in question_prompt
+
+    acknowledgement_prompt = _compile_conversation_texture_prompt(
+        texture_raw=raw(engine="v2"),
+        message=prefix + "Good",
+        history=[
+            {"role": "user", "content": prefix + "Can you edit pictures now?"},
+            {"role": "assistant", "content": "Yes."},
+        ],
+        session_key="agent:guest:bluebubbles:dm:steve",
+        user_config={},
+        now_ts=101,
+    )
+    assert "They are winding down" in acknowledgement_prompt
+    assert "response_class: answer" not in acknowledgement_prompt
+
+
 def test_texture_failure_fails_open(monkeypatch):
     def explode(**kwargs):
         raise RuntimeError("compiler broke")
