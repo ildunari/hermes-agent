@@ -430,9 +430,8 @@ features:
         path: web/src/lib/api.ts
         needles:
           - WEBUI_HIDDEN_MESSAGING_SESSION_SOURCES
-          - WEBUI_HIDDEN_SESSION_SOURCES_QUERY
-          - '/api/sessions?limit=${limit}&offset=${offset}&order=${order}&exclude_sources=${WEBUI_HIDDEN_SESSION_SOURCES_QUERY}'
-          - '/api/sessions/search?q=${encodeURIComponent(q)}&exclude_sources=${WEBUI_HIDDEN_SESSION_SOURCES_QUERY}'
+          - withDefaultSessionExclusions
+          - appendSessionFilters
         description: browser recents and search exclude messaging transcripts
       - id: webui-search-source-filter
         path: hermes_cli/web_server.py
@@ -779,19 +778,6 @@ features:
         needles: [_MAX_ELEMENT_LABEL_CHARS, "label[: _MAX_ELEMENT_LABEL_CHARS - 1]"]
         description: oversized AX labels are clamped before entering model context
 
-  - id: runtime.computer-use-ended-session-revival
-    title: Revive daemon-ended computer-use sessions once
-    owner: kosta
-    class: keep-core
-    owner_paths:
-      - tools/computer_use/cua_backend.py
-    tests:
-      - tests/tools/test_computer_use.py
-    checks:
-      - id: computer-use-ended-session-revival
-        path: tools/computer_use/cua_backend.py
-        needles: [_is_ended_logical_session_result, "start_session", "reviving once"]
-        description: ended logical driver sessions are revived before one bounded action retry
 
   - id: tools.fuzzy-match-indentation-boundary
     title: Preserve full line indentation in fuzzy replacements
@@ -811,6 +797,23 @@ features:
         path: tools/fuzzy_match.py
         needles: [exact_indent_adjusted, starts_inside_indent, match_start]
         description: whitespace-prefixed exact matches consume the complete indentation prefix without weakening replace-all or ambiguity semantics
+
+  - id: tools.tts-delivery-metadata-sanitization
+    title: Keep delivery metadata and local artifact paths out of speech
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - tools/tts_text_normalize.py
+      - tests/tools/test_tts_text_normalize.py
+    collision_paths:
+      - tools/tts_text_normalize.py
+    tests:
+      - tests/tools/test_tts_text_normalize.py
+    checks:
+      - id: tts-delivery-metadata-sanitization
+        path: tools/tts_text_normalize.py
+        needles: [_MEDIA_LINE_RE, _MEDIA_TOKEN_RE, _TTS_AUDIO_PATH_RE, _LOCAL_PATH_RE]
+        description: spoken-text normalization removes MEDIA directives and substitutes generated-file labels for host-local paths
 
   - id: desktop.document-side-panel-preview
     title: Render PDF and DOCX attachments in the Desktop side panel
