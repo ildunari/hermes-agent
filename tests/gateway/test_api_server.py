@@ -684,8 +684,6 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
-    app.router.add_get("/miniapp", adapter._handle_miniapp_index)
-    app.router.add_get("/miniapp/index.html", adapter._handle_miniapp_index)
     app.router.add_post(
         "/api/platforms/{platform}/events",
         adapter._handle_platform_event_callback,
@@ -1008,28 +1006,6 @@ class TestHealthEndpoint:
             assert resp.headers.get("X-XSS-Protection") == "0"
             assert resp.headers.get("Referrer-Policy") == "no-referrer"
 
-    @pytest.mark.asyncio
-    async def test_miniapp_headers_allow_inline_ui_and_telegram_webapp(self, adapter, tmp_path):
-        """Mini app HTML must not inherit the API-only locked-down CSP."""
-        miniapp_dir = tmp_path / "miniapp"
-        miniapp_dir.mkdir()
-        (miniapp_dir / "index.html").write_text(
-            "<!doctype html><style>body{color:red}</style><script>window.ok=true</script>",
-            encoding="utf-8",
-        )
-        adapter._miniapp_dir = miniapp_dir
-
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.get("/miniapp/index.html")
-            assert resp.status == 200
-            csp = resp.headers.get("Content-Security-Policy") or ""
-            assert "default-src 'self'" in csp
-            assert "style-src 'self' 'unsafe-inline'" in csp
-            assert "script-src 'self' 'unsafe-inline' https://telegram.org" in csp
-            assert "frame-ancestors 'none'" not in csp
-            assert resp.headers.get("X-Frame-Options") is None
-            assert resp.headers.get("Permissions-Policy") == "camera=(), microphone=(self), geolocation=()"
 
     @pytest.mark.asyncio
     async def test_health_returns_ok(self, adapter):
@@ -4465,8 +4441,6 @@ class TestCORS:
             assert resp.status == 200
             allowed_headers = resp.headers.get("Access-Control-Allow-Headers", "")
             assert "Idempotency-Key" in allowed_headers
-            assert "X-Telegram-Init-Data" in allowed_headers
-            assert "X-Hermes-Session-Id" in allowed_headers
 
     @pytest.mark.asyncio
     async def test_cors_sets_vary_origin_header(self):

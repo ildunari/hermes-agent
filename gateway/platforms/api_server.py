@@ -8,7 +8,6 @@ Exposes an HTTP server with endpoints:
 - DELETE /v1/responses/{response_id} — Delete a stored response
 - GET  /v1/models                  — lists hermes-agent and any configured model_routes aliases
 - GET  /v1/capabilities            — machine-readable API capabilities for external UIs
-- GET  /v1/runs                    — list recently known API runs
 - GET  /api/sessions               — list client-visible Hermes sessions
 - POST /api/sessions               — create an empty Hermes session
 - GET/PATCH/DELETE /api/sessions/{session_id} — read/update/delete a session
@@ -20,7 +19,6 @@ Exposes an HTTP server with endpoints:
 - GET  /v1/runs/{run_id}/events    — SSE stream of structured lifecycle events
 - POST /v1/runs/{run_id}/approval — resolve a pending run approval
 - POST /v1/runs/{run_id}/stop       — interrupt a running agent
-- GET  /api/background-tasks       — inspect live Hermes background work
 - GET  /health                     — health check
 - GET  /health/detailed            — rich status for cross-container dashboard probing
 
@@ -53,12 +51,9 @@ from functools import wraps
 import logging
 import os
 import re
-import shutil
-import contextlib
 import sqlite3
 import sys
 import time
-import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -87,19 +82,6 @@ except ImportError:
     AIOHTTP_AVAILABLE = False
     web = None  # type: ignore[assignment]
 
-try:
-    import psutil
-except ImportError:  # pragma: no cover
-    psutil = None  # type: ignore[assignment]
-
-try:
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    CRYPTOGRAPHY_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    Ed25519PublicKey = None  # type: ignore[assignment]
-    CRYPTOGRAPHY_AVAILABLE = False
-
-from gateway.claude_sessions import get_claude_session, list_claude_sessions
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     MEDIA_TAG_CLEANUP_RE,
@@ -173,19 +155,10 @@ BIND_RETRY_INITIAL_BACKOFF_S = 0.5
 BIND_RETRY_MAX_BACKOFF_S = 5.0
 MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversations with tool calls
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
-TELEGRAM_MINIAPP_PUBLIC_KEY_HEX = "e7bf03a2fa4602af4580703d88dda5bb59f32ed8b02a56c187fe7d34caed242d"
-# Telegram Mini Apps can stay open for hours. A 5-minute auth_date TTL makes
-# signed initData expire while the UI still looks online, breaking helper routes.
-TELEGRAM_MINIAPP_MAX_AGE_SECONDS = 24 * 60 * 60
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
 RESPONSES_AUTO_TRUNCATION_HISTORY_LIMIT = 100
 _COMPRESSED_SUMMARY_METADATA_KEY = "_compressed_summary"
-
-
-def _decode_base64url(value: str) -> bytes:
-    padding = '=' * (-len(value) % 4)
-    return base64.urlsafe_b64decode(value + padding)
 
 
 def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
@@ -867,7 +840,7 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Telegram-Init-Data, X-Hermes-Session-Id",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
 }
 
 
@@ -1109,23 +1082,6 @@ _SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
 }
 
-_MINIAPP_SECURITY_HEADERS = {
-    "Content-Security-Policy": (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://telegram.org; "
-        "style-src 'self' 'unsafe-inline'; "
-        "connect-src 'self' https://api.telegram.org wss://macstudio.tailf7342a.ts.net; "
-        "img-src 'self' data: blob:; "
-        "font-src 'self'; "
-        "base-uri 'self'; "
-        "form-action 'self'"
-    ),
-    "Permissions-Policy": "camera=(), microphone=(self), geolocation=()",
-    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-    "X-Content-Type-Options": "nosniff",
-    "X-XSS-Protection": "0",
-    "Referrer-Policy": "no-referrer",
-}
 
 
 if AIOHTTP_AVAILABLE:
@@ -1133,10 +1089,10 @@ if AIOHTTP_AVAILABLE:
     async def security_headers_middleware(request, handler):
         """Add security headers to all responses (including errors)."""
         response = await handler(request)
-        headers = _MINIAPP_SECURITY_HEADERS if request.path.startswith('/miniapp') else _SECURITY_HEADERS
-        for k, v in headers.items():
+        for k, v in _SECURITY_HEADERS.items():
             response.headers.setdefault(k, v)
         return response
+
 else:
     security_headers_middleware = None  # type: ignore[assignment]
 
@@ -1382,40 +1338,6 @@ class APIServerAdapter(BasePlatformAdapter):
         # agent with model="" that 400s every call until manual retry.
         self._last_resolved_model: Dict[str, str] = {}
         self._session_db_lock: Optional[asyncio.Lock] = None  # Single-flight for lazy init
-        # Per-session token usage cache. Read by /api/session-usage and
-        # _get_session_usage; populated on session-create paths and during run
-        # finalization. The clean-branch rebuild dropped this initializer,
-        # which made every /api/session-usage call AttributeError → 500.
-        self._session_usage_cache: Dict[str, Dict[str, int]] = {}
-        self._telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self._telegram_bot_id: Optional[int] = None
-        if self._telegram_bot_token:
-            try:
-                self._telegram_bot_id = int(self._telegram_bot_token.split(":", 1)[0])
-            except (TypeError, ValueError):
-                self._telegram_bot_id = None
-        self._telegram_allowed_users: set[int] = set()
-        for raw in (os.getenv("TELEGRAM_OWNER_ID", ""), os.getenv("TELEGRAM_ALLOWED_USERS", "")):
-            for part in str(raw).split(','):
-                part = part.strip()
-                if not part:
-                    continue
-                try:
-                    self._telegram_allowed_users.add(int(part))
-                except ValueError:
-                    continue
-        self._miniapp_dir = Path.home() / '.hermes' / 'miniapp'
-        try:
-            from hermes_cli.config import get_hermes_home
-            self._miniapp_dir = get_hermes_home() / 'miniapp'
-        except Exception:
-            pass
-        self._miniapp_signing_key = None
-        if CRYPTOGRAPHY_AVAILABLE:
-            try:
-                self._miniapp_signing_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(TELEGRAM_MINIAPP_PUBLIC_KEY_HEX))
-            except Exception:
-                self._miniapp_signing_key = None
         # Concurrency cap shared across all agent-serving endpoints
         # (/v1/chat/completions, /v1/responses, /v1/runs). Read from
         # config.yaml gateway.api_server.max_concurrent_runs; 0 disables
@@ -1984,19 +1906,6 @@ class APIServerAdapter(BasePlatformAdapter):
             ("POST", "/v1/responses", self._handle_responses),
             ("GET", "/v1/responses/{response_id}", self._handle_get_response),
             ("DELETE", "/v1/responses/{response_id}", self._handle_delete_response),
-            ("GET", "/api/model-info", self._handle_model_info),
-            ("GET", "/api/claude-sessions", self._handle_claude_sessions),
-            ("GET", "/api/claude-sessions/{session_id}", self._handle_claude_session),
-            ("GET", "/api/claude-sessions/{session_id}/events", self._handle_claude_session_events),
-            ("GET", "/api/session-usage", self._handle_session_usage),
-            ("GET", "/api/processes", self._handle_processes),
-            ("GET", "/api/background-tasks", self._handle_background_tasks),
-            ("GET", "/api/commands", self._handle_commands),
-            ("POST", "/api/command", self._handle_command),
-            ("GET", "/miniapp", self._handle_miniapp_index),
-            ("GET", "/miniapp/", self._handle_miniapp_index),
-            ("GET", "/miniapp/index.html", self._handle_miniapp_index),
-            ("GET", "/miniapp/{path:.+}", self._handle_miniapp_asset),
             # Generic platform HTTP event callback ingress. Authenticated by
             # the target adapter's own verifier (platform-signed bearer), NOT
             # API_SERVER_KEY — external platforms hold no API server key.
@@ -2009,7 +1918,6 @@ class APIServerAdapter(BasePlatformAdapter):
             ("POST", "/api/jobs/{job_id}/pause", self._handle_pause_job),
             ("POST", "/api/jobs/{job_id}/resume", self._handle_resume_job),
             ("POST", "/api/jobs/{job_id}/run", self._handle_run_job),
-            ("GET", "/v1/runs", self._handle_list_runs),
             ("POST", "/v1/runs", self._handle_runs),
             ("GET", "/v1/runs/{run_id}", self._handle_get_run),
             ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
@@ -2933,257 +2841,23 @@ class APIServerAdapter(BasePlatformAdapter):
         out = {key: cfg.get(key) for key in allowed if cfg.get(key)}
         return out or None
 
-    def _current_model_info(self) -> Dict[str, Any]:
-        from gateway.run import _resolve_runtime_agent_kwargs, _resolve_gateway_model
-        from agent.model_metadata import get_model_context_length
-
-        model = _resolve_gateway_model()
-        runtime = _resolve_runtime_agent_kwargs()
-        provider = runtime.get('provider') or ''
-        base_url = runtime.get('base_url') or ''
-        api_key = runtime.get('api_key') or ''
-        context_length = get_model_context_length(
-            model,
-            base_url=base_url,
-            api_key=api_key,
-            config_context_length=None,
-            provider=provider,
-        )
-        return {
-            'model': model,
-            'model_short': model.split('/')[-1] if '/' in model else model,
-            'provider': provider or '',
-            'base_url': base_url or '',
-            'context_length': int(context_length or 0),
-        }
-
-    def _get_session_usage(self, session_id: str) -> Dict[str, int]:
-        if session_id in self._session_usage_cache:
-            return dict(self._session_usage_cache[session_id])
-        usage = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}
-        session_db = self._ensure_session_db()
-        if session_db is not None and session_id:
-            try:
-                session = session_db.get_session(session_id) or {}
-                prompt_tokens = int(session.get('input_tokens') or 0)
-                completion_tokens = int(session.get('output_tokens') or 0)
-                usage = {
-                    'prompt_tokens': prompt_tokens,
-                    'completion_tokens': completion_tokens,
-                    'total_tokens': prompt_tokens + completion_tokens,
-                }
-            except Exception:
-                pass
-        self._session_usage_cache[session_id] = dict(usage)
-        return usage
-
-    def _system_health_payload(self) -> Dict[str, Any]:
-        payload = {'status': 'ok', 'platform': 'hermes-agent'}
-        if psutil is None:
-            return payload
-        try:
-            payload.update({
-                'cpu_percent': round(float(psutil.cpu_percent(interval=0.1)), 1),
-                'memory_percent': round(float(psutil.virtual_memory().percent), 1),
-                'disk_percent': round(float(psutil.disk_usage(str(Path.home())).percent), 1),
-                'uptime': max(0, int(time.time() - psutil.boot_time())),
-            })
-            if hasattr(os, 'getloadavg'):
-                try:
-                    payload['load_avg'] = [round(float(x), 2) for x in os.getloadavg()]
-                except OSError:
-                    pass
-        except Exception:
-            pass
-        return payload
-
-    def _process_snapshot(self) -> List[Dict[str, Any]]:
-        if psutil is None:
-            return []
-        items: List[Dict[str, Any]] = []
-        try:
-            current_user = psutil.Process().username()
-        except Exception:
-            current_user = None
-        for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_percent', 'status']):
-            try:
-                info = proc.info
-                if current_user and info.get('username') != current_user:
-                    continue
-                items.append({
-                    'pid': info.get('pid'),
-                    'name': info.get('name') or str(info.get('pid')),
-                    'cpu': round(float(info.get('cpu_percent') or 0), 1),
-                    'mem': round(float(info.get('memory_percent') or 0), 1),
-                    'running': info.get('status') not in ('stopped', 'zombie', 'dead'),
-                })
-            except Exception:
-                continue
-        items.sort(key=lambda p: (p.get('cpu') or 0, p.get('mem') or 0), reverse=True)
-        return items[:12]
-
-    def _format_jobs_list(self) -> str:
-        cron_err = self._check_jobs_available()
-        if cron_err:
-            return 'Cron jobs are not available.'
-        jobs = self._cron_list(include_disabled=True)
-        if not jobs:
-            return 'No cron jobs.'
-        lines = []
-        for job in jobs[:20]:
-            status = 'paused' if not job.get('enabled', True) or job.get('state') == 'paused' else 'active'
-            sched = job.get('schedule_display') or job.get('schedule') or '—'
-            lines.append(f"- {job.get('name') or job.get('id')}: {sched} [{status}]")
-        return '\n'.join(lines)
-
-    def _available_commands_payload(self) -> List[Dict[str, Any]]:
-        from hermes_cli.commands import COMMAND_REGISTRY
-        commands: List[Dict[str, Any]] = []
-        for cmd in COMMAND_REGISTRY:
-            if cmd.cli_only and not cmd.gateway_config_gate:
-                continue
-            if not cmd.advertise_in_gateway:
-                continue
-            commands.append({
-                'name': cmd.name,
-                'desc': cmd.description,
-                'args': cmd.args_hint or '',
-            })
-        return commands
-
-    async def _handle_miniapp_index(self, request: "web.Request") -> "web.StreamResponse":
-        index_path = self._miniapp_dir / 'index.html'
-        if not index_path.exists():
-            return web.json_response({'error': f'Mini app not installed at {index_path}'}, status=404)
-        return web.FileResponse(index_path, headers={'Cache-Control': 'no-cache'})
-
-    async def _handle_miniapp_asset(self, request: "web.Request") -> "web.StreamResponse":
-        rel = request.match_info.get('path', '').strip('/')
-        if not rel:
-            return await self._handle_miniapp_index(request)
-        target = (self._miniapp_dir / rel).resolve()
-        try:
-            target.relative_to(self._miniapp_dir.resolve())
-        except Exception:
-            return web.json_response({'error': 'Invalid miniapp path'}, status=400)
-        if not target.exists() or not target.is_file():
-            return web.json_response({'error': 'Miniapp asset not found'}, status=404)
-        return web.FileResponse(target)
 
 
 
-    async def _handle_model_info(self, request: "web.Request") -> "web.Response":
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
-        return web.json_response(self._current_model_info())
 
-    async def _handle_claude_sessions(self, request: "web.Request") -> "web.Response":
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
-        try:
-            limit = int(request.query.get('limit', '30'))
-        except Exception:
-            limit = 30
-        payload = list_claude_sessions(limit=max(1, min(limit, 100)))
-        return web.json_response(payload)
 
-    async def _handle_claude_session(self, request: "web.Request") -> "web.Response":
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
-        session_id = request.match_info.get('session_id', '').strip()
-        payload = get_claude_session(session_id, include_events=True)
-        status = 200 if payload.get('ok') else 404
-        return web.json_response(payload, status=status)
 
-    async def _handle_claude_session_events(self, request: "web.Request") -> "web.Response":
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
-        session_id = request.match_info.get('session_id', '').strip()
-        payload = get_claude_session(session_id, include_events=True)
-        status = 200 if payload.get('ok') else 404
-        return web.json_response({
-            'ok': payload.get('ok', False),
-            'session_id': session_id,
-            'timeline': payload.get('timeline', []),
-            'warnings': payload.get('warnings', []),
-            'error': payload.get('error'),
-        }, status=status)
 
-    async def _handle_session_usage(self, request: "web.Request") -> "web.Response":
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
-        session_id = request.headers.get('X-Hermes-Session-Id', '').strip()
-        if not session_id:
-            return web.json_response({'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0})
-        return web.json_response(self._get_session_usage(session_id))
 
-    async def _handle_processes(self, request: "web.Request") -> "web.Response":
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
-        return web.json_response({'processes': self._process_snapshot()})
 
-    async def _handle_commands(self, request: "web.Request") -> "web.Response":
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
-        return web.json_response({'commands': self._available_commands_payload()})
 
-    async def _handle_command(self, request: "web.Request") -> "web.Response":
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        command = str(body.get('command') or '').strip()
-        args = str(body.get('args') or '').strip()
-        current_session_id = request.headers.get('X-Hermes-Session-Id', '').strip()
-        if command in ('/new', '/reset'):
-            new_session_id = f"miniapp-{uuid.uuid4().hex[:16]}"
-            self._session_usage_cache[new_session_id] = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}
-            return web.json_response({'output': 'Started a new session.', 'session_id': new_session_id})
-        if command in ('/help', '/commands'):
-            from hermes_cli.commands import gateway_help_lines
-            return web.json_response({'output': '\n'.join(gateway_help_lines()), 'session_id': current_session_id})
-        if command == '/status':
-            info = self._current_model_info()
-            usage = self._get_session_usage(current_session_id) if current_session_id else {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}
-            lines = [
-                f"Session: {current_session_id or 'none'}",
-                f"Model: {info['model_short']} via {info['provider'] or 'unknown'}",
-                f"Context: {usage['prompt_tokens']}/{info['context_length'] or 0} prompt tokens",
-                f"Total session tokens: {usage['total_tokens']}",
-            ]
-            return web.json_response({'output': '\n'.join(lines), 'session_id': current_session_id})
-        if command == '/model':
-            info = self._current_model_info()
-            return web.json_response({'output': f"{info['model']}\nprovider: {info['provider'] or 'unknown'}\ncontext: {info['context_length']}", 'session_id': current_session_id})
-        if command == '/cron' and (not args or args == 'list'):
-            return web.json_response({'output': self._format_jobs_list(), 'session_id': current_session_id})
-        if command == '/stop':
-            try:
-                from tools.process_registry import get_process_registry
-                reg = get_process_registry()
-                count = 0
-                for proc in reg.list_processes():
-                    sid = proc.get('session_id')
-                    if sid:
-                        try:
-                            reg.kill_process(sid)
-                            count += 1
-                        except Exception:
-                            continue
-                return web.json_response({'output': f'Stopped {count} background process(es).', 'session_id': current_session_id})
-            except Exception as exc:
-                return web.json_response({'output': f'Unable to stop background processes: {exc}', 'session_id': current_session_id})
-        return web.json_response({'output': f'Unsupported miniapp command: {command} {args}'.strip(), 'session_id': current_session_id}, status=400)
+
+
+
+
+
+
+
 
     # ------------------------------------------------------------------
     # HTTP Handlers
@@ -6732,172 +6406,9 @@ class APIServerAdapter(BasePlatformAdapter):
         routing = self._run_statuses.get(run_id, {}).get("runtime_routing")
         return routing if isinstance(routing, dict) else None
 
-    def _sorted_run_statuses(self, *, active_only: bool = False) -> List[Dict[str, Any]]:
-        """Return a newest-first snapshot of API-created runs."""
-        statuses = [dict(status) for status in self._run_statuses.values()]
-        if active_only:
-            statuses = [
-                status for status in statuses
-                if str(status.get("status", "")).lower() in {"queued", "started", "running", "stopping"}
-            ]
-        return sorted(
-            statuses,
-            key=lambda status: float(status.get("updated_at") or status.get("created_at") or 0),
-            reverse=True,
-        )
 
-    async def _handle_list_runs(self, request: "web.Request") -> "web.Response":
-        """GET /v1/runs — list recently known API runs for dashboard UIs."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
 
-        active_only = request.query.get("active") in {"1", "true", "yes"}
-        runs = self._sorted_run_statuses(active_only=active_only)
-        return web.json_response({
-            "object": "list",
-            "data": runs,
-            "count": len(runs),
-        })
 
-    def _background_task_payload(self) -> Dict[str, Any]:
-        """Build an inspect-only snapshot of Hermes-managed background work."""
-        generated_at = time.time()
-        tasks: List[Dict[str, Any]] = []
-        active_api_runs = self._sorted_run_statuses(active_only=True)
-        for run in active_api_runs:
-            tasks.append({
-                "id": run.get("run_id"),
-                "kind": "api_run",
-                "source": "api_server",
-                "label": run.get("input") or run.get("prompt") or run.get("run_id"),
-                "status": run.get("status", "running"),
-                "created_at": run.get("created_at"),
-                "updated_at": run.get("updated_at"),
-                "session_id": run.get("session_id"),
-                "model": run.get("model"),
-                "preview": run.get("output") or run.get("error") or run.get("last_event") or "",
-                "controllable": True,
-                "actions": ["inspect", "stop"],
-            })
-
-        process_count = 0
-        try:
-            from tools.process_registry import process_registry
-            processes = process_registry.list_sessions()
-            process_count = len(processes)
-            for proc in processes:
-                if proc.get("status") != "running":
-                    continue
-                tasks.append({
-                    "id": proc.get("session_id"),
-                    "kind": "process",
-                    "source": "terminal",
-                    "label": proc.get("command") or proc.get("session_id"),
-                    "status": proc.get("status", "running"),
-                    "started_at": proc.get("started_at"),
-                    "uptime_seconds": proc.get("uptime_seconds"),
-                    "pid": proc.get("pid"),
-                    "cwd": proc.get("cwd"),
-                    "preview": proc.get("output_preview", ""),
-                    "detached": bool(proc.get("detached")),
-                    "controllable": False,
-                    "actions": ["inspect"],
-                })
-        except Exception as exc:
-            tasks.append({
-                "id": "process-registry-error",
-                "kind": "error",
-                "source": "process_registry",
-                "label": "Process registry unavailable",
-                "status": "error",
-                "preview": str(exc),
-                "controllable": False,
-                "actions": ["inspect"],
-            })
-
-        subagent_count = 0
-        spawn_paused = False
-        try:
-            from tools.delegate_tool import is_spawn_paused, list_active_subagents
-            spawn_paused = bool(is_spawn_paused())
-            subagents = list_active_subagents()
-            subagent_count = len(subagents)
-            now = time.time()
-            for child in subagents:
-                started = child.get("started_at")
-                uptime = None
-                if isinstance(started, (int, float)):
-                    uptime = int(max(0, now - float(started)))
-                tasks.append({
-                    "id": child.get("subagent_id"),
-                    "kind": "subagent",
-                    "source": "delegate_task",
-                    "label": child.get("goal") or child.get("subagent_id"),
-                    "status": child.get("status", "running"),
-                    "started_at": started,
-                    "uptime_seconds": uptime,
-                    "model": child.get("model"),
-                    "parent_id": child.get("parent_id"),
-                    "depth": child.get("depth"),
-                    "tool_count": child.get("tool_count"),
-                    "preview": child.get("goal") or "",
-                    "controllable": False,
-                    "actions": ["inspect"],
-                })
-        except Exception as exc:
-            tasks.append({
-                "id": "delegate-registry-error",
-                "kind": "error",
-                "source": "delegate_task",
-                "label": "Delegate registry unavailable",
-                "status": "error",
-                "preview": str(exc),
-                "controllable": False,
-                "actions": ["inspect"],
-            })
-
-        gateway_active_agents = 0
-        try:
-            from gateway.status import read_runtime_status
-            runtime = read_runtime_status() or {}
-            gateway_active_agents = int(runtime.get("active_agents") or 0)
-            if gateway_active_agents:
-                tasks.append({
-                    "id": "gateway-active-agents",
-                    "kind": "gateway_agents_summary",
-                    "source": "gateway",
-                    "label": "Gateway active agents",
-                    "status": "running",
-                    "count": gateway_active_agents,
-                    "updated_at": runtime.get("updated_at"),
-                    "preview": f"{gateway_active_agents} live gateway agent(s)",
-                    "controllable": False,
-                    "actions": ["inspect"],
-                })
-        except Exception:
-            gateway_active_agents = 0
-
-        return {
-            "object": "hermes.background_tasks",
-            "generated_at": generated_at,
-            "tasks": tasks,
-            "summary": {
-                "api_runs": len(active_api_runs),
-                "processes": process_count,
-                "subagents": subagent_count,
-                "spawn_paused": spawn_paused,
-                "gateway_active_agents": gateway_active_agents,
-            },
-        }
-
-    async def _handle_background_tasks(self, request: "web.Request") -> "web.Response":
-        """GET /api/background-tasks — inspect live Hermes background work."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
-
-        return web.json_response(self._background_task_payload())
 
     @_admit_api_agent_request
     async def _handle_runs(self, request: "web.Request") -> "web.Response":
