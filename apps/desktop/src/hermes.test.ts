@@ -20,6 +20,7 @@ import {
   listSessions,
   listSidebarSessions,
   resetSidebarBatchCapability,
+  setApiRequestProfile,
   speakText,
   transcribeAudio
 } from './hermes'
@@ -45,6 +46,7 @@ describe('Hermes REST helpers', () => {
   })
 
   afterEach(() => {
+    setApiRequestProfile(null)
     vi.restoreAllMocks()
     Reflect.deleteProperty(window, 'hermesDesktop')
   })
@@ -56,7 +58,7 @@ describe('Hermes REST helpers', () => {
       expect.objectContaining({
         path:
           '/api/sessions?limit=50&offset=0&min_messages=1&archived=exclude&order=recent' +
-          '&exclude_sources=subagent%2Ctool%2Csmoke-test%2Ctelegram%2Cdiscord%2Cslack%2Cmattermost%2Cmatrix%2Csignal%2Cwhatsapp%2Cbluebubbles%2Chomeassistant%2Cemail%2Csms%2Cwebhook%2Cweixin%2Cwecom%2Cqqbot%2Cyuanbao%2Cdingtalk%2Cfeishu',
+          '&exclude_sources=subagent%2Ctool%2Csmoke-test%2Ctelegram%2Cdiscord%2Cslack%2Cmattermost%2Cmatrix%2Csignal%2Cwhatsapp%2Cbluebubbles%2Cphoton%2Chomeassistant%2Cemail%2Csms%2Cwebhook%2Cweixin%2Cwecom%2Cqqbot%2Cyuanbao%2Cdingtalk%2Cfeishu',
         timeoutMs: 60_000
       })
     )
@@ -69,7 +71,7 @@ describe('Hermes REST helpers', () => {
       expect.objectContaining({
         path:
           '/api/profiles/sessions?limit=50&offset=0&min_messages=1&archived=exclude&order=recent&profile=all' +
-          '&exclude_sources=subagent%2Ctool%2Csmoke-test%2Ctelegram%2Cdiscord%2Cslack%2Cmattermost%2Cmatrix%2Csignal%2Cwhatsapp%2Cbluebubbles%2Chomeassistant%2Cemail%2Csms%2Cwebhook%2Cweixin%2Cwecom%2Cqqbot%2Cyuanbao%2Cdingtalk%2Cfeishu',
+          '&exclude_sources=subagent%2Ctool%2Csmoke-test%2Ctelegram%2Cdiscord%2Cslack%2Cmattermost%2Cmatrix%2Csignal%2Cwhatsapp%2Cbluebubbles%2Cphoton%2Chomeassistant%2Cemail%2Csms%2Cwebhook%2Cweixin%2Cwecom%2Cqqbot%2Cyuanbao%2Cdingtalk%2Cfeishu',
         timeoutMs: 60_000
       })
     )
@@ -381,7 +383,8 @@ describe('Hermes REST helpers', () => {
     expect(audioSpeakRequestTimeoutMs('x'.repeat(100_000))).toBe(AUDIO_SPEAK_MAX_REQUEST_TIMEOUT_MS)
   })
 
-  it('uses an extended timeout for blocking TTS synthesis', async () => {
+  it('routes blocking TTS synthesis through the active profile backend', async () => {
+    setApiRequestProfile('rhaegal')
     api.mockResolvedValueOnce({
       data_url: 'data:audio/mpeg;base64,AA==',
       mime_type: 'audio/mpeg',
@@ -400,7 +403,7 @@ describe('Hermes REST helpers', () => {
       body: { text: 'Read this aloud' },
       method: 'POST',
       path: '/api/audio/speak',
-      profile: 'default',
+      profile: 'rhaegal',
       timeoutMs: AUDIO_SPEAK_MIN_REQUEST_TIMEOUT_MS
     })
   })
@@ -412,6 +415,7 @@ describe('Hermes REST helpers', () => {
   })
 
   it('uses an extended timeout for blocking transcription', async () => {
+    setApiRequestProfile('rhaegal')
     api.mockResolvedValueOnce({
       ok: true,
       provider: 'openai',
@@ -428,7 +432,7 @@ describe('Hermes REST helpers', () => {
       body: { data_url: 'data:audio/webm;base64,AA==', mime_type: 'audio/webm' },
       method: 'POST',
       path: '/api/audio/transcribe',
-      profile: 'default',
+      profile: 'rhaegal',
       timeoutMs: AUDIO_TRANSCRIBE_MIN_REQUEST_TIMEOUT_MS
     })
   })

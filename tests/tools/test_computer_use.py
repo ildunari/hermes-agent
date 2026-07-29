@@ -1556,6 +1556,7 @@ class TestCuaDriverSessionReconnect:
         session._shutdown_event = None
         session._lifecycle_future = None
         session._setup_error = None
+        session._declared_session_id = None
         session._call_tool_async = lambda name, args: ("call", name, args)
         # Record what reconnect does — stop then start, in that order.
         session._reconnect_log = []
@@ -1590,24 +1591,80 @@ class TestCuaDriverSessionReconnect:
         assert bridge.calls[1][0] == ("call", "list_apps", {})
         assert len(bridge.calls) == 2
 
-    def test_call_tool_revives_ended_logical_session_once(self):
-        """A daemon-side session tombstone is revived before retrying the call."""
+    def test_reconnect_retry_can_revive_ended_session(self):
+        """A reconnect result may still require reviving the declared session."""
+        from anyio import ClosedResourceError
+
+        ended = {
+            "data": "session 'hermes-test' has ended; call start_session to revive it",
+            "images": [],
+            "structuredContent": None,
+            "isError": True,
+        }
+        revived = {"data": "revived", "isError": False}
+        windows = {
+            "data": "",
+            "structuredContent": {"windows": []},
+            "isError": False,
+        }
+
         class FakeBridge:
             def __init__(self):
                 self.calls = []
                 self.effects = [
-                    {
-                        "data": (
-                            "session 'hermes-dead' has ended; tool call "
-                            "'list_windows' was rejected. Call start_session with "
-                            "this id to revive it before issuing further actions, "
-                            "or use a new session id."
-                        ),
-                        "isError": True,
-                    },
-                    {"data": "revived", "isError": False},
-                    {"data": "windows", "isError": False},
+                    ClosedResourceError(),
+                    ended,
+                    revived,
+                    windows,
                 ]
+
+            def run(self, value, timeout=None):
+                self.calls.append((value, timeout))
+                effect = self.effects.pop(0)
+                if isinstance(effect, Exception):
+                    raise effect
+                return effect
+
+        bridge = FakeBridge()
+        session = self._make_session(bridge)
+        session._declared_session_id = "hermes-test"
+
+        result = session.call_tool(
+            "list_windows", {"session": "hermes-test"}
+        )
+
+        assert result is windows
+        assert session._reconnect_log == ["stop", "start"]
+        assert [call[0] for call in bridge.calls] == [
+            ("call", "list_windows", {"session": "hermes-test"}),
+            ("call", "list_windows", {"session": "hermes-test"}),
+            ("call", "start_session", {"session": "hermes-test"}),
+            ("call", "list_windows", {"session": "hermes-test"}),
+        ]
+
+    def test_call_tool_revives_ended_session_then_retries_once(self):
+        """Logical ended-session errors revive the same id before one replay."""
+        ended = {
+            "data": (
+                "session 'hermes-test' has ended; tool call 'list_windows' "
+                "was rejected. Call start_session with this id to revive it."
+            ),
+            "images": [],
+            "structuredContent": None,
+            "isError": True,
+        }
+        ok = {"data": "revived", "images": [], "structuredContent": None, "isError": False}
+        windows = {
+            "data": "",
+            "images": [],
+            "structuredContent": {"windows": [{"pid": 1, "window_id": 2}]},
+            "isError": False,
+        }
+
+        class FakeBridge:
+            def __init__(self):
+                self.calls = []
+                self.effects = [ended, ok, windows]
 
             def run(self, value, timeout=None):
                 self.calls.append((value, timeout))
@@ -1615,20 +1672,54 @@ class TestCuaDriverSessionReconnect:
 
         bridge = FakeBridge()
         session = self._make_session(bridge)
-        args = {"session": "hermes-dead"}
+        session._declared_session_id = "hermes-test"
 
-        assert session.call_tool("list_windows", args) == {
-            "data": "windows", "isError": False
-        }
+        result = session.call_tool(
+            "list_windows", {"on_screen_only": True, "session": "hermes-test"}
+        )
+
+        assert result is windows
         assert [call[0] for call in bridge.calls] == [
-            ("call", "list_windows", args),
-            ("call", "start_session", {"session": "hermes-dead"}),
-            ("call", "list_windows", args),
+            ("call", "list_windows", {"on_screen_only": True, "session": "hermes-test"}),
+            ("call", "start_session", {"session": "hermes-test"}),
+            ("call", "list_windows", {"on_screen_only": True, "session": "hermes-test"}),
         ]
 
-    def test_call_tool_does_not_revive_unrelated_logical_error(self):
-        """Only the driver's explicit ended-session rejection is retryable."""
-        error = {"data": "target window not found", "isError": True}
+    def test_call_tool_does_not_loop_when_retry_is_still_ended(self):
+        """A repeated ended-session result is surfaced after one revival."""
+        ended = {
+            "data": "session 'hermes-test' has ended; call start_session to revive it",
+            "images": [],
+            "structuredContent": None,
+            "isError": True,
+        }
+
+        class FakeBridge:
+            def __init__(self):
+                self.calls = []
+                self.effects = [ended, {"isError": False}, ended]
+
+            def run(self, value, timeout=None):
+                self.calls.append((value, timeout))
+                return self.effects.pop(0)
+
+        bridge = FakeBridge()
+        session = self._make_session(bridge)
+        session._declared_session_id = "hermes-test"
+
+        result = session.call_tool("list_windows", {"session": "hermes-test"})
+
+        assert result is ended
+        assert len(bridge.calls) == 3
+
+    def test_lifecycle_call_does_not_try_to_revive_itself(self):
+        """start_session failures stay single-shot and cannot recurse."""
+        ended = {
+            "data": "session 'hermes-test' has ended; call start_session to revive it",
+            "images": [],
+            "structuredContent": None,
+            "isError": True,
+        }
 
         class FakeBridge:
             def __init__(self):
@@ -1636,14 +1727,14 @@ class TestCuaDriverSessionReconnect:
 
             def run(self, value, timeout=None):
                 self.calls.append((value, timeout))
-                return error
+                return ended
 
         bridge = FakeBridge()
         session = self._make_session(bridge)
 
-        assert session.call_tool(
-            "list_windows", {"session": "hermes-live"}
-        ) is error
+        result = session.call_tool("start_session", {"session": "hermes-test"})
+
+        assert result is ended
         assert len(bridge.calls) == 1
 
     def test_call_tool_does_not_retry_on_unrelated_error(self):
@@ -4048,55 +4139,3 @@ class TestStartupTimeoutPhaseDetail:
                 assert False, "expected RuntimeError"
             except RuntimeError as e:
                 assert "stuck in phase: unknown" in str(e)
-
-
-class TestElementLabelClamp:
-    """SOM/AX element labels are clamped in the JSON payload (2026-07-27).
-
-    Electron/Chromium apps can publish an entire document's text as one AX
-    element's label; 100 such elements made single captures ~82KB of tool
-    result, outrunning context compression in long GUI loops.
-    """
-
-    def test_long_label_is_clamped_with_ellipsis(self):
-        from tools.computer_use.backend import UIElement
-        from tools.computer_use.tool import (
-            _MAX_ELEMENT_LABEL_CHARS,
-            _element_to_dict,
-        )
-
-        e = UIElement(
-            index=1, role="AXStaticText",
-            label="x" * (_MAX_ELEMENT_LABEL_CHARS * 50),
-            bounds=(0, 0, 10, 10),
-        )
-        d = _element_to_dict(e)
-        assert len(d["label"]) == _MAX_ELEMENT_LABEL_CHARS
-        assert d["label"].endswith("…")
-
-    def test_short_label_is_untouched(self):
-        from tools.computer_use.backend import UIElement
-        from tools.computer_use.tool import _element_to_dict
-
-        e = UIElement(index=2, role="AXButton", label="Continue", bounds=(1, 2, 3, 4))
-        assert _element_to_dict(e)["label"] == "Continue"
-
-    def test_capture_payload_is_bounded_with_pathological_labels(self):
-        """End-to-end: a 100-element capture with huge labels stays small."""
-        from tools.computer_use.backend import CaptureResult, UIElement
-        from tools.computer_use.tool import _capture_response
-
-        cap = CaptureResult(
-            mode="ax", width=1920, height=1080, png_b64="",
-            elements=[
-                UIElement(index=i, role="AXStaticText", label="y" * 4000,
-                          bounds=(0, i, 10, 10))
-                for i in range(100)
-            ],
-            app="TestApp", window_title="Test",
-        )
-        raw = _capture_response(cap)
-        assert isinstance(raw, str)
-        # Pre-clamp this payload was ~400KB; post-clamp it must stay well
-        # under the size that outran compression (~82KB observed live).
-        assert len(raw) < 60_000

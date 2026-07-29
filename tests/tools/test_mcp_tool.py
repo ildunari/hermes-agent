@@ -6,6 +6,7 @@ All tests use mocks -- no real MCP servers or subprocesses are started.
 import asyncio
 import concurrent.futures
 import json
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -1256,6 +1257,46 @@ class TestMCPServerTask:
             assert server._registered_tool_names == ["mcp__srv__old"]
 
         asyncio.run(_test())
+
+    def test_refresh_removes_old_tool_when_new_list_becomes_ambiguous(self, caplog):
+        """A newly ambiguous list must not leave the old handler callable."""
+        from tools.mcp_tool import MCPServerTask
+        from tools.registry import ToolRegistry
+
+        registry = ToolRegistry()
+        server = MCPServerTask("srv")
+        server._config = {"tools": {"resources": False, "prompts": False}}
+        server._tools = [_make_mcp_tool("read_file")]
+        server._registered_tool_names = ["mcp__srv__read_file"]
+        server.session = MagicMock()
+        server.session.list_tools = AsyncMock(
+            return_value=SimpleNamespace(
+                tools=[_make_mcp_tool("read_file"), _make_mcp_tool("read-file")]
+            )
+        )
+        registry.register(
+            name="mcp__srv__read_file",
+            toolset="mcp-srv",
+            schema={
+                "name": "mcp__srv__read_file",
+                "description": "Old",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda *_args, **_kwargs: "{}",
+        )
+
+        with patch("tools.registry.registry", registry), \
+             patch("tools.mcp_tool._track_mcp_tool_server"), \
+             patch("tools.mcp_tool._forget_mcp_tool_server"), \
+             caplog.at_level(logging.ERROR, logger="tools.mcp_tool"):
+            asyncio.run(server._refresh_tools())
+
+        assert registry.get_entry("mcp__srv__read_file") is None
+        assert server._registered_tool_names == []
+        assert any(
+            "name normalization collision" in record.message
+            for record in caplog.records
+        )
 
     def test_schedule_tools_refresh_keeps_task_until_done(self):
         """Background refresh tasks are strongly referenced and then discarded."""
@@ -4258,46 +4299,6 @@ class TestMCPBuiltinCollisionGuard:
         assert mock_registry.get_toolset_for_tool("mcp__minimax__web_search") == "mcp-minimax"
 
         _servers.pop("minimax", None)
-
-    def test_mcp_tool_allowed_when_collision_is_another_mcp(self):
-        """Collision between two MCP toolsets is allowed (last wins)."""
-        from tools.registry import ToolRegistry
-        from tools.mcp_tool import _discover_and_register_server, _servers, MCPServerTask
-
-        mock_registry = ToolRegistry()
-
-        # Pre-register an MCP tool from a different server.
-        mcp_schema = {
-            "name": "mcp__srv__do_thing",
-            "description": "From another MCP server",
-            "parameters": {"type": "object", "properties": {}},
-        }
-        mock_registry.register(
-            name="mcp__srv__do_thing", toolset="mcp-old",
-            schema=mcp_schema, handler=lambda a, **k: "{}",
-        )
-
-        mock_tools = [_make_mcp_tool("do_thing", "Do a thing")]
-        mock_session = MagicMock()
-
-        async def fake_connect(name, config):
-            server = MCPServerTask(name)
-            server.session = mock_session
-            server._tools = mock_tools
-            return server
-
-        with patch("tools.mcp_tool._connect_server", side_effect=fake_connect), \
-             patch("tools.registry.registry", mock_registry):
-            registered = asyncio.run(
-                _discover_and_register_server("srv", {"command": "test", "args": []})
-            )
-
-        # MCP-to-MCP collision is allowed — the new server wins.
-        assert "mcp__srv__do_thing" in registered
-        assert mock_registry.get_toolset_for_tool("mcp__srv__do_thing") == "mcp-srv"
-
-        _servers.pop("srv", None)
-
 
 # ---------------------------------------------------------------------------
 # sanitize_mcp_name_component

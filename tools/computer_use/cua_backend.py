@@ -909,6 +909,10 @@ class _CuaDriverSession:
         self._shutdown_event: Optional[asyncio.Event] = None  # created on bridge loop
         self._lifecycle_future = None  # concurrent.futures.Future
         self._setup_error: Optional[BaseException] = None
+        # Stable driver-side identity declared through start_session.
+        # Used to revive a logical ended-session rejection without
+        # recursive call_tool re-entry or backend-owned state (#71166).
+        self._declared_session_id: Optional[str] = None
 
     def _require_started(self) -> None:
         if not self._started:
@@ -1170,6 +1174,67 @@ class _CuaDriverSession:
         return self._capability_version
 
     @staticmethod
+    def _logical_error_text(result: Dict[str, Any]) -> str:
+        """Flatten a logical MCP error into text for narrow classification."""
+        chunks: List[str] = []
+        for value in (result.get("data"), result.get("structuredContent")):
+            if isinstance(value, str):
+                chunks.append(value)
+            elif value is not None:
+                try:
+                    chunks.append(json.dumps(value, sort_keys=True))
+                except (TypeError, ValueError):
+                    chunks.append(str(value))
+        return "\n".join(chunks)
+
+    @classmethod
+    def _is_ended_session_result(cls, result: Any) -> bool:
+        """Recognise cua-driver's explicit recoverable ended-session result."""
+        if not isinstance(result, dict) or result.get("isError") is not True:
+            return False
+        message = cls._logical_error_text(result).lower()
+        return (
+            "session" in message
+            and ("has ended" in message or "session ended" in message)
+            and "start_session" in message
+        )
+
+    def _revive_declared_session_once(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        first_result: Dict[str, Any],
+        timeout: float,
+    ) -> Dict[str, Any]:
+        """Revive the stable session and replay one rejected tool call once."""
+        session_id = self._declared_session_id
+        if not session_id or name in self._LIFECYCLE_CALLS:
+            return first_result
+
+        logger.warning(
+            "cua-driver session %s ended during %s; reviving and retrying once",
+            session_id,
+            name,
+        )
+        revive_result = self._bridge.run(
+            self._call_tool_async("start_session", {"session": session_id}),
+            timeout=timeout,
+        )
+        if revive_result.get("isError") is True:
+            logger.warning(
+                "cua-driver session %s could not be revived: %s",
+                session_id,
+                self._logical_error_text(revive_result),
+            )
+            return first_result
+
+        # Return the second result as-is. A second rejection is surfaced; no loop.
+        return self._bridge.run(
+            self._call_tool_async(name, args),
+            timeout=timeout,
+        )
+
+    @staticmethod
     def _is_closed_session_error(exc: Exception) -> bool:
         """Return True for MCP/stdio failures that are recoverable by reconnecting."""
         name = exc.__class__.__name__
@@ -1345,40 +1410,21 @@ class _CuaDriverSession:
     # into start() when the session-start hasn't flipped _started yet.
     _LIFECYCLE_CALLS = frozenset({"start_session", "end_session"})
 
-    @staticmethod
-    def _is_ended_logical_session_result(result: Dict[str, Any]) -> bool:
-        """True when cua-driver rejected a call because its run session ended.
+    def call_tool(self, name: str, args: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
+        # A prior session may have died (MCP drop / driver crash): its
+        # lifecycle coro reset _started to False in its finally (#55048).
+        if not self._started and name not in self._LIFECYCLE_CALLS:
+            logger.warning(
+                "cua-driver session not active on %s; (re)starting before call", name
+            )
+            self.start()
+        self._require_started()
 
-        The daemon deliberately keeps ended session IDs as tombstones so late
-        actions cannot mutate the desktop. A long-lived Hermes backend can
-        legitimately outlive that daemon-side session (for example after a
-        daemon restart or stale-session cleanup), so revive the same ID once
-        before giving up.
-        """
-        if result.get("isError") is not True:
-            return False
-        data = result.get("data")
-        return (
-            isinstance(data, str)
-            and "session '" in data
-            and " has ended; tool call '" in data
-            and "Call start_session with this id to revive it" in data
-        )
-
-    def _call_tool_once(
-        self, name: str, args: Dict[str, Any], timeout: float
-    ) -> Dict[str, Any]:
-        """Run one logical tool call, retaining transport-level recovery."""
-        # The cua-driver daemon proxy returns POSIX EAGAIN ("Resource
-        # temporarily unavailable") for heavier calls like get_window_state when
-        # its non-blocking socket buffer is full. On some machines/builds this
-        # is persistent for get_window_state over the MCP stdio bridge, while
-        # the direct CLI transport keeps working. So: try the MCP path ONCE,
-        # and on the transient/transport error fall straight through to the CLI
-        # transport (which has its own retry + screenshot-to-file mitigation)
-        # rather than burning a long backoff chain on a path that won't recover.
         try:
-            return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+            result = self._bridge.run(
+                self._call_tool_async(name, args),
+                timeout=timeout,
+            )
         except Exception as e:
             if self._is_transient_daemon_error(e):
                 logger.warning(
@@ -1388,53 +1434,30 @@ class _CuaDriverSession:
                 return self._call_tool_via_cli(name, args, timeout)
             if not self._is_closed_session_error(e):
                 raise
-            # Daemon restart closes the cached stdio channel. Reconnect once and
-            # retry exactly one more time — never loop, to avoid hammering a
-            # genuinely dead daemon.
             logger.warning("cua-driver MCP session closed during %s; reconnecting once", name)
             with self._lock:
                 self._restart_session_locked()
-            return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
-
-    def call_tool(self, name: str, args: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
-        # A prior session may have died (MCP drop / driver crash): its
-        # lifecycle coro reset _started to False in its finally (#55048
-        # Bug 1). Re-enter start() so we rebuild the session instead of
-        # calling _require_started() straight into a "not started" raise or
-        # a None session. start() is idempotent when already started. Skip
-        # this for the start_session/end_session handshake, which start()/
-        # stop() drive directly while _started is still in flux.
-        if not self._started and name not in self._LIFECYCLE_CALLS:
-            logger.warning(
-                "cua-driver session not active on %s; (re)starting before call", name
+            result = self._bridge.run(
+                self._call_tool_async(name, args),
+                timeout=timeout,
             )
-            self.start()
-        self._require_started()
 
-        result = self._call_tool_once(name, args, timeout)
-        session_id = args.get("session")
+        # Remember only a successfully declared stable identity. Failed
+        # start_session calls must not leave stale recovery state behind.
+        if name == "start_session" and result.get("isError") is not True:
+            declared_id = args.get("session")
+            if isinstance(declared_id, str) and declared_id:
+                self._declared_session_id = declared_id
+
+        if self._is_ended_session_result(result):
+            result = self._revive_declared_session_once(name, args, result, timeout)
+
         if (
-            name not in self._LIFECYCLE_CALLS
-            and isinstance(session_id, str)
-            and session_id
-            and self._is_ended_logical_session_result(result)
+            name == "end_session"
+            and result.get("isError") is not True
+            and args.get("session") == self._declared_session_id
         ):
-            # This is a daemon-level session tombstone, not a broken MCP
-            # transport. Revive the same logical run and retry the rejected
-            # action exactly once. Never recurse through call_tool(): the retry
-            # must stay bounded if revival itself fails or the daemon rejects
-            # the action again.
-            logger.warning(
-                "cua-driver logical session %s ended during %s; reviving once",
-                session_id,
-                name,
-            )
-            revived = self._call_tool_once(
-                "start_session", {"session": session_id}, timeout
-            )
-            if revived.get("isError") is True:
-                return result
-            return self._call_tool_once(name, args, timeout)
+            self._declared_session_id = None
         return result
 
 
@@ -2114,19 +2137,11 @@ class CuaDriverBackend(ComputerUseBackend):
                 # Modern drivers carry the payload in structuredContent
                 # (elements array / embedded screenshot) with no markdown
                 # tree — that is NOT an empty result.
-                if (
-                    sc_.get("elements")
-                    or sc_.get("screenshot_png_b64")
-                    or sc_.get("windows")
-                ):
-                    # Window-metadata payloads (Linux drivers enumerate
-                    # windows via structuredContent) are full results too.
+                if sc_.get("elements") or sc_.get("screenshot_png_b64"):
                     return False
                 txt = out.get("data") if isinstance(out.get("data"), str) else ""
-                # Any non-blank driver text (even a "0 elements" header with
-                # no tree) is a real result; only a fully blank payload is the
-                # silent-failure mode this fallback exists to revive.
-                return not (txt and txt.strip())
+                _, tr = _split_tree_text(txt or "")
+                return not (tr and tr.strip())
 
             if _gws_is_empty(gws_out):
                 logger.warning(

@@ -1669,60 +1669,29 @@ class APIServerAdapter(BasePlatformAdapter):
     # Auth helper
     # ------------------------------------------------------------------
 
-    def _validate_telegram_init_data(self, raw_init_data: str) -> Optional[Dict[str, Any]]:
-        """Validate Telegram Mini App initData via Ed25519 or bot-token HMAC."""
-        if not raw_init_data:
-            return None
-        try:
-            pairs = urllib.parse.parse_qsl(raw_init_data, keep_blank_values=True, strict_parsing=False)
-        except Exception:
-            return None
-        params = dict(pairs)
-        signature = params.pop('signature', None)
-        supplied_hash = params.pop('hash', None)
-        auth_date_raw = params.get('auth_date', '')
-        try:
-            auth_date = int(auth_date_raw)
-        except (TypeError, ValueError):
-            return None
-        if abs(time.time() - auth_date) > TELEGRAM_MINIAPP_MAX_AGE_SECONDS:
-            return None
-        data_check = '\n'.join(f"{k}={v}" for k, v in sorted(params.items()))
+    def _expected_api_key(self) -> str:
+        """Return the API key authorized for the URL-selected profile."""
+        profile = _api_request_profile.get()
+        if not profile or profile == "default":
+            return self._api_key
 
-        valid = False
-        if signature and self._telegram_bot_id and self._miniapp_signing_key is not None:
-            payload = f"{self._telegram_bot_id}:WebAppData\n{data_check}".encode('utf-8')
-            try:
-                self._miniapp_signing_key.verify(_decode_base64url(signature), payload)
-                valid = True
-            except Exception:
-                valid = False
-
-        # Telegram clients commonly include the classic WebAppData HMAC hash.
-        # Keep this fallback so Mini App helper pages still work when the
-        # third-party Ed25519 `signature` is absent or the gateway process lacks
-        # enough env to derive bot_id for that verification path.
-        if not valid and supplied_hash and self._telegram_bot_token:
-            secret = hmac.new(b"WebAppData", self._telegram_bot_token.encode('utf-8'), hashlib.sha256).digest()
-            expected = hmac.new(secret, data_check.encode('utf-8'), hashlib.sha256).hexdigest()
-            valid = hmac.compare_digest(expected, supplied_hash)
-
-        if not valid:
-            return None
-        user_raw = params.get('user') or params.get('receiver')
-        if not user_raw:
-            return None
         try:
-            user = json.loads(user_raw)
-        except json.JSONDecodeError:
-            return None
-        try:
-            user_id = int(user.get('id'))
-        except (TypeError, ValueError):
-            return None
-        if self._telegram_allowed_users and user_id not in self._telegram_allowed_users:
-            return None
-        return user
+            from agent.secret_scope import get_secret
+            from hermes_cli.auth import has_usable_secret
+
+            key = get_secret("API_SERVER_KEY", "") or ""
+            if not has_usable_secret(key, min_length=16):
+                return ""
+            return key
+        except Exception as exc:
+            # Fail closed if the profile scope or strength guard cannot resolve
+            # the credential. Do not log the key or exception text.
+            logger.warning(
+                "Failed to resolve a usable profile-scoped API_SERVER_KEY for %r: %s",
+                profile,
+                type(exc).__name__,
+            )
+            return ""
 
     def _check_auth(self, request: "web.Request") -> Optional["web.Response"]:
         """Validate Telegram Mini App initData first, then Bearer auth fallback.
@@ -1731,24 +1700,43 @@ class APIServerAdapter(BasePlatformAdapter):
         connect() refuses to start the API server without API_SERVER_KEY, so
         the no-key branch only exists for tests or unsupported manual wiring.
         """
-        init_data = request.headers.get('X-Telegram-Init-Data', '').strip()
-        if init_data:
-            user = self._validate_telegram_init_data(init_data)
-            if user is not None:
-                request['telegram_user'] = user
-                request['auth_mode'] = 'telegram'
+        profile = _api_request_profile.get()
+        is_named_profile = bool(profile and profile != "default")
+        expected_key = self._expected_api_key()
+        if not expected_key:
+            # Preserve the historical no-key test/manual-wiring behavior only
+            # for the default listener. Named profiles must fail closed rather
+            # than inherit the listener owner's key.
+            if not is_named_profile:
                 return None
-
-        if not self._api_key:
-            return None
+            logger.warning(
+                "API server rejected request for profile %r: no profile-scoped "
+                "API_SERVER_KEY is configured; %s",
+                profile,
+                self._request_audit_log_suffix(request),
+            )
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "Invalid gateway API key (API_SERVER_KEY)",
+                        "type": "gateway_auth_error",
+                        "code": "gateway_auth_failed",
+                    }
+                },
+                status=401,
+            )
 
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer ") and self._api_key:
             token = auth_header[7:].strip()
-            # Compare as bytes: compare_digest rejects non-ASCII ``str`` input.
-            if hmac.compare_digest(token.encode(), self._api_key.encode()):
-                request['auth_mode'] = 'bearer'
-                return None
+            # Compare as bytes: ``hmac.compare_digest`` raises TypeError on a
+            # str containing non-ASCII characters, and ``token`` is the raw
+            # client-supplied header. A stray non-ASCII byte in the key would
+            # otherwise crash this handler (500) instead of returning a clean
+            # 401. Encoding both sides keeps the timing-safe comparison and
+            # matches web_server.py's dashboard-token check.
+            if hmac.compare_digest(token.encode(), expected_key.encode()):
+                return None  # Auth OK
 
         logger.warning(
             "API server rejected invalid API key: %s",

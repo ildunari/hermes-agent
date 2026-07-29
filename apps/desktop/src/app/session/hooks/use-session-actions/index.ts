@@ -571,6 +571,7 @@ export function useSessionActions({
       if ($sessionTiles.get().some(t => t.storedSessionId === storedSessionId)) {
         closeSessionTile(storedSessionId)
       }
+
       // Optimistically clear any prior resume-failure latch for this session:
       // we're attempting a fresh resume, so the self-heal in use-route-resume
       // must not keep treating it as stranded. It's re-armed below only if THIS

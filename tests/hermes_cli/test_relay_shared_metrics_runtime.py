@@ -5,7 +5,9 @@ from __future__ import annotations
 import contextvars
 import asyncio
 import json
+import sqlite3
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -321,6 +323,7 @@ def test_direct_runtime_records_without_enabling_a_plugin(direct_runtime, tmp_pa
 def test_real_binding_drives_lifecycle_aggregation_export_and_snapshot(
     real_binding_runtime,
     tmp_path,
+    monkeypatch,
 ):
     assert real_binding_runtime._native is not None
     prompt_canary = "real-relay-sensitive-prompt"
@@ -416,6 +419,12 @@ def test_real_binding_drives_lifecycle_aggregation_export_and_snapshot(
 
     root = tmp_path / "hermes-home" / "telemetry" / "shared_metrics"
     store = SharedMetricsStore(root / "metrics.sqlite3", root / "outbox")
+    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    monkeypatch.setattr(
+        "hermes_cli.observability.shared_metrics._utc_now",
+        lambda: tomorrow,
+    )
+    assert len(store.create_and_export_package_if_due()) == 1
     snapshot = store.counter_snapshot()
     by_metric: dict[str, list[dict[str, Any]]] = {}
     for counter in snapshot:
@@ -451,7 +460,7 @@ def test_real_binding_drives_lifecycle_aggregation_export_and_snapshot(
     }
     package_values: dict[tuple[str, tuple[tuple[str, str], ...]], int] = {}
     packages = sorted((root / "outbox").glob("*.json"))
-    assert len(packages) == 3
+    assert len(packages) == 2
     package_payloads = [
         json.loads(package.read_text(encoding="utf-8")) for package in packages
     ]
@@ -1525,6 +1534,91 @@ def test_turn_cleanup_drains_logical_calls_after_turn_scope_start_failure(
     assert turn.logical_llm_calls == {}
 
 
+def test_turn_cleanup_drains_logical_calls_in_lifo_order(direct_runtime):
+    coordinator = relay_runtime.SESSION_COORDINATOR
+    profile_key = relay_runtime.current_profile_key()
+    lease = coordinator.acquire_conversation(
+        profile_key=profile_key,
+        session_id="session-lifo",
+        platform="cli",
+    )
+    assert lease.session is not None
+    turn = coordinator.begin_turn(
+        lease,
+        turn_id="turn-lifo",
+        task_id="task-lifo",
+    )
+    assert turn.handle is not None
+    runtime = lease.host
+
+    handles = []
+    for request_id in ("request-1", "request-2"):
+        handle = runtime.run_in_session(
+            lease.session,
+            runtime.relay.scope.push,
+            relay_runtime.LOGICAL_LLM_SCOPE,
+            runtime.relay.ScopeType.Function,
+            handle=turn.handle,
+            input={},
+        )
+        turn.logical_llm_calls[request_id] = handle
+        handles.append(handle)
+
+    coordinator.end_turn(turn, outcome="failed")
+    coordinator.release_conversation(lease)
+
+    logical_closes = [
+        event[1]
+        for event in direct_runtime.events
+        if event[0] == "scope.pop" and event[1] in handles
+    ]
+    assert logical_closes == list(reversed(handles))
+    assert turn.logical_llm_calls == {}
+
+
+def test_real_binding_drains_multiple_logical_calls_before_turn_close(
+    real_binding_runtime,
+    caplog,
+):
+    coordinator = relay_runtime.SESSION_COORDINATOR
+    profile_key = relay_runtime.current_profile_key()
+    lease = coordinator.acquire_conversation(
+        profile_key=profile_key,
+        session_id="session-native-lifo",
+        platform="cli",
+    )
+    assert lease.session is not None
+    turn = coordinator.begin_turn(
+        lease,
+        turn_id="turn-native-lifo",
+        task_id="task-native-lifo",
+    )
+    assert turn.handle is not None
+    runtime = lease.host
+
+    for request_id in ("request-1", "request-2"):
+        handle = runtime.run_in_session(
+            lease.session,
+            runtime.relay.scope.push,
+            relay_runtime.LOGICAL_LLM_SCOPE,
+            runtime.relay.ScopeType.Function,
+            handle=turn.handle,
+            input={},
+        )
+        turn.logical_llm_calls[request_id] = handle
+
+    coordinator.end_turn(turn, outcome="failed")
+    coordinator.release_conversation(lease)
+    coordinator.finalize_conversation(
+        profile_key=profile_key,
+        session_id=lease.session_id,
+    )
+
+    assert turn.logical_llm_calls == {}
+    assert "finalization failed" not in caplog.text
+    assert "closed with errors" not in caplog.text
+
+
 def test_shared_metrics_creates_one_task_under_concurrent_access(direct_runtime):
     runtime = relay_shared_metrics._get_runtime()
     assert runtime is not None
@@ -2194,32 +2288,133 @@ def test_session_finalize_closes_a_pending_task_as_system_aborted(direct_runtime
     }
 
 
-def test_sequential_tasks_in_one_session_aggregate_once_each(direct_runtime, tmp_path):
+def test_desktop_task_completion_exports_once_per_utc_day(
+    direct_runtime, tmp_path, monkeypatch
+):
+    current_time = datetime(2026, 7, 28, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "hermes_cli.observability.shared_metrics._utc_now",
+        lambda: current_time,
+    )
     for task_id in ("t1", "t2"):
         lifecycle.invoke_hook(
             "pre_llm_call",
             session_id="s1",
             task_id=task_id,
-            platform="cli",
+            platform="desktop",
         )
         lifecycle.invoke_hook(
             "on_session_end",
             session_id="s1",
             task_id=task_id,
-            platform="cli",
+            platform="desktop",
             completed=True,
             failed=False,
             interrupted=False,
             turn_exit_reason="text_response(stop)",
         )
-    lifecycle.finalize_session(session_id="s1")
 
     outbox = tmp_path / "hermes-home" / "telemetry" / "shared_metrics" / "outbox"
-    [package_path] = list(outbox.glob("*.json"))
+    [first_package_path] = list(outbox.glob("*.json"))
+    first_package = json.loads(first_package_path.read_text(encoding="utf-8"))
+    first_metrics = {metric["name"]: metric for metric in first_package["metrics"]}
+    assert first_metrics["hermes.task_run.started"]["value"] == 1
+    assert first_metrics["hermes.task_run.started"]["dimensions"] == {
+        "entrypoint": "interactive",
+        "execution_surface": "desktop",
+    }
+    assert first_metrics["hermes.task_run.finished"]["value"] == 1
+
+    lifecycle.finalize_session(session_id="s1")
+    assert list(outbox.glob("*.json")) == [first_package_path]
+
+    current_time = datetime(2026, 7, 29, 9, tzinfo=timezone.utc)
+    lifecycle.invoke_hook(
+        "pre_llm_call",
+        session_id="s1",
+        task_id="t3",
+        platform="desktop",
+    )
+    lifecycle.invoke_hook(
+        "on_session_end",
+        session_id="s1",
+        task_id="t3",
+        platform="desktop",
+        completed=True,
+        failed=False,
+        interrupted=False,
+        turn_exit_reason="text_response(stop)",
+    )
+
+    packages = [
+        json.loads(package_path.read_text(encoding="utf-8"))
+        for package_path in outbox.glob("*.json")
+    ]
+    totals: dict[str, int] = {}
+    for package in packages:
+        for metric in package["metrics"]:
+            totals[metric["name"]] = totals.get(metric["name"], 0) + metric["value"]
+    assert totals["hermes.task_run.started"] == 3
+    assert totals["hermes.task_run.finished"] == 3
+
+
+def test_failed_flush_keeps_daily_export_open_for_later_task(
+    direct_runtime, tmp_path, monkeypatch, caplog
+):
+    current_time = datetime(2026, 7, 28, 9, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "hermes_cli.observability.shared_metrics._utc_now",
+        lambda: current_time,
+    )
+    original_flush = direct_runtime.subscribers.flush
+    flush_attempts = 0
+
+    def fail_first_flush() -> None:
+        nonlocal flush_attempts
+        flush_attempts += 1
+        if flush_attempts == 1:
+            raise RuntimeError("simulated flush failure")
+        original_flush()
+
+    direct_runtime.subscribers.flush = fail_first_flush
+
+    def finish_desktop_task(task_id: str) -> None:
+        lifecycle.invoke_hook(
+            "pre_llm_call",
+            session_id="s1",
+            task_id=task_id,
+            platform="desktop",
+        )
+        lifecycle.invoke_hook(
+            "on_session_end",
+            session_id="s1",
+            task_id=task_id,
+            platform="desktop",
+            completed=True,
+            failed=False,
+            interrupted=False,
+            turn_exit_reason="text_response(stop)",
+        )
+
+    finish_desktop_task("t1")
+
+    root = tmp_path / "hermes-home" / "telemetry" / "shared_metrics"
+    assert list((root / "outbox").glob("*.json")) == []
+    with sqlite3.connect(root / "metrics.sqlite3") as connection:
+        [package_count] = connection.execute(
+            "SELECT COUNT(*) FROM package_outbox"
+        ).fetchone()
+    assert package_count == 0
+
+    finish_desktop_task("t2")
+
+    [package_path] = list((root / "outbox").glob("*.json"))
     package = json.loads(package_path.read_text(encoding="utf-8"))
     metrics = {metric["name"]: metric for metric in package["metrics"]}
     assert metrics["hermes.task_run.started"]["value"] == 2
     assert metrics["hermes.task_run.finished"]["value"] == 2
+    assert flush_attempts == 2
+    assert "Hermes shared-metrics task flush failed" in caplog.text
 
 
 def test_task_ownership_survives_session_id_rotation(direct_runtime):
