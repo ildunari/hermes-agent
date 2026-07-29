@@ -406,7 +406,12 @@ def _topic_overlap_score(topic: str, candidate_text: str) -> tuple[float, int]:
     return (overlap / len(topic_words), overlap)
 
 
-def candidate_from_research(topic: str, materials: Sequence[ResearchMaterial]) -> Mapping[str, object] | None:
+def candidate_from_research(
+    topic: str,
+    materials: Sequence[ResearchMaterial],
+    *,
+    candidate_filter: Callable[[ProactiveCandidate], bool] | None = None,
+) -> Mapping[str, object] | None:
     """Conservatively select one normalized item; this is not a prose synthesizer."""
     normalized_candidates: list[tuple[tuple[float, int, float, int], Mapping[str, object]]] = []
     source_order = 0
@@ -453,8 +458,20 @@ def candidate_from_research(topic: str, materials: Sequence[ResearchMaterial]) -
     if normalized_candidates:
         # A newer result that merely repeats one generic query word must not
         # displace a slightly older result that actually matches the compound
-        # interest. Among equally relevant results, freshness wins.
-        return max(normalized_candidates, key=lambda row: row[0])[1]
+        # interest. Among equally relevant results, freshness wins. When the
+        # caller has contact-local history, keep walking the ranked response
+        # instead of wasting the whole attempt on a known deterministic veto.
+        ranked = sorted(normalized_candidates, key=lambda row: row[0], reverse=True)
+        if candidate_filter is not None:
+            for _score, value in ranked:
+                try:
+                    parsed = ProactiveCandidate.parse(value)
+                except CandidateValidationError:
+                    continue
+                if candidate_filter(parsed):
+                    return value
+            return None
+        return ranked[0][1]
     return None
 
 
@@ -474,9 +491,15 @@ class FetchCoordinator:
         self.candidate_builder = candidate_builder
         self.thin_below = max(1, int(thin_below))
 
-    def fetch(self, topic: str) -> ProactiveCandidate:
+    def fetch(
+        self,
+        topic: str,
+        *,
+        candidate_filter: Callable[[ProactiveCandidate], bool] | None = None,
+    ) -> ProactiveCandidate:
         materials: list[ResearchMaterial] = []
         primary_error: Exception | None = None
+        fallback_attempted = False
         try:
             primary = self.primary.search(topic)
             if primary is not None:
@@ -484,6 +507,7 @@ class FetchCoordinator:
         except Exception as exc:
             primary_error = exc
         if not materials or materials[0].item_count < self.thin_below:
+            fallback_attempted = True
             try:
                 fallback = self.web_fallback.search(topic)
                 if fallback is not None:
@@ -497,7 +521,33 @@ class FetchCoordinator:
             raise FetchError("no research material")
         # Only the builder's strict result survives this scope.  ``materials`` is
         # never returned, logged, stored, or included in a model/session request.
-        return ProactiveCandidate.parse(self.candidate_builder(topic, tuple(materials)))
+        if self.candidate_builder is candidate_from_research:
+            primary_terminal = candidate_from_research(topic, tuple(materials))
+            built = candidate_from_research(
+                topic, tuple(materials), candidate_filter=candidate_filter
+            )
+            # A full primary response can still be operationally thin when
+            # every item is a known duplicate, generic, stale, mismatched, or
+            # sensitivity-adjacent result. Give the independent fallback one
+            # chance before preserving the primary result's terminal reason.
+            if built is None and candidate_filter is not None and not fallback_attempted:
+                try:
+                    fallback = self.web_fallback.search(topic)
+                    if fallback is not None:
+                        materials.append(fallback)
+                except Exception:
+                    pass
+                built = candidate_from_research(
+                    topic, tuple(materials), candidate_filter=candidate_filter
+                )
+            if built is None:
+                # Preserve the former terminal reason when every source is
+                # unusable instead of recording a misleading no-material error
+                # or burning a rejected fallback item into novelty history.
+                built = primary_terminal or candidate_from_research(topic, tuple(materials))
+        else:
+            built = self.candidate_builder(topic, tuple(materials))
+        return ProactiveCandidate.parse(built)
 
 
 @dataclass(frozen=True)
@@ -681,6 +731,36 @@ class ProactiveGate:
     def __init__(self, verdict: Callable[[GateModelRequest], object] | None = None) -> None:
         self.verdict = verdict
 
+    @staticmethod
+    def deterministic_reason(
+        *,
+        candidate: ProactiveCandidate,
+        interest: Interest | None,
+        store: ContactMemoryStore,
+        principal: RetrievalPrincipal,
+        now: float,
+    ) -> str | None:
+        """Return a side-effect-free pre-model veto for candidate selection."""
+        if store.has_proactive_item_hash(candidate.item_hash) or _already_in_facts(
+            candidate, store, principal, now
+        ):
+            return "novelty_duplicate"
+        if not _is_concrete(candidate):
+            return "not_concrete"
+        if (
+            interest is None or interest.state is not InterestState.ACTIVE
+            or interest.valence is not InterestValence.POSITIVE
+            or interest.effective_score(now) < 2.0
+            or not _tokens_overlap(candidate.topic, interest.topic)
+        ):
+            return "interest_mismatch"
+        age = now - candidate.freshness_ts
+        if age < -300 or age > FRESHNESS_SECONDS:
+            return "stale"
+        if _sensitive_adjacency(candidate, store, principal, now):
+            return "sensitivity_adjacency"
+        return None
+
     def evaluate(
         self,
         *,
@@ -701,24 +781,15 @@ class ProactiveGate:
             )
             return GateResult(False, reason, candidate)
 
-        if store.has_proactive_item_hash(candidate.item_hash) or _already_in_facts(
-            candidate, store, principal, timestamp
-        ):
-            return suppress("novelty_duplicate")
-        if not _is_concrete(candidate):
-            return suppress("not_concrete")
-        if (
-            interest is None or interest.state is not InterestState.ACTIVE
-            or interest.valence is not InterestValence.POSITIVE
-            or interest.effective_score(timestamp) < 2.0
-            or not _tokens_overlap(candidate.topic, interest.topic)
-        ):
-            return suppress("interest_mismatch")
-        age = timestamp - candidate.freshness_ts
-        if age < -300 or age > FRESHNESS_SECONDS:
-            return suppress("stale")
-        if _sensitive_adjacency(candidate, store, principal, timestamp):
-            return suppress("sensitivity_adjacency")
+        deterministic_reason = self.deterministic_reason(
+            candidate=candidate,
+            interest=interest,
+            store=store,
+            principal=principal,
+            now=timestamp,
+        )
+        if deterministic_reason is not None:
+            return suppress(deterministic_reason)
         if self.verdict is None:
             return suppress("final_gate_unavailable")
         request = GateModelRequest(
@@ -872,11 +943,21 @@ class ProactivePipeline:
                 status, existing.gate_reason, prior_candidate, alarm=metrics.alarm
             )
         try:
-            candidate = (
-                ProactiveCandidate.parse(candidate_override)
-                if candidate_override is not None
-                else self.fetcher.fetch(topic)
-            )
+            if candidate_override is not None:
+                candidate = ProactiveCandidate.parse(candidate_override)
+            elif isinstance(self.fetcher, FetchCoordinator):
+                candidate = self.fetcher.fetch(
+                    topic,
+                    candidate_filter=lambda value: self.gate.deterministic_reason(
+                        candidate=value,
+                        interest=interest,
+                        store=store,
+                        principal=principal,
+                        now=timestamp,
+                    ) is None,
+                )
+            else:
+                candidate = self.fetcher.fetch(topic)
         except CandidateValidationError:
             _record_terminal(
                 store, send_id=send_id, interest_id=interest.interest_id if interest else None,

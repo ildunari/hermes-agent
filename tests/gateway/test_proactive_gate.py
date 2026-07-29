@@ -128,6 +128,174 @@ def test_candidate_from_research_prefers_topic_relevance_over_one_day_freshness(
     assert result["source_url"] == "https://example.com/prices"
 
 
+def test_pipeline_tries_next_ranked_candidate_after_known_duplicate(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    item = interest(store)
+    duplicate = candidate(
+        concrete_item="Porsche 911 GT3 Specs Published Yesterday",
+        source_url="https://example.com/duplicate",
+        freshness_ts=NOW - 3600,
+    )
+    store.record_proactive_send(ProactiveSend(
+        send_id="prior", interest_id=item.interest_id,
+        kind=ProactiveSendKind.INTEREST_SHARE, candidate_json=duplicate.to_json(),
+        gate_decision=GateDecision.SUPPRESSED, gate_reason="prior",
+        sent_at=None, outcome=None, outcome_at=None, created_at=NOW - 100,
+    ))
+
+    class Source:
+        def search(self, _topic: str) -> ResearchMaterial | None:
+            return ResearchMaterial("last30days", {"ranked_candidates": [
+                {
+                    "title": duplicate.concrete_item,
+                    "url": duplicate.source_url,
+                    "published_at": duplicate.freshness_ts,
+                    "snippet": duplicate.why_now,
+                },
+                {
+                    "title": "Ferrari F80 Production Specs Published Today",
+                    "url": "https://example.com/ferrari-f80",
+                    "published_at": NOW - 7200,
+                    "snippet": "Ferrari published the production specifications this morning",
+                },
+            ]}, 2)
+
+    pipeline = ProactivePipeline(
+        fetcher=FetchCoordinator(Source()),
+        gate=ProactiveGate(allow),
+        compose=lambda _request: "okay the F80 specs are genuinely wild",
+        mode="observe",
+    )
+    result = pipeline.run(
+        send_id="next", topic=item.topic, interest=item, store=store, route={}, now=NOW,
+    )
+
+    assert result.status == "dry_run"
+    assert result.candidate is not None
+    assert result.candidate.source_url == "https://example.com/ferrari-f80"
+
+
+def test_pipeline_preserves_best_candidate_veto_when_every_result_is_unusable(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    item = interest(store)
+    duplicate = candidate()
+    store.record_proactive_send(ProactiveSend(
+        send_id="prior", interest_id=item.interest_id,
+        kind=ProactiveSendKind.INTEREST_SHARE, candidate_json=duplicate.to_json(),
+        gate_decision=GateDecision.SUPPRESSED, gate_reason="prior",
+        sent_at=None, outcome=None, outcome_at=None, created_at=NOW - 100,
+    ))
+
+    class Source:
+        def search(self, _topic: str) -> ResearchMaterial | None:
+            return ResearchMaterial("last30days", {"ranked_candidates": [{
+                "title": duplicate.concrete_item,
+                "url": duplicate.source_url,
+                "published_at": duplicate.freshness_ts,
+                "snippet": duplicate.why_now,
+            }]}, 1)
+
+    result = ProactivePipeline(
+        fetcher=FetchCoordinator(Source()), gate=ProactiveGate(allow),
+        compose=lambda _request: "must not compose", mode="observe",
+    ).run(send_id="next", topic=item.topic, interest=item, store=store, route={}, now=NOW)
+
+    assert result.reason == "novelty_duplicate"
+
+
+def test_pipeline_uses_web_fallback_when_primary_results_all_fail_preflight(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    item = interest(store)
+    duplicate = candidate()
+    store.record_proactive_send(ProactiveSend(
+        send_id="prior", interest_id=item.interest_id,
+        kind=ProactiveSendKind.INTEREST_SHARE, candidate_json=duplicate.to_json(),
+        gate_decision=GateDecision.SUPPRESSED, gate_reason="prior",
+        sent_at=None, outcome=None, outcome_at=None, created_at=NOW - 100,
+    ))
+
+    class Primary:
+        def search(self, topic: str) -> ResearchMaterial | None:
+            return ResearchMaterial("last30days", {"ranked_candidates": [{
+                "title": duplicate.concrete_item, "url": duplicate.source_url,
+                "published_at": duplicate.freshness_ts, "snippet": duplicate.why_now,
+            }]}, 1)
+
+    class Web:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def search(self, topic: str) -> ResearchMaterial | None:
+            self.calls.append(topic)
+            return ResearchMaterial("web", [{
+                "title": "Ferrari F80 Production Specs Published Today",
+                "url": "https://example.com/ferrari-f80",
+                "published_at": NOW - 7200,
+                "snippet": "Ferrari published the production specifications this morning",
+            }], 1)
+
+    web = Web()
+    result = ProactivePipeline(
+        fetcher=FetchCoordinator(Primary(), web), gate=ProactiveGate(allow),
+        compose=lambda _request: "okay the F80 specs are genuinely wild", mode="observe",
+    ).run(send_id="next", topic=item.topic, interest=item, store=store, route={}, now=NOW)
+
+    assert result.status == "dry_run"
+    assert result.candidate is not None
+    assert result.candidate.source_url == "https://example.com/ferrari-f80"
+    assert web.calls == [item.topic]
+
+
+def test_exhausted_fallback_preserves_primary_terminal_candidate(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    item = interest(store)
+    duplicate = candidate()
+    store.record_proactive_send(ProactiveSend(
+        send_id="prior", interest_id=item.interest_id,
+        kind=ProactiveSendKind.INTEREST_SHARE, candidate_json=duplicate.to_json(),
+        gate_decision=GateDecision.SUPPRESSED, gate_reason="prior",
+        sent_at=None, outcome=None, outcome_at=None, created_at=NOW - 100,
+    ))
+
+    class Primary:
+        def search(self, topic: str) -> ResearchMaterial | None:
+            return ResearchMaterial("last30days", {"ranked_candidates": [{
+                "title": duplicate.concrete_item, "url": duplicate.source_url,
+                "published_at": duplicate.freshness_ts, "snippet": duplicate.why_now,
+            }]}, 1)
+
+    class RejectedWeb:
+        def search(self, topic: str) -> ResearchMaterial | None:
+            return ResearchMaterial("web", [{
+                "title": "Sports Car Accident Investigation Published Today",
+                "url": "https://example.com/rejected-fallback",
+                "published_at": NOW - 60,
+                "snippet": "A new sports car accident investigation was published today",
+            }], 1)
+
+    store.supersede_fact(FactProposal(
+        logical_id="car-accident", subject_id="person:contact", predicate="reported",
+        object_text="Their sports car was totaled in an accident last week.",
+        audience=Audience.OWNER_ONLY, mention_policy=MentionPolicy.MENTIONABLE,
+        assertion_type=AssertionType.STATED, source_id="message-1",
+        source_contact_id="contact", evidence_pointer="message-1",
+        trust=.95, confidence=.95, valid_from=NOW - 100,
+    ), now=NOW - 100)
+    result = ProactivePipeline(
+        fetcher=FetchCoordinator(Primary(), RejectedWeb()), gate=ProactiveGate(allow),
+        compose=lambda _request: "must not compose", mode="observe",
+    ).run(send_id="next", topic=item.topic, interest=item, store=store, route={}, now=NOW)
+
+    assert result.reason == "novelty_duplicate"
+    assert result.candidate is not None
+    assert result.candidate.source_url == duplicate.source_url
+    assert not store.has_proactive_item_hash(candidate(
+        concrete_item="Sports Car Accident Investigation Published Today",
+        source_url="https://example.com/rejected-fallback",
+        freshness_ts=NOW - 60,
+    ).item_hash)
+
+
 def test_concrete_gate_accepts_fresh_specific_item_without_magic_event_verb(tmp_path: Path):
     store = ContactMemoryStore(tmp_path, "contact")
     item = interest(store, topic="gift wrapping design")
