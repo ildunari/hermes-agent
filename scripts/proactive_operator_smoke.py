@@ -81,6 +81,7 @@ def arm_operator_smoke(
         route,
         route_commitment=commitment,
         candidate_override=_operator_candidate(timestamp),
+        replace_armed_slot=True,
         now=timestamp,
     )
     return {

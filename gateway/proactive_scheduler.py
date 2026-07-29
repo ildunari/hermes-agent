@@ -1251,6 +1251,7 @@ class ProactiveScheduler:
         *,
         route_commitment: str,
         candidate_override: object | None = None,
+        replace_armed_slot: bool = False,
         now: float | None = None,
         slot_id: str | None = None,
     ) -> str:
@@ -1298,12 +1299,24 @@ class ProactiveScheduler:
                 raise ValueError("operator smoke route does not match the stored existing DM")
             if commitment != self.operator_route_commitment(stored_route):
                 raise ValueError("operator smoke route commitment does not match the existing DM")
-            if con.execute(
-                "SELECT 1 FROM proactive_slot WHERE contact_hash=? "
+            live_slot = con.execute(
+                "SELECT slot_id,status,payload_json FROM proactive_slot WHERE contact_hash=? "
                 "AND status IN ('armed','claimed')",
                 (contact_hash,),
-            ).fetchone() is not None:
-                raise ValueError("operator smoke contact already has live work")
+            ).fetchone()
+            if live_slot is not None:
+                live_payload = json.loads(live_slot["payload_json"] or "{}")
+                if (
+                    not replace_armed_slot
+                    or live_slot["status"] != "armed"
+                    or live_payload.get("operator_smoke") is True
+                ):
+                    raise ValueError("operator smoke contact already has live work")
+                con.execute(
+                    """UPDATE proactive_slot SET status='cancelled',
+                       reason='replaced_by_operator_smoke',updated_at=? WHERE slot_id=?""",
+                    (timestamp, live_slot["slot_id"]),
+                )
             identifier = slot_id or f"operator-smoke-{uuid.uuid4().hex}"
             payload = {
                 "topic": interest.topic,

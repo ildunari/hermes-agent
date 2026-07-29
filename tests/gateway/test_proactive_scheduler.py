@@ -1030,6 +1030,40 @@ def test_cancelled_fetch_reuse_does_not_replace_operator_candidate(tmp_path: Pat
     assert stored_slot["status"] == "suppressed"
 
 
+def test_operator_smoke_can_atomically_replace_only_armed_organic_work(tmp_path: Path):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    register_messages(state)
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(), profile="poke",
+    )
+    route = contact_route()
+    organic = scheduler.arm_slot(
+        route, kind="interest_share", interest_id="cars", fire_at=NOW + 3600,
+        payload={"topic": "sports cars"}, now=NOW,
+    )
+    smoke = scheduler.arm_operator_smoke(
+        route,
+        route_commitment=scheduler.operator_route_commitment(route.as_dict()),
+        candidate_override=ProactiveCandidate.parse({
+            "topic": "Hermes proactive transport verification",
+            "concrete_item": "Hermes proactive delivery transport smoke",
+            "why_now": "the operator requested immediate verification",
+            "source_url": "https://hermes-agent.nousresearch.com/docs",
+            "freshness_ts": NOW,
+        }),
+        replace_armed_slot=True,
+        now=NOW + 1,
+    )
+    organic_slot = scheduler.get_slot(organic)
+    smoke_slot = scheduler.get_slot(smoke)
+    assert organic_slot is not None and organic_slot["status"] == "cancelled"
+    assert organic_slot["reason"] == "replaced_by_operator_smoke"
+    assert smoke_slot is not None and smoke_slot["status"] == "armed"
+
+
 def test_operator_smoke_is_exact_route_tagged_observe_blocked_and_active_override(
     tmp_path: Path,
 ):
