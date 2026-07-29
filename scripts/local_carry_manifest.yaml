@@ -769,6 +769,20 @@ features:
         needles: [_compression_rotation_pending_title_clear, old_session_id, new_session_id]
         description: committed session:compress events move the live gateway identity before the model turn completes
 
+  - id: runtime.computer-use-element-label-cap
+    title: Bound computer-use accessibility labels in tool payloads
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - tools/computer_use/tool.py
+    tests:
+      - tests/tools/test_computer_use.py
+    checks:
+      - id: computer-use-element-label-cap
+        path: tools/computer_use/tool.py
+        needles: [_MAX_ELEMENT_LABEL_CHARS, "label[: _MAX_ELEMENT_LABEL_CHARS - 1]"]
+        description: oversized AX labels are clamped before entering model context
+
   - id: runtime.computer-use-ended-session-revival
     title: Revive daemon-ended computer-use sessions once
     owner: kosta
