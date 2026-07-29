@@ -39,7 +39,7 @@ from typing import Optional, Dict, List, Any, Set, Tuple, Union
 logger = logging.getLogger(__name__)
 
 from hermes_time import now as _hermes_now
-from utils import atomic_replace
+from utils import atomic_replace, atomic_write_text
 
 try:
     from croniter import croniter
@@ -824,15 +824,22 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 def _atomic_write_epoch(path: Path) -> None:
     """Atomically write the current epoch time to ``path``.
 
-    Uses the same tmpfile + ``atomic_replace`` pattern as ``save_jobs`` so a
-    concurrent reader in another process (``hermes cron status``) never sees a
-    torn/truncated file. Best-effort: failures are swallowed by callers.
+    Delegates to :func:`utils.atomic_write_text` (tmpfile + fsync +
+    ``atomic_replace``, same pattern as ``save_jobs``) so a concurrent reader
+    in another process (``hermes cron status``) never sees a torn/truncated
+    file. Best-effort: failures are swallowed by callers.
     """
     ensure_dirs()
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".hb_")
+    atomic_write_text(path, str(time.time()), tmp_prefix=".hb_")
+
+
+def _atomic_write_counter(path: Path, value: int) -> None:
+    """Atomically persist a non-negative integer counter."""
+    ensure_dirs()
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".count_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(str(time.time()))
+            f.write(str(max(0, value)))
             f.flush()
             os.fsync(f.fileno())
         atomic_replace(tmp_path, path)
@@ -905,6 +912,19 @@ def get_ticker_success_age() -> Optional[float]:
     return _epoch_file_age(store.cron_dir / "ticker_last_success")
 
 
+def record_catch_up_occurrence() -> None:
+    """Increment the profile-local stale-schedule catch-up counter, best effort."""
+    path = _current_cron_store().cron_dir / "catch_up_occurrences"
+    try:
+        try:
+            value = int(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            value = 0
+        _atomic_write_counter(path, max(0, value) + 1)
+    except Exception:
+        pass
+
+
 def record_ticker_error(message: str) -> None:
     """Persist the most recent tick failure so other processes can surface it.
 
@@ -938,6 +958,15 @@ def record_ticker_error(message: str) -> None:
             raise
     except Exception:
         pass
+
+
+def get_catch_up_occurrence_count() -> int:
+    """Return the profile-local stale-schedule catch-up count."""
+    path = _current_cron_store().cron_dir / "catch_up_occurrences"
+    try:
+        return max(0, int(path.read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        return 0
 
 
 def clear_ticker_error() -> None:
@@ -1780,6 +1809,50 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         logger.warning("mark_job_run: job_id %s not found, skipping save", job_id)
 
 
+def _write_wedged_oneshot_diagnostic(job: Dict[str, Any]) -> None:
+    """Leave an operator-visible trace when a wedged one-shot is removed.
+
+    A finite one-shot whose dispatch was claimed (``repeat.completed`` >=
+    ``repeat.times``) but which never reached ``mark_job_run`` (``last_run_at``
+    is null) was interrupted mid-run — scheduler restart, gateway kill, or a
+    non-Exception escape (#73973). The recovery guards remove such jobs so
+    they stop appearing due, but a silent removal leaves the user with no
+    output, no error, and no job record. Write a small diagnostic file into
+    the job's output directory so the removal is observable and debuggable.
+
+    Best-effort: diagnostics must never break the removal itself.
+    """
+    if job.get("last_run_at") is not None:
+        return  # a prior run was recorded — normal completion race, not a wedge
+    try:
+        repeat = job.get("repeat") or {}
+        claim = job.get("run_claim") or {}
+        text = (
+            "# Cron job removed without producing output\n\n"
+            f"- job id: {job.get('id')}\n"
+            f"- name: {job.get('name')}\n"
+            f"- dispatch claimed: {repeat.get('completed', '?')}/{repeat.get('times', '?')}\n"
+            f"- run claimed at: {claim.get('at', 'unknown')} by {claim.get('by', 'unknown')}\n"
+            f"- removed at: {_hermes_now().isoformat()}\n\n"
+            "This one-shot job's dispatch was claimed, but the run never "
+            "completed (`last_run_at` was never written) — the scheduler "
+            "process was most likely killed or restarted mid-execution. The "
+            "job has been removed to stop it re-firing; recreate it to run "
+            "again.\n"
+        )
+        save_job_output(job.get("id", ""), text)
+        logger.warning(
+            "Job '%s': removed without a completed run — diagnostic written to "
+            "its output directory",
+            job.get("name", job.get("id", "?")),
+        )
+    except Exception as e:
+        logger.debug(
+            "Failed to write wedged-oneshot diagnostic for job %r: %s",
+            job.get("id"), e,
+        )
+
+
 def claim_dispatch(job_id: str) -> bool:
     """Atomically claim a finite one-shot job dispatch BEFORE execution.
 
@@ -1817,6 +1890,9 @@ def claim_dispatch(job_id: str) -> bool:
                 # Clean up so it stops appearing as due on every tick.
                 jobs.pop(i)
                 save_jobs(jobs)
+                # If the claimed run never completed (#73973), leave an
+                # operator-visible diagnostic instead of vanishing silently.
+                _write_wedged_oneshot_diagnostic(job)
                 logger.info(
                     "Job '%s': dispatch limit reached (%d/%d) — removing",
                     job.get("name", job.get("id", "?")),
@@ -2245,6 +2321,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                                 rj["next_run_at"] = new_next
                                 needs_save = True
                                 break
+                        record_catch_up_occurrence()
                         # Fall through to due.append(job) — execute once now
 
                 # One-shot dispatch-limit guard (issue #38758): a finite one-shot
@@ -2289,6 +2366,11 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                                     raw_jobs.remove(rj)
                                     needs_save = True
                                     break
+                            # The claimed run never completed here by
+                            # definition (last_run_at unwritten is what made
+                            # the entry look due) — leave an operator-visible
+                            # diagnostic instead of vanishing silently (#73973).
+                            _write_wedged_oneshot_diagnostic(job)
                             continue
 
                 # Durably claim a one-shot for the DURATION of its run before
