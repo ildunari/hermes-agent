@@ -4404,7 +4404,18 @@ def _sync_session_key_after_compress(
     agent = session.get("agent")
     new_session_id = getattr(agent, "session_id", None) or ""
     old_key = session.get("session_key", "") or ""
-    if not new_session_id or new_session_id == old_key:
+    if not new_session_id:
+        return
+    if new_session_id == old_key:
+        # The compression event may already have moved the identity while the
+        # turn was running. Finish only its deferred title policy here; ordinary
+        # turns and aborted/no-op compression remain no-ops.
+        if (
+            clear_pending_title
+            and session.pop("_compression_rotation_pending_title_clear", None)
+            == new_session_id
+        ):
+            session["pending_title"] = None
         return
 
     lease_reanchored = _transfer_active_session_slot(
@@ -5250,6 +5261,37 @@ def _on_agent_event(sid: str, name: str, payload: dict) -> None:
         _emit("runtime.route", sid, payload)
         return
     if name == "session:compress":
+        if isinstance(payload, dict) and not bool(payload.get("in_place")):
+            old_session_id = str(payload.get("old_session_id") or "")
+            new_session_id = str(payload.get("session_id") or "")
+            with _sessions_lock:
+                session = _sessions.get(sid)
+                agent = session.get("agent") if session is not None else None
+                if (
+                    session is not None
+                    and agent is not None
+                    and old_session_id
+                    and new_session_id
+                    and str(session.get("session_key") or "") == old_session_id
+                    and str(getattr(agent, "session_id", "") or "") == new_session_id
+                ):
+                    _sync_session_key_after_compress(
+                        sid,
+                        session,
+                        clear_pending_title=False,
+                        restart_slash_worker=True,
+                    )
+                    session["_compression_rotation_pending_title_clear"] = (
+                        new_session_id
+                    )
+                    _emit(
+                        "session.info",
+                        sid,
+                        {
+                            "stored_session_id": new_session_id,
+                            "running": bool(session.get("running")),
+                        },
+                    )
         _emit(name, sid, payload)
 
 

@@ -291,6 +291,13 @@ class TestFlushAfterCompression:
             agent.compression_in_place = False
             agent._ensure_db_session()
 
+            compression_events = []
+            setattr(
+                agent,
+                "event_callback",
+                lambda name, payload: compression_events.append((name, payload)),
+            )
+
             # Plain marked messages only: the exact-equality assertion below
             # relies on `compressed` containing no message that _flush filters
             # for a reason INDEPENDENT of _db_persisted (ephemeral scaffolding,
@@ -313,6 +320,18 @@ class TestFlushAfterCompression:
             assert agent.session_id != parent_sid
             child_sid = agent.session_id
 
+            assert compression_events[-1] == (
+                "session:compress",
+                {
+                    "platform": getattr(agent, "platform", "") or "",
+                    "session_id": child_sid,
+                    "old_session_id": parent_sid,
+                    "in_place": False,
+                    "compression_count": getattr(
+                        agent, "context_compressor"
+                    ).compression_count,
+                },
+            )
             agent._flush_messages_to_session_db(compressed, None)
 
             child_rows = db.get_messages(child_sid)

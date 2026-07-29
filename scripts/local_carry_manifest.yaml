@@ -734,6 +734,25 @@ features:
         needles: ['"gemini": [', '"gemini-3.6-flash"']
         description: native Gemini picker catalog includes the current 3.6 Flash model
 
+  - id: runtime.desktop-compression-reanchor
+    title: Re-anchor Desktop session identity at the compression boundary
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - tui_gateway/server.py
+      - tests/test_tui_gateway_server.py
+      - tests/run_agent/test_compression_persistence.py
+    collision_paths:
+      - tui_gateway/server.py
+    tests:
+      - tests/test_tui_gateway_server.py
+      - tests/run_agent/test_compression_persistence.py
+    checks:
+      - id: desktop-compression-event-reanchor
+        path: tui_gateway/server.py
+        needles: [_compression_rotation_pending_title_clear, old_session_id, new_session_id]
+        description: committed session:compress events move the live gateway identity before the model turn completes
+
   - id: runtime.computer-use-ended-session-revival
     title: Revive daemon-ended computer-use sessions once
     owner: kosta

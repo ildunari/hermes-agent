@@ -6960,6 +6960,74 @@ def test_session_compress_syncs_session_key_after_rotation(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_live_compression_rotation_reanchors_before_turn_completion(monkeypatch):
+    """The gateway must expose the child id while the model turn is still running."""
+    agent = types.SimpleNamespace(session_id="old-key")
+    session = _session(agent=agent, running=True)
+    session["session_key"] = "old-key"
+    session["pending_title"] = "keep through auto compression"
+    server._sessions["sid"] = session
+    emitted = []
+    restart_calls = []
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload: emitted.append((event, sid, payload)),
+    )
+    monkeypatch.setattr(
+        server,
+        "_restart_slash_worker",
+        lambda sid, current: restart_calls.append((sid, current)),
+    )
+
+    try:
+        agent.session_id = "child-key"
+        payload = {
+            "session_id": "child-key",
+            "old_session_id": "old-key",
+            "in_place": False,
+        }
+        server._on_agent_event("sid", "session:compress", payload)
+
+        assert session["session_key"] == "child-key"
+        assert session["pending_title"] == "keep through auto compression"
+        assert emitted == [
+            (
+                "session.info",
+                "sid",
+                {"stored_session_id": "child-key", "running": True},
+            ),
+            ("session:compress", "sid", payload),
+        ]
+        assert restart_calls == [("sid", session)]
+
+        # The normal post-turn sync still performs its caller-owned policy work
+        # even though the identity itself was already re-anchored immediately.
+        server._sync_session_key_after_compress("sid", session)
+        assert session["pending_title"] is None
+        assert restart_calls == [("sid", session)]
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_post_turn_sync_without_rotation_is_a_noop(monkeypatch):
+    agent = types.SimpleNamespace(session_id="same-key")
+    session = _session(agent=agent)
+    session["session_key"] = "same-key"
+    session["pending_title"] = "still pending"
+    restart_calls = []
+    monkeypatch.setattr(
+        server,
+        "_restart_slash_worker",
+        lambda sid, current: restart_calls.append((sid, current)),
+    )
+
+    server._sync_session_key_after_compress("sid", session)
+
+    assert session["pending_title"] == "still pending"
+    assert restart_calls == []
+
+
 def test_session_compress_sync_failure_discards_lcm_notification(monkeypatch):
     from agent.conversation_compression import (
         _queue_context_engine_compression_notification,
