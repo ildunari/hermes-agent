@@ -985,6 +985,51 @@ def test_cancelled_fetch_reuse_expires_and_is_exact_topic_scoped(tmp_path: Path)
     ) is None
 
 
+def test_cancelled_fetch_reuse_does_not_replace_operator_candidate(tmp_path: Path):
+    state = ProactiveStateStore(tmp_path / "state.db")
+    register_messages(state)
+    store = ContactMemoryStore(tmp_path / "contact-memory", "kosta-owner")
+    make_interest(store)
+    scheduler = ProactiveScheduler(
+        state_db=tmp_path / "state.db", contact_memory_root=tmp_path / "contact-memory",
+        config=config(), profile="poke",
+    )
+    route = contact_route()
+    cached = ProactiveCandidate.parse({
+        "topic": "sports cars", "concrete_item": "Cached track test published",
+        "why_now": "the test was published today", "source_url": "https://example.com/cached",
+        "freshness_ts": NOW,
+    })
+    scheduler.cache_cancelled_candidate(SimpleNamespace(
+        slot_id="cancelled", contact_hash=route.contact_hash,
+        payload={"topic": "sports cars"},
+    ), cached, now=NOW - 1)
+    operator = ProactiveCandidate.parse({
+        "topic": "Hermes proactive transport verification",
+        "concrete_item": "Hermes proactive delivery transport smoke",
+        "why_now": "the operator requested immediate verification",
+        "source_url": "https://hermes-agent.nousresearch.com/docs",
+        "freshness_ts": NOW,
+    })
+    slot = scheduler.arm_operator_smoke(
+        route,
+        route_commitment=scheduler.operator_route_commitment(route.as_dict()),
+        candidate_override=operator,
+        now=NOW,
+    )
+    seen = []
+
+    def capture(_route, claim, _store):
+        seen.append(claim.payload["reused_candidate_json"])
+        return SimpleNamespace(status="suppressed", reason="captured", candidate=operator)
+
+    scheduler.tick(now=NOW + 1, on_interest_share=capture)
+    assert seen == [operator.to_json()]
+    stored_slot = scheduler.get_slot(slot)
+    assert stored_slot is not None
+    assert stored_slot["status"] == "suppressed"
+
+
 def test_operator_smoke_is_exact_route_tagged_observe_blocked_and_active_override(
     tmp_path: Path,
 ):

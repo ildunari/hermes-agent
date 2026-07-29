@@ -636,6 +636,36 @@ def test_pipeline_model_veto_logs_suppression(tmp_path: Path):
     assert store.get_proactive_send("veto").gate_reason == "model_veto"
 
 
+def test_operator_candidate_bypasses_gate_only_with_explicit_override(tmp_path: Path):
+    store = ContactMemoryStore(tmp_path, "contact")
+    item = interest(store)
+    gate_calls = []
+    pipeline = ProactivePipeline(
+        fetcher=FixedFetcher(candidate()),
+        gate=ProactiveGate(
+            lambda request: gate_calls.append(request)
+            or {"allow": False, "reason": "model_reject"}
+        ),
+        compose=lambda _request: "Hermes proactive transport smoke",
+        mode="observe",
+    )
+    result = pipeline.run(
+        send_id="operator", topic=item.topic, interest=item, store=store, route={},
+        candidate_override=candidate(), operator_gate_bypass=True, now=NOW,
+    )
+    assert result.status == "dry_run"
+    assert gate_calls == []
+
+    ordinary_store = ContactMemoryStore(tmp_path, "ordinary")
+    ordinary_item = interest(ordinary_store)
+    ordinary = pipeline.run(
+        send_id="ordinary", topic=ordinary_item.topic, interest=ordinary_item,
+        store=ordinary_store, route={}, operator_gate_bypass=True, now=NOW,
+    )
+    assert ordinary.reason == "model_gate:model_reject"
+    assert len(gate_calls) == 1
+
+
 def test_suppression_metrics_alarm_only_when_send_rate_exceeds_forty_percent(tmp_path: Path):
     store = ContactMemoryStore(tmp_path, "contact")
     payload = candidate().to_json()

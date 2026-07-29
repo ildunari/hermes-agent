@@ -923,6 +923,7 @@ class ProactivePipeline:
         principal: RetrievalPrincipal = RetrievalPrincipal.OWNER,
         kind: ProactiveSendKind = ProactiveSendKind.INTEREST_SHARE,
         candidate_override: object | None = None,
+        operator_gate_bypass: bool = False,
         now: float | None = None,
     ) -> PipelineResult:
         timestamp = float(time.time() if now is None else now)
@@ -974,10 +975,13 @@ class ProactivePipeline:
             metrics = self._metrics(store)
             return PipelineResult("suppressed", "no_material", alarm=metrics.alarm)
 
-        gate_result = self.gate.evaluate(
-            send_id=send_id, candidate=candidate, interest=interest, store=store,
-            principal=principal, kind=kind, now=timestamp,
-        )
+        if operator_gate_bypass and candidate_override is not None:
+            gate_result = GateResult(True, "operator_smoke_gate_bypass", candidate)
+        else:
+            gate_result = self.gate.evaluate(
+                send_id=send_id, candidate=candidate, interest=interest, store=store,
+                principal=principal, kind=kind, now=timestamp,
+            )
         if not gate_result.allowed:
             metrics = self._metrics(store)
             return PipelineResult("suppressed", gate_result.reason, candidate, alarm=metrics.alarm)

@@ -2847,6 +2847,15 @@ def _run_proactive_tick_once(
             mode=scheduler.config.mode.value,
         )
         interest = store.get_interest(claim.interest_id) if claim.interest_id else None
+        candidate_override = claim.payload.get("reused_candidate_json")
+        operator_gate_bypass = bool(
+            claim.payload.get("operator_smoke") is True
+            and candidate_override is not None
+            and route.profile_name == "poke"
+            and route.contact_id == "kosta-owner"
+            and str(claim.payload.get("route_commitment") or "")
+            == scheduler.operator_route_commitment(route.as_dict())
+        )
         return pipeline.run(
             send_id=claim.slot_id,
             topic=str(claim.payload.get("topic") or (interest.topic if interest else "")),
@@ -2858,7 +2867,8 @@ def _run_proactive_tick_once(
                 else RetrievalPrincipal.OWNER
             ),
             kind=ProactiveSendKind(claim.kind),
-            candidate_override=claim.payload.get("reused_candidate_json"),
+            candidate_override=candidate_override,
+            operator_gate_bypass=operator_gate_bypass,
             now=now,
         )
 

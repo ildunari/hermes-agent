@@ -311,6 +311,45 @@ class TestStripBlockedTools(unittest.TestCase):
 
 
 class TestDelegateTask(unittest.TestCase):
+    @patch("tools.delegate_tool._run_single_child")
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.config.load_config_readonly")
+    def test_model_only_override_infers_unique_configured_provider(
+        self, load_full_config, load_cfg, resolve_creds, build_child, run_child
+    ):
+        load_full_config.return_value = {
+            "providers": {
+                "openai-codex": {"models": {"gpt-5.6-sol": {}}},
+                "vibeproxy": {"models": {"claude-fable-5": {}}},
+            }
+        }
+        load_cfg.return_value = {}
+        resolve_creds.side_effect = lambda cfg, _parent: {
+            "model": cfg.get("model"),
+            "provider": cfg.get("provider"),
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+        build_child.return_value = MagicMock()
+        run_child.return_value = {
+            "task_index": 0,
+            "status": "completed",
+            "summary": "ok",
+        }
+
+        result = json.loads(delegate_task(
+            goal="inspect",
+            model="claude-fable-5",
+            parent_agent=_make_mock_parent(),
+        ))
+
+        self.assertEqual(result["results"][0]["status"], "completed")
+        self.assertEqual(resolve_creds.call_args.args[0]["provider"], "vibeproxy")
+        self.assertEqual(build_child.call_args.kwargs["override_provider"], "vibeproxy")
+
     @patch("tools.delegate_tool._build_child_agent")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
     @patch("tools.delegate_tool._load_configured_model_catalog")
@@ -767,6 +806,31 @@ class TestDelegateTask(unittest.TestCase):
         result = json.loads(delegate_task(goal="Break things", parent_agent=parent))
         self.assertEqual(result["results"][0]["status"], "error")
         self.assertIn("Something broke", result["results"][0]["error"])
+
+    def test_child_failure_text_is_not_reported_as_completed(self):
+        parent = _make_mock_parent()
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "Context length exceeded. Cannot compress further.",
+                "completed": False,
+                "failed": True,
+                "error": "Context length exceeded. Cannot compress further.",
+                "compression_exhausted": True,
+                "api_calls": 0,
+            }
+            MockAgent.return_value = mock_child
+
+            result = json.loads(delegate_task(
+                goal="Fail honestly",
+                parent_agent=parent,
+            ))
+
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "failed")
+        self.assertEqual(entry["exit_reason"], "compression_exhausted")
+        self.assertIn("Context length exceeded", entry["error"])
 
     def test_depth_increments(self):
         """Verify child gets parent's depth + 1."""

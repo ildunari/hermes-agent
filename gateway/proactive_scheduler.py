@@ -1250,6 +1250,7 @@ class ProactiveScheduler:
         route: ContactRoute,
         *,
         route_commitment: str,
+        candidate_override: object | None = None,
         now: float | None = None,
         slot_id: str | None = None,
     ) -> str:
@@ -1274,6 +1275,11 @@ class ProactiveScheduler:
             key=lambda item: (item.effective_score(timestamp), item.interest_id),
             reverse=True,
         )[0]
+        candidate_json: str | None = None
+        if candidate_override is not None:
+            from gateway.proactive_fetch import ProactiveCandidate
+
+            candidate_json = ProactiveCandidate.parse(candidate_override).to_json()
         con = self._begin()
         try:
             contact = con.execute(
@@ -1306,6 +1312,8 @@ class ProactiveScheduler:
                 "active_hours_override": True,
                 "route_commitment": commitment,
             }
+            if candidate_json is not None:
+                payload["reused_candidate_json"] = candidate_json
             con.execute(
                 """INSERT INTO proactive_slot(
                    slot_id,contact_hash,kind,interest_id,payload_json,status,fire_at,
@@ -2704,7 +2712,7 @@ class ProactiveScheduler:
                 reused = self.reusable_cancelled_candidate(
                     route, topic=str(claim.payload.get("topic") or ""), now=timestamp,
                 )
-                if reused:
+                if reused and "reused_candidate_json" not in claim.payload:
                     claim = replace(
                         claim,
                         payload={**claim.payload, "reused_candidate_json": reused},

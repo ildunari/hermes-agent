@@ -2353,6 +2353,7 @@ def _run_single_child(
 
         summary = result.get("final_response") or ""
         completed = result.get("completed", False)
+        failed = result.get("failed") is True
         interrupted = result.get("interrupted", False)
         api_calls = result.get("api_calls", 0)
 
@@ -2365,6 +2366,11 @@ def _run_single_child(
 
         if interrupted:
             status = "interrupted"
+        elif failed:
+            # Fatal agent results often include a human-readable final_response
+            # (context exhaustion, auth failure, provider rejection). That text
+            # is diagnostic output, not a successful task summary.
+            status = "failed"
         elif summary and not _empty_sentinel:
             # A summary means the subagent produced usable output.
             # exit_reason ("completed" vs "max_iterations") already
@@ -2414,6 +2420,10 @@ def _run_single_child(
         # Determine exit reason
         if interrupted:
             exit_reason = "interrupted"
+        elif result.get("compression_exhausted") is True:
+            exit_reason = "compression_exhausted"
+        elif failed:
+            exit_reason = str(result.get("turn_exit_reason") or "failed")
         elif completed:
             exit_reason = "completed"
         else:
@@ -2971,9 +2981,34 @@ def delegate_task(
     # intentionally exempt and keeps the existing inheritance behavior.
     configured_models = _load_configured_model_catalog()
     configured_provider_models = _load_configured_provider_model_catalogs()
+    resolved_task_providers: List[Optional[str]] = []
     for i, task in enumerate(task_list):
         explicit_model = task.get("model") or model
         explicit_provider = task.get("provider") or provider
+        if explicit_model and not explicit_provider:
+            declaring_providers = _providers_declaring_model(
+                str(explicit_model), configured_provider_models
+            )
+            parent_provider = str(getattr(parent_agent, "provider", "") or "").lower()
+            if parent_provider in declaring_providers:
+                # Preserve model-only switching inside the parent's provider.
+                explicit_provider = None
+            elif len(declaring_providers) == 1:
+                # A model-only override that belongs to exactly one configured
+                # provider is a cross-provider routing instruction. Without
+                # this inference the child inherits the parent's endpoint and
+                # sends an invalid model/provider pair (for example Fable on
+                # the Codex OAuth endpoint).
+                explicit_provider = declaring_providers[0]
+            elif len(declaring_providers) > 1:
+                return tool_error(
+                    f"Task {i} model override '{explicit_model}' is declared by "
+                    f"multiple providers ({', '.join(declaring_providers)}). "
+                    "Specify provider explicitly."
+                )
+        resolved_task_providers.append(
+            str(explicit_provider) if explicit_provider else None
+        )
         if explicit_model:
             provider_models = configured_provider_models.get(
                 str(explicit_provider).strip().lower(), ()
@@ -2989,10 +3024,10 @@ def delegate_task(
     # bleed across parallel children. API keys remain config/runtime-owned.
     task_creds = []
     try:
-        for task in task_list:
+        for task_index, task in enumerate(task_list):
             task_cfg = dict(cfg)
             selected_model = task.get("model") or model
-            selected_provider = task.get("provider") or provider
+            selected_provider = resolved_task_providers[task_index]
             if selected_model:
                 task_cfg["model"] = selected_model
             if selected_provider:
@@ -3841,6 +3876,28 @@ def _load_configured_model_catalog() -> tuple[str, ...]:
 def _load_configured_provider_model_catalogs() -> dict[str, tuple[str, ...]]:
     """Load non-empty provider-scoped model catalogs from active config."""
     return _load_configured_model_catalogs()[1]
+
+
+def _providers_declaring_model(
+    requested_model: str,
+    provider_catalogs: dict[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    """Return configured providers that explicitly declare ``requested_model``."""
+    requested = str(requested_model or "").strip().lower().lstrip("@")
+    _prefix, separator, bare = requested.partition(":")
+    requested_bare = bare.strip() if separator else requested
+    if not requested_bare:
+        return ()
+
+    matches = []
+    for provider, models in provider_catalogs.items():
+        for declared in models:
+            declared_lower = str(declared).strip().lower().lstrip("@")
+            _declared_prefix, declared_separator, declared_bare = declared_lower.partition(":")
+            if (declared_bare.strip() if declared_separator else declared_lower) == requested_bare:
+                matches.append(provider)
+                break
+    return tuple(sorted(set(matches)))
 
 
 def _unknown_explicit_model_error(
