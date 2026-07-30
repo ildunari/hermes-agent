@@ -102,10 +102,18 @@ checks:
     path: cli.py
     needles: [restart-gateways, enqueue_detached_restart]
     description: CLI detached restart dispatch
+  - id: detached-restart-command-registry
+    path: hermes_cli/commands.py
+    needles: [restart-webui, restart-gateways, restart-hermes]
+    description: expose detached restart commands and aliases through the shared command registry
   - id: gateway-compact-voice
     path: gateway/run.py
     needles: [_handle_detached_surface_restart_command, __compact__, compact_tool_counts, _update_compact_tool_progress, register_live_voice_streamer]
     description: gateway restart, compact HUD, and Discord live voice integration
+  - id: gateway-turn-context-carry
+    path: gateway/turn_context.py
+    needles: [compact_tool_counts, compact_todo_args, voice_reply_consumer_holder, live_voice_guild]
+    description: carry state cells used by compact progress and Discord live voice after the upstream TurnRunner extraction
   - id: discord-live-voice
     path: plugins/platforms/discord/adapter.py
     needles: []
