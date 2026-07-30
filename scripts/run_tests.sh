@@ -51,9 +51,16 @@ REPO_ROOT="${HERMES_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 VENV=""
 VENV_PYTHON=""
 SKIPPED_VENVS=""
+has_isolated_pytest() {
+  # The runner later clears PYTHONPATH for each test subprocess. Probe under
+  # that same clean environment; otherwise an inherited checkout PYTHONPATH
+  # can make an empty worktree venv look pytest-capable and every child then
+  # fails with "No module named pytest".
+  env -u PYTHONPATH -u PYTHONHOME "$1" -c 'import pytest' 2>/dev/null
+}
 for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/.venv" "$HOME/.hermes/hermes-agent/venv"; do
   if [ -f "$candidate/bin/activate" ]; then
-    if "$candidate/bin/python" -c 'import pytest' 2>/dev/null; then
+    if has_isolated_pytest "$candidate/bin/python"; then
       VENV="$candidate"
       VENV_PYTHON="$candidate/bin/python"
       break
@@ -65,7 +72,7 @@ for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agen
   # Git Bash / MSYS with a `python -m venv`- or uv-created venv hits
   # this branch — without it the canonical runner refuses to start.
   if [ -f "$candidate/Scripts/activate" ]; then
-    if "$candidate/Scripts/python.exe" -c 'import pytest' 2>/dev/null; then
+    if has_isolated_pytest "$candidate/Scripts/python.exe"; then
       VENV="$candidate"
       VENV_PYTHON="$candidate/Scripts/python.exe"
       break
@@ -83,7 +90,7 @@ fi
 if [ -n "$VENV" ]; then
   PYTHON="$VENV_PYTHON"
 elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
-    && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
+    && has_isolated_pytest "$HERMES_PYTHON"; then
   # Guard with an import check: HERMES_PYTHON may point at the RELEASE
   # venv (no pytest) when inherited from a wrapped `hermes` binary rather
   # than the devShell hook.
