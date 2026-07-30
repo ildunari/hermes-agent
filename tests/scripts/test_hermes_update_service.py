@@ -127,6 +127,27 @@ def test_preflight_assessment_keeps_small_clean_run_fast(tmp_path: Path) -> None
     assert assessment["classification_reasons"] == []
 
 
+def test_merge_preview_timeout_is_conservatively_large(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "repo"
+    base = _init_repo(repo)
+    real_run = SERVICE.subprocess.run
+
+    def timeout_merge_tree(args, **kwargs):
+        if args[:2] == ["git", "merge-tree"]:
+            raise SERVICE.subprocess.TimeoutExpired(args, kwargs.get("timeout", 0))
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(SERVICE.subprocess, "run", timeout_merge_tree)
+
+    assessment = SERVICE.preflight_assessment(repo, base, base)
+
+    assert assessment["update_class"] == "LARGE"
+    assert assessment["predicted_conflict_count"] == 0
+    assert assessment["merge_preview_error"] == "git merge-tree preview timed out after 300s"
+
+
 def test_fast_path_overrun_reclassifies_without_stopping_run(
     tmp_path: Path, monkeypatch
 ) -> None:

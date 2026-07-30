@@ -304,12 +304,17 @@ def preview_merge_conflicts(repo: Path, base: str, upstream: str) -> tuple[list[
     line. Treat an unparseable result as unknown rather than guessing that the
     merge is clean.
     """
-    result = subprocess.run(
-        ["git", "merge-tree", "--write-tree", "--name-only", base, upstream],
-        cwd=repo,
-        text=True,
-        capture_output=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "merge-tree", "--write-tree", "--name-only", base, upstream],
+            cwd=repo,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return [], "git merge-tree preview timed out after 300s"
     if result.returncode == 0:
         return [], None
     lines = result.stdout.splitlines()
