@@ -392,13 +392,23 @@ def refresh_fast_path_classification(root: Path, run_id: str) -> dict[str, Any]:
         return ledger
     reasons = list(ledger.get("classification_reasons") or [])
     reasons.append("30-minute target elapsed before fast-path completion")
-    return record(
-        root,
-        run_id,
-        update_class="LARGE",
-        classification_reasons=reasons,
-        fast_path_missed_at=now.isoformat(),
-    )
+    try:
+        return record(
+            root,
+            run_id,
+            update_class="LARGE",
+            classification_reasons=reasons,
+            fast_path_missed_at=now.isoformat(),
+        )
+    except RuntimeError:
+        # A status poll can race the worker's terminal transition between the
+        # read above and record()'s locked update. Terminal ledgers are
+        # immutable; return the winner rather than turning a successful status
+        # request into an error.
+        latest = read_json(ledger_path(root, run_id))
+        if latest.get("status") in TERMINAL:
+            return latest
+        raise
 
 
 def fd_count(pid: int) -> int:

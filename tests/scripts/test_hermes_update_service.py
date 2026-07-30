@@ -190,6 +190,37 @@ def test_terminal_fast_status_is_read_only_after_deadline(
     assert "fast_path_missed_at" not in status
 
 
+def test_fast_reclassification_tolerates_terminal_transition_race(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "20260718T120000Z-fedcba654321"
+    make_ledger(tmp_path, run_id)
+    SERVICE.record(
+        tmp_path,
+        run_id,
+        update_class="FAST",
+        classification_reasons=[],
+        fast_path_deadline="2026-07-18T12:30:00+00:00",
+    )
+    monkeypatch.setattr(
+        SERVICE,
+        "utc_datetime",
+        lambda: SERVICE.dt.datetime(2026, 7, 18, 12, 31, tzinfo=SERVICE.dt.UTC),
+    )
+    real_record = SERVICE.record
+
+    def terminal_race(root: Path, rid: str, **updates: object):
+        SERVICE.transition(root, rid, "COMPLETED")
+        return real_record(root, rid, **updates)
+
+    monkeypatch.setattr(SERVICE, "record", terminal_race)
+
+    ledger = SERVICE.refresh_fast_path_classification(tmp_path, run_id)
+
+    assert ledger["status"] == "COMPLETED"
+    assert ledger["update_class"] == "FAST"
+
+
 def test_transition_rejects_phase_regression_and_terminal_resume(tmp_path: Path) -> None:
     run_id = "20260718T120000Z-aaaaaaaaaaaa"
     make_ledger(tmp_path, run_id)
