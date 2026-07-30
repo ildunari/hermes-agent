@@ -377,7 +377,11 @@ def refresh_fast_path_classification(root: Path, run_id: str) -> dict[str, Any]:
     """Turn a missed FAST target into an honest LARGE run without stopping it."""
     ledger = read_json(ledger_path(root, run_id))
     deadline_raw = ledger.get("fast_path_deadline")
-    if ledger.get("update_class") != "FAST" or not isinstance(deadline_raw, str):
+    if (
+        ledger.get("status") in TERMINAL
+        or ledger.get("update_class") != "FAST"
+        or not isinstance(deadline_raw, str)
+    ):
         return ledger
     try:
         deadline = dt.datetime.fromisoformat(deadline_raw)

@@ -166,6 +166,30 @@ def test_successful_rehearsal_cleanup_removes_worktree(tmp_path: Path) -> None:
     assert str(worktree) not in _run_git(repo, "worktree", "list", "--porcelain")
 
 
+def test_terminal_fast_status_is_read_only_after_deadline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "20260718T120000Z-abcdef123456"
+    make_terminal_ledger(
+        tmp_path,
+        run_id,
+        "COMPLETED",
+        update_class="FAST",
+        fast_path_deadline="2026-07-18T12:30:00+00:00",
+    )
+    monkeypatch.setattr(
+        SERVICE,
+        "utc_datetime",
+        lambda: SERVICE.dt.datetime(2026, 7, 19, tzinfo=SERVICE.dt.UTC),
+    )
+
+    status = SERVICE.redacted_status(tmp_path, run_id)
+
+    assert status["status"] == "COMPLETED"
+    assert status["update_class"] == "FAST"
+    assert "fast_path_missed_at" not in status
+
+
 def test_transition_rejects_phase_regression_and_terminal_resume(tmp_path: Path) -> None:
     run_id = "20260718T120000Z-aaaaaaaaaaaa"
     make_ledger(tmp_path, run_id)
