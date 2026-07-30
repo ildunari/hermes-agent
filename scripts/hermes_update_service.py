@@ -333,6 +333,7 @@ def preflight_assessment(
     base: str,
     upstream: str,
     *,
+    fast_path_started_at: dt.datetime | None = None,
     fast_max_commits: int = FAST_MAX_UPSTREAM_COMMITS,
     fast_max_changed_paths: int = FAST_MAX_CHANGED_PATHS,
     fast_max_conflicts: int = FAST_MAX_PREDICTED_CONFLICTS,
@@ -359,14 +360,18 @@ def preflight_assessment(
     if preview_error:
         reasons.append(f"merge conflict preview unavailable: {preview_error}")
     assessed_at = utc_datetime()
+    target_started_at = fast_path_started_at or assessed_at
     update_class = "LARGE" if reasons else "FAST"
     return {
         "update_class": update_class,
         "classification_reasons": reasons,
         "assessed_at": assessed_at.isoformat(),
+        "fast_path_started_at": target_started_at.isoformat(),
         "fast_path_target_seconds": FAST_PATH_TARGET_SECONDS,
         "fast_path_deadline": (
-            (assessed_at + dt.timedelta(seconds=FAST_PATH_TARGET_SECONDS)).isoformat()
+            (
+                target_started_at + dt.timedelta(seconds=FAST_PATH_TARGET_SECONDS)
+            ).isoformat()
             if update_class == "FAST"
             else None
         ),
@@ -871,6 +876,7 @@ def redacted_status(root: Path, run_id: str) -> dict[str, Any]:
         "update_class",
         "classification_reasons",
         "assessed_at",
+        "fast_path_started_at",
         "fast_path_target_seconds",
         "fast_path_deadline",
         "fast_path_missed_at",
@@ -1586,7 +1592,15 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 upstream = git(repo, "rev-parse", "origin/main")
                 record(root, run_id, upstream_sha=upstream)
             if not read_json(ledger_path(root, run_id)).get("assessed_at"):
-                assessment = preflight_assessment(repo, base, upstream)
+                created_at = dt.datetime.fromisoformat(
+                    str(read_json(ledger_path(root, run_id))["created_at"])
+                )
+                assessment = preflight_assessment(
+                    repo,
+                    base,
+                    upstream,
+                    fast_path_started_at=created_at,
+                )
                 record(root, run_id, **assessment)
             worker_command(
                 root,

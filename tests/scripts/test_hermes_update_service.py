@@ -118,13 +118,18 @@ def test_preflight_assessment_keeps_small_clean_run_fast(tmp_path: Path) -> None
     _run_git(repo, "checkout", "-q", "local/studio-slim")
     base = _run_git(repo, "rev-parse", "HEAD")
 
-    assessment = SERVICE.preflight_assessment(repo, base, upstream)
+    started_at = SERVICE.dt.datetime(2026, 7, 18, 12, tzinfo=SERVICE.dt.UTC)
+    assessment = SERVICE.preflight_assessment(
+        repo, base, upstream, fast_path_started_at=started_at
+    )
 
     assert assessment["update_class"] == "FAST"
     assert assessment["upstream_commit_count"] == 1
     assert assessment["upstream_changed_path_count"] == 1
     assert assessment["predicted_conflict_count"] == 0
     assert assessment["classification_reasons"] == []
+    assert assessment["fast_path_started_at"] == "2026-07-18T12:00:00+00:00"
+    assert assessment["fast_path_deadline"] == "2026-07-18T12:30:00+00:00"
 
 
 def test_merge_preview_timeout_is_conservatively_large(
