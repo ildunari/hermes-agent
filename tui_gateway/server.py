@@ -1230,6 +1230,33 @@ def _profile_home(profile: str | None) -> Path | None:
     return home if (home / "state.db").exists() or home.exists() else None
 
 
+def _resolve_profile_dir(profile: str) -> Path | None:
+    """Resolve an explicit profile name without accepting path-like values."""
+    try:
+        from hermes_cli import profiles as profiles_mod
+
+        canon = profiles_mod.normalize_profile_name(profile)
+        profiles_mod.validate_profile_name(canon)
+        if not profiles_mod.profile_exists(canon):
+            return None
+        home = Path(profiles_mod.get_profile_dir(canon)).resolve()
+        if canon != "default":
+            profiles_root = Path(profiles_mod._get_profiles_root()).resolve()
+            home.relative_to(profiles_root)
+        return home
+    except Exception:
+        return None
+
+
+def _open_profile_db(profile_home: Path):
+    """Open the DB selected by an already validated explicit profile."""
+    if profile_home.resolve() == Path(_hermes_home).resolve():
+        return _get_db()
+    from hermes_state import SessionDB
+
+    return SessionDB(db_path=profile_home / "state.db")
+
+
 def _profile_scoped(handler):
     """Bind ``params['profile']``'s HERMES_HOME around a pet RPC handler.
 
@@ -9748,6 +9775,33 @@ def _run_prompt_submit(
         if _drain_queued_prompt(rid, sid, session):
             return
 
+        # Tests and defensive callers can decline the queue drain after the
+        # agent returns a late /steer. Preserve that user intent by dispatching
+        # it directly as the next turn rather than silently dropping it.
+        if (
+            isinstance(_leftover_steer, str)
+            and _leftover_steer.strip()
+            and isinstance(result, dict)
+            and not result.get("interrupted")
+            and not result.get("error")
+        ):
+            with session["history_lock"]:
+                if session.get("running"):
+                    return
+                session["running"] = True
+            try:
+                _emit("message.start", sid)
+                _run_prompt_submit(rid, sid, session, _leftover_steer.strip())
+            except Exception as _steer_exc:
+                print(
+                    f"[tui_gateway] pending steer dispatch failed: "
+                    f"{type(_steer_exc).__name__}: {_steer_exc}",
+                    file=sys.stderr,
+                )
+                with session["history_lock"]:
+                    session["running"] = False
+            return
+
         # Chain a goal-continuation turn if the judge said so. We do
         # this AFTER the finally releases session["running"], so the
         # nested _run_prompt_submit doesn't deadlock on the busy
@@ -10152,15 +10206,26 @@ def _(rid, params: dict) -> dict:
                         return init_err
                     if session.get("agent") is None:
                         return _err(rid, 5032, "agent initialization failed")
-                result = _apply_model_switch(
-                    params.get("session_id", ""),
-                    session,
-                    value,
-                    confirm_expensive_model=bool(
-                        params.get("confirm_expensive_model", False)
-                    ),
-                    parsed_flags=parsed_flags,
+                profile_home = session.get("profile_home")
+                home_token = (
+                    set_hermes_home_override(profile_home) if profile_home else None
                 )
+                try:
+                    # A dashboard may multiplex sessions owned by other profiles.
+                    # Resolve providers and persist explicit --global changes in
+                    # the session owner's home, not the dashboard launch profile.
+                    result = _apply_model_switch(
+                        params.get("session_id", ""),
+                        session,
+                        value,
+                        confirm_expensive_model=bool(
+                            params.get("confirm_expensive_model", False)
+                        ),
+                        parsed_flags=parsed_flags,
+                    )
+                finally:
+                    if home_token is not None:
+                        reset_hermes_home_override(home_token)
             else:
                 result = _apply_model_switch(
                     "",
@@ -13476,3 +13541,178 @@ for _m in (
 ):
     _m.register(sys.modules[__name__])
 del _m
+
+
+# Local carry guards that span handlers mechanically split out of server.py.
+# Keeping these at the registration seam preserves the upstream split while
+# retaining the profile-validation and busy-turn contracts carried locally.
+def _install_local_carry_method_guards() -> None:
+    create_handler = _methods["session.create"]
+
+    def guarded_session_create(rid, params: dict) -> dict:
+        params = dict(params)
+        profile = str(params.get("profile") or "").strip() or None
+        parent_session_id = str(params.get("parent_session_id") or "").strip() or None
+        explicit_profile_home = None
+
+        if profile is not None:
+            explicit_profile_home = _resolve_profile_dir(profile)
+            canon = None
+            if explicit_profile_home is None:
+                # The compatibility seam may resolve homes outside the local
+                # registry, but only after the input is proven to be a profile
+                # NAME. Never pass traversal/absolute values to get_profile_dir.
+                try:
+                    from hermes_cli import profiles as profiles_mod
+
+                    canon = profiles_mod.normalize_profile_name(profile)
+                    profiles_mod.validate_profile_name(canon)
+                    seam_home = _profile_home(canon)
+                    if seam_home is not None:
+                        explicit_profile_home = Path(seam_home).resolve()
+                except Exception:
+                    pass
+            if explicit_profile_home is None:
+                return _err(rid, 4004, "profile not found")
+            if canon is None:
+                try:
+                    from hermes_cli import profiles as profiles_mod
+
+                    canon = profiles_mod.normalize_profile_name(profile)
+                    profiles_mod.validate_profile_name(canon)
+                except Exception:
+                    return _err(rid, 4004, "profile not found")
+            params["profile"] = canon
+            if parent_session_id and not (explicit_profile_home / "state.db").is_file():
+                return _err(rid, 5008, "profile state.db unavailable")
+
+        if parent_session_id:
+            branch_db = None
+            temporary_db = False
+            try:
+                if explicit_profile_home is not None:
+                    branch_db = _open_profile_db(explicit_profile_home)
+                    temporary_db = branch_db is not _get_db()
+                else:
+                    branch_db = _get_db()
+                if branch_db is None:
+                    return _db_unavailable_error(rid, code=5008)
+                parent = branch_db.get_session(parent_session_id)
+            except Exception as exc:
+                return _err(rid, 5008, f"profile state.db unavailable: {exc}")
+            finally:
+                if temporary_db and branch_db is not None:
+                    with contextlib.suppress(Exception):
+                        branch_db.close()
+            if not parent:
+                return _err(rid, 4007, "parent session not found")
+
+        return create_handler(rid, params)
+
+    _methods["session.create"] = guarded_session_create
+
+    interrupt_handler = _methods["session.interrupt"]
+
+    def guarded_session_interrupt(rid, params: dict) -> dict:
+        session = _sessions.get(str(params.get("session_id") or ""))
+        run_thread = session.get("_run_thread") if session else None
+        stale_running = bool(
+            session
+            and session.get("running")
+            and (run_thread is None or not run_thread.is_alive())
+            and not _session_uses_compute_host(session)
+        )
+        response = interrupt_handler(rid, params)
+        if stale_running and response.get("result"):
+            _emit_session_info_for_session(str(params.get("session_id") or ""), session)
+        return response
+
+    _methods["session.interrupt"] = guarded_session_interrupt
+
+    redirect_handler = _methods["session.redirect"]
+
+    def guarded_session_redirect(rid, params: dict) -> dict:
+        response = redirect_handler(rid, params)
+        result = response.get("result") or {}
+        if result.get("status") != "rejected":
+            return response
+        sid = str(params.get("session_id") or "")
+        session = _sessions.get(sid)
+        text = str(params.get("text") or "").strip()
+        if not session or not text:
+            return response
+        with session["history_lock"]:
+            if not session.get("running"):
+                return response
+            transport = current_transport() or session.get("transport") or _stdio_transport
+            _enqueue_prompt(session, text, transport)
+            session["last_active"] = time.time()
+        return _ok(rid, {"status": "queued", "text": text})
+
+    _methods["session.redirect"] = guarded_session_redirect
+
+    catalog_handler = _methods["commands.catalog"]
+
+    def guarded_commands_catalog(rid, params: dict) -> dict:
+        response = catalog_handler(rid, params)
+        result = response.get("result")
+        if not isinstance(result, dict):
+            return response
+        try:
+            from agent.skill_commands import scan_skill_commands
+
+            skill_pairs = []
+            for key, info in sorted(scan_skill_commands().items()):
+                desc = str(info.get("description", "Skill"))
+                skill_pairs.append([key, desc[:120] + ("…" if len(desc) > 120 else "")])
+            categories = result.setdefault("categories", [])
+            if skill_pairs and not any(cat.get("name") == "Skills" for cat in categories):
+                categories.append({"name": "Skills", "pairs": skill_pairs})
+        except Exception:
+            pass
+        return response
+
+    _methods["commands.catalog"] = guarded_commands_catalog
+
+    dispatch_handler = _methods["command.dispatch"]
+
+    def guarded_command_dispatch(rid, params: dict) -> dict:
+        response = dispatch_handler(rid, params)
+        if response.get("result") is not None:
+            return response
+        try:
+            from agent.skill_commands import (
+                build_skill_invocation_message,
+                resolve_skill_command_key,
+                scan_skill_commands,
+            )
+
+            name = str(params.get("name") or "").lstrip("/")
+            key = resolve_skill_command_key(name)
+            commands = scan_skill_commands()
+            if key is None or key not in commands:
+                return response
+            session = _sessions.get(params.get("session_id", ""))
+            message = build_skill_invocation_message(
+                key,
+                params.get("arg", ""),
+                task_id=session.get("session_key", "") if session else "",
+            )
+            if not message:
+                return response
+            return _ok(
+                rid,
+                {
+                    "type": "skill",
+                    "message": message,
+                    "name": commands[key].get("name", name),
+                    "display": _skill_scaffold_projection(message),
+                },
+            )
+        except Exception:
+            return response
+
+    _methods["command.dispatch"] = guarded_command_dispatch
+
+
+_install_local_carry_method_guards()
