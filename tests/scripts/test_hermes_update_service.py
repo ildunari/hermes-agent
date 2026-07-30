@@ -274,6 +274,23 @@ def test_nonterminal_overdue_status_is_large_without_writing_ledger(
     assert "fast_path_missed_at" not in persisted
 
 
+def test_receive_response_reads_past_request_payload_limit() -> None:
+    payload = json.dumps({"ok": True, "paths": ["x" * 100] * 100}).encode() + b"\n"
+
+    class ChunkSocket:
+        def __init__(self, data: bytes) -> None:
+            self.chunks = [data[index : index + 1024] for index in range(0, len(data), 1024)]
+
+        def recv(self, size: int) -> bytes:
+            assert size > 0
+            return self.chunks.pop(0) if self.chunks else b""
+
+    response = SERVICE.receive_response(ChunkSocket(payload))
+
+    assert len(response) > SERVICE.MAX_PAYLOAD
+    assert json.loads(response)["ok"] is True
+
+
 def test_transition_rejects_phase_regression_and_terminal_resume(tmp_path: Path) -> None:
     run_id = "20260718T120000Z-aaaaaaaaaaaa"
     make_ledger(tmp_path, run_id)

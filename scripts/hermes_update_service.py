@@ -47,6 +47,7 @@ PHASES = (
     "COMPLETED",
 )
 MAX_PAYLOAD = 4096
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 REQUEST_TTL = 60
 FD_LIMIT = 256
 DESKTOP_BUILD_FD_LIMIT = 2048
@@ -1044,6 +1045,21 @@ def serve(args: argparse.Namespace) -> int:
             connection.sendall((json.dumps(response, sort_keys=True) + "\n").encode("utf-8"))
 
 
+def receive_response(client: socket.socket) -> str:
+    """Read one newline-delimited response without truncating large ledgers."""
+    raw = bytearray()
+    while b"\n" not in raw:
+        remaining = MAX_RESPONSE_BYTES - len(raw) + 1
+        chunk = client.recv(min(64 * 1024, remaining))
+        if not chunk:
+            raise ConnectionError("update service closed before completing response")
+        raw.extend(chunk)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise ValueError("update service response too large")
+    response, _, _ = raw.partition(b"\n")
+    return response.decode("utf-8")
+
+
 def request(args: argparse.Namespace) -> int:
     root = state_root(args.state_root)
     payload: dict[str, Any] = {
@@ -1060,9 +1076,10 @@ def request(args: argparse.Namespace) -> int:
     else:
         payload["run_id"] = args.run_id
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5)
     client.connect(str(root / "update.sock"))
     client.sendall(json.dumps(payload).encode("utf-8"))
-    response = client.recv(MAX_PAYLOAD).decode("utf-8")
+    response = receive_response(client)
     print(response.strip())
     return 0 if json.loads(response).get("ok") else 1
 
