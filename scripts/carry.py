@@ -288,6 +288,30 @@ def exemption_for(registry: Registry, path: str) -> Exemption | None:
     return None
 
 
+def needle_relocations(registry: Registry, needle: str, original_path: str) -> list[str]:
+    """Find tracked files containing a moved sentinel after an upstream refactor."""
+    result = command(
+        registry.root,
+        "git",
+        "grep",
+        "-I",
+        "-l",
+        "-i",
+        "-F",
+        "-e",
+        needle,
+        "--",
+        check=False,
+    )
+    if result.returncode not in {0, 1}:
+        return []
+    return [
+        path
+        for path in sorted(set(result.stdout.splitlines()))
+        if path != original_path
+    ][:5]
+
+
 def validate_checks(registry: Registry) -> list[str]:
     failures: list[str] = []
     seen: set[str] = set()
@@ -302,7 +326,11 @@ def validate_checks(registry: Registry) -> list[str]:
         content = path.read_text(encoding="utf-8", errors="replace").lower()
         for needle in check.needles:
             if needle.lower() not in content:
-                failures.append(f"missing needle {needle!r}: {check.path} [{check.id}]")
+                message = f"missing needle {needle!r}: {check.path} [{check.id}]"
+                relocations = needle_relocations(registry, needle, check.path)
+                if relocations:
+                    message += "; possible relocation: " + ", ".join(relocations)
+                failures.append(message)
         for needle in check.forbidden_needles:
             if needle.lower() in content:
                 failures.append(f"forbidden needle {needle!r}: {check.path} [{check.id}]")

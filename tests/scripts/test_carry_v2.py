@@ -101,6 +101,20 @@ def test_validate_passes_at_full_coverage(tmp_path: Path) -> None:
     assert "1/1 managed paths" in result.stdout
 
 
+def test_missing_needle_reports_tracked_relocation_hint(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path)
+    manifest(repo)
+    moved = repo / "core" / "moved.py"
+    moved.write_text("VALUE = 2\n", encoding="utf-8")
+    (repo / "core" / "feature.py").write_text("VALUE = 3\n", encoding="utf-8")
+    subprocess.run(["git", "add", "core"], cwd=repo, check=True)
+
+    result = run(repo, "validate")
+
+    assert result.returncode == 1
+    assert "possible relocation: core/moved.py" in result.stderr
+
+
 def test_primary_owner_collision_fails(tmp_path: Path) -> None:
     repo = make_repo(tmp_path)
     manifest(repo)

@@ -38,6 +38,20 @@ def _init_repo(repo: Path) -> str:
     return _run_git(repo, "rev-parse", "HEAD")
 
 
+def _make_diverged_repo(repo: Path) -> tuple[str, str]:
+    base = _init_repo(repo)
+    _run_git(repo, "checkout", "-q", "-b", "upstream")
+    (repo / "shared.py").write_text("upstream\n", encoding="utf-8")
+    _run_git(repo, "add", "shared.py")
+    _run_git(repo, "commit", "-q", "-m", "upstream")
+    upstream = _run_git(repo, "rev-parse", "HEAD")
+    _run_git(repo, "checkout", "-q", "local/studio-slim")
+    (repo / "shared.py").write_text("local\n", encoding="utf-8")
+    _run_git(repo, "add", "shared.py")
+    _run_git(repo, "commit", "-q", "-m", "local")
+    return base, upstream
+
+
 def make_terminal_ledger(root: Path, run_id: str, status: str, **extra: object) -> None:
     directory = SERVICE.run_dir(root, run_id)
     directory.mkdir(mode=0o700, parents=True)
@@ -71,6 +85,85 @@ def test_nonce_replay_is_rejected(tmp_path: Path) -> None:
 
     assert SERVICE.nonce_valid(tmp_path, nonce, timestamp)
     assert not SERVICE.nonce_valid(tmp_path, nonce, timestamp)
+
+
+def test_preflight_assessment_detects_large_conflict_run(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _, upstream = _make_diverged_repo(repo)
+    base = _run_git(repo, "rev-parse", "HEAD")
+
+    assessment = SERVICE.preflight_assessment(
+        repo,
+        base,
+        upstream,
+        fast_max_commits=100,
+        fast_max_changed_paths=100,
+        fast_max_conflicts=0,
+    )
+
+    assert assessment["update_class"] == "LARGE"
+    assert assessment["predicted_conflict_count"] == 1
+    assert assessment["predicted_conflicts"] == ["shared.py"]
+    assert any("conflict" in reason for reason in assessment["classification_reasons"])
+
+
+def test_preflight_assessment_keeps_small_clean_run_fast(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _run_git(repo, "checkout", "-q", "-b", "upstream")
+    (repo / "upstream.py").write_text("value = 1\n", encoding="utf-8")
+    _run_git(repo, "add", "upstream.py")
+    _run_git(repo, "commit", "-q", "-m", "upstream")
+    upstream = _run_git(repo, "rev-parse", "HEAD")
+    _run_git(repo, "checkout", "-q", "local/studio-slim")
+    base = _run_git(repo, "rev-parse", "HEAD")
+
+    assessment = SERVICE.preflight_assessment(repo, base, upstream)
+
+    assert assessment["update_class"] == "FAST"
+    assert assessment["upstream_commit_count"] == 1
+    assert assessment["upstream_changed_path_count"] == 1
+    assert assessment["predicted_conflict_count"] == 0
+    assert assessment["classification_reasons"] == []
+
+
+def test_fast_path_overrun_reclassifies_without_stopping_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "20260718T120000Z-123456789abc"
+    make_ledger(tmp_path, run_id)
+    SERVICE.record(
+        tmp_path,
+        run_id,
+        update_class="FAST",
+        classification_reasons=[],
+        fast_path_deadline="2026-07-18T12:30:00+00:00",
+    )
+    monkeypatch.setattr(
+        SERVICE,
+        "utc_datetime",
+        lambda: SERVICE.dt.datetime(2026, 7, 18, 12, 31, tzinfo=SERVICE.dt.UTC),
+    )
+
+    SERVICE.refresh_fast_path_classification(tmp_path, run_id)
+
+    ledger = SERVICE.read_json(SERVICE.ledger_path(tmp_path, run_id))
+    assert ledger["update_class"] == "LARGE"
+    assert ledger["fast_path_missed_at"] == "2026-07-18T12:31:00+00:00"
+    assert ledger["status"] == "RUNNING"
+    assert "30-minute target" in ledger["classification_reasons"][-1]
+
+
+def test_successful_rehearsal_cleanup_removes_worktree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    worktree = tmp_path / "rehearsal"
+    _run_git(repo, "worktree", "add", "--detach", str(worktree), "HEAD")
+
+    SERVICE.remove_rehearsal_worktree(repo, worktree)
+
+    assert not worktree.exists()
+    assert str(worktree) not in _run_git(repo, "worktree", "list", "--porcelain")
 
 
 def test_transition_rejects_phase_regression_and_terminal_resume(tmp_path: Path) -> None:

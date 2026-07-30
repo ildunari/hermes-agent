@@ -61,6 +61,10 @@ LISTENER_ONLY_PORTS = (8644, 8647)
 # port between the two tuples is a deliberate policy change, not a tweak.
 BEST_EFFORT_PORTS: tuple[int, ...] = ()
 RESTART_WAIT_SECONDS = 7200
+FAST_PATH_TARGET_SECONDS = 30 * 60
+FAST_MAX_UPSTREAM_COMMITS = 100
+FAST_MAX_CHANGED_PATHS = 1000
+FAST_MAX_PREDICTED_CONFLICTS = 5
 # Extras this machine's live venv is built with (matrix is deliberately
 # excluded: python-olm does not build here). Keep in sync with the venv.
 UV_SYNC_EXTRA_ARGS = (
@@ -104,8 +108,12 @@ class LeaseHeld(RuntimeError):
     pass
 
 
+def utc_datetime() -> dt.datetime:
+    return dt.datetime.now(dt.UTC)
+
+
 def utc_now() -> str:
-    return dt.datetime.now(dt.UTC).isoformat()
+    return utc_datetime().isoformat()
 
 
 def state_root(value: Path | None = None) -> Path:
@@ -285,6 +293,108 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
         check=check,
     )
     return result.stdout.strip()
+
+
+def preview_merge_conflicts(repo: Path, base: str, upstream: str) -> tuple[list[str], str | None]:
+    """Preview an exact ort merge without touching the index or worktree.
+
+    ``git merge-tree --write-tree --name-only`` writes only temporary Git
+    objects. On a conflicted merge its first section is the synthetic tree OID
+    followed by one unresolved path per line; diagnostics begin after a blank
+    line. Treat an unparseable result as unknown rather than guessing that the
+    merge is clean.
+    """
+    result = subprocess.run(
+        ["git", "merge-tree", "--write-tree", "--name-only", base, upstream],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return [], None
+    lines = result.stdout.splitlines()
+    try:
+        separator = lines.index("")
+    except ValueError:
+        separator = -1
+    if result.returncode == 1 and separator > 1:
+        return sorted(set(lines[1:separator])), None
+    detail = (result.stderr or result.stdout).strip().splitlines()
+    return [], (detail[-1][:300] if detail else f"git merge-tree exited {result.returncode}")
+
+
+def preflight_assessment(
+    repo: Path,
+    base: str,
+    upstream: str,
+    *,
+    fast_max_commits: int = FAST_MAX_UPSTREAM_COMMITS,
+    fast_max_changed_paths: int = FAST_MAX_CHANGED_PATHS,
+    fast_max_conflicts: int = FAST_MAX_PREDICTED_CONFLICTS,
+) -> dict[str, Any]:
+    """Classify a pinned update before creating its integration worktree."""
+    commit_count = int(git(repo, "rev-list", "--count", f"{base}..{upstream}") or 0)
+    changed_paths = git(repo, "diff", "--name-only", f"{base}...{upstream}").splitlines()
+    conflicts, preview_error = preview_merge_conflicts(repo, base, upstream)
+    reasons: list[str] = []
+    if commit_count > fast_max_commits:
+        reasons.append(
+            f"upstream commit count {commit_count} exceeds fast limit {fast_max_commits}"
+        )
+    if len(changed_paths) > fast_max_changed_paths:
+        reasons.append(
+            f"upstream changed-path count {len(changed_paths)} exceeds fast limit "
+            f"{fast_max_changed_paths}"
+        )
+    if len(conflicts) > fast_max_conflicts:
+        reasons.append(
+            f"predicted conflict count {len(conflicts)} exceeds fast limit "
+            f"{fast_max_conflicts}"
+        )
+    if preview_error:
+        reasons.append(f"merge conflict preview unavailable: {preview_error}")
+    assessed_at = utc_datetime()
+    update_class = "LARGE" if reasons else "FAST"
+    return {
+        "update_class": update_class,
+        "classification_reasons": reasons,
+        "assessed_at": assessed_at.isoformat(),
+        "fast_path_target_seconds": FAST_PATH_TARGET_SECONDS,
+        "fast_path_deadline": (
+            (assessed_at + dt.timedelta(seconds=FAST_PATH_TARGET_SECONDS)).isoformat()
+            if update_class == "FAST"
+            else None
+        ),
+        "upstream_commit_count": commit_count,
+        "upstream_changed_path_count": len(changed_paths),
+        "predicted_conflict_count": len(conflicts),
+        "predicted_conflicts": conflicts,
+        "merge_preview_error": preview_error,
+    }
+
+
+def refresh_fast_path_classification(root: Path, run_id: str) -> dict[str, Any]:
+    """Turn a missed FAST target into an honest LARGE run without stopping it."""
+    ledger = read_json(ledger_path(root, run_id))
+    deadline_raw = ledger.get("fast_path_deadline")
+    if ledger.get("update_class") != "FAST" or not isinstance(deadline_raw, str):
+        return ledger
+    try:
+        deadline = dt.datetime.fromisoformat(deadline_raw)
+    except ValueError:
+        return ledger
+    now = utc_datetime()
+    if now < deadline:
+        return ledger
+    reasons = list(ledger.get("classification_reasons") or [])
+    reasons.append("30-minute target elapsed before fast-path completion")
+    return record(
+        root,
+        run_id,
+        update_class="LARGE",
+        classification_reasons=reasons,
+        fast_path_missed_at=now.isoformat(),
+    )
 
 
 def fd_count(pid: int) -> int:
@@ -719,6 +829,7 @@ def nonce_valid(root: Path, nonce: str, timestamp: int) -> bool:
 
 
 def redacted_status(root: Path, run_id: str) -> dict[str, Any]:
+    refresh_fast_path_classification(root, run_id)
     ledger = read_json(ledger_path(root, run_id))
     allowed = {
         "run_id",
@@ -738,6 +849,16 @@ def redacted_status(root: Path, run_id: str) -> dict[str, Any]:
         "macbook_deferred_reason",
         "retired",
         "retired_at",
+        "update_class",
+        "classification_reasons",
+        "assessed_at",
+        "fast_path_target_seconds",
+        "fast_path_deadline",
+        "fast_path_missed_at",
+        "upstream_commit_count",
+        "upstream_changed_path_count",
+        "predicted_conflict_count",
+        "merge_preview_error",
     }
     return {key: ledger[key] for key in allowed if key in ledger}
 
@@ -990,11 +1111,12 @@ def worker_command(
     honor_abort: bool = True,
     child_fd_limit: int = FD_LIMIT,
 ) -> int:
+    refresh_fast_path_classification(root, run_id)
     ledger = read_json(ledger_path(root, run_id))
     origin_pid = ledger.get("origin_pid")
     baseline = int(ledger.get("origin_fd_baseline") or 0)
     origin_limit = max(FD_LIMIT, baseline + 32)
-    return owned_command(
+    result = owned_command(
         command_args,
         cwd,
         run_dir(root, run_id) / "evidence" / f"{name}.log",
@@ -1006,6 +1128,8 @@ def worker_command(
         allow_failure,
         child_fd_limit,
     )
+    refresh_fast_path_classification(root, run_id)
+    return result
 
 
 def wait_worker_child(
@@ -1126,6 +1250,14 @@ def conflict_is_resolved(path: Path) -> bool:
 
 def worktree_for(root: Path, run_id: str) -> Path:
     return root / "worktrees" / run_id
+
+
+def remove_rehearsal_worktree(repo: Path, worktree: Path) -> None:
+    """Make a successful rehearsal terminal without leaving a checkout behind."""
+    if not worktree.exists():
+        return
+    git(repo, "worktree", "remove", "--force", str(worktree))
+    git(repo, "worktree", "prune")
 
 
 NODE_DEPENDENCY_TREES = (
@@ -1434,6 +1566,9 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 )
                 upstream = git(repo, "rev-parse", "origin/main")
                 record(root, run_id, upstream_sha=upstream)
+            if not read_json(ledger_path(root, run_id)).get("assessed_at"):
+                assessment = preflight_assessment(repo, base, upstream)
+                record(root, run_id, **assessment)
             worker_command(
                 root,
                 run_id,
@@ -1790,6 +1925,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     f"fds={snapshot['fds']} baseline={worker_fd_baseline} "
                     f"descendants={snapshot['descendants']}"
                 )
+            remove_rehearsal_worktree(repo, worktree)
             transition(
                 root,
                 run_id,
