@@ -86,10 +86,10 @@ checks:
     path: tools/mcp_tool.py
     needles: [session is None, skipping dynamic tool refresh; session is closed]
     description: closed-session MCP refresh guard
-  - id: session-recents-index
+  - id: legacy-trigram-config
     path: hermes_state.py
-    needles: [_fts_trigram_disabled, disable_fts_trigram, last_active, idx_sessions_last_active]
-    description: trigram-disable lifecycle and indexed session recents
+    needles: [_fts_trigram_disabled, disable_fts_trigram]
+    description: preserve the config-backed legacy trigram flag after the upstream state-schema split; the retired denormalized session-recents index is replaced by the upstream recursive last-active query
   - id: bounded-session-read-connections
     path: hermes_state.py
     needles: [_MAX_THREAD_READ_CONNECTIONS, bounded fallback for this thread]
@@ -434,8 +434,8 @@ features:
           - appendSessionFilters
         description: browser recents and search exclude messaging transcripts
       - id: webui-search-source-filter
-        path: hermes_cli/web_server.py
-        needles: ['@app.get("/api/sessions/search")', 'excluded_sources = {', 'source_hidden(payload.get("source"))']
+        path: hermes_cli/web_routers/sessions.py
+        needles: ['@search_router.get("/api/sessions/search")', 'excluded_sources = {', 'source_hidden(payload.get("source"))']
         description: session search enforces source exclusions in the backend
       - id: webui-internal-agent-input
         path: web/src/lib/internal-agent-input.ts

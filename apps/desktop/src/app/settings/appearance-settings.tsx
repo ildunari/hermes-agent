@@ -16,6 +16,7 @@ import { $backdrop, setBackdrop } from '@/store/backdrop'
 import { $chatWidth, setChatWidth } from '@/store/chat-width'
 import { $embedAllowed, $embedMode, clearEmbedAllowed, type EmbedMode, setEmbedMode } from '@/store/embed-consent'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
+import { $reactionsEnabled, setReactionsEnabled } from '@/store/reactions-enabled'
 import { $tableLayout, setTableLayout } from '@/store/table-layout'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
 import { $translucency, setTranslucency } from '@/store/translucency'
@@ -253,6 +254,7 @@ export function AppearanceSettings() {
   const embedMode = useStore($embedMode)
   const embedAllowed = useStore($embedAllowed)
   const translucency = useStore($translucency)
+  const reactionsEnabled = useStore($reactionsEnabled)
   const backdrop = useStore($backdrop)
   const chatWidth = useStore($chatWidth)
   const tableLayout = useStore($tableLayout)
@@ -486,6 +488,24 @@ export function AppearanceSettings() {
             }
             description={a.backdropDesc}
             title={a.backdropTitle}
+          />
+
+          <ListRow
+            action={
+              <SegmentedControl
+                onChange={id => {
+                  triggerHaptic('selection')
+                  setReactionsEnabled(id === 'on')
+                }}
+                options={[
+                  { id: 'off', label: t.common.off },
+                  { id: 'on', label: t.common.on }
+                ]}
+                value={reactionsEnabled ? 'on' : 'off'}
+              />
+            }
+            description={a.reactionsDesc}
+            title={a.reactionsTitle}
           />
 
           <ListRow

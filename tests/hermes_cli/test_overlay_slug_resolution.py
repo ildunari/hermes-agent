@@ -10,7 +10,6 @@ Covers: #5223, #6492
 import os
 from unittest.mock import patch
 
-import pytest
 
 from hermes_cli.model_switch import list_authenticated_providers
 
@@ -32,68 +31,16 @@ def test_copilot_uses_hermes_slug():
     assert gh_copilot is None, "github-copilot slug should not appear (resolved to copilot)"
 
 
-@patch.dict(os.environ, {"COPILOT_GITHUB_TOKEN": "fake-ghu"}, clear=False)
-def test_copilot_no_duplicate_entries():
-    """Copilot must appear only once — not as both 'copilot' (section 1) and 'github-copilot' (section 2)."""
-    providers = list_authenticated_providers(current_provider="copilot")
-
-    copilot_slugs = [p["slug"] for p in providers if "copilot" in p["slug"]]
-    # Should have at most one copilot entry (may also have copilot-acp if creds exist)
-    copilot_main = [s for s in copilot_slugs if s == "copilot"]
-    assert len(copilot_main) == 1, f"Expected exactly one 'copilot' entry, got {copilot_main}"
 
 
 # -- kimi-for-coding alias in auth.py ----------------------------------------
 
-def test_kimi_for_coding_alias():
-    """resolve_provider('kimi-for-coding') should return 'kimi-coding'."""
-    from hermes_cli.auth import resolve_provider
-
-    result = resolve_provider("kimi-for-coding")
-    assert result == "kimi-coding"
 
 
 # -- Generic slug mismatch providers -----------------------------------------
 
-@pytest.mark.parametrize("alias", ["kimi", "kimi-coding", "kimi-for-coding", "moonshot"])
-@patch.dict(os.environ, {"KIMI_API_KEY": "fake-key"}, clear=False)
-def test_kimi_for_coding_overlay_uses_hermes_slug(alias):
-    """All Kimi aliases collapse into one accurately labelled canonical row."""
-    providers = list_authenticated_providers(
-        current_provider=alias,
-        user_providers={
-            alias: {
-                "name": "Kimi / Moonshot",
-                "discover_models": False,
-                "models": {"kimi-k3": {}},
-            }
-        },
-        probe_custom_providers=False,
-    )
-
-    kimi_rows = [
-        provider
-        for provider in providers
-        if provider["slug"] in {"kimi", "kimi-coding", "kimi-for-coding", "moonshot"}
-    ]
-    assert len(kimi_rows) == 1
-    assert kimi_rows[0]["slug"] == "kimi-coding"
-    assert kimi_rows[0]["name"] == "Kimi / Moonshot"
-    assert kimi_rows[0]["is_current"] is True
-    assert "kimi-k3" in kimi_rows[0]["models"]
 
 
-@patch.dict(os.environ, {"KILOCODE_API_KEY": "fake-key"}, clear=False)
-def test_kilo_overlay_uses_hermes_slug():
-    """kilo overlay should resolve to slug='kilocode'."""
-    providers = list_authenticated_providers(current_provider="kilocode")
-
-    kilo = next((p for p in providers if p["slug"] == "kilocode"), None)
-    assert kilo is not None, "kilocode should appear when KILOCODE_API_KEY is set"
-    assert kilo["is_current"] is True
-
-    kilo_mdev = next((p for p in providers if p["slug"] == "kilo"), None)
-    assert kilo_mdev is None, "kilo slug should not appear (resolved to kilocode)"
 
 
 

@@ -243,7 +243,7 @@ export function ExternalLink({
 
   return (
     <a
-      className={cn('link-chip', className)}
+      className={cn('ref', className)}
       href={target}
       onAuxClick={event => {
         onAuxClick?.(event)

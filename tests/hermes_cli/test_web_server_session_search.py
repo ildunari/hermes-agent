@@ -139,6 +139,7 @@ def test_desktop_session_search_excludes_hidden_sources(monkeypatch):
     assert response == {
         "results": [
             {
+                "id": "20260603_090200_exact",
                 "session_id": "20260603_090200_exact",
                 "lineage_root": "20260603_090200_exact",
                 "snippet": "ID match preview",

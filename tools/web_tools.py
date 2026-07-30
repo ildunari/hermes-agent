@@ -615,7 +615,6 @@ def _truncate_with_footer(
 
     total = len(content)
     stored_path = _store_full_text(url, content)
-    shown = len(head) + len(tail)
 
     footer_lines = [
         "",

@@ -272,7 +272,15 @@ def _resolve_compression_threshold(
 
     Returns ``(effective_threshold, autoraise_notice)``. ``autoraise_notice`` is
     ``{"model": <slug>, "from": <old>, "to": <new>}`` only when a Codex
-    autoraise actually raises the threshold, otherwise ``None``.
+    autoraise (gpt-5.4/5.5 272K family or gpt-5.3-codex-spark) actually raises
+    the threshold, otherwise ``None``.
+
+    The Codex overrides are *autoraises*: they must never LOWER a higher
+    user-configured threshold. A user who already set ``compression.threshold``
+    above the raised value deliberately keeps more raw context, and silently
+    dropping them would both waste usable window and contradict the feature's
+    purpose (use more of the window). Other overrides (e.g. Arcee Trinity)
+    keep their existing unconditional behaviour.
     """
     if model_cthresh is None:
         return global_threshold, None
@@ -289,12 +297,23 @@ def _resolve_compression_threshold(
 
 
 def _codex_gpt55_autoraise_notice_marker():
-    """Path to the per-profile marker recording that the autoraise notice ran."""
+    """Path to the per-profile marker recording that the autoraise notice ran.
+
+    Lives under ``$HERMES_HOME`` (which is profile-scoped) alongside the other
+    internal markers like ``.container-mode`` — so it is not a user-facing config
+    key, and every profile tracks its own notice state independently.
+    """
     return get_hermes_home() / ".codex_gpt55_autoraise_notice"
 
 
 def _codex_gpt55_autoraise_notice_state(autoraise: Dict[str, Any]) -> str:
-    """Stable identity for one autoraise notice, keyed on what it displays."""
+    """Stable identity for one autoraise notice, keyed on what it displays.
+
+    Uses the model slug plus the same from→to percentages the notice text
+    shows, so an unchanged threshold stays silent across restarts while a
+    later change (the user edits their global ``threshold``, or switches to a
+    different autoraised Codex model) re-notifies once.
+    """
     model = str(autoraise.get("model") or "").strip().lower().rsplit("/", 1)[-1]
     from_pct = int(round(float(autoraise["from"]) * 100))
     to_pct = int(round(float(autoraise["to"]) * 100))
@@ -302,7 +321,11 @@ def _codex_gpt55_autoraise_notice_state(autoraise: Dict[str, Any]) -> str:
 
 
 def _codex_gpt55_autoraise_notice_seen(autoraise: Dict[str, Any]) -> bool:
-    """True if this exact autoraise notice was already shown for this profile."""
+    """True if this exact autoraise notice was already shown for this profile.
+
+    A missing/unreadable marker (or one recording a different threshold) reads
+    as unseen, so the notice shows.
+    """
     try:
         current = _codex_gpt55_autoraise_notice_state(autoraise)
         return _codex_gpt55_autoraise_notice_marker().read_text(
@@ -313,7 +336,11 @@ def _codex_gpt55_autoraise_notice_seen(autoraise: Dict[str, Any]) -> bool:
 
 
 def _record_codex_gpt55_autoraise_notice(autoraise: Dict[str, Any]) -> None:
-    """Persist that the autoraise notice was shown for this profile/config state."""
+    """Persist that the autoraise notice was shown for this profile/config state.
+
+    Best-effort: a read-only or missing ``$HERMES_HOME`` just means the notice
+    may show again next init, which is preferable to breaking agent init.
+    """
     try:
         marker = _codex_gpt55_autoraise_notice_marker()
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -322,10 +349,6 @@ def _record_codex_gpt55_autoraise_notice(autoraise: Dict[str, Any]) -> None:
         )
     except (OSError, KeyError, TypeError, ValueError):
         pass
-
-
-# Backward-compatible alias for local code/tests that still use the old helper name.
-_build_codex_gpt55_autoraise_notice = _build_codex_gpt5_autoraise_notice
 
 
 def _normalized_custom_base_url(value: Any) -> str:
@@ -432,8 +455,7 @@ def init_agent(
     command: str = None,
     args: list[str] | None = None,
     model: str = "",
-    max_iterations: int = 500,  # Default tool-calling iterations (shared with subagents)
-    tool_delay: float = 1.0,
+    max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     save_trajectories: bool = False,
@@ -509,8 +531,7 @@ def init_agent(
         requested_provider (str): Original provider identity before runtime canonicalization
         api_mode (str): API mode override: "chat_completions" or "codex_responses"
         model (str): Model name to use (default: "anthropic/claude-opus-4.6")
-        max_iterations (int): Maximum number of tool calling iterations (default: 500)
-        tool_delay (float): Delay between tool calls in seconds (default: 1.0)
+        max_iterations (int): Maximum number of tool calling iterations (default: 90)
         enabled_toolsets (List[str]): Only enable tools from these toolsets (optional)
         disabled_toolsets (List[str]): Disable tools from these toolsets (optional)
         save_trajectories (bool): Whether to save conversation trajectories to JSONL files (default: False)
@@ -552,10 +573,8 @@ def init_agent(
     _install_safe_stdio()
 
     agent.model = model
-    # Selected intent is not always the runtime that successfully initializes.
-    # Keep this identity independent from the operational snapshot used to
-    # restore turn-scoped fallbacks: init-time credential fallback mutates
-    # model/provider before _primary_runtime can be captured.
+    # Selected intent is independent from the runtime that credential/provider
+    # fallback may activate during initialization.
     agent._selected_runtime_identity = {
         "model": str(model or ""),
         "provider": str(provider or "").strip().lower(),
@@ -564,16 +583,11 @@ def init_agent(
     # Shared iteration budget — parent creates, children inherit.
     # Consumed by every LLM turn across parent + all subagents.
     agent.iteration_budget = iteration_budget or IterationBudget(max_iterations)
-    agent.tool_delay = tool_delay
     agent.save_trajectories = save_trajectories
     agent.verbose_logging = verbose_logging
     agent.quiet_mode = quiet_mode
     agent.tool_progress_mode = tool_progress_mode
     agent.ephemeral_system_prompt = ephemeral_system_prompt
-    # API-call-only suffix for trusted per-turn context. Hosts must replace this
-    # on every turn; it is copied onto the current API user message and is never
-    # written into the transcript or cached system prompt.
-    agent.per_turn_user_context = ""
     agent.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
     agent._user_id = user_id  # Platform user identifier (gateway sessions)
     agent._user_id_alt = user_id_alt  # Optional stable alternate platform identifier
@@ -830,34 +844,18 @@ def init_agent(
     agent._use_prompt_caching, agent._use_native_cache_layout = (
         agent._anthropic_prompt_cache_policy()
     )
-    # Anthropic supports "5m" and "1h" cache TTL tiers. ``mixed`` uses 1h for
-    # the stable system/tool prefix and 5m for the rolling message tail. Read
-    # from config.yaml under prompt_caching.cache_ttl. Mixed is the default
-    # only for native Anthropic and the local CLIProxy Claude route; other
-    # providers retain 5m because their 1h-tier support is not guaranteed.
+    # Anthropic supports "5m" (default) and "1h" cache TTL tiers. Read from
+    # config.yaml under prompt_caching.cache_ttl; unknown values keep "5m".
     # 1h tier costs 2x on write vs 1.25x for 5m, but amortizes across long
     # sessions with >5-minute pauses between turns (#14971).
     agent._cache_ttl = "5m"
     try:
-        from hermes_cli.config import load_config as _load_pc_cfg
+        from hermes_cli.config import load_config_readonly as _load_pc_cfg
 
         _pc_cfg = _load_pc_cfg().get("prompt_caching", {}) or {}
-        _ttl = _pc_cfg.get("cache_ttl", "mixed")
-        if _ttl in {"5m", "1h", "mixed"}:
+        _ttl = _pc_cfg.get("cache_ttl", "5m")
+        if _ttl in {"5m", "1h"}:
             agent._cache_ttl = _ttl
-        if agent._cache_ttl == "mixed":
-            _provider = (agent.provider or "").lower()
-            _model = (agent.model or "").lower()
-            _is_cliproxy_claude = _provider == "vibeproxy" and any(
-                family in _model
-                for family in ("claude", "opus", "sonnet", "haiku", "mythos", "fable")
-            )
-            _is_native_anthropic = _provider == "anthropic" or (
-                agent.api_mode == "anthropic_messages"
-                and "api.anthropic.com" in (agent.base_url or "").lower()
-            )
-            if not (_is_cliproxy_claude or _is_native_anthropic):
-                agent._cache_ttl = "5m"
     except Exception:
         pass
 
@@ -1102,7 +1100,7 @@ def init_agent(
         # Guardrail config — read from config.yaml at init time.
         agent._bedrock_guardrail_config = None
         try:
-            from hermes_cli.config import load_config as _load_br_cfg
+            from hermes_cli.config import load_config_readonly as _load_br_cfg
             _gr = _load_br_cfg().get("bedrock", {}).get("guardrail", {})
             if _gr.get("guardrail_identifier") and _gr.get("guardrail_version"):
                 agent._bedrock_guardrail_config = {
@@ -1173,8 +1171,8 @@ def init_agent(
                 client_kwargs["default_headers"] = hermes_xai_default_headers()
             elif "default_headers" not in client_kwargs:
                 # Fall back to profile.default_headers for providers that
-                # declare custom headers (e.g. Kimi User-Agent on non-kimi.com
-                # endpoints).
+                # declare custom headers (e.g. Vercel AI Gateway attribution,
+                # Kimi User-Agent on non-kimi.com endpoints).
                 try:
                     from providers import get_provider_profile as _gpf
                     _ph = _gpf(agent.provider)
@@ -1489,7 +1487,7 @@ def init_agent(
     # reads the JSON files directly.  See run_agent._save_session_log.
     agent._session_json_enabled = False
     try:
-        from hermes_cli.config import load_config as _load_sess_cfg
+        from hermes_cli.config import load_config_readonly as _load_sess_cfg
         _sess_cfg = (_load_sess_cfg().get("sessions") or {})
         agent._session_json_enabled = bool(_sess_cfg.get("write_json_snapshots", False))
     except Exception:
@@ -1558,10 +1556,9 @@ def init_agent(
     from tools.todo_tool import TodoStore
     agent._todo_store = TodoStore()
     
-    # Load config once for memory, skills, and compression sections.
-    # Guest-routed gateway sessions need the guest profile's memory config, not
-    # the owner/gateway profile, otherwise built-in Kosta memories leak and
-    # mem0 initializes under the wrong namespace.
+    # Load config once for memory, skills, and compression sections. Routed
+    # sessions can supply their profile config directly so context-engine state
+    # never falls back to the gateway owner's profile.
     try:
         if context_engine_config is not None:
             _agent_cfg = (
@@ -1572,10 +1569,16 @@ def init_agent(
         elif str(user_id_alt or "").startswith("guest:"):
             from pathlib import Path as _Path
             import yaml as _yaml
-            _guest_cfg_path = _Path.home() / ".hermes" / "profiles" / "guest" / "config.yaml"
-            _agent_cfg = _yaml.safe_load(_guest_cfg_path.read_text(encoding="utf-8")) or {}
+
+            _guest_cfg_path = (
+                _Path.home() / ".hermes" / "profiles" / "guest" / "config.yaml"
+            )
+            _agent_cfg = (
+                _yaml.safe_load(_guest_cfg_path.read_text(encoding="utf-8")) or {}
+            )
         else:
-            from hermes_cli.config import load_config as _load_agent_config
+            from hermes_cli.config import load_config_readonly as _load_agent_config
+
             _agent_cfg = _load_agent_config()
     except Exception:
         _agent_cfg = {}
@@ -1633,7 +1636,6 @@ def init_agent(
     agent._memory_nudge_interval = 10
     agent._turns_since_memory = 0
     agent._iters_since_skill = 0
-    mem_config = {}
     # A flush/background agent may pass skip_memory=True to avoid spinning up an
     # external memory *provider*, but if the caller also explicitly enables the
     # "memory" toolset it still needs the built-in file-backed store — otherwise
@@ -1669,17 +1671,16 @@ def init_agent(
             if _mem_provider_name and _mem_provider_name.strip():
                 from agent.memory_manager import MemoryManager as _MemoryManager
                 from plugins.memory import load_memory_provider as _load_mem
-                agent._memory_manager = _MemoryManager(mem_config.get("recall_policy", {}))
+                agent._memory_manager = _MemoryManager()
                 _mp = _load_mem(_mem_provider_name)
                 if _mp and _mp.is_available():
                     agent._memory_manager.add_provider(_mp)
                 if agent._memory_manager.providers:
-                    _agent_context = "cron" if (platform or "").lower() in {"cron", "flush"} else "primary"
                     _init_kwargs = {
                         "session_id": agent.session_id,
                         "platform": platform or "cli",
                         "hermes_home": str(get_hermes_home()),
-                        "agent_context": _agent_context,
+                        "agent_context": "primary",
                     }
                     if _init_kwargs["platform"] == "cli":
                         _init_kwargs["warning_callback"] = agent._emit_warning
@@ -1815,14 +1816,14 @@ def init_agent(
     if not isinstance(_compression_cfg, dict):
         _compression_cfg = {}
     compression_threshold = float(_compression_cfg.get("threshold", 0.50))
-    # Per-model/route compaction-threshold override. Codex gpt-5.5 raises to
-    # 85% (the Codex backend caps the window at 272K, so the default 50% would
-    # compact at ~136K — half the usable context). Gated by an opt-out config
-    # flag so the user can fall back to the global threshold; when the override
-    # fires we stash a one-time notification (replayed on the first turn) that
-    # tells the user what changed and how to revert. The notice has its own
-    # display gate so users can keep the threshold autoraise without getting
-    # the banner on gateway turns.
+    # Per-model/route compaction-threshold override. Codex gpt-5.4 / gpt-5.5
+    # raise to 85% (the Codex backend caps both families at 272K, so the
+    # default 50% would compact at ~136K — half the usable context). Gated by
+    # an opt-out config flag so the user can fall back to the global threshold;
+    # when the override fires we stash a one-time notification (replayed on the
+    # first turn) that tells the user what changed and how to revert. The
+    # notice has its own display gate so users can keep the threshold
+    # autoraise without getting the banner on gateway turns.
     _codex_gpt55_autoraise = str(
         _compression_cfg.get("codex_gpt55_autoraise", True)
     ).lower() in {"true", "1", "yes"}
@@ -1841,6 +1842,11 @@ def init_agent(
             agent.provider,
             allow_codex_gpt55_autoraise=_codex_gpt55_autoraise,
         )
+        # The Codex autoraises (gpt-5.4/5.5 272K family and gpt-5.3-codex-spark)
+        # apply only when they RAISE (never lower a user's higher global
+        # threshold). The notice is populated only when it actually fires, and
+        # carries the model slug so the banner names the right family. Arcee
+        # Trinity keeps its long-standing unconditional behaviour.
         compression_threshold, agent._compression_threshold_autoraised = (
             _resolve_compression_threshold(
                 compression_threshold,
@@ -2058,8 +2064,6 @@ def init_agent(
     if _config_context_length is not None:
         try:
             _config_context_length = int(_config_context_length)
-            if _config_context_length <= 0:
-                _config_context_length = None
         except (TypeError, ValueError):
             _ra().logger.warning(
                 "Invalid model.context_length in config.yaml: %r — "
@@ -2318,7 +2322,7 @@ def init_agent(
 
     # Select context engine: config-driven (like memory providers).
     # 1. Check config.yaml context.engine setting
-    # 2. Check repo and ~/.hermes/plugins/context_engine/ directories
+    # 2. Check plugins/context_engine/<name>/ directory (repo-shipped)
     # 3. Check general plugin system (user-installed plugins)
     # 4. Fall back to built-in ContextCompressor
     _selected_engine = None
@@ -2332,11 +2336,11 @@ def init_agent(
         pass
 
     if _engine_name == "compressor":
-        # Clear any standalone-engine values left by an earlier in-process
-        # construction. Use the same lock as plugin construction so this reset
-        # cannot race an engine reading its bridged environment.
+        # Clear standalone-engine values left by an earlier in-process
+        # construction under the same lock used by plugin construction.
         try:
             from plugins.context_engine import context_engine_construction_scope
+
             with context_engine_construction_scope(_agent_cfg, _engine_name):
                 pass
         except Exception as _ce_bridge_err:
@@ -2345,16 +2349,14 @@ def init_agent(
                 _ce_bridge_err,
             )
     else:
-        # Keep behavioral settings in config.yaml while supporting standalone
-        # engines whose constructors read environment variables. The bridge and
-        # construction run under one module lock so concurrent profile agents
-        # cannot observe each other's temporary values. A routed profile home
-        # is also applied inside that lock so storage resolves to that profile.
+        # Bridge profile-owned config/environment and construction under one
+        # lock so concurrent routed profiles cannot observe each other's state.
         try:
             from plugins.context_engine import (
                 context_engine_construction_scope,
                 load_context_engine,
             )
+
             with context_engine_construction_scope(
                 _agent_cfg,
                 _engine_name,
@@ -2408,10 +2410,12 @@ def init_agent(
     # else: config says "compressor" — use built-in, don't auto-activate plugins
 
     if _selected_engine is not None:
+        agent.context_compressor = _selected_engine
         # External engines own compaction policy: the host compression
-        # threshold (including the Codex gpt-5.x autoraise above) only
+        # threshold (including the Codex gpt-5.5 autoraise above) only
         # configures the built-in ContextCompressor and never reaches the
-        # plugin, so an autoraise notice here would describe an inactive change.
+        # plugin, so the autoraise notice would announce a change that does
+        # not apply. Drop it. (#44439)
         agent._compression_threshold_autoraised = None
         # Resolve context_length for plugin engines — mirrors switch_model() path
         from agent.model_metadata import get_model_context_length
@@ -2423,71 +2427,27 @@ def init_agent(
             provider=agent.provider,
             custom_providers=_custom_providers,
         )
-        # Per-model overrides must be visible to the engine's first model
-        # resolution, not only after a later model switch.
+        # Per-model threshold overrides are part of the explicit
+        # context-engine contract: assign them BEFORE the initial
+        # update_model() call so the first resolution (which derives
+        # threshold_percent/threshold_tokens for the initial model) already
+        # sees the overrides. Assigning after update_model() left the initial
+        # model on the engine's global threshold until the first /model
+        # switch. Engines that override update_model() own their own policy
+        # and may ignore the attribute.
         if compression_model_thresholds:
-            _selected_engine.model_thresholds = compression_model_thresholds
-        try:
-            _selected_engine.update_model(
-                model=agent.model,
-                context_length=_plugin_ctx_len,
-                base_url=agent.base_url,
-                api_key=getattr(agent, "api_key", ""),
-                provider=agent.provider,
-                api_mode=agent.api_mode,
-            )
-        except Exception as _ce_update_err:
-            _ra().logger.warning(
-                "Context engine '%s' failed during update_model (%s: %s) — closing it and falling back to built-in compressor",
-                _engine_name,
-                type(_ce_update_err).__name__,
-                _ce_update_err,
-            )
-            _close_engine = getattr(_selected_engine, "close", None)
-            if not callable(_close_engine):
-                _close_engine = getattr(_selected_engine, "_close_storage", None)
-            if callable(_close_engine):
-                try:
-                    _close_engine()
-                except Exception:
-                    _ra().logger.debug(
-                        "Context engine '%s' cleanup after update_model failure also failed",
-                        _engine_name,
-                        exc_info=True,
-                    )
-            _selected_engine = None
-            # The host threshold is active again once fallback selects the
-            # built-in compressor. Recompute model-specific policy that was
-            # intentionally suppressed while the plugin was considered active.
-            try:
-                from agent.auxiliary_client import (
-                    _compression_threshold_for_model as _fallback_cthresh_fn,
-                    _is_codex_gpt54_or_gpt55 as _fallback_is_codex_fn,
-                    _is_codex_spark as _fallback_is_spark_fn,
-                )
-                _model_cthresh = _fallback_cthresh_fn(
-                    agent.model,
-                    agent.provider,
-                    allow_codex_gpt55_autoraise=_codex_gpt55_autoraise,
-                )
-                compression_threshold, agent._compression_threshold_autoraised = (
-                    _resolve_compression_threshold(
-                        float(_compression_cfg.get("threshold", 0.50)),
-                        _model_cthresh,
-                        model=agent.model,
-                        is_codex_autoraise=(
-                            _fallback_is_codex_fn(agent.model, agent.provider)
-                            or _fallback_is_spark_fn(agent.model, agent.provider)
-                        ),
-                    )
-                )
-            except Exception:
-                pass
-        else:
-            agent.context_compressor = _selected_engine
-            if not agent.quiet_mode:
-                _ra().logger.info("Using context engine: %s", _selected_engine.name)
-    if _selected_engine is None:
+            agent.context_compressor.model_thresholds = compression_model_thresholds
+        agent.context_compressor.update_model(
+            model=agent.model,
+            context_length=_plugin_ctx_len,
+            base_url=agent.base_url,
+            api_key=getattr(agent, "api_key", ""),
+            provider=agent.provider,
+            api_mode=agent.api_mode,
+        )
+        if not agent.quiet_mode:
+            _ra().logger.info("Using context engine: %s", _selected_engine.name)
+    else:
         agent.context_compressor = ContextCompressor(
             model=agent.model,
             threshold_percent=compression_threshold,
@@ -2652,14 +2612,6 @@ def init_agent(
     agent.session_output_tokens = 0
     agent.session_cache_read_tokens = 0
     agent.session_cache_write_tokens = 0
-    agent.session_api_output_tokens = 0
-    agent.session_api_wall_seconds = 0.0
-    agent.session_output_rate_available = True
-    agent.session_tool_stats = {}
-    # Per-call cache telemetry used only to detect a demonstrated warm→cold
-    # transition. It never participates in prompt construction.
-    agent._last_prompt_cache_usage = None
-    agent._last_prompt_cache_route = None
     agent.session_reasoning_tokens = 0
     agent.session_estimated_cost_usd = 0.0
     agent.session_cost_status = "unknown"
@@ -2731,6 +2683,9 @@ def init_agent(
 
     if not agent.quiet_mode:
         if compression_enabled:
+            # Report the active engine's own threshold — for a plugin engine
+            # the host compression_threshold is not in effect, and mixing the
+            # two printed a percent that contradicted the token count. (#44439)
             _active_threshold_pct = getattr(
                 agent.context_compressor, "threshold_percent", compression_threshold
             )
@@ -2776,10 +2731,8 @@ def init_agent(
     # ``run_conversation``'s preflight) runs it at most once per agent.
     agent._compression_feasibility_checked = False
 
-    # Snapshot the operational runtime for per-turn restoration.  When fallback
-    # activates during a turn, the next turn restores these values so the
-    # preferred model gets a fresh attempt each time.  Uses a single dict
-    # so new state fields are easy to add without N individual attributes.
+    # Snapshot the operational runtime for per-turn restoration. Preserve the
+    # user's selected identity when initialization itself had to fall back.
     if not getattr(agent, "_fallback_activated", False):
         agent._selected_runtime_identity = {
             "model": str(agent.model or ""),
@@ -2812,12 +2765,8 @@ def init_agent(
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
         })
-    # An init-time credential fallback is the only runtime that successfully
-    # initialized, not a turn-scoped detour from a viable primary.  Its snapshot
-    # is therefore an operational baseline and must not be "restored" into
-    # itself at the first turn boundary (which would falsely clear active
-    # routing).  Deliberate model switches replace the snapshot and make it
-    # restorable again.
+    # An init-time credential fallback is the only runtime that initialized; it
+    # is an operational baseline, not a turn-scoped detour to restore away.
     agent._primary_runtime_restorable = not bool(
         getattr(agent, "_fallback_activated", False)
     )

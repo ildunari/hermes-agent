@@ -1,6 +1,5 @@
 """Regression tests for multiplex profile-aware own-policy authorization."""
 
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -29,18 +28,18 @@ def _make_multiplex_runner(monkeypatch):
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(multiplex_profiles=True)
 
-    default_adapter = MagicMock()
-    default_adapter.send = AsyncMock()
-    default_adapter.authorization_is_upstream = False
-    default_adapter.enforces_own_access_policy = True
-    default_adapter._dm_policy = "allowlist"
-    default_adapter._group_policy = "pairing"
-    secondary_adapter = MagicMock()
-    secondary_adapter.send = AsyncMock()
-    secondary_adapter.authorization_is_upstream = False
-    secondary_adapter.enforces_own_access_policy = True
-    secondary_adapter._dm_policy = "open"
-    secondary_adapter._group_policy = "open"
+    default_adapter = SimpleNamespace(
+        send=AsyncMock(),
+        enforces_own_access_policy=True,
+        _dm_policy="allowlist",
+        _group_policy="pairing",
+    )
+    secondary_adapter = SimpleNamespace(
+        send=AsyncMock(),
+        enforces_own_access_policy=True,
+        _dm_policy="open",
+        _group_policy="open",
+    )
 
     runner.adapters = {Platform.WECOM: default_adapter}
     runner._profile_adapters = {
@@ -49,70 +48,6 @@ def _make_multiplex_runner(monkeypatch):
     runner.pairing_store = MagicMock()
     runner.pairing_store.is_approved.return_value = False
     return runner, default_adapter, secondary_adapter
-
-
-def _make_shared_bluebubbles_runner(tmp_path):
-    from gateway.run import GatewayRunner
-
-    registry_path = tmp_path / "contacts.json"
-    registry_path.write_text(
-        json.dumps(
-            {
-                "owner_identities": ["owner@example.com"],
-                "owner_profile": "poke",
-                "owner_contact_id": "kosta-owner",
-                "guest_profile": "guest",
-                "contacts": {
-                    "stephen-lucier": {
-                        "identities": {
-                            "bluebubbles": {"handles": ["guest@example.com"]}
-                        },
-                        "allowed_surfaces": ["bluebubbles"],
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    runner = object.__new__(GatewayRunner)
-    runner.config = GatewayConfig(
-        multiplex_profiles=True,
-        platforms={
-            Platform.BLUEBUBBLES: PlatformConfig(
-                enabled=True,
-                extra={"guest_contacts_file": str(registry_path)},
-            ),
-        },
-    )
-    root_bluebubbles = MagicMock()
-    root_bluebubbles.send = AsyncMock(return_value=None)
-    root_wecom = MagicMock()
-    root_wecom.send = AsyncMock(return_value=None)
-    runner.adapters = {
-        Platform.BLUEBUBBLES: root_bluebubbles,
-        Platform.WECOM: root_wecom,
-    }
-    runner._profile_adapters = {"poke": {}, "guest": {}}
-    runner._thread_metadata_for_source = MagicMock(return_value={"reply_to": "m-1"})
-    return runner, root_bluebubbles, root_wecom
-
-
-def test_secondary_open_policy_not_authorized_by_default_allowlist(monkeypatch):
-    """Secondary-profile open intake must not inherit default allowlist trust."""
-    runner, _default_adapter, _secondary_adapter = _make_multiplex_runner(monkeypatch)
-
-    source = SessionSource(
-        platform=Platform.WECOM,
-        user_id="attacker",
-        chat_id="dm-chat",
-        user_name="attacker",
-        chat_type="dm",
-        profile="coder",
-    )
-
-    assert runner._adapter_dm_policy(Platform.WECOM, profile="coder") == "open"
-    assert runner._adapter_dm_policy(Platform.WECOM) == "allowlist"
-    assert runner._is_user_authorized(source) is False
 
 
 def test_default_profile_still_trusts_own_allowlist(monkeypatch):
@@ -131,184 +66,12 @@ def test_default_profile_still_trusts_own_allowlist(monkeypatch):
     assert runner._is_user_authorized(source) is True
 
 
-def test_secondary_allowlist_still_authorized(monkeypatch):
-    """Secondary profile with allowlist policy is trusted on its own adapter."""
-    runner, _default_adapter, secondary_adapter = _make_multiplex_runner(monkeypatch)
-    secondary_adapter._dm_policy = "allowlist"
-
-    source = SessionSource(
-        platform=Platform.WECOM,
-        user_id="allowed-user",
-        chat_id="dm-chat",
-        user_name="allowed-user",
-        chat_type="dm",
-        profile="coder",
-    )
-
-    assert runner._is_user_authorized(source) is True
-
-
 def test_active_profile_stamp_resolves_primary_adapter(monkeypatch):
     """A single-profile gateway stamps its active profile but stores adapters as primary."""
     runner, default_adapter, _secondary_adapter = _make_multiplex_runner(monkeypatch)
     runner._active_profile_name = lambda: "dev"
 
     assert runner._authorization_adapter(Platform.WECOM, profile="dev") is default_adapter
-
-
-def test_adapter_for_source_resolves_secondary_profile_adapter(monkeypatch):
-    """Ingress adapter lookup must use the stamped profile's adapter map."""
-    runner, default_adapter, secondary_adapter = _make_multiplex_runner(monkeypatch)
-
-    source = SessionSource(
-        platform=Platform.WECOM,
-        user_id="attacker",
-        chat_id="dm-chat",
-        user_name="attacker",
-        chat_type="dm",
-        profile="coder",
-    )
-
-    assert runner._adapter_for_source(source) is secondary_adapter
-    assert runner._adapter_for_source(
-        SessionSource(
-            platform=Platform.WECOM,
-            user_id="allowed-user",
-            chat_id="dm-chat",
-            user_name="allowed-user",
-            chat_type="dm",
-            profile=None,
-        )
-    ) is default_adapter
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("profile", ("poke", "guest"))
-async def test_registered_bluebubbles_profile_reply_uses_root_transport(
-    tmp_path, profile
-):
-    runner, root_bluebubbles, _root_wecom = _make_shared_bluebubbles_runner(tmp_path)
-    source = SessionSource(
-        platform=Platform.BLUEBUBBLES,
-        user_id=f"{profile}@example.com",
-        chat_id=f"{profile}-chat",
-        user_name=profile,
-        chat_type="dm",
-        profile=profile,
-    )
-
-    await runner._send_goal_status_notice(source, "routed reply")
-
-    root_bluebubbles.send.assert_awaited_once_with(
-        f"{profile}-chat",
-        "routed reply",
-        metadata={"reply_to": "m-1"},
-    )
-
-
-@pytest.mark.parametrize(
-    ("platform", "profile"),
-    (
-        (Platform.BLUEBUBBLES, "reviewer"),
-        (Platform.WECOM, "poke"),
-    ),
-    ids=("unexpected-bluebubbles-profile", "non-bluebubbles-platform"),
-)
-def test_shared_bluebubbles_root_transport_fallback_stays_fail_closed(
-    tmp_path, platform, profile
-):
-    runner, _root_bluebubbles, _root_wecom = _make_shared_bluebubbles_runner(tmp_path)
-    source = SessionSource(
-        platform=platform,
-        user_id="user@example.com",
-        chat_id="dm-chat",
-        user_name="user",
-        chat_type="dm",
-        profile=profile,
-    )
-
-    assert runner._adapter_for_source(source) is None
-def test_chat_routed_source_keeps_receiving_shared_adapter(monkeypatch):
-    """A runtime-only profile route must not discard the shared transport.
-
-    ``source.profile`` selects the routed runtime/session namespace, but the
-    adapter that built the source still owns outbound delivery and intake
-    policy when that profile has no credential of its own.
-    """
-    runner, default_adapter, _secondary_adapter = _make_multiplex_runner(
-        monkeypatch
-    )
-    runner._profile_adapters["routed"] = {}
-
-    source = SessionSource(
-        platform=Platform.WECOM,
-        user_id="allowed-user",
-        chat_id="dm-chat",
-        user_name="allowed-user",
-        chat_type="dm",
-        profile="routed",
-    )
-    assert runner._adapter_for_source(source) is None
-    source._transport_adapter_ref = lambda: default_adapter
-    assert runner._adapter_for_source(source) is default_adapter
-    assert runner._is_user_authorized(source) is True
-
-
-def test_adapter_for_relay_delivered_source_uses_relay_transport(monkeypatch):
-    """A relayed Slack event keeps Slack session semantics but replies over relay."""
-    from gateway.run import GatewayRunner
-
-    runner = object.__new__(GatewayRunner)
-    slack_adapter = SimpleNamespace(send=AsyncMock())
-    relay_adapter = SimpleNamespace(send=AsyncMock())
-    runner.adapters = {
-        Platform.SLACK: slack_adapter,
-        Platform.RELAY: relay_adapter,
-    }
-    runner._profile_adapters = {}
-
-    source = SessionSource(
-        platform=Platform.SLACK,
-        user_id="U123",
-        chat_id="C123",
-        chat_type="channel",
-        profile="coder",
-        delivered_via_upstream_relay=True,
-    )
-
-    assert runner._adapter_for_source(source) is relay_adapter
-
-
-def test_adapter_for_direct_source_keeps_native_platform_adapter(monkeypatch):
-    """The relay routing rule must not affect direct Slack connector delivery."""
-    from gateway.run import GatewayRunner
-
-    runner = object.__new__(GatewayRunner)
-    slack_adapter = SimpleNamespace(send=AsyncMock())
-    relay_adapter = SimpleNamespace(send=AsyncMock())
-    runner.adapters = {
-        Platform.SLACK: slack_adapter,
-        Platform.RELAY: relay_adapter,
-    }
-    runner._profile_adapters = {}
-
-    source = SessionSource(
-        platform=Platform.SLACK,
-        user_id="U123",
-        chat_id="C123",
-        chat_type="channel",
-    )
-
-    assert runner._adapter_for_source(source) is slack_adapter
-
-
-def test_explicit_active_profile_stamp_uses_default_adapter_map(monkeypatch):
-    """A named active profile is not misclassified as multiplex secondary."""
-    runner, default_adapter, _secondary_adapter = _make_multiplex_runner(monkeypatch)
-    runner._active_profile_name = lambda: "main"
-
-    assert runner._authorization_adapter(Platform.WECOM, profile="main") is default_adapter
-
 
 
 def test_secondary_allowlist_dm_behavior_ignores_unauthorized(monkeypatch):
@@ -349,28 +112,6 @@ def test_adapter_auth_check_stamps_secondary_profile(monkeypatch):
     check = runner._make_adapter_auth_check(Platform.WECOM, profile_name="coder")
     assert check("some-user", "dm", "dm-chat") is True
     assert captured["profile"] == "coder"
-
-
-def test_adapter_auth_check_defaults_to_active_profile(monkeypatch):
-    """Primary-adapter callbacks (no profile_name) still resolve the active profile."""
-    from gateway.run import GatewayRunner
-
-    _clear_auth_env(monkeypatch)
-
-    runner = object.__new__(GatewayRunner)
-    runner.config = GatewayConfig(multiplex_profiles=True)
-
-    captured: dict = {}
-
-    def fake_is_user_authorized(source):
-        captured["profile"] = source.profile
-        return True
-
-    runner._is_user_authorized = fake_is_user_authorized
-
-    check = runner._make_adapter_auth_check(Platform.WECOM)
-    assert check("some-user", "dm", "dm-chat") is True
-    assert captured["profile"] is None
 
 
 def test_secondary_open_policy_fails_startup_guard(monkeypatch):

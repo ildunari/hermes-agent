@@ -39,11 +39,7 @@ from typing import Any, List, Optional
 # the module) fail with ModuleNotFoundError for hermes_time et al.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hermes_constants import (
-    get_hermes_home,
-    reset_hermes_home_override,
-    set_hermes_home_override,
-)
+from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import (
     _expand_env_vars,
@@ -54,45 +50,6 @@ from hermes_cli.fallback_config import get_fallback_chain
 from hermes_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
-
-
-_CRON_TITLE_INTERNAL_RE = re.compile(
-    r"\b(automation|automated|dynamic|injection|pre[- ]prompt|extract(?:ion)?|setup review)\b",
-    re.I,
-)
-_CRON_PROMPT_LEADING_RE = re.compile(
-    r"^(please\s+|can you\s+|could you\s+|write\s+|create\s+|generate\s+|run\s+|check\s+(whether\s+)?|monitor\s+|summarize\s+)+",
-    re.I,
-)
-
-
-def _plain_cron_title_text(text: Any, *, limit: int = 60) -> str:
-    clean = " ".join(str(text or "").split())
-    clean = re.sub(r"^\[IMPORTANT:[^\]]*\]\s*", "", clean, flags=re.I)
-    clean = _CRON_PROMPT_LEADING_RE.sub("", clean).strip(" .!?;:—-")
-    if len(clean) > limit:
-        clean = clean[: max(0, limit - 1)].rstrip(" .,!?:;—-") + "…"
-    return clean
-
-
-def _cron_session_title(job: dict, *, run_time=None) -> str:
-    """Return a scan-friendly title for a cron-run session row."""
-    name = _plain_cron_title_text(job.get("name"))
-    prompt = _plain_cron_title_text(job.get("prompt"))
-    job_id = _plain_cron_title_text(job.get("id"), limit=40)
-
-    # Some generated job names describe the mechanism, not the user's reason for
-    # scheduling it. In those cases the prompt is usually closer to what a person
-    # would search for in history.
-    if name and not _CRON_TITLE_INTERNAL_RE.search(name):
-        base = name
-    elif prompt:
-        base = prompt
-    else:
-        base = name or job_id or "Cron job"
-
-    stamp_source = run_time or _hermes_now()
-    return f"{base} · {stamp_source.strftime('%b %d %H:%M')}"
 
 
 def _set_cron_session_title(session_db, session_id, base_title):
@@ -191,42 +148,27 @@ class CronPromptInjectionBlocked(Exception):
     """Raised by _build_job_prompt when the fully-assembled prompt trips the
     injection scanner. Caught in run_job so the operator sees a clean
     "job blocked" delivery instead of the scheduler crashing.
+
+    Assembled-prompt scanning (including loaded skill content) plugs the
+    gap from #3968: create-time scanning only covers the user-supplied
+    prompt field; skill content loaded at runtime was never scanned, so a
+    malicious skill could carry an injection payload that reached the
+    non-interactive (auto-approve) cron agent.
     """
-
-
-def _cron_job_needs_memory_provider(job: dict) -> bool:
-    """Return True when a cron job explicitly needs memory-provider tools.
-
-    Cron normally skips memory so scheduler prompts do not pollute the compact
-    built-in MEMORY.md / USER.md hot cache. mem0-first/logbook jobs are different:
-    they explicitly need provider tools such as mem0_search, mem0_conclude, and
-    mem0_add_document, so blocking all memory at agent construction makes those
-    jobs false-success no-ops.
-    """
-    enabled_toolsets = job.get("enabled_toolsets") or []
-    if "memory" in enabled_toolsets:
-        return True
-    haystack_parts = [
-        str(job.get("name") or ""),
-        str(job.get("prompt") or ""),
-        str(job.get("skill") or ""),
-        " ".join(str(s) for s in (job.get("skills") or [])),
-    ]
-    haystack = "\n".join(haystack_parts).lower()
-    return "mem0" in haystack or "memory harvest" in haystack
 
 
 def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
-    """Toolsets disabled for a cron-spawned agent.
+    """Toolsets a cron-spawned agent must never receive.
 
-    Cron uses the same default enabled toolsets as every other trusted Hermes
-    surface, then applies a small non-interactive runtime denylist:
-    ``cronjob`` prevents recursive scheduling, ``messaging`` avoids live gateway
-    assumptions, and ``clarify`` avoids blocking on a user who is not present.
-    User-level ``agent.disabled_toolsets`` from config.yaml is layered on top so
-    per-job ``enabled_toolsets`` cannot bypass policy that applies to ordinary
-    agent runs (#25752 — LLM-supplied enabled_toolsets was widening past
-    config.yaml's denylist).
+    Three protected toolsets are always disabled in cron context:
+      - ``cronjob`` — would let a cron-spawned agent schedule more cron jobs
+      - ``messaging`` — interactive, needs a live gateway session
+      - ``clarify`` — interactive, blocks waiting for user input
+
+    User-level ``agent.disabled_toolsets`` from config.yaml is layered on top
+    so per-job ``enabled_toolsets`` cannot bypass policy that applies to
+    ordinary agent runs (#25752 — LLM-supplied enabled_toolsets was widening
+    past config.yaml's denylist).
     """
     disabled = ["cronjob", "messaging", "clarify"]
     agent_cfg = (cfg or {}).get("agent") or {}
@@ -384,10 +326,6 @@ _parallel_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _parallel_pool_max_workers: Optional[int] = None
 _running_job_ids: set = set()
 _running_lock = threading.Lock()
-# Probe identity captured at dispatch, keyed by the physical in-flight run.
-# The shutdown timeout path uses this same frozen snapshot when it completes
-# the run from a different thread.
-_running_probe_snapshots: dict = {}
 
 # Job IDs the gateway shutdown path force-killed the tool subprocess of
 # while still in ``_running_job_ids`` (see ``mark_running_jobs_interrupted``
@@ -397,25 +335,6 @@ _running_probe_snapshots: dict = {}
 # plausible-looking final response from truncated output — can never
 # overwrite the interrupted status with a false "ok" (#60432).
 _interrupted_job_ids: set = set()
-
-
-def _persist_active_agents_for_cron() -> None:
-    """Best-effort: tell the owning GatewayRunner its active_agents changed.
-
-    Cron dispatch/completion mutates ``_running_job_ids`` from the parallel
-    pool's worker threads, entirely outside GatewayRunner. Without an
-    explicit persist here that claim/release was invisible in
-    ``gateway_state.json`` until the next unrelated turn boundary — the
-    stale-file bug behind the phantom-drain incident in
-    docs/local/UPDATE_INCIDENTS_20260723.md item 12. Lazy import avoids a
-    module-level circular import with gateway.run (which already lazily
-    imports this module for ``get_running_job_ids``).
-    """
-    try:
-        from gateway.run import persist_active_agents_now
-        persist_active_agents_now()
-    except Exception:
-        pass
 
 
 def get_running_job_ids() -> "frozenset[str]":
@@ -463,17 +382,11 @@ def mark_running_jobs_interrupted(reason: str) -> list:
     """
     with _running_lock:
         job_ids = list(_running_job_ids)
-        probe_snapshots = {
-            job_id: _running_probe_snapshots.get(job_id) for job_id in job_ids
-        }
         _interrupted_job_ids.update(job_ids)
     marked = []
     for job_id in job_ids:
         try:
-            mark_job_run(
-                job_id, False, reason,
-                probe_run_snapshot=probe_snapshots.get(job_id),
-            )
+            mark_job_run(job_id, False, reason)
             marked.append(job_id)
         except Exception as e:
             logger.warning("Failed to mark job %s interrupted: %s", job_id, e)
@@ -1546,30 +1459,6 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     Returns None on success, or an error string on failure.
     """
     targets = _resolve_delivery_targets(job)
-
-    # Fail closed before either the normal-profile or delegated-profile send
-    # path can load an adapter. Internal maintenance/probe/bootstrap output is
-    # operational telemetry, never conversation content. This also covers
-    # old/tampered records that predate ``delivery_profile``.
-    internal_names = {
-        "contact memory interest maintenance",
-        "proactive rollout health watchdog",
-        "proactive alarm sink end-to-end probe",
-    }
-    internal_script_markers = (
-        "maintenance", "watchdog", "bootstrap", "dry_run", "dry-run", "probe",
-    )
-    job_name = str(job.get("name") or "").strip().lower()
-    script_name = Path(str(job.get("script") or "")).name.lower()
-    is_internal = job_name in internal_names or any(
-        marker in script_name for marker in internal_script_markers
-    )
-    if is_internal:
-        if any(str(target.get("platform") or "").lower() == "bluebubbles" for target in targets):
-            msg = "internal maintenance/watchdog/bootstrap/dry-run delivery to BlueBubbles is forbidden"
-            logger.error("Job '%s': %s", job.get("id", "?"), msg)
-            return msg
-
     if not targets:
         deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
         if deliver_value == "local":
@@ -1618,8 +1507,6 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     else:
         delivery_content = content
 
-    force_document_attachments = "[[as_document]]" in delivery_content
-
     # Extract MEDIA: tags so attachments are forwarded as files, not raw text
     from gateway.platforms.base import BasePlatformAdapter
     media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
@@ -1638,33 +1525,8 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         _, mirror_text = BasePlatformAdapter.extract_media(content)
         mirror_text = (mirror_text or "").strip()
 
-    delivery_profile = job.get("delivery_profile")
     try:
-        if delivery_profile is None:
-            config = load_gateway_config()
-        else:
-            from gateway.cron_delivery_profile import validate_delegated_alarm_delivery
-            source_home = _get_hermes_home().resolve()
-            if source_home.name not in {"poke", "guest"} or job.get("name") not in {
-                "Proactive rollout health watchdog",
-                "Proactive alarm sink end-to-end probe",
-            }:
-                raise ValueError("delivery_profile is restricted to installed Poke/Guest proactive alarms")
-            if not targets:
-                raise ValueError("delegated delivery requires one explicit target")
-            first = targets[0]
-            if any(t.get("platform") != first.get("platform") or t.get("chat_id") != first.get("chat_id") for t in targets):
-                raise ValueError("delegated delivery cannot fan out across destinations")
-            _, config, _, _ = validate_delegated_alarm_delivery(
-                source_home, str(delivery_profile), {
-                    "platform": str(first["platform"]),
-                    "address": str(first["chat_id"]),
-                    "target": str(job.get("deliver") or ""),
-                },
-            )
-            # Never borrow the source profile's live adapter. Delegation is
-            # outbound-only and cannot create a second ingress owner.
-            adapters = None
+        config = load_gateway_config()
     except Exception as e:
         msg = f"failed to load gateway config: {e}"
         logger.error("Job '%s': %s", job["id"], msg)
@@ -1921,7 +1783,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 text_to_send = cleaned_delivery_content.strip()
                 adapter_ok = True
                 timed_out = False
-                if adapter_ok and text_to_send:
+                if text_to_send:
                     from agent.async_utils import safe_schedule_threadsafe
 
                     router = DeliveryRouter(config, adapters)
@@ -2158,7 +2020,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 delivery_errors.extend(target_errors)
                 continue
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
-            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files, force_document=force_document_attachments)
+            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
             try:
                 result = asyncio.run(coro)
             except RuntimeError as run_err:
@@ -2181,17 +2043,13 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # `except RuntimeError` block is NOT caught by the sibling
                 # `except Exception` below — it would escape _deliver_result()
                 # and crash the whole delivery loop, silently skipping every
-                # remaining target. Wrap the fallback in its own try/except so
-                # a per-target failure is logged and the loop continues.
+                # remaining target (#47163). Wrap the fallback in its own
+                # try/except so a per-target failure is logged and the loop
+                # continues to the next target.
                 try:
                     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                     try:
-                        retry_coro = _send_to_platform(
-                            platform, pconfig, chat_id, cleaned_delivery_content,
-                            thread_id=thread_id, media_files=media_files,
-                            force_document=force_document_attachments,
-                        )
-                        future = pool.submit(asyncio.run, retry_coro)
+                        future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
                         result = future.result(timeout=30)
                     finally:
                         pool.shutdown(wait=False)
@@ -2241,7 +2099,7 @@ _SCRIPT_TIMEOUT = _DEFAULT_SCRIPT_TIMEOUT
 _RUN_CLAIM_HEARTBEAT_SECONDS = 60.0
 
 
-def _get_script_timeout(hermes_home: Path | None = None) -> int:
+def _get_script_timeout() -> int:
     """Resolve cron pre-run script timeout from module/env/config with a safe default."""
     if _SCRIPT_TIMEOUT != _DEFAULT_SCRIPT_TIMEOUT:
         try:
@@ -2260,7 +2118,6 @@ def _get_script_timeout(hermes_home: Path | None = None) -> int:
         except Exception:
             logger.warning("Invalid HERMES_CRON_SCRIPT_TIMEOUT=%r; using config/default", env_value)
 
-    token = set_hermes_home_override(hermes_home) if hermes_home is not None else None
     try:
         cfg = load_config() or {}
         cron_cfg = cfg.get("cron", {}) if isinstance(cfg, dict) else {}
@@ -2271,9 +2128,6 @@ def _get_script_timeout(hermes_home: Path | None = None) -> int:
                 return timeout
     except Exception as exc:
         logger.debug("Failed to load cron script timeout from config: %s", exc)
-    finally:
-        if token is not None:
-            reset_hermes_home_override(token)
 
     return _DEFAULT_SCRIPT_TIMEOUT
 
@@ -2376,13 +2230,7 @@ def _run_job_script(
         (success, output) — on failure *output* contains the error message so the
         LLM can report the problem to the user.
     """
-    # Resolve the profile once and use that same value for both path lookup and
-    # the child environment.  Cron can be scoped through the context-local or
-    # module override without changing process-global os.environ; inheriting
-    # the latter here could therefore execute a script from profile A while
-    # making its config/env loaders read profile B.
-    hermes_home = _get_hermes_home().expanduser().resolve()
-    scripts_dir = hermes_home / "scripts"
+    scripts_dir = _get_hermes_home() / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     scripts_dir_resolved = scripts_dir.resolve()
 
@@ -2407,7 +2255,7 @@ def _run_job_script(
     if not path.is_file():
         return False, f"Script path is not a file: {path}"
 
-    script_timeout = _get_script_timeout(hermes_home)
+    script_timeout = _get_script_timeout()
 
     # Pick an interpreter by extension.  Bash for .sh/.bash, Python for
     # everything else.  We deliberately do NOT honour the file's own
@@ -2436,7 +2284,7 @@ def _run_job_script(
         argv = [python_exe, str(path)]
 
     try:
-        from tools.environments.local import _sanitize_subprocess_env
+        from tools.environments.local import build_subprocess_env
 
         popen_kwargs = {}
         if sys.platform == "win32":
@@ -2445,13 +2293,8 @@ def _run_job_script(
                 "encoding": "utf-8",
                 "errors": "replace",
             }
-        child_env = _sanitize_subprocess_env(os.environ.copy())
-        child_env.update(env_overlay)
-        # _sanitize_subprocess_env preserves ambient HERMES_HOME (and may
-        # bridge a context override), but the scheduler's resolved profile is
-        # authoritative for this job.  Pin it after sanitization so script,
-        # config, cron state, and profile-owned credentials cannot diverge.
-        child_env["HERMES_HOME"] = str(hermes_home)
+        env = build_subprocess_env()
+        env.update(env_overlay)
         # Use the job's workdir as the subprocess cwd when configured,
         # otherwise default to the scripts-dir parent (back-compat).
         # NEVER mutate the Python process cwd — that would leak into
@@ -2463,7 +2306,7 @@ def _run_job_script(
             text=True,
             timeout=script_timeout,
             cwd=_script_cwd,
-            env=child_env,
+            env=env,
             **popen_kwargs,
         )
         stdout = (result.stdout or "").strip()
@@ -3158,7 +3001,6 @@ def run_job(
     if prompt is None:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return True, "", SILENT_MARKER, None
-    origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
@@ -3323,14 +3165,13 @@ def run_job(
         _cron_default_provider = ""
 
         # Load config.yaml for model, reasoning, prefill, toolsets, provider routing
-        _cfg: dict[str, Any] = {}
+        _cfg = {}
         _model_cfg = {}
         try:
-            import yaml
+            from hermes_cli.config import read_user_config_raw
             _cfg_path = str(_get_hermes_home() / "config.yaml")
             if os.path.exists(_cfg_path):
-                with open(_cfg_path, encoding="utf-8") as _f:
-                    _cfg = yaml.safe_load(_f) or {}
+                _cfg = read_user_config_raw(Path(_cfg_path))
                 # Managed scope: a scheduled job must honor administrator-pinned
                 # model / reasoning / toolsets / provider_routing too. This loader
                 # builds its own dict, so overlay managed values via the shared
@@ -3390,9 +3231,9 @@ def run_job(
         except Exception:
             pass
 
-        # Resolve reasoning after provider authentication so an auth fallback
-        # can first replace the primary model with its configured model.
-        from hermes_constants import parse_reasoning_effort, resolve_reasoning_config
+        # Reasoning config is resolved after provider authentication so an auth
+        # fallback can first replace the primary model with its configured model.
+        from hermes_constants import resolve_reasoning_config
 
         # Prefill messages from env or config.yaml. The top-level
         # prefill_messages_file key is canonical; agent.prefill_messages_file is
@@ -3430,7 +3271,6 @@ def run_job(
         )
         from hermes_cli.auth import AuthError
 
-
         # F8 runtime backstop: never resolve a stored provider/base_url pair that
         # would ship a named provider's stored credential to an off-host endpoint
         # (CWE-200/CWE-522). The cron tool validates this on create/update, but a
@@ -3438,15 +3278,8 @@ def run_job(
         # — reaches this sink unchecked. Fail closed before resolution so no
         # off-host call is ever made with a stored key.
         _guard_job_credential_exfil(job)
+
         primary_model_for_drift = model
-        if isinstance(_model_cfg, str):
-            configured_model_for_drift = _model_cfg.strip()
-        elif isinstance(_model_cfg, dict):
-            configured_model_for_drift = str(
-                _model_cfg.get("default") or _model_cfg.get("model") or ""
-            ).strip()
-        else:
-            configured_model_for_drift = ""
         configured_provider_for_drift = (
             str(_model_cfg.get("provider") or "").strip().lower()
             if isinstance(_model_cfg, dict)
@@ -3458,10 +3291,11 @@ def run_job(
             or None
         )
         try:
-            _cron_cfg = _cfg.get("cron", {}) if isinstance(_cfg.get("cron"), dict) else {}
             # Do not inject HERMES_INFERENCE_PROVIDER here. resolve_runtime_provider()
             # already prefers persisted config over stale shell/env overrides when
-            # no explicit provider is requested.
+            # no explicit provider is requested. Passing the env var here short-
+            # circuits that precedence and can resurrect old providers (for
+            # example DeepSeek) for cron jobs that do not pin provider/model.
             runtime_kwargs = {
                 # Per-job user pin wins; otherwise the cron-fleet default
                 # provider (cron.model_provider); otherwise resolve from
@@ -3473,33 +3307,14 @@ def run_job(
                 # below, which already passes its fb_model.
                 "target_model": model,
             }
-            credential_label = (
-                job.get("credential_label")
-                or job.get("credential")
-                or job.get("auth_label")
-                or (_cron_cfg.get("credential_label") if isinstance(_cron_cfg, dict) else "")
-                or ""
-            )
-            if credential_label:
-                runtime_kwargs["credential_label"] = str(credential_label).strip()
-            cron_base_url = _cron_cfg.get("base_url") or _cron_cfg.get("default_base_url")
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
-            elif cron_base_url:
-                runtime_kwargs["explicit_base_url"] = cron_base_url
             runtime = resolve_runtime_provider(**runtime_kwargs)
             primary_provider_for_drift = (
                 str(runtime.get("provider") or "").strip().lower()
                 or primary_provider_for_drift
             )
         except AuthError as auth_exc:
-            # The primary route made no inference call. For drift comparison,
-            # retain the configured primary model (when present) rather than an
-            # ambient HERMES_MODEL override: the fallback below is an explicit
-            # provider/model pair and must not be misclassified as primary-model
-            # drift after authentication has already failed closed.
-            if not job.get("model") and configured_model_for_drift:
-                primary_model_for_drift = configured_model_for_drift
             # Primary provider auth failed — try each configured provider/model
             # pair atomically. Keeping the primary model while changing only the
             # provider can silently route a paid GPT model through OpenRouter.
@@ -3546,19 +3361,9 @@ def run_job(
             message = format_runtime_provider_error(exc)
             raise RuntimeError(message) from exc
 
-        _cron_cfg_for_reasoning = (
-            _cfg.get("cron", {}) if isinstance(_cfg.get("cron"), dict) else {}
+        reasoning_config = resolve_reasoning_config(
+            _cfg if isinstance(_cfg, dict) else {}, str(model)
         )
-        if "reasoning_effort" in job:
-            reasoning_config = parse_reasoning_effort(job.get("reasoning_effort"))
-        elif "reasoning_effort" in _cron_cfg_for_reasoning:
-            reasoning_config = parse_reasoning_effort(
-                _cron_cfg_for_reasoning.get("reasoning_effort")
-            )
-        else:
-            reasoning_config = resolve_reasoning_config(
-                _cfg if isinstance(_cfg, dict) else {}, str(model)
-            )
 
         # Provider/model-drift fail-closed guard (#44585).
         #
@@ -3696,7 +3501,7 @@ def run_job(
             # Without a workdir, keep cwd context discovery disabled.
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
-            skip_memory=not _cron_job_needs_memory_provider(job),
+            skip_memory=True,  # Cron system prompts would corrupt user representations
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
@@ -3992,7 +3797,8 @@ def run_job(
             # across runs; _set_cron_session_title dedupes (#50537) and the
             # except-fallback below guarantees a non-blank title (#50535).
             try:
-                _cron_title = _cron_session_title(job)
+                _title_base = " ".join(job_name.split())[:60].strip() or f"cron {job_id}"
+                _cron_title = f"{_title_base} · {_hermes_now().strftime('%b %d %H:%M')}"
                 if not _set_cron_session_title(
                     _session_db, _final_cron_session_id, _cron_title
                 ):
@@ -4084,11 +3890,6 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
     Returns True if the job was processed (even if the job itself failed —
     failure is recorded via ``mark_job_run``), False only if processing raised.
     """
-    # Freeze all probe identity axes before the run claim and execution. This
-    # detached copy is the only binding completion code may use, even if the
-    # installed job is reconciled while this run is in flight.
-    binding = job.get("probe_binding")
-    probe_run_snapshot = dict(binding) if isinstance(binding, dict) else None
     execution_id = job.get("execution_id")
     if not execution_id:
         execution_id = create_execution(job["id"], source="direct")["id"]
@@ -4190,6 +3991,7 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             # responses: do not deliver a blank message, and let the
             # empty-response guard below mark the run as a soft failure.
             should_deliver = bool(deliver_content.strip())
+            unresolved_origin = False
             # Cron silence suppression — see _is_cron_silence_response.  Replaces the
             # old `SILENT_MARKER in ...upper()` substring check, which both leaked
             # bracketless near-markers ("SILENT" / "NO_REPLY") and wrongly swallowed
@@ -4201,6 +4003,10 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
                 should_deliver = False
 
             if should_deliver:
+                unresolved_origin = (
+                    _normalize_deliver_value(job.get("deliver", "local")) == "origin"
+                    and not _resolve_delivery_targets(job)
+                )
                 try:
                     delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
                 except Exception as de:
@@ -4221,48 +4027,54 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
         if not _consume_interrupted_flag(job["id"]):
-            # Persist proof only from this real execution + delivery path.  A
-            # stale in-flight run carries its snapshot binding and is rejected
-            # atomically by mark_job_run if install/config changed meanwhile.
-            probe_binding = probe_run_snapshot
-            expected_probe_output = None
-            if isinstance(probe_binding, dict):
-                nonce = str(probe_binding.get("nonce") or "")
-                generation = str(probe_binding.get("generation") or "")
-                if nonce and generation:
-                    expected_probe_output = (
-                        f"HERMES_PROACTIVE_ALARM_PROBE_ACK_REQUEST {nonce} {generation}"
-                    )
-            ack_metadata = (
-                dict(probe_binding)
-                if should_deliver and success and delivery_error is None
-                and expected_probe_output is not None
-                # Bind the proof to what the real script emitted and to the
-                # exact transport target/script carried by this run snapshot.
-                and deliver_content.strip() == expected_probe_output
-                and job.get("deliver") == probe_binding.get("target")
-                and job.get("script") == probe_binding.get("script")
-                else None
-            )
-            mark_kwargs = {"delivery_error": delivery_error}
-            if ack_metadata is not None:
-                mark_kwargs["delivery_ack_metadata"] = ack_metadata
-            mark_job_run(
-                job["id"], success, error,
-                probe_run_snapshot=probe_run_snapshot,
-                **mark_kwargs,
-            )
-        finish_execution(execution_id, success=success, error=error)
+            mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+        normalized_deliver = _normalize_deliver_value(job.get("deliver", "local"))
+        if delivery_error:
+            delivery_outcome = "failed"
+        elif should_deliver and unresolved_origin:
+            delivery_outcome = "not_configured"
+        elif should_deliver and normalized_deliver != "local":
+            delivery_outcome = "delivered"
+        else:
+            delivery_outcome = "suppressed"
+        finish_execution(
+            execution_id,
+            success=success,
+            error=error,
+            delivery_outcome=delivery_outcome,
+        )
         return True
 
-    except Exception as e:
-        logger.error("Error processing job %s: %s", job['id'], e)
-        if not _consume_interrupted_flag(job["id"]):
-            mark_job_run(
-                job["id"], False, str(e),
-                probe_run_snapshot=probe_run_snapshot,
+    except BaseException as e:  # noqa: BLE001 — deliberate: see below
+        # BaseException, not Exception (#73973): the inner run_job handler
+        # re-raises CancelledError / KeyboardInterrupt / SystemExit after agent
+        # teardown, and none of those are Exception subclasses. If they escape
+        # without mark_job_run(False), a finite one-shot is left wedged —
+        # claim_dispatch() already consumed repeat.completed, but last_run_at
+        # is never written, so the job sits in state "scheduled" until the
+        # run-claim TTL expires and the dispatch-limit guard removes it with
+        # no output and no error. Record the failure first, then re-raise
+        # anything that isn't a plain Exception.
+        _err_text = str(e) or type(e).__name__
+        logger.error("Error processing job %s: %s", job['id'], _err_text)
+        try:
+            if not _consume_interrupted_flag(job["id"]):
+                mark_job_run(job["id"], False, _err_text)
+        except Exception as record_err:
+            # Never let bookkeeping mask the original interruption.
+            logger.error(
+                "Failed to record interrupted run for job %s: %s",
+                job["id"], record_err,
             )
-        finish_execution(execution_id, success=False, error=str(e))
+        try:
+            finish_execution(execution_id, success=False, error=_err_text)
+        except Exception as record_err:
+            logger.error(
+                "Failed to finish execution record for job %s: %s",
+                job["id"], record_err,
+            )
+        if not isinstance(e, Exception):
+            raise
         return False
 
 
@@ -4417,16 +4229,6 @@ def tick(
                     logger.info("Job '%s' already running — skipping", job.get("name", job_id))
                     return None
                 _running_job_ids.add(job_id)
-                binding = job.get("probe_binding")
-                _running_probe_snapshots[job_id] = (
-                    dict(binding) if isinstance(binding, dict) else None
-                )
-                claimed_count = len(_running_job_ids)
-            logger.info(
-                "Cron claimed running-job slot for '%s' (running=%d)",
-                job.get("name", job_id), claimed_count,
-            )
-            _persist_active_agents_for_cron()
             # Record the attempt before executor dispatch. Recovery classifies
             # abandoned records as unknown; it never automatically retries them.
             execution = create_execution(job_id, source="builtin")
@@ -4439,26 +4241,12 @@ def tick(
                 finally:
                     with _running_lock:
                         _running_job_ids.discard(j["id"])
-                        _running_probe_snapshots.pop(j["id"], None)
-                        released_count = len(_running_job_ids)
-                    logger.info(
-                        "Cron released running-job slot for '%s' (running=%d)",
-                        j.get("name", j["id"]), released_count,
-                    )
-                    _persist_active_agents_for_cron()
 
             try:
                 return pool.submit(_run_and_release)
             except Exception as submit_err:
                 with _running_lock:
                     _running_job_ids.discard(job_id)
-                    _running_probe_snapshots.pop(job_id, None)
-                    dispatch_failed_count = len(_running_job_ids)
-                logger.info(
-                    "Cron released running-job slot for '%s' after dispatch failure (running=%d)",
-                    job.get("name", job_id), dispatch_failed_count,
-                )
-                _persist_active_agents_for_cron()
                 finish_execution(
                     execution["id"],
                     success=False,

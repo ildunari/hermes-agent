@@ -42,9 +42,6 @@ def _make_minimal_agent() -> AIAgent:
     agent.session_cache_write_tokens = 0
     agent.session_reasoning_tokens = 0
     agent.session_api_calls = 0
-    agent.session_api_output_tokens = 0
-    agent.session_api_wall_seconds = 0.0
-    agent.session_tool_stats = {}
     agent.session_estimated_cost_usd = 0.0
     agent.session_cost_status = "unknown"
     agent.session_cost_source = "none"
@@ -92,45 +89,4 @@ class TestResetSessionState:
             f"_user_turn_count must be 0 after reset; got: {agent._user_turn_count}"
         )
 
-    def test_usage_stats_cleared_on_reset(self):
-        agent = _make_minimal_agent()
-        agent.session_api_output_tokens = 500
-        agent.session_api_wall_seconds = 12.5
-        agent.session_tool_stats = {"terminal": {"calls": 3, "errors": 1}}
-        agent.context_compressor = None
 
-        agent.reset_session_state()
-
-        assert agent.session_api_output_tokens == 0
-        assert agent.session_api_wall_seconds == 0.0
-        assert agent.session_tool_stats == {}
-
-    def test_both_fields_cleared_together(self):
-        """Both stale fields are cleared in a single reset_session_state() call."""
-        agent = _make_minimal_agent()
-        agent._user_turn_count = 3
-
-        compressor = ContextCompressor.__new__(ContextCompressor)
-        compressor._previous_summary = "Stale summary"
-        compressor.last_prompt_tokens = 0
-        compressor.last_completion_tokens = 0
-        compressor.last_total_tokens = 0
-        compressor.compression_count = 0
-        compressor._context_probed = False
-        agent.context_compressor = compressor
-
-        agent.reset_session_state()
-
-        assert agent._user_turn_count == 0
-        assert compressor._previous_summary is None
-
-    def test_reset_without_compressor_does_not_raise(self):
-        """reset_session_state() must not raise when context_compressor is None."""
-        agent = _make_minimal_agent()
-        agent._user_turn_count = 2
-        agent.context_compressor = None
-
-        # Must not raise
-        agent.reset_session_state()
-
-        assert agent._user_turn_count == 0

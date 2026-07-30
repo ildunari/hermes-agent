@@ -64,13 +64,14 @@ def _float_env(name: str, default: float) -> float:
 
 
 def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) -> dict | None:
-    """Build platform-aware topic metadata for adapter sends.
+    """Build platform-aware thread metadata for adapter sends.
 
     Most platforms route threaded sends with a generic ``thread_id`` metadata
-    value. Telegram private-chat topic lanes keep the explicit private topic id
-    as metadata. Live user replies route visibly with ``message_thread_id`` plus
-    ``reply_to_message_id``; synthetic/resumed sends may use
-    ``direct_messages_topic_id`` when no reply anchor exists.
+    value. Telegram private-chat topics created through Hermes' DM-topic helper
+    are exposed in updates as ``message_thread_id`` plus a reply anchor. Live
+    user-message replies route with ``message_thread_id`` + ``reply_to_message_id``;
+    synthetic/resumed sends that have no reply anchor fall back to Telegram's
+    ``direct_messages_topic_id`` when the Bot API supports it.
     """
     thread_id = getattr(source, "thread_id", None)
     metadata = {"thread_id": thread_id} if thread_id is not None else {}
@@ -84,10 +85,7 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
             metadata["slack_team_id"] = str(scope_id)
     if not metadata:
         return None
-    chat_type = getattr(source, "chat_type", None)
-    is_telegram_dm = _platform_name(getattr(source, "platform", None)) == "telegram" and chat_type == "dm"
-    if is_telegram_dm:
-        metadata["chat_type"] = chat_type
+    if _platform_name(getattr(source, "platform", None)) == "telegram" and getattr(source, "chat_type", None) == "dm":
         metadata["telegram_dm_topic_reply_fallback"] = True
         tid = str(thread_id)
         if tid and tid not in {"", "1"}:
@@ -733,8 +731,8 @@ def get_inbound_media_max_bytes() -> int:
     unreadable — falls back to the default.
     """
     try:
-        from hermes_cli.config import load_config as _load_config
-        cfg = _load_config()
+        from hermes_cli.config import load_config_readonly as _load_config
+        cfg = _load_config()  # read-only: .get() only, never mutated
     except Exception:
         return DEFAULT_INBOUND_MEDIA_MAX_BYTES
     gw = cfg.get("gateway", {}) if isinstance(cfg, dict) else {}
@@ -1163,12 +1161,6 @@ MEDIA_DELIVERY_SAFE_ROOTS = (
     VIDEO_CACHE_DIR,
     DOCUMENT_CACHE_DIR,
     SCREENSHOT_CACHE_DIR,
-    # get_hermes_dir() intentionally prefers legacy image_cache if it exists,
-    # but current image-generation providers save under cache/images. Allow
-    # both so generated MEDIA paths remain deliverable after the recency window.
-    _HERMES_HOME / "cache" / "images",
-    _HERMES_HOME / "cache" / "audio",
-    _HERMES_HOME / "cache" / "video",
     _HERMES_HOME / "image_cache",
     _HERMES_HOME / "audio_cache",
     _HERMES_HOME / "video_cache",
@@ -1181,7 +1173,6 @@ MEDIA_DELIVERY_SAFE_ROOTS = (
     _HERMES_HOME / "cache" / "videos",
     _HERMES_HOME / "cache" / "documents",
     _HERMES_HOME / "cache" / "screenshots",
-    _HERMES_HOME / "cache" / "rich_cards",
 )
 
 # Default recency window for trusting freshly-produced files (seconds).
@@ -1559,17 +1550,6 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".toml": "application/toml",
     ".ini": "text/plain",
     ".cfg": "text/plain",
-    ".css": "text/css",
-    # Telegram theme files are user-installable documents. They are usually
-    # ZIP containers on Desktop (.tdesktop-theme) or plain/color files on
-    # mobile (.attheme); route both through send_document instead of leaving
-    # MEDIA tags visible in chat.
-    ".tdesktop-theme": "application/octet-stream",
-    ".tgios-theme": "application/octet-stream",
-    ".attheme": "application/octet-stream",
-    ".tgx-theme": "application/octet-stream",
-    ".palette": "application/octet-stream",
-    ".theme": "application/octet-stream",
     ".zip": "application/zip",
     ".doc": "application/msword",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1673,10 +1653,8 @@ MEDIA_DELIVERY_EXTS: Tuple[str, ...] = (
     ".pptx", ".ppt", ".odp", ".key",
     # Archives
     ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".apk", ".ipa",
-    # Web / rendered output / stylesheets
-    ".html", ".htm", ".css",
-    # Telegram themes (send as documents so clients can open/apply them)
-    ".tdesktop-theme", ".tgios-theme", ".attheme", ".tgx-theme", ".palette", ".theme",
+    # Web / rendered output
+    ".html", ".htm",
 )
 
 # Regex alternation fragment of bare extensions (no leading dot), e.g.
@@ -2069,93 +2047,20 @@ class ProcessingOutcome(Enum):
     CANCELLED = "cancelled"
 
 
-@dataclass(frozen=True)
-class CommunicationIngressAttachment:
-    """Sanitized immutable attachment facts captured before media download."""
-
-    source_attachment_id: str
-    media_kind: str
-    mime_type: Optional[str] = None
-    uti: Optional[str] = None
-    size_bytes: Optional[int] = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.source_attachment_id, str) or not self.source_attachment_id:
-            raise ValueError("source_attachment_id is required")
-        if self.media_kind not in {"image", "video", "audio", "document", "other"}:
-            raise ValueError("media_kind is invalid")
-        if self.size_bytes is not None and (
-            isinstance(self.size_bytes, bool)
-            or not isinstance(self.size_bytes, int)
-            or not 0 <= self.size_bytes <= 10_000_000_000
-        ):
-            raise ValueError("size_bytes is outside the allowed range")
-
-
-@dataclass(frozen=True)
-class CommunicationIngressEnvelope:
-    """Versioned transport-only communication facts from one source record."""
-
-    version: int
-    source_message_id: str
-    received_at: float
-    occurred_at: float
-    timestamp_source: str
-    chat_type: str
-    direction: str
-    sender_identity: str
-    visible_text: str
-    visible_urls: Tuple[str, ...] = ()
-    attachments: Tuple[CommunicationIngressAttachment, ...] = ()
-    reply_target: Optional[str] = None
-    reaction_target: Optional[str] = None
-    reaction_kind: Optional[str] = None
-    event_kind: str = "text"
-
-    def __post_init__(self) -> None:
-        if self.version != 1:
-            raise ValueError("unsupported communication ingress envelope version")
-        for name in ("source_message_id", "timestamp_source", "sender_identity"):
-            if not isinstance(getattr(self, name), str) or not getattr(self, name):
-                raise ValueError(f"{name} is required")
-        if self.chat_type not in {"dm", "group"}:
-            raise ValueError("chat_type is invalid")
-        if self.direction not in {"inbound", "outbound"}:
-            raise ValueError("direction is invalid")
-        if not isinstance(self.visible_text, str):
-            raise ValueError("visible_text must be text")
-        if not isinstance(self.visible_urls, tuple) or not all(
-            isinstance(value, str) for value in self.visible_urls
-        ):
-            raise ValueError("visible_urls must be an immutable string tuple")
-        if not isinstance(self.attachments, tuple) or not all(
-            isinstance(value, CommunicationIngressAttachment) for value in self.attachments
-        ):
-            raise ValueError("attachments must be an immutable descriptor tuple")
-        if self.event_kind not in {
-            "text", "link_share", "attachment_share", "reply",
-            "reaction_add", "reaction_remove",
-        }:
-            raise ValueError("event_kind is invalid")
-        is_reaction = self.event_kind in {"reaction_add", "reaction_remove"}
-        if is_reaction != bool(self.reaction_target and self.reaction_kind):
-            raise ValueError("reaction events require target and kind")
-
-
 @dataclass
 class MessageEvent:
     """
     Incoming message from a platform.
-
+    
     Normalized representation that all adapters produce.
     """
     # Message content
     text: str
     message_type: MessageType = MessageType.TEXT
-
+    
     # Source information
     source: SessionSource = None
-
+    
     # Original platform data
     raw_message: Any = None
     message_id: Optional[str] = None
@@ -2168,12 +2073,12 @@ class MessageEvent:
     # ("Error while calling `get_updates` one more time to mark all fetched
     # updates" in gateway.log).
     platform_update_id: Optional[int] = None
-
+    
     # Media attachments
     # media_urls: local file paths (for vision tool access)
     media_urls: List[str] = field(default_factory=list)
     media_types: List[str] = field(default_factory=list)
-
+    
     # Reply context
     reply_to_message_id: Optional[str] = None
     reply_to_text: Optional[str] = None  # Text of the replied-to message (for context injection)
@@ -2190,7 +2095,7 @@ class MessageEvent:
     # clarify resolvers) BEFORE normal dispatch; native adapters never set it
     # (their button callbacks resolve in-process).
     prompt_response: Optional[Dict[str, Any]] = None
-
+    
     # Auto-loaded skill(s) for topic/channel bindings (e.g., Telegram DM Topics,
     # Discord channel_skill_bindings).  A single name or ordered list.
     auto_skill: Optional[str | list[str]] = None
@@ -2204,11 +2109,7 @@ class MessageEvent:
     # from ``text`` so the sender-prefix logic in run.py can operate on the
     # trigger message alone, then prepend this context afterward.
     channel_context: Optional[str] = None
-
-    # Observed-only events are persisted as context after normal authorization,
-    # but do not run the agent or produce a platform response.
-    observed_only: bool = False
-
+    
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.
     internal: bool = False
@@ -2220,17 +2121,13 @@ class MessageEvent:
     # particular key existing.
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    # Immutable transport evidence. BlueBubbles may merge several records into
-    # one reactive turn, but every original member remains present here.
-    communication_ingress: Tuple[CommunicationIngressEnvelope, ...] = ()
-
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
-
+    
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""
         return (self.text or "").lstrip().startswith("/")
-
+    
     def get_command(self) -> Optional[str]:
         """Extract command name if this is a command message."""
         if not self.is_command():
@@ -2245,7 +2142,7 @@ class MessageEvent:
         if raw and "/" in raw:
             return None
         return raw
-
+    
     def get_command_args(self) -> str:
         """Get the arguments after a command."""
         if not self.is_command():
@@ -2623,7 +2520,6 @@ _RETRYABLE_ERROR_PATTERNS = (
 # reply), an ``EphemeralReply`` to opt the reply into auto-deletion, or
 # ``None`` when the response was already delivered (e.g. via streaming).
 MessageHandler = Callable[[MessageEvent], Awaitable[Optional[Union[str, "EphemeralReply"]]]]
-IngressHandler = Callable[[MessageEvent], Awaitable[Tuple[str, ...]]]
 
 
 def resolve_channel_prompt(
@@ -2730,7 +2626,7 @@ def _strip_media_directives(text: str) -> str:
 class BasePlatformAdapter(ABC):
     """
     Base class for platform adapters.
-
+    
     Subclasses implement platform-specific logic for:
     - Connecting and authenticating
     - Receiving messages
@@ -2852,7 +2748,6 @@ class BasePlatformAdapter(ABC):
         self.config = config
         self.platform = platform
         self._message_handler: Optional[MessageHandler] = None
-        self._ingress_handler: Optional[IngressHandler] = None
         # Optional gateway-supplied fan-out for platform-native emoji
         # reaction events (see ``set_reaction_handler``).
         self._reaction_handler: Optional[
@@ -2873,7 +2768,7 @@ class BasePlatformAdapter(ABC):
         # through the existing retryable conflict path.
         self._platform_lock_takeover_allowed = False
         self._platform_lock_takeover_attempted = False
-
+        
         # Track active message handlers per session for interrupt support.
         # _active_sessions stores the per-session interrupt Event; _session_tasks
         # maps session → the specific Task currently processing it so that
@@ -2904,7 +2799,6 @@ class BasePlatformAdapter(ABC):
         # Gateway shutdown cancels these so an old gateway instance doesn't keep
         # working on a task after --replace or manual restarts.
         self._background_tasks: set[asyncio.Task] = set()
-        self._pending_ephemeral_deletes: Dict[str, list[tuple[str, str]]] = {}
         # One-shot callbacks to fire after the main response is delivered.
         # Keyed by session_key. Values are either a bare callback (legacy) or
         # a ``(generation, callback)`` tuple so GatewayRunner can make deferred
@@ -3050,9 +2944,9 @@ class BasePlatformAdapter(ABC):
     ) -> bool:
         """Whether this adapter supports native streaming-draft updates.
 
-        Telegram ``sendMessageDraft`` renders an animated streaming preview as
-        the bot calls it repeatedly with the same ``draft_id`` and growing
-        text. Adapters that implement
+        Telegram Bot API 9.5 introduced ``sendMessageDraft``, which renders an
+        animated streaming preview as the bot calls it repeatedly with the
+        same ``draft_id`` and growing text.  Adapters that implement
         ``send_draft`` should return True here for the chat types where the
         platform supports it (Telegram restricts drafts to private DMs).
 
@@ -3380,24 +3274,20 @@ class BasePlatformAdapter(ABC):
     def name(self) -> str:
         """Human-readable name for this adapter."""
         return self.platform.value.title()
-
+    
     @property
     def is_connected(self) -> bool:
         """Check if adapter is currently connected."""
         return self._running
-
+    
     def set_message_handler(self, handler: MessageHandler) -> None:
         """
         Set the handler for incoming messages.
-
+        
         The handler receives a MessageEvent and should return
         an optional response string.
         """
         self._message_handler = handler
-
-    def set_ingress_handler(self, handler: IngressHandler) -> None:
-        """Set the bounded durable-ingress handler used before webhook ACK."""
-        self._ingress_handler = handler
 
     def set_topic_recovery_fn(
         self,
@@ -3465,7 +3355,8 @@ class BasePlatformAdapter(ABC):
         The callback signature is ``(user_id, chat_type, chat_id) -> bool``.
         It is used by adapters that pull external context (e.g. Slack thread
         replies via ``conversations.replies``) to flag messages from senders
-        that are not on the configured allowlist.
+        that are not on the configured allowlist, so the LLM can treat them
+        as unverified background reference rather than authoritative input.
         """
         self._authorization_check = callback
 
@@ -3475,7 +3366,13 @@ class BasePlatformAdapter(ABC):
         chat_type: Optional[str] = None,
         chat_id: Optional[str] = None,
     ) -> Optional[bool]:
-        """Return whether ``user_id`` is on the allowlist, if configured."""
+        """Return whether ``user_id`` is on the allowlist, if a check is configured.
+
+        Returns ``True``/``False`` when an authorization check has been
+        registered via :meth:`set_authorization_check`. Returns ``None``
+        when no check is registered (caller should treat as "trust unknown"
+        and preserve legacy behaviour).
+        """
         if not user_id or self._authorization_check is None:
             return None
         try:
@@ -3490,13 +3387,13 @@ class BasePlatformAdapter(ABC):
     def set_session_store(self, session_store: Any) -> None:
         """
         Set the session store for checking active sessions.
-
+        
         Used by adapters that need to check if a thread/conversation
         has an active session before processing messages (e.g., Slack
         thread replies without explicit mentions).
         """
         self._session_store = session_store
-
+    
     def _history_media_paths_for_session(self, session_key: str) -> Optional[set]:
         """Return media paths already delivered in prior turns of this session.
 
@@ -3521,14 +3418,30 @@ class BasePlatformAdapter(ABC):
             return None
         if not transcript:
             return None
-        # Exclude the current turn's assistant message, which has already been
-        # persisted by the time we reach delivery but must not be treated as
-        # "history" for dedup purposes.
+        # Exclude the CURRENT TURN entirely — everything from the last user
+        # message onward. The agent persists rows as it produces them, so by
+        # delivery time the transcript already contains this turn's tool
+        # results and assistant reply. The old form dropped only the most
+        # recent assistant entry, which left THIS turn's tool results in
+        # "history": a text_to_speech result carrying media_tag then put its
+        # own path into the dedup set and delivery silently stripped the
+        # attachment (staging repro 2026-07-29 — `response_delivery_dropped`
+        # for a MEDIA-tag-only reply; user saw TTS produce no audio).
         history = list(transcript)
-        for msg in reversed(history):
-            if msg.get("role") == "assistant":
-                history.remove(msg)
+        last_user_idx = None
+        for i in range(len(history) - 1, -1, -1):
+            if history[i].get("role") == "user":
+                last_user_idx = i
                 break
+        if last_user_idx is not None:
+            history = history[:last_user_idx]
+        else:
+            # No user row (unusual store shape): keep the old safe behavior of
+            # at least excluding the trailing assistant reply.
+            for msg in reversed(history):
+                if msg.get("role") == "assistant":
+                    history.remove(msg)
+                    break
         if not history:
             return None
         # Avoid circular import: gateway.run already imports this module.
@@ -3551,16 +3464,15 @@ class BasePlatformAdapter(ABC):
                 than silently discarded. Adapters with no such queue may
                 ignore the flag.
 
-
         Returns True if connection was successful.
         """
         pass
-
+    
     @abstractmethod
     async def disconnect(self) -> None:
         """Disconnect from the platform."""
         pass
-
+    
     @abstractmethod
     async def send(
         self,
@@ -3571,13 +3483,13 @@ class BasePlatformAdapter(ABC):
     ) -> SendResult:
         """
         Send a message to a chat.
-
+        
         Args:
             chat_id: The chat/channel ID to send to
             content: Message content (may be markdown)
             reply_to: Optional message ID to reply to
             metadata: Additional platform-specific options
-
+        
         Returns:
             SendResult with success status and message ID
         """
@@ -3676,11 +3588,11 @@ class BasePlatformAdapter(ABC):
         auto-deletion.  Non-fatal if config is unreadable.
         """
         try:
-            from hermes_cli.config import load_config as _load_config
+            from hermes_cli.config import load_config_readonly as _load_config
         except Exception:
             return 0
         try:
-            cfg = _load_config()
+            cfg = _load_config()  # read-only: .get() only, never mutated
         except Exception:
             return 0
         display = cfg.get("display", {}) if isinstance(cfg, dict) else {}
@@ -3691,18 +3603,6 @@ class BasePlatformAdapter(ABC):
             return int(raw)
         except (TypeError, ValueError):
             return 0
-
-    async def _cleanup_pending_ephemeral_messages(self, session_key: str) -> None:
-        """Delete queued ephemeral messages for a session immediately."""
-        pending = self._pending_ephemeral_deletes.pop(session_key, [])
-        for chat_id, message_id in pending:
-            try:
-                await self.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception as e:
-                logger.debug(
-                    "[%s] Ephemeral cleanup failed for %s/%s: %s",
-                    self.name, chat_id, message_id, e,
-                )
 
     def _schedule_ephemeral_delete(
         self,
@@ -3729,10 +3629,6 @@ class BasePlatformAdapter(ABC):
                     self.name, chat_id, message_id, e,
                 )
 
-        session_key = getattr(self, "_current_session_key", None)
-        if session_key:
-            self._pending_ephemeral_deletes.setdefault(session_key, []).append((chat_id, message_id))
-
         coro = _run_delete()
         try:
             asyncio.create_task(coro)
@@ -3741,6 +3637,91 @@ class BasePlatformAdapter(ABC):
             # path).  Close the coroutine cleanly so Python doesn't warn
             # about it never being awaited, then drop silently.
             coro.close()
+
+    # ── Shared interactive-prompt formatting cores ─────────────────────────
+    # Template attrs for ``_format_exec_approval``. Adapters override these to
+    # keep their historical, platform-specific wording byte-identical while
+    # sharing the assembly logic (header → fenced command preview → reason →
+    # optional smart-deny note).
+    _EA_HEADER: str = "⚠️ Command Approval Required\n\n"
+    _EA_CODE_OPEN: str = "```\n"
+    _EA_CODE_CLOSE: str = "\n```\n"
+    _EA_REASON_LABEL: str = "Reason: "
+    _EA_SMART_DENY_LINE: str = (
+        "\n\nSmart DENY: owner override applies to this one operation only."
+    )
+    _EA_CMD_BUDGET: int = 3000
+
+    @staticmethod
+    def _truncate_preview(text: str, budget: int, suffix: str = "...") -> str:
+        """Truncate ``text`` to ``budget`` chars, appending ``suffix`` when cut.
+
+        The shared ``x[:budget] + "..." if len(x) > budget else x`` idiom used
+        by every adapter's approval/confirm preview construction.
+        """
+        text = str(text or "")
+        return text[:budget] + suffix if len(text) > budget else text
+
+    def _ea_escape(self, text: str) -> str:
+        """Escape hook applied to the command preview and reason text.
+
+        Default is pass-through; HTML-mode platforms (Telegram) override.
+        """
+        return text
+
+    def _format_exec_approval(
+        self,
+        command: str,
+        description: str = "dangerous command",
+        smart_denied: bool = False,
+    ) -> str:
+        """Shared formatting core for exec-approval prompt text.
+
+        Assembles ``_EA_HEADER`` + fenced command preview (truncated to
+        ``_EA_CMD_BUDGET``) + ``_EA_REASON_LABEL`` + description, plus
+        ``_EA_SMART_DENY_LINE`` when ``smart_denied``. Button construction
+        stays platform-local; adapters with additional trailing instructions
+        (e.g. reaction legends) append them to this core.
+        """
+        cmd_preview = self._truncate_preview(str(command or ""), self._EA_CMD_BUDGET)
+        text = (
+            f"{self._EA_HEADER}"
+            f"{self._EA_CODE_OPEN}{self._ea_escape(cmd_preview)}{self._EA_CODE_CLOSE}"
+            f"{self._EA_REASON_LABEL}{self._ea_escape(description)}"
+        )
+        if smart_denied:
+            text += self._EA_SMART_DENY_LINE
+        return text
+
+    @staticmethod
+    def _format_choice_page(
+        options: list,
+        page: int,
+        per_page: int,
+    ) -> "tuple[list, Dict[str, Any]]":
+        """Shared pagination core for picker keyboards/menus.
+
+        Clamps ``page`` into range, slices ``options`` for that page and
+        returns ``(page_options, meta)`` where ``meta`` carries ``page``,
+        ``total_pages``, ``start``, ``end``, ``total`` and ``page_info`` —
+        the `` (N–M of T)`` suffix text (empty when everything fits on one
+        page). Option/button rendering stays platform-local.
+        """
+        total = len(options)
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        page = max(0, min(page, total_pages - 1))
+        start = page * per_page
+        end = min(start + per_page, total)
+        page_info = f" ({start + 1}–{end} of {total})" if total_pages > 1 else ""
+        meta: Dict[str, Any] = {
+            "page": page,
+            "total_pages": total_pages,
+            "start": start,
+            "end": end,
+            "total": total,
+            "page_info": page_info,
+        }
+        return options[start:end], meta
 
     async def send_slash_confirm(
         self,
@@ -3874,7 +3855,7 @@ class BasePlatformAdapter(ABC):
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """
         Send a typing indicator.
-
+        
         Override in subclasses if the platform supports it.
         metadata: optional dict with platform-specific context (e.g. thread_id for Slack).
         """
@@ -3979,7 +3960,7 @@ class BasePlatformAdapter(ABC):
     ) -> SendResult:
         """
         Send an image natively via the platform API.
-
+        
         Override in subclasses to send images as proper attachments
         instead of plain-text URLs. Default falls back to sending the
         URL as a text message.
@@ -3987,7 +3968,7 @@ class BasePlatformAdapter(ABC):
         # Fallback: send URL as text (subclasses override for native images)
         text = f"{caption}\n{image_url}" if caption else image_url
         return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
-
+    
     async def send_animation(
         self,
         chat_id: str,
@@ -3998,13 +3979,13 @@ class BasePlatformAdapter(ABC):
     ) -> SendResult:
         """
         Send an animated GIF natively via the platform API.
-
+        
         Override in subclasses to send GIFs as proper animations
         (e.g., Telegram send_animation) so they auto-play inline.
         Default falls back to send_image.
         """
         return await self.send_image(chat_id=chat_id, image_url=animation_url, caption=caption, reply_to=reply_to, metadata=metadata)
-
+    
     @staticmethod
     def _is_animation_url(url: str) -> bool:
         """Check if a URL points to an animated GIF (vs a static image)."""
@@ -4015,21 +3996,21 @@ class BasePlatformAdapter(ABC):
     def extract_images(content: str) -> Tuple[List[Tuple[str, str]], str]:
         """
         Extract image URLs from markdown and HTML image tags in a response.
-
+        
         Finds patterns like:
         - ![alt text](https://example.com/image.png)
         - <img src="https://example.com/image.png">
         - <img src="https://example.com/image.png"></img>
-
+        
         Args:
             content: The response text to scan.
-
+        
         Returns:
             Tuple of (list of (url, alt_text) pairs, cleaned content with image tags removed).
         """
         images = []
         cleaned = content
-
+        
         # Match markdown images: ![alt](url)
         md_pattern = r'!\[([^\]]*)\]\((https?://[^\s\)]+)\)'
         for match in re.finditer(md_pattern, content):
@@ -4039,13 +4020,13 @@ class BasePlatformAdapter(ABC):
             if any(url.lower().endswith(ext) or ext in url.lower() for ext in
                    ['.png', '.jpg', '.jpeg', '.gif', '.webp', 'fal.media', 'fal-cdn', 'replicate.delivery']):
                 images.append((url, alt_text))
-
+        
         # Match HTML img tags: <img src="url"> or <img src="url"></img> or <img src="url"/>
         html_pattern = r'<img\s+src=["\']?(https?://[^\s"\'<>]+)["\']?\s*/?>\s*(?:</img>)?'
         for match in re.finditer(html_pattern, content):
             url = match.group(1)
             images.append((url, ""))
-
+        
         # Remove only the matched image tags from content (not all markdown images)
         if images:
             extracted_urls = {url for url, _ in images}
@@ -4056,9 +4037,9 @@ class BasePlatformAdapter(ABC):
             cleaned = re.sub(html_pattern, _remove_if_extracted, cleaned)
             # Clean up leftover blank lines
             cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-
+        
         return images, cleaned
-
+    
     async def send_voice(
         self,
         chat_id: str,
@@ -4372,7 +4353,6 @@ class BasePlatformAdapter(ABC):
         ``MEDIA:`/path/to/file.png` ``) to avoid breaking path extraction.
         """
         chars = list(content)
-        n = len(chars)
 
         # Build list of (start, end) spans to mask
         spans: list = []
@@ -4490,7 +4470,7 @@ class BasePlatformAdapter(ABC):
         # ``content`` for it (so they can still react to it); here we just
         # keep it out of the user-visible cleaned text.
         cleaned = cleaned.replace("[[as_document]]", "")
-
+        
         # Extract MEDIA:<path> tags, allowing optional whitespace after the colon
         # and quoted/backticked paths for LLM-formatted outputs. The extension
         # set is the shared MEDIA_DELIVERY_EXTS source of truth (built once into
@@ -4568,7 +4548,7 @@ class BasePlatformAdapter(ABC):
                     del chars[start:end]
                 cleaned = "".join(chars)
                 cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-
+        
         return media, cleaned
 
     @staticmethod
@@ -4684,10 +4664,10 @@ class BasePlatformAdapter(ABC):
     ) -> None:
         """
         Continuously send typing indicator until cancelled.
-
+        
         Telegram/Discord typing status expires after ~5 seconds, so we refresh every 2
         to recover quickly after progress messages interrupt it.
-
+        
         Skips send_typing when the chat is in ``_typing_paused`` (e.g. while
         the agent is waiting for dangerous-command approval).  This is critical
         for Slack's Assistant API where ``assistant_threads_setStatus`` disables
@@ -4913,11 +4893,52 @@ class BasePlatformAdapter(ABC):
     # Subclasses override these to react to message processing events
     # (e.g. Discord adds 👀/✅/❌ reactions).
 
+    # Opt-in emoji set for the shared reaction-ack flow in
+    # ``on_processing_complete``. Adapters whose reaction primitives follow
+    # the ``_add_reaction(chat_id, message_id, emoji)`` /
+    # ``_remove_reaction(chat_id, message_id)`` shape can set these class
+    # attributes instead of overriding the hook. Left as ``None`` the hook
+    # stays a no-op (historical default).
+    _ACK_EMOJI: Optional[str] = None
+    _OK_EMOJI: Optional[str] = None
+    _FAIL_EMOJI: Optional[str] = None
+
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Hook called when background processing begins."""
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
-        """Hook called when background processing completes."""
+        """Hook called when background processing completes.
+
+        Default: shared reaction-ack flow — swap the in-progress reaction for
+        a final success/failure reaction. Runs only when the adapter opts in
+        by setting ``_OK_EMOJI`` / ``_FAIL_EMOJI`` class attributes AND
+        defines ``_add_reaction`` / ``_remove_reaction`` primitives taking
+        ``(chat_id, message_id[, emoji])``. Otherwise this is a no-op, as it
+        always was. Remove-then-add rather than a bare replace: deterministic
+        whether the platform replaces a sender's previous reaction or stacks
+        them. CANCELLED outcomes leave the message unreacted.
+        """
+        if self._OK_EMOJI is None and self._FAIL_EMOJI is None:
+            return
+        add: Any = getattr(self, "_add_reaction", None)
+        remove: Any = getattr(self, "_remove_reaction", None)
+        if not callable(add) or not callable(remove):
+            return
+        enabled = getattr(self, "_reactions_enabled", None)
+        if callable(enabled) and not enabled():
+            return
+        chat_id = getattr(event.source, "chat_id", None)
+        message_id = getattr(event, "message_id", None)
+        if not chat_id or not message_id:
+            return
+        await remove(chat_id, message_id)
+        if outcome == ProcessingOutcome.SUCCESS:
+            if self._OK_EMOJI:
+                await add(chat_id, message_id, self._OK_EMOJI)
+        elif outcome == ProcessingOutcome.FAILURE:
+            if self._FAIL_EMOJI:
+                await add(chat_id, message_id, self._FAIL_EMOJI)
+        # CANCELLED: leave the message unreacted.
 
     async def _run_processing_hook(self, hook_name: str, *args: Any, **kwargs: Any) -> None:
         """Run a lifecycle hook without letting failures break message flow."""
@@ -4947,10 +4968,7 @@ class BasePlatformAdapter(ABC):
         if not error:
             return False
         lowered = error.lower()
-        return any(
-            token in lowered
-            for token in ("timed out", "readtimeout", "writetimeout", "pooltimeout")
-        )
+        return "timed out" in lowered or "readtimeout" in lowered or "writetimeout" in lowered
 
     def _unwrap_ephemeral(self, response: Any) -> Tuple[Optional[str], int]:
         """Unwrap a handler response into (text, ttl_seconds).
@@ -5031,20 +5049,6 @@ class BasePlatformAdapter(ABC):
             return result
 
         error_str = result.error or ""
-        if isinstance(getattr(result, "raw_response", None), dict) and result.raw_response.get("partial_delivery"):
-            logger.warning(
-                "[%s] Send failed after partial delivery: %s — not retrying full content",
-                self.name,
-                error_str,
-            )
-            return result
-        if isinstance(getattr(result, "raw_response", None), dict) and result.raw_response.get("skip_plaintext_fallback"):
-            logger.warning(
-                "[%s] Send failed: %s — skipping plain-text fallback",
-                self.name,
-                error_str,
-            )
-            return result
         is_network = result.retryable or self._is_retryable_error(error_str)
 
         # Timeout errors are not safe to retry (message may have been
@@ -5531,7 +5535,7 @@ class BasePlatformAdapter(ABC):
     async def handle_message(self, event: MessageEvent) -> None:
         """
         Process an incoming message.
-
+        
         This method returns quickly by spawning background tasks.
         This allows new messages to be processed even while an agent is running,
         enabling interruption support.
@@ -5552,10 +5556,6 @@ class BasePlatformAdapter(ABC):
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
-
-        # If this is a voice-note turn that will need auto-TTS, warm the slow
-        # RTX lane immediately while STT/agent/tool work happens. Detached and
-        # best-effort: Kokoro fallback still owns correctness.
 
         # On-entry self-heal: if the adapter still has an _active_sessions
         # entry for this key but the owner task has already exited (done or
@@ -5578,14 +5578,18 @@ class BasePlatformAdapter(ABC):
             # session lifecycle and its cleanup races with the running task
             # (see PR #4926).
             cmd = event.get_command()
-            from hermes_cli.commands import should_bypass_active_session
+            from hermes_cli.commands import (
+                is_interrupt_then_dispatch,
+                should_bypass_active_session,
+            )
 
             if should_bypass_active_session(cmd):
                 # /stop, /new, /reset must cancel the in-flight adapter task
                 # and preserve ordering of queued follow-ups.  Route those
                 # through the dedicated handoff path that serializes
                 # cancellation + runner response + pending drain.
-                if cmd in {"stop", "new", "reset", "clear"}:
+                # (Registry-derived: busy_policy == "interrupt_then_dispatch".)
+                if cmd and is_interrupt_then_dispatch(cmd):
                     self._discard_text_debounce(session_key)
                     try:
                         await self._dispatch_active_session_command(event, session_key, cmd)
@@ -5718,7 +5722,7 @@ class BasePlatformAdapter(ABC):
                     merge_text=event.message_type == MessageType.TEXT,
                 )
             return  # Don't process now - will be handled after current task finishes
-
+        
         # Mark session as active BEFORE spawning background task to close
         # the race window where a second message arriving before the task
         # starts would also pass the _active_sessions check and spawn a
@@ -5727,7 +5731,7 @@ class BasePlatformAdapter(ABC):
         # _start_session_processing installs the guard AND the owner-task
         # mapping atomically so stale-lock detection works.
         self._start_session_processing(event, session_key)
-
+    
     @staticmethod
     def _get_human_delay() -> float:
         """
@@ -5755,7 +5759,6 @@ class BasePlatformAdapter(ABC):
             max_ms = 2500
         return random.uniform(min_ms / 1000.0, max_ms / 1000.0)
 
-
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
         """Background task that actually processes the message."""
         # Track delivery outcomes for the processing-complete hook
@@ -5775,7 +5778,7 @@ class BasePlatformAdapter(ABC):
         # Fall back to a new Event only if the entry was removed externally.
         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
         self._active_sessions[session_key] = interrupt_event
-
+        
         # Start continuous typing indicator (refreshes every 2 seconds).
         # Gated per-platform: when typing_indicator=False the refresh loop is
         # never spawned, so no "typing…" / "is thinking…" status is shown.
@@ -5803,7 +5806,7 @@ class BasePlatformAdapter(ABC):
                 typing_task,
                 metadata=_thread_metadata,
             )
-
+        
         try:
             await self._run_processing_hook("on_processing_start", event)
 
@@ -5849,44 +5852,32 @@ class BasePlatformAdapter(ABC):
                 # where Telegram's sendPhoto recompression destroys legibility.
                 force_document_attachments = "[[as_document]]" in response
 
-                # Render explicit rich-card artifact blocks only after the final
-                # response is complete. This avoids streaming partial YAML and
-                # preserves text/card/text ordering for rendered cards.
-                # Keep a pre-extract snapshot for the #29346
-                # recovery/invariant below.
+                # Pre-extract snapshot for the #29346 recovery/invariant below.
                 _response_pre_extract = response
 
-                if response is None:
-                    media_files = []
-                    images = []
-                    local_files = []
-                    text_content = ""
-                else:
-                    # Extract MEDIA:<path> tags (from TTS tool) before other processing
-                    media_files, response = self.extract_media(response)
-                    media_files = self.filter_media_delivery_paths(media_files)
+                # Extract MEDIA:<path> tags (from TTS tool) before other processing
+                media_files, response = self.extract_media(response)
+                media_files = self.filter_media_delivery_paths(media_files)
 
-                    # Deduplicate against media already delivered in prior turns.
-                    # The model may echo a previous MEDIA: tag or bare file path in
-                    # a later response; without this guard the same file is sent
-                    # repeatedly.
-                    _history_media_paths = self._history_media_paths_for_session(session_key)
-                    if _history_media_paths:
-                        media_files = [
-                            (path, is_voice)
-                            for path, is_voice in media_files
-                            if path not in _history_media_paths
-                        ]
+                # Do NOT deduplicate MEDIA tags against prior turns here.
+                # The auto-append path in GatewayRunner._run_agent_inner already
+                # deduplicates auto-appended tags via _collect_auto_append_media_tags
+                # with history_media_paths, so this filter would only catch explicit
+                # MEDIA tags the model deliberately included in its response — which
+                # must be preserved (user asked to resend an image, the model echoed
+                # a path intentionally, etc.).  Bare-file-path dedup still applies
+                # to local_files below via the same _history_media_paths set.
+                _history_media_paths = self._history_media_paths_for_session(session_key)
 
-                    # Extract image URLs and send them as native platform attachments
-                    images, text_content = self.extract_images(response)
-                    # Strip any remaining internal directives from message body (fixes #1561).
-                    # _strip_media_directives shares MEDIA_TAG_CLEANUP_RE, so a MEDIA: tag
-                    # with an unknown extension is intentionally left in the body for
-                    # extract_local_files below to pick up rather than silently dropped (#34517).
-                    text_content = _strip_media_directives(text_content).strip()
-                    if images:
-                        logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
+                # Extract image URLs and send them as native platform attachments
+                images, text_content = self.extract_images(response)
+                # Strip any remaining internal directives from message body (fixes #1561).
+                # _strip_media_directives shares MEDIA_TAG_CLEANUP_RE, so a MEDIA: tag
+                # with an unknown extension is intentionally left in the body for
+                # extract_local_files below to pick up rather than silently dropped (#34517).
+                text_content = _strip_media_directives(text_content).strip()
+                if images:
+                    logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
 
                 local_files = []
                 if not is_ephemeral_response:
@@ -5897,6 +5888,15 @@ class BasePlatformAdapter(ABC):
                     local_files, text_content = self.extract_local_files(text_content)
                     local_files = self.filter_local_delivery_paths(local_files)
                     if _history_media_paths:
+                        _suppressed = [p for p in local_files if p in _history_media_paths]
+                        if _suppressed:
+                            # Log the suppression (#73771) — silent drops here
+                            # cost operators hours of log-diving.
+                            logger.info(
+                                "[%s] Suppressing %d bare local file path(s) already "
+                                "delivered in this session: %s",
+                                self.name, len(_suppressed), _suppressed,
+                            )
                         local_files = [p for p in local_files if p not in _history_media_paths]
                     if local_files:
                         logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
@@ -5905,7 +5905,7 @@ class BasePlatformAdapter(ABC):
                 # empty text with no attachment, and the `if text_content` guard
                 # below then drops it silently. Recover on every platform (#33842
                 # was Discord-only); the guard avoids duplicating an attachment.
-                if response is not None and not (text_content or images or local_files or media_files):
+                if not (text_content or images or local_files or media_files):
                     # Recover from the post-extract_media `response`, not the raw
                     # snapshot: extract_media already stripped MEDIA (incl. spaced
                     # paths) with its full grammar, so no fragment can leak.
@@ -6070,28 +6070,6 @@ class BasePlatformAdapter(ABC):
                         metadata=_final_thread_metadata,
                     )
                     _record_delivery(result)
-                    try:
-                        _pending_badges = getattr(self, "_pending_context_badges", None)
-                        if (
-                            _pending_badges
-                            and result
-                            and getattr(result, "success", False)
-                            and getattr(result, "message_id", None)
-                            and hasattr(self, "attach_context_badge")
-                        ):
-                            _badge_entry = _pending_badges.pop(str(event.source.chat_id), None)
-                            if _badge_entry:
-                                await self.attach_context_badge(
-                                    chat_id=event.source.chat_id,
-                                    message_id=result.message_id,
-                                    used=int(_badge_entry.get("used", 0)),
-                                    total=int(_badge_entry.get("total", 0)),
-                                    details=_badge_entry.get("details") or {},
-                                    session_key=_badge_entry.get("session_key"),
-                                )
-                    except Exception as _badge_exc:
-                        logger.debug("[%s] Context badge post-send attach failed: %s", self.name, _badge_exc)
-
                     if _obligation_id is not None:
                         try:
                             from gateway.delivery_ledger import (
@@ -6337,7 +6315,7 @@ class BasePlatformAdapter(ABC):
                     # Tests stub create_task() with non-hashable sentinels; tolerate.
                     pass
                 return  # Drain task owns the session now.
-
+                
         except asyncio.CancelledError:
             current_task = asyncio.current_task()
             outcome = ProcessingOutcome.CANCELLED
@@ -6484,7 +6462,7 @@ class BasePlatformAdapter(ABC):
                 current_task = asyncio.current_task()
                 if current_task is not None and self._session_tasks.get(session_key) is current_task:
                     self._cleanup_finished_session_task(session_key, interrupt_event)
-
+    
     def _cleanup_finished_session_task(
         self, session_key: str, interrupt_event: Optional[asyncio.Event]
     ) -> None:
@@ -6504,7 +6482,7 @@ class BasePlatformAdapter(ABC):
         self._release_session_guard(session_key, guard=interrupt_event)
         if session_key not in self._active_sessions:
             self._session_tasks.pop(session_key, None)
-
+    
     async def cancel_background_tasks(self) -> None:
         """Cancel any in-flight background message-processing tasks.
 
@@ -6569,11 +6547,11 @@ class BasePlatformAdapter(ABC):
     def has_pending_interrupt(self, session_key: str) -> bool:
         """Check if there's a pending interrupt for a session."""
         return session_key in self._active_sessions and self._active_sessions[session_key].is_set()
-
+    
     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
         """Get and clear any pending message for a session."""
         return self._pending_messages.pop(session_key, None)
-
+    
     def build_source(
         self,
         chat_id: str,
@@ -6662,29 +6640,29 @@ class BasePlatformAdapter(ABC):
         # for this turn even when profile_routes selects a different runtime.
         source._transport_adapter_ref = weakref.ref(self)
         return source
-
+    
     @abstractmethod
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """
         Get information about a chat/channel.
-
+        
         Returns dict with at least:
         - name: Chat name
         - type: "dm", "group", "channel"
         """
         pass
-
+    
     def format_message(self, content: str) -> str:
         """
         Format a message for this platform.
-
+        
         Override in subclasses to handle platform-specific formatting
         (e.g., Telegram MarkdownV2, Discord markdown).
-
+        
         Default implementation returns content as-is.
         """
         return content
-
+    
     @staticmethod
     def truncate_message(
         content: str,

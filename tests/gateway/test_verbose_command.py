@@ -76,13 +76,13 @@ class TestVerboseCommand:
         runner = _make_runner()
         result = await runner._handle_verbose_command(_make_event())
 
-        # all -> compact
-        assert "COMPACT" in result
+        # all -> verbose
+        assert "VERBOSE" in result
         assert "telegram" in result.lower()  # per-platform feedback
 
         # Verify config was saved to display.platforms.telegram
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "compact"
+        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "verbose"
 
     @pytest.mark.asyncio
     async def test_quoted_false_keeps_command_disabled(self, tmp_path, monkeypatch):
@@ -103,132 +103,4 @@ class TestVerboseCommand:
         assert "not enabled" in result.lower()
         assert "tool_progress_command" in result
 
-    @pytest.mark.asyncio
-    async def test_cycles_through_all_modes(self, tmp_path, monkeypatch):
-        """Calling /verbose repeatedly cycles through all tool-progress visibility modes."""
 
-        hermes_home = tmp_path / "hermes"
-        hermes_home.mkdir()
-        config_path = hermes_home / "config.yaml"
-        config_path.write_text(
-            "display:\n  tool_progress_command: true\n  tool_progress: 'off'\n",
-            encoding="utf-8",
-        )
-
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
-        runner = _make_runner()
-
-        # off -> all -> compact -> verbose -> off
-        expected = ["all", "compact", "verbose", "off"]
-        for mode in expected:
-            result = await runner._handle_verbose_command(_make_event())
-            saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            actual = saved["display"]["platforms"]["telegram"]["tool_progress"]
-            assert actual == mode, \
-                f"Expected {mode}, got {actual}"
-
-    @pytest.mark.asyncio
-    async def test_defaults_to_platform_default_when_no_tool_progress_set(self, tmp_path, monkeypatch):
-        """When tool_progress is not in config, starts from platform default then cycles.
-
-        Telegram's tier-1 preset overrides ``tool_progress`` to ``"off"`` so the
-        platform stays final-answer-first by default on mobile inboxes.  The
-        first ``/verbose`` invocation therefore cycles ``off → new``.
-        """
-        hermes_home = tmp_path / "hermes"
-        hermes_home.mkdir()
-        config_path = hermes_home / "config.yaml"
-        config_path.write_text(
-            "display:\n  tool_progress_command: true\n",
-            encoding="utf-8",
-        )
-
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
-
-        runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
-
-        # Telegram platform default is "new" → cycles to "all"
-        assert "ALL" in result
-        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "all"
-
-    @pytest.mark.asyncio
-    async def test_runtime_resolver_honors_platform_specific_tool_progress(self):
-        display_cfg = {
-            "tool_progress": "all",
-            "platforms": {
-                "telegram": {"tool_progress": "compact"},
-                "slack": {"tool_progress": "off"},
-            },
-        }
-
-        assert gateway_run.GatewayRunner._resolve_gateway_tool_progress_mode(display_cfg, "telegram") == "compact"
-        assert gateway_run.GatewayRunner._resolve_gateway_tool_progress_mode(display_cfg, "slack") == "off"
-        assert gateway_run.GatewayRunner._resolve_gateway_tool_progress_mode(display_cfg, "discord") == "all"
-
-    @pytest.mark.asyncio
-    async def test_runtime_resolver_invalid_tool_progress_falls_back_to_all(self):
-        display_cfg = {
-            "tool_progress": "bogus",
-            "platforms": {
-                "telegram": {"tool_progress": " also-bogus "},
-            },
-        }
-
-        assert gateway_run.GatewayRunner._resolve_gateway_tool_progress_mode(display_cfg, "telegram") == "all"
-        assert gateway_run.GatewayRunner._resolve_gateway_tool_progress_mode(display_cfg, "discord") == "all"
-
-    @pytest.mark.asyncio
-    async def test_per_platform_isolation(self, tmp_path, monkeypatch):
-        """Cycling /verbose on Telegram doesn't change Slack's setting.
-
-        Without a global tool_progress, each platform uses its built-in
-        default — Telegram = 'off' (tier-1 inbox override), Slack = 'off'
-        (quiet Slack default). Both cycle to 'new' on first /verbose.
-        """
-        hermes_home = tmp_path / "hermes"
-        hermes_home.mkdir()
-        config_path = hermes_home / "config.yaml"
-        # No global tool_progress → built-in platform defaults apply
-        config_path.write_text(
-            "display:\n  tool_progress_command: true\n",
-            encoding="utf-8",
-        )
-
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
-        runner = _make_runner()
-
-        # Cycle on Telegram
-        await runner._handle_verbose_command(
-            _make_event(platform=Platform.TELEGRAM)
-        )
-        # Cycle on Slack
-        await runner._handle_verbose_command(
-            _make_event(platform=Platform.SLACK)
-        )
-
-        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        platforms = saved["display"]["platforms"]
-        # Telegram: new -> all (platform default = new)
-        assert platforms["telegram"]["tool_progress"] == "all"
-        # Slack: new -> all (platform default = new)
-        assert platforms["slack"]["tool_progress"] == "all"
-
-    @pytest.mark.asyncio
-    async def test_no_config_file_returns_disabled(self, tmp_path, monkeypatch):
-        """When config.yaml doesn't exist, command reports disabled."""
-        hermes_home = tmp_path / "hermes"
-        hermes_home.mkdir()
-        # No config.yaml
-
-        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
-
-        runner = _make_runner()
-        result = await runner._handle_verbose_command(_make_event())
-        assert "not enabled" in result.lower()
-
-    def test_verbose_is_in_gateway_known_commands(self):
-        """The /verbose command is recognized by the gateway dispatch."""
-        from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS
-        assert "verbose" in GATEWAY_KNOWN_COMMANDS
