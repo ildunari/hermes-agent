@@ -383,9 +383,8 @@ def preflight_assessment(
     }
 
 
-def refresh_fast_path_classification(root: Path, run_id: str) -> dict[str, Any]:
-    """Turn a missed FAST target into an honest LARGE run without stopping it."""
-    ledger = read_json(ledger_path(root, run_id))
+def effective_fast_path_classification(ledger: dict[str, Any]) -> dict[str, Any]:
+    """Derive an overdue LARGE classification without mutating the ledger."""
     deadline_raw = ledger.get("fast_path_deadline")
     if (
         ledger.get("status") in TERMINAL
@@ -398,23 +397,37 @@ def refresh_fast_path_classification(root: Path, run_id: str) -> dict[str, Any]:
     except ValueError:
         return ledger
     now = utc_datetime()
-    if now < deadline:
+    if now <= deadline:
         return ledger
+    effective = dict(ledger)
     reasons = list(ledger.get("classification_reasons") or [])
     reasons.append("30-minute target elapsed before fast-path completion")
+    effective.update(
+        update_class="LARGE",
+        classification_reasons=reasons,
+        fast_path_missed_at=now.isoformat(),
+    )
+    return effective
+
+
+def refresh_fast_path_classification(root: Path, run_id: str) -> dict[str, Any]:
+    """Persist a missed FAST target from the single update worker."""
+    ledger = read_json(ledger_path(root, run_id))
+    effective = effective_fast_path_classification(ledger)
+    if effective is ledger:
+        return ledger
     try:
         return record(
             root,
             run_id,
-            update_class="LARGE",
-            classification_reasons=reasons,
-            fast_path_missed_at=now.isoformat(),
+            update_class=effective["update_class"],
+            classification_reasons=effective["classification_reasons"],
+            fast_path_missed_at=effective["fast_path_missed_at"],
         )
     except RuntimeError:
-        # A status poll can race the worker's terminal transition between the
-        # read above and record()'s locked update. Terminal ledgers are
-        # immutable; return the winner rather than turning a successful status
-        # request into an error.
+        # An abort can race the worker between the read above and record()'s
+        # locked update. Terminal ledgers are immutable; return the winner
+        # rather than turning a successful worker command into an error.
         latest = read_json(ledger_path(root, run_id))
         if latest.get("status") in TERMINAL:
             return latest
@@ -853,8 +866,7 @@ def nonce_valid(root: Path, nonce: str, timestamp: int) -> bool:
 
 
 def redacted_status(root: Path, run_id: str) -> dict[str, Any]:
-    refresh_fast_path_classification(root, run_id)
-    ledger = read_json(ledger_path(root, run_id))
+    ledger = effective_fast_path_classification(read_json(ledger_path(root, run_id)))
     allowed = {
         "run_id",
         "mode",

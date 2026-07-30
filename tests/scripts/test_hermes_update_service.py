@@ -247,6 +247,33 @@ def test_fast_reclassification_tolerates_terminal_transition_race(
     assert ledger["update_class"] == "FAST"
 
 
+def test_nonterminal_overdue_status_is_large_without_writing_ledger(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "20260718T120000Z-112233445566"
+    make_ledger(tmp_path, run_id)
+    SERVICE.record(
+        tmp_path,
+        run_id,
+        update_class="FAST",
+        classification_reasons=[],
+        fast_path_deadline="2026-07-18T12:30:00+00:00",
+    )
+    monkeypatch.setattr(
+        SERVICE,
+        "utc_datetime",
+        lambda: SERVICE.dt.datetime(2026, 7, 18, 12, 31, tzinfo=SERVICE.dt.UTC),
+    )
+
+    status = SERVICE.redacted_status(tmp_path, run_id)
+    persisted = SERVICE.read_json(SERVICE.ledger_path(tmp_path, run_id))
+
+    assert status["update_class"] == "LARGE"
+    assert status["fast_path_missed_at"] == "2026-07-18T12:31:00+00:00"
+    assert persisted["update_class"] == "FAST"
+    assert "fast_path_missed_at" not in persisted
+
+
 def test_transition_rejects_phase_regression_and_terminal_resume(tmp_path: Path) -> None:
     run_id = "20260718T120000Z-aaaaaaaaaaaa"
     make_ledger(tmp_path, run_id)
