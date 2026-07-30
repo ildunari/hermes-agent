@@ -1506,6 +1506,24 @@ def _normalize_main_model_assignment(provider: str, model: str) -> tuple[str, st
         cfg = load_config()
     except Exception:
         cfg = {}
+    from hermes_cli.opencodex_catalog import (
+        OpenCodexCatalogError,
+        load_configured_opencodex_catalog,
+        opencodex_runtime_provider,
+    )
+
+    try:
+        opencodex_catalog = load_configured_opencodex_catalog(cfg)
+    except OpenCodexCatalogError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception:
+        opencodex_catalog = None
+    if opencodex_catalog is not None:
+        match = opencodex_catalog.resolve(model_in, provider_hint=prov_in)
+        if match.model is None:
+            raise HTTPException(status_code=400, detail=match.error)
+        return opencodex_runtime_provider(cfg), match.model.slug
+
     user_providers = cfg.get("providers") if isinstance(cfg, dict) else None
     user_provider = resolve_user_provider(
         prov_in, user_providers if isinstance(user_providers, dict) else {}
