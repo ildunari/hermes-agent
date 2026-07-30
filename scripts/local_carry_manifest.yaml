@@ -98,6 +98,10 @@ checks:
     path: hermes_cli/auth.py
     needles: [File-system/resource failures, json.JSONDecodeError, UnicodeDecodeError]
     description: quarantine only malformed auth JSON; propagate permission, EMFILE, and storage I/O failures truthfully
+  - id: parallel-sdk-availability-probe
+    path: plugins/web/parallel/provider.py
+    needles: [import parallel, availability probe]
+    description: avoid invoking disabled lazy installation when the Parallel SDK is already importable, including test-provided modules
   - id: detached-restart-cli
     path: cli.py
     needles: [restart-gateways, enqueue_detached_restart]
