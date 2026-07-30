@@ -712,7 +712,7 @@ def _reset_tui_gateway_server_state():
     yield
 
     mod = sys.modules.get(_TUI_SERVER_MODULE)
-    if mod is None:
+    if mod is None or not isinstance(getattr(mod, "_sessions", None), dict):
         return
 
     # This finalizer can run before the test's own monkeypatch undo, so a

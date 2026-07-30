@@ -457,6 +457,9 @@ def load_cli_config() -> Dict[str, Any]:
             "docker_mount_cwd_to_workspace": False,  # explicit opt-in only; default off for sandbox isolation
         },
         "browser": {
+            # Independent Desktop in-app browser transport kill switch. This
+            # does not gate or mutate the existing agent browser tools.
+            "in_app": {"enabled": False},
             "inactivity_timeout": 120,  # Auto-cleanup inactive browser sessions after 2 min
             "record_sessions": False,  # Auto-record browser sessions as WebM videos
             "engine": "auto",  # Browser engine: auto (Chrome), lightpanda, chrome

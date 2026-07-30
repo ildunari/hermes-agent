@@ -179,6 +179,34 @@ _WS_ORPHAN_REAP_GRACE_S = max(0.0, _ws_orphan_reap_grace)
 _DETAIL_SECTION_NAMES = ("thinking", "tools", "subagents", "activity")
 _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
 
+
+def active_turn_snapshot() -> dict[str, int | float]:
+    """Return a constant-time snapshot of live TUI/Desktop agent turns."""
+    now = time.time()
+    started_at: list[float] = []
+    with _sessions_lock:
+        for session in _sessions.values():
+            if not session.get("running"):
+                continue
+            inflight = session.get("inflight_turn")
+            raw_started = inflight.get("started_at") if isinstance(inflight, dict) else None
+            try:
+                if raw_started is None:
+                    raise ValueError("missing start time")
+                started = float(raw_started)
+            except (TypeError, ValueError):
+                try:
+                    started = float(session.get("last_active") or now)
+                except (TypeError, ValueError):
+                    started = now
+            started_at.append(started)
+
+    snapshot: dict[str, int | float] = {"active_runs": len(started_at)}
+    if started_at:
+        snapshot["oldest_run_age_seconds"] = round(max(0.0, now - min(started_at)), 1)
+    return snapshot
+
+
 # ── Async RPC dispatch (#12546) ──────────────────────────────────────
 # A handful of handlers block the dispatcher loop in entry.py for seconds
 # to minutes (slash.exec, cli.exec, shell.exec, session.resume,

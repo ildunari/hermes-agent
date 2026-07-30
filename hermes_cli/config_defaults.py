@@ -343,6 +343,9 @@ DEFAULT_CONFIG = {
     },
 
     "browser": {
+        # Independent, permanent kill switch for the Desktop in-app browser
+        # transport. This does not gate or mutate the existing browser tools.
+        "in_app": {"enabled": False},
         "inactivity_timeout": 120,
         "command_timeout": 30,  # Timeout for browser commands in seconds (screenshot, navigate, etc.)
         "record_sessions": False,  # Auto-record browser sessions as WebM videos
