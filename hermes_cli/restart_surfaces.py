@@ -831,6 +831,39 @@ def _heartbeat_active_agents(target: RestartTarget) -> tuple[int, float] | None:
         return None
 
 
+def _old_writer_requires_graceful_transition(
+    target: RestartTarget,
+    status_payload: dict[str, Any],
+) -> bool:
+    """Detect a live pre-contract gateway that cannot prove count freshness.
+
+    This is detection only — never an idle authorization. The safe-wait owner
+    uses it to ask that gateway to enter its own internal drain via SIGUSR1.
+    The process then rejects new work and waits on its live in-memory counters
+    before exiting.
+    """
+    stamp_age = _iso_age_seconds(status_payload.get("active_agents_updated_at"))
+    if stamp_age is not None and stamp_age <= ACTIVE_AGENTS_TRUST_WINDOW_S:
+        return False
+    heartbeat_path = _heartbeat_path_for_target(target)
+    heartbeat = _read_json(heartbeat_path) if heartbeat_path is not None else None
+    if not heartbeat or "active_agents" in heartbeat:
+        return False
+    heartbeat_age = _iso_age_seconds(heartbeat.get("updated_at"))
+    if heartbeat_age is None or not (
+        -HEARTBEAT_FRESH_WINDOW_S <= heartbeat_age <= HEARTBEAT_FRESH_WINDOW_S
+    ):
+        return False
+    try:
+        heartbeat_pid = heartbeat.get("pid")
+        status_pid = status_payload.get("pid")
+        if heartbeat_pid is None or status_pid is None:
+            return False
+        return int(heartbeat_pid) == int(status_pid)
+    except (TypeError, ValueError):
+        return False
+
+
 def gateway_busy_snapshot(targets: Iterable[RestartTarget]) -> list[dict[str, Any]]:
     """Structured per-target busy-state record: label, active_agents,
     gateway_state, restart_requested, and the freshness age behind that
@@ -877,40 +910,18 @@ def gateway_busy_snapshot(targets: Iterable[RestartTarget]) -> list[dict[str, An
         if not _count_is_fresh:
             live = _heartbeat_active_agents(target)
             if live is None:
-                # No independent confirmation: fail closed for NONZERO counts.
-                # For ZERO there is one sanctioned exception: a LEGACY writer
-                # (no stamp field at all — a gateway predating the stamp) can
-                # never prove freshness, so demanding it deadlocks every
-                # first-upgrade restart (observed live 2026-07-24: the old
-                # gateway idled for 6h while the new helper refused its zero).
-                # A legacy zero with fresh updated_at and a live pid is the
-                # best evidence a legacy writer can produce and matches
-                # pre-stamp behavior; once the NEW gateway runs, the stamp
-                # exists and the strict path applies. A PRESENT-but-stale
-                # stamp still fails closed — that writer could have stamped
-                # and didn't.
+                # Identity evidence never proves idleness. Fail closed for
+                # both zero and nonzero. The safe-wait owner separately
+                # transitions a verified old writer through its internal drain
+                # instead of inferring zero from stale state.
                 if active_agents == 0:
-                    _legacy_writer = "active_agents_updated_at" not in payload
-                    _updated_age = _iso_age_seconds(payload.get("updated_at"))
-                    if (
-                        _legacy_writer
-                        and _updated_age is not None
-                        and _updated_age <= ACTIVE_AGENTS_TRUST_WINDOW_S
-                    ):
-                        _append_log(
-                            f"{target.label}: active_agents=0 from a legacy "
-                            f"writer (no count stamp), updated_at fresh "
-                            f"({_updated_age:.1f}s) and pid live; accepting "
-                            "legacy idle (first-upgrade transition)"
-                        )
-                    else:
-                        _append_log(
-                            f"{target.label}: active_agents=0 but count freshness "
-                            f"is unknown (stamp={_stamp!r}, age={active_agents_age!r}s) "
-                            "and no heartbeat is available; treating as BUSY "
-                            "(failing closed)"
-                        )
-                        active_agents = 1  # force busy; unverifiable idle is not idle
+                    _append_log(
+                        f"{target.label}: active_agents=0 but count freshness "
+                        f"is unknown (stamp={_stamp!r}, age={active_agents_age!r}s) "
+                        "and no count-bearing heartbeat is available; treating as "
+                        "BUSY until the owner completes a graceful drain"
+                    )
+                    active_agents = 1  # unverifiable idle is not idle
                 else:
                     _append_log(
                         f"{target.label}: active_agents={active_agents} but status "
@@ -984,8 +995,46 @@ def _wait_for_safe_restart(
     timeout: float = DEFAULT_SAFE_WAIT_TIMEOUT,
     interval: float = DEFAULT_SAFE_WAIT_INTERVAL,
 ) -> tuple[bool, list[str]]:
-    """Poll gateway runtime status until no target reports active work."""
+    """Poll runtime status until no target reports active work.
+
+    When the helper is newer than a live gateway that cannot emit trustworthy
+    count telemetry, transition that gateway through its own internal drain.
+    """
+    targets = tuple(targets)
     deadline = time.monotonic() + max(0.0, timeout)
+    initial_gateway_busy = _gateway_busy_details(targets)
+    transition_targets = targets if timeout > 0 and initial_gateway_busy else ()
+    for target in transition_targets:
+        status_path = _gateway_status_path_for_target(target)
+        payload = _read_json(status_path) if status_path is not None else None
+        if not payload or not _pid_is_alive(payload.get("pid")):
+            continue
+        if not _old_writer_requires_graceful_transition(target, payload):
+            continue
+        requested_service = target.service_name(os.getuid())
+        service, launchctl_result = _resolve_loaded_service(requested_service)
+        if launchctl_result.returncode != 0:
+            return False, [
+                f"{target.label}: old writer requires an internal drain but "
+                f"{requested_service} is not a loaded service"
+            ]
+        remaining = max(1.0, deadline - time.monotonic())
+        _append_log(
+            f"{target.label}: old writer lacks trustworthy count telemetry; "
+            "requesting its owner-controlled graceful drain before polling"
+        )
+        outcome, error = _graceful_restart_gateway(
+            target,
+            service,
+            launchctl_result,
+            timeout=remaining,
+        )
+        if outcome is not RestartVerification.RESTARTED:
+            return False, [error or f"{target.label}: old-writer transition failed"]
+        _append_log(
+            f"{target.label}: old writer completed its owner-controlled graceful "
+            "drain and was replaced"
+        )
     last_busy: list[str] = []
     while True:
         last_busy = (

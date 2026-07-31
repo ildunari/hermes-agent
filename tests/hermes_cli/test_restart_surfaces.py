@@ -12,6 +12,7 @@ from hermes_cli.restart_surfaces import (
     _gateway_pid as real_gateway_pid,
     _graceful_restart_gateway as real_graceful_restart_gateway,
     _multiplex_gateway_config as real_multiplex_gateway_config,
+    _old_writer_requires_graceful_transition as real_old_writer_requires_graceful_transition,
     _webui_busy_details as real_webui_busy_details,
     describe_plan,
     enqueue_detached_restart,
@@ -32,6 +33,10 @@ def _no_live_webui_probe(monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.restart_surfaces._desktop_busy_details",
         lambda _targets: [],
+    )
+    monkeypatch.setattr(
+        "hermes_cli.restart_surfaces._old_writer_requires_graceful_transition",
+        lambda _target, _payload: False,
     )
     monkeypatch.setattr(
         "hermes_cli.restart_surfaces._desktop_dashboard_is_running",
@@ -2030,10 +2035,8 @@ def test_gateway_busy_details_missing_count_stamp_consults_heartbeat(monkeypatch
     assert not busy  # heartbeat says idle
 
 
-def test_gateway_busy_details_legacy_zero_with_fresh_updated_at_is_idle(monkeypatch, tmp_path):
-    """First-upgrade transition: a LEGACY writer (no stamp field) reporting
-    zero with fresh updated_at and a live pid is accepted as idle — demanding
-    a stamp it cannot produce deadlocked the 2026-07-24 05:35 restart for 6h."""
+def test_gateway_busy_details_legacy_zero_without_count_evidence_is_busy(monkeypatch, tmp_path):
+    """Identity freshness is not affirmative evidence that active work is zero."""
     import json
     from datetime import datetime, timezone
     from hermes_cli.restart_surfaces import _gateway_busy_details
@@ -2052,7 +2055,7 @@ def test_gateway_busy_details_legacy_zero_with_fresh_updated_at_is_idle(monkeypa
     monkeypatch.setattr("hermes_cli.restart_surfaces._heartbeat_active_agents", lambda t: None)
 
     busy = _gateway_busy_details([target])
-    assert not busy  # legacy zero + fresh updated_at + live pid -> idle
+    assert len(busy) == 1  # stale identity-only zero must fail closed
 
 
 def test_gateway_busy_details_stale_zero_from_stamping_writer_is_busy(monkeypatch, tmp_path):
@@ -2080,3 +2083,92 @@ def test_gateway_busy_details_stale_zero_from_stamping_writer_is_busy(monkeypatc
 
     busy = _gateway_busy_details([target])
     assert len(busy) == 1  # stale stamp at zero -> fail closed to busy
+
+
+def _write_old_writer_upgrade_state(tmp_path, *, active_agents=0, heartbeat_pid=123):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    process_started = now - timedelta(minutes=5)
+    status = tmp_path / "gateway_state.json"
+    status.write_text(json.dumps({
+        "pid": 123,
+        "start_time": process_started.timestamp(),
+        "active_agents": active_agents,
+        "active_agents_updated_at": (process_started - timedelta(minutes=5)).isoformat(),
+        "gateway_state": "running",
+        "restart_requested": False,
+        "updated_at": now.isoformat(),
+    }))
+    heartbeat = tmp_path / "state" / "gateway.heartbeat"
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat.write_text(json.dumps({
+        "pid": heartbeat_pid,
+        "start_time": process_started.timestamp(),
+        "updated_at": now.isoformat(),
+        "monotonic": 1.0,
+    }))
+    return status
+
+
+def test_old_writer_transition_detects_same_process_without_count_heartbeat(monkeypatch, tmp_path):
+    status = _write_old_writer_upgrade_state(tmp_path)
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+
+    assert real_old_writer_requires_graceful_transition(target, json.loads(status.read_text()))
+
+
+def test_old_writer_transition_also_drains_nonzero(monkeypatch, tmp_path):
+    status = _write_old_writer_upgrade_state(tmp_path, active_agents=1)
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+
+    assert real_old_writer_requires_graceful_transition(target, json.loads(status.read_text()))
+
+
+def test_old_writer_transition_rejects_heartbeat_pid_mismatch(monkeypatch, tmp_path):
+    status = _write_old_writer_upgrade_state(tmp_path, heartbeat_pid=456)
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr("hermes_cli.restart_surfaces.GATEWAY_STATUS_PATHS", {target.label: status})
+
+    assert not real_old_writer_requires_graceful_transition(target, json.loads(status.read_text()))
+
+
+def test_safe_wait_transitions_old_writer_through_owner_drain(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    status = _write_old_writer_upgrade_state(tmp_path, active_agents=1)
+    target = targets_for_scope("gateways")[0]
+    monkeypatch.setattr(restart_surfaces, "GATEWAY_STATUS_PATHS", {target.label: status})
+    monkeypatch.setattr(restart_surfaces, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_resolve_loaded_service",
+        lambda service: (service, subprocess.CompletedProcess([], 0, "pid = 123", "")),
+    )
+    calls = []
+
+    def graceful(*args, **kwargs):
+        calls.append((args, kwargs))
+        return RestartVerification.RESTARTED, None
+
+    monkeypatch.setattr(restart_surfaces, "_graceful_restart_gateway", graceful)
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_old_writer_requires_graceful_transition",
+        real_old_writer_requires_graceful_transition,
+    )
+    # The owner-controlled transition is the only side effect; after launchd
+    # replacement, the normal strict poll sees the new writer as idle.
+    busy_sequence = [["old writer busy"], []]
+    monkeypatch.setattr(
+        restart_surfaces,
+        "_gateway_busy_details",
+        lambda _targets: busy_sequence.pop(0),
+    )
+
+    ok, busy = restart_surfaces._wait_for_safe_restart((target,), timeout=5, interval=0.01)
+
+    assert ok and busy == []
+    assert len(calls) == 1

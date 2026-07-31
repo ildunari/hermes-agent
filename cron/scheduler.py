@@ -327,6 +327,15 @@ _parallel_pool_max_workers: Optional[int] = None
 _running_job_ids: set = set()
 _running_lock = threading.Lock()
 
+
+def _persist_active_agents_for_cron() -> None:
+    """Publish cron claim/release transitions to the gateway drain state."""
+    try:
+        from gateway.run import persist_active_agents_now
+        persist_active_agents_now()
+    except Exception:
+        pass
+
 # Job IDs the gateway shutdown path force-killed the tool subprocess of
 # while still in ``_running_job_ids`` (see ``mark_running_jobs_interrupted``
 # below). ``run_one_job``'s own completion path checks this set before
@@ -4229,6 +4238,7 @@ def tick(
                     logger.info("Job '%s' already running — skipping", job.get("name", job_id))
                     return None
                 _running_job_ids.add(job_id)
+            _persist_active_agents_for_cron()
             # Record the attempt before executor dispatch. Recovery classifies
             # abandoned records as unknown; it never automatically retries them.
             execution = create_execution(job_id, source="builtin")
@@ -4241,12 +4251,14 @@ def tick(
                 finally:
                     with _running_lock:
                         _running_job_ids.discard(j["id"])
+                    _persist_active_agents_for_cron()
 
             try:
                 return pool.submit(_run_and_release)
             except Exception as submit_err:
                 with _running_lock:
                     _running_job_ids.discard(job_id)
+                _persist_active_agents_for_cron()
                 finish_execution(
                     execution["id"],
                     success=False,

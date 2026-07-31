@@ -3179,6 +3179,37 @@ import weakref as _weakref
 _gateway_runner_ref: _weakref.ref = lambda: None
 
 
+# Keep the persisted restart-drain count synchronized with work claimed by
+# API and cron paths outside GatewayRunner's normal turn boundaries.
+_ACTIVE_AGENTS_PERSIST_MIN_INTERVAL = 0.25
+_active_agents_persist_state: Dict[str, float] = {"ts": 0.0, "count": -1.0}
+_active_agents_persist_lock = threading.Lock()
+
+
+def persist_active_agents_now() -> None:
+    """Best-effort, throttled persist of the live active-work count."""
+    runner = _gateway_runner_ref()
+    if runner is None:
+        return
+    try:
+        with _active_agents_persist_lock:
+            count = runner._active_work_count()
+            now = time.monotonic()
+            state = _active_agents_persist_state
+            crossing_zero = (count == 0) != (state["count"] == 0)
+            if (
+                not crossing_zero
+                and (now - state["ts"]) < _ACTIVE_AGENTS_PERSIST_MIN_INTERVAL
+            ):
+                return
+            state["ts"] = now
+            state["count"] = float(count)
+        runner._persist_active_agents()
+    except Exception:
+        # Drain telemetry must never break the work path it observes.
+        pass
+
+
 def _normalize_empty_agent_response(
     agent_result: dict,
     response: str,
@@ -7154,12 +7185,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         profiles cannot create an ``api_server`` adapter because it binds a port,
         so only the primary registry is a supported source of this work.
         """
-        try:
-            adapter = getattr(self, "adapters", {}).get(Platform.API_SERVER)
-            helper = getattr(adapter, "active_agent_work_count", None)
-            return max(0, int(helper())) if callable(helper) else 0
-        except Exception:
+        adapter = getattr(self, "adapters", {}).get(Platform.API_SERVER)
+        helper = getattr(adapter, "active_agent_work_count", None)
+        if not callable(helper):
             return 0
+        # A failed count is unknown, never idle. Swallowing an exception as
+        # zero can authorize a restart while a live API task is still running.
+        return max(0, int(cast(Callable[[], Any], helper)()))
 
     # ── scale-to-zero idle detection / dormant-quiesce (Phase 0) ──────────────
     # The gateway-side BEHAVIOUR that consumes the relay scale-to-zero primitives
@@ -7538,7 +7570,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 gateway_state=gateway_state,
                 exit_reason=exit_reason,
                 restart_requested=self._restart_requested,
-                active_agents=self._active_work_count(),
+                # Re-snapshot under the status writer lock so a delayed write
+                # cannot publish a count captured before a newer claim/release.
+                active_agents=self._active_work_count,
             )
         except Exception:
             pass
@@ -7561,7 +7595,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(active_agents=self._active_work_count())
+            write_runtime_status(active_agents=self._active_work_count)
         except Exception:
             pass
 
@@ -10989,6 +11023,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     loop_heartbeat_forever(
                         interval_s=DEFAULT_HEARTBEAT_INTERVAL_S,
                         start_time=getattr(self, "_gateway_started_at", 0.0),
+                        # Independent live count used when the status file's
+                        # count stamp is stale or a prior writer was replaced
+                        # by an update while the old process was still alive.
+                        extra_provider=lambda: {
+                            "active_agents": self._active_work_count()
+                        },
                     )
                 )
                 _bg = getattr(self, "_background_tasks", None)

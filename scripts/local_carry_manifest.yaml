@@ -158,6 +158,26 @@ checks:
     path: gateway/shutdown_watchdog.py
     needles: [_refresh_runtime_status_identity]
     description: heartbeat loop re-stamps runtime-status identity so foreign clobbers self-heal
+  - id: gateway-active-work-writer
+    path: gateway/run.py
+    needles: [persist_active_agents_now, _active_agents_persist_lock, 'extra_provider=lambda:', 'active_agents=self._active_work_count', 'A failed count is unknown, never idle']
+    description: update-safe restart drain publishes live work at turn boundaries and in the independent loop heartbeat
+  - id: gateway-active-work-status-stamp
+    path: gateway/status.py
+    needles: [_process_owns_runtime_status, _RUNTIME_STATUS_WRITE_LOCK, _runtime_status_file_lock, active_agents_updated_at, 'if callable(active_agents)']
+    description: active-work count writes are serialized, re-snapshotted, and independently freshness-stamped
+  - id: gateway-active-work-api-claims
+    path: gateway/platforms/api_server.py
+    needles: [_persist_active_agents_for_api, persist_active_agents_now]
+    description: API admission and detached-run claims remain visible to safe restart drains
+  - id: gateway-active-work-cron-claims
+    path: cron/scheduler.py
+    needles: [_persist_active_agents_for_cron, persist_active_agents_now]
+    description: cron dispatch and release remain visible to safe restart drains
+  - id: restart-first-upgrade-idle-bridge
+    path: hermes_cli/restart_surfaces.py
+    needles: [_old_writer_requires_graceful_transition, owner-controlled graceful drain]
+    description: the post-update helper transitions an old writer through its internal drain without inferring idle from stale telemetry
   - id: desktop-build-hooks
     path: apps/desktop/package.json
     needles: ['"afterPack"', '"entitlements"']

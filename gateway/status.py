@@ -12,6 +12,7 @@ concurrently under distinct configurations).
 """
 
 import copy
+import contextlib
 import hashlib
 import json
 import logging
@@ -587,6 +588,7 @@ def _build_runtime_status_record() -> dict[str, Any]:
         "exit_reason": None,
         "restart_requested": False,
         "active_agents": 0,
+        "active_agents_updated_at": _utc_now_iso(),
         "platforms": {},
         "updated_at": _utc_now_iso(),
     })
@@ -977,6 +979,75 @@ def write_pid_file() -> None:
         raise
 
 
+_RUNTIME_STATUS_WRITE_LOCK = threading.Lock()
+
+
+def _process_owns_runtime_status(existing: Optional[dict[str, Any]]) -> bool:
+    """Return whether this process may stamp the live gateway's identity.
+
+    Adapters and detached helpers can import this module from processes that do
+    not own the gateway. Those callers must not overwrite the real gateway PID
+    or count. Dead/absent ownership is reclaimable for startup and recovery.
+    """
+    if _gateway_lock_handle is not None:
+        return True
+    me = os.getpid()
+    pid_record = _read_pid_record()
+    file_pid = _pid_from_record(pid_record)
+    if file_pid == me:
+        return True
+    if file_pid is not None and runtime_status_pid_is_live(pid_record):
+        return False
+    existing_pid = _pid_from_record(existing)
+    if existing_pid is None or existing_pid == me:
+        return True
+    return not runtime_status_pid_is_live(existing)
+
+
+@contextlib.contextmanager
+def _runtime_status_file_lock():
+    """Serialize runtime-status read/merge/write across processes."""
+    lock_path = _get_runtime_status_path().with_suffix(".lock")
+    handle = None
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+")
+        if _IS_WINDOWS:
+            import msvcrt as _msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() <= _WINDOWS_LOCK_OFFSET:
+                handle.seek(_WINDOWS_LOCK_OFFSET)
+                handle.write("\0")
+                handle.flush()
+            handle.seek(_WINDOWS_LOCK_OFFSET)
+            getattr(_msvcrt, "locking")(
+                handle.fileno(), getattr(_msvcrt, "LK_LOCK"), 1
+            )
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        if handle is not None:
+            handle.close()
+        handle = None
+    try:
+        yield
+    finally:
+        if handle is not None:
+            try:
+                if _IS_WINDOWS:
+                    import msvcrt as _msvcrt
+
+                    handle.seek(_WINDOWS_LOCK_OFFSET)
+                    getattr(_msvcrt, "locking")(
+                        handle.fileno(), getattr(_msvcrt, "LK_UNLCK"), 1
+                    )
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+
+
 def write_runtime_status(
     *,
     gateway_state: Any = _UNSET,
@@ -990,6 +1061,47 @@ def write_runtime_status(
     served_profiles: Any = _UNSET,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status."""
+    with _RUNTIME_STATUS_WRITE_LOCK, _runtime_status_file_lock():
+        existing = _read_json_file(_get_runtime_status_path())
+        if not _process_owns_runtime_status(existing):
+            logger.debug(
+                "Skipping runtime-status write from non-owner pid=%s; owner pid=%s",
+                os.getpid(),
+                _pid_from_record(existing),
+            )
+            return
+        _write_runtime_status_locked(
+            gateway_state=gateway_state,
+            exit_reason=exit_reason,
+            restart_requested=restart_requested,
+            active_agents=active_agents,
+            platform=platform,
+            platform_state=platform_state,
+            error_code=error_code,
+            error_message=error_message,
+            served_profiles=served_profiles,
+        )
+
+
+def _write_runtime_status_locked(
+    *,
+    gateway_state: Any = _UNSET,
+    exit_reason: Any = _UNSET,
+    restart_requested: Any = _UNSET,
+    active_agents: Any = _UNSET,
+    platform: Any = _UNSET,
+    platform_state: Any = _UNSET,
+    error_code: Any = _UNSET,
+    error_message: Any = _UNSET,
+    served_profiles: Any = _UNSET,
+) -> None:
+    if callable(active_agents):
+        try:
+            active_agents = active_agents()
+        except Exception:
+            # Unknown is not idle: preserve the previous count rather than
+            # authorizing a restart with a fabricated zero.
+            active_agents = _UNSET
     path = _get_runtime_status_path()
     payload = _read_json_file(path) or _build_runtime_status_record()
     previous_payload = copy.deepcopy(payload)
@@ -1009,6 +1121,7 @@ def write_runtime_status(
         payload["restart_requested"] = bool(restart_requested)
     if active_agents is not _UNSET:
         payload["active_agents"] = parse_active_agents(active_agents)
+        payload["active_agents_updated_at"] = _utc_now_iso()
     if served_profiles is not _UNSET:
         # Profiles this gateway multiplexes (multi-profile mode). Absent/empty
         # for a single-profile gateway. Lets `hermes status` show per-profile

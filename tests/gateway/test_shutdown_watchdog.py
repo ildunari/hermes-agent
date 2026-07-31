@@ -259,6 +259,9 @@ def test_count_write_stamps_dedicated_freshness_field(tmp_path, monkeypatch):
     status_mod.write_runtime_status(active_agents=boom)
     payload = _json.loads(path.read_text())
     assert payload["active_agents"] == 2
+    assert payload["active_agents_updated_at"] == first_stamp
+
+
 @pytest.mark.asyncio
 async def test_loop_heartbeat_rewrites_until_cancelled(tmp_path):
     path = get_loop_heartbeat_path(tmp_path)

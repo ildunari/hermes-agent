@@ -96,36 +96,6 @@ class TestActiveApiRunCount:
         with pytest.raises(RuntimeError):
             runner._active_api_run_count()
 
-    def test_delegates_to_primary_api_adapter(self):
-        runner, _adapter = make_restart_runner()
-        runner.adapters = {
-            Platform.API_SERVER: _make_api_adapter(inflight=2, queued_ids=["r1"])
-        }
-        assert runner._active_api_run_count() == 3
-
-    def test_ignores_non_api_platforms(self):
-        runner, _adapter = make_restart_runner()
-        other = SimpleNamespace(
-            platform=Platform.DISCORD,
-            active_agent_work_count=lambda: 99,
-        )
-        runner.adapters = {Platform.DISCORD: other}
-        assert runner._active_api_run_count() == 0
-
-    def test_never_raises_on_broken_adapter(self):
-        runner, _adapter = make_restart_runner()
-
-        class Bad:
-            platform = Platform.API_SERVER
-
-            @staticmethod
-            def active_agent_work_count() -> int:
-                raise RuntimeError("boom")
-
-        runner.adapters = {Platform.API_SERVER: Bad()}
-        assert runner._active_api_run_count() == 0
-
-
 class TestAPIServerAdapterWorkCount:
 
     @pytest.mark.asyncio
