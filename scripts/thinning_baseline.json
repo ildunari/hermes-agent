@@ -1,251 +1,90 @@
 {
   "branch": "local/studio-slim",
-  "head": "289fd6e4fce5549a3b8d8b5f3a3a8b060669e1b0",
-  "hotspot_count": 395,
+  "head": "bf5d2181a28081047946cbc786f2833eac31bd6e",
+  "hotspot_count": 349,
   "hotspots": [
     {
-      "local_changed_lines": 2859,
-      "path": "gateway/run.py",
-      "prior_conflicts": 0,
-      "score": 31449,
-      "upstream_commits": 10
-    },
-    {
-      "local_changed_lines": 2255,
-      "path": "hermes_cli/web_server.py",
-      "prior_conflicts": 0,
-      "score": 9020,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 694,
-      "path": "hermes_cli/main.py",
-      "prior_conflicts": 0,
-      "score": 8328,
-      "upstream_commits": 11
-    },
-    {
-      "local_changed_lines": 932,
-      "path": "hermes_state.py",
-      "prior_conflicts": 0,
-      "score": 5592,
-      "upstream_commits": 5
-    },
-    {
-      "local_changed_lines": 1269,
-      "path": "gateway/platforms/api_server.py",
-      "prior_conflicts": 0,
-      "score": 5076,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 526,
-      "path": "agent/conversation_loop.py",
-      "prior_conflicts": 0,
-      "score": 4208,
-      "upstream_commits": 7
-    },
-    {
-      "local_changed_lines": 991,
+      "local_changed_lines": 1013,
       "path": "apps/desktop/electron/main.ts",
       "prior_conflicts": 0,
-      "score": 3964,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 590,
-      "path": "agent/auxiliary_client.py",
-      "prior_conflicts": 0,
-      "score": 3540,
-      "upstream_commits": 5
-    },
-    {
-      "local_changed_lines": 1131,
-      "path": "tools/browser_tool.py",
-      "prior_conflicts": 0,
-      "score": 2262,
+      "score": 2026,
       "upstream_commits": 1
     },
     {
-      "local_changed_lines": 563,
-      "path": "tui_gateway/server.py",
+      "local_changed_lines": 1699,
+      "path": "hermes_cli/web_server.py",
       "prior_conflicts": 0,
-      "score": 2252,
-      "upstream_commits": 3
+      "score": 1699,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 1126,
+      "path": "tools/browser_tool.py",
+      "prior_conflicts": 0,
+      "score": 1126,
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 1056,
       "path": "gateway/slash_commands.py",
       "prior_conflicts": 0,
-      "score": 2112,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 417,
-      "path": "cron/scheduler.py",
-      "prior_conflicts": 0,
-      "score": 2085,
-      "upstream_commits": 4
-    },
-    {
-      "local_changed_lines": 687,
-      "path": "tests/run_agent/test_run_agent.py",
-      "prior_conflicts": 0,
-      "score": 2061,
-      "upstream_commits": 2
-    },
-    {
-      "local_changed_lines": 391,
-      "path": "agent/anthropic_adapter.py",
-      "prior_conflicts": 0,
-      "score": 1955,
-      "upstream_commits": 4
-    },
-    {
-      "local_changed_lines": 750,
-      "path": "agent/tool_executor.py",
-      "prior_conflicts": 0,
-      "score": 1500,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 277,
-      "path": "tests/test_hermes_state.py",
-      "prior_conflicts": 0,
-      "score": 1385,
-      "upstream_commits": 4
-    },
-    {
-      "local_changed_lines": 216,
-      "path": "tests/agent/test_auxiliary_client.py",
-      "prior_conflicts": 0,
-      "score": 1296,
-      "upstream_commits": 5
-    },
-    {
-      "local_changed_lines": 528,
-      "path": "gateway/platforms/base.py",
-      "prior_conflicts": 0,
       "score": 1056,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 455,
+      "path": "tests/test_tui_gateway_server.py",
+      "prior_conflicts": 0,
+      "score": 910,
+      "upstream_commits": 1
+    },
+    {
+      "local_changed_lines": 375,
+      "path": "apps/desktop/src/global.d.ts",
+      "prior_conflicts": 0,
+      "score": 750,
+      "upstream_commits": 1
+    },
+    {
+      "local_changed_lines": 593,
+      "path": "agent/auxiliary_client.py",
+      "prior_conflicts": 0,
+      "score": 593,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 569,
+      "path": "agent/conversation_loop.py",
+      "prior_conflicts": 0,
+      "score": 569,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 569,
+      "path": "tools/delegate_tool.py",
+      "prior_conflicts": 0,
+      "score": 569,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 281,
+      "path": "gateway/run.py",
+      "prior_conflicts": 0,
+      "score": 562,
       "upstream_commits": 1
     },
     {
       "local_changed_lines": 526,
       "path": "tools/web_tools.py",
       "prior_conflicts": 0,
-      "score": 1052,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 329,
-      "path": "tests/test_tui_gateway_server.py",
-      "prior_conflicts": 0,
-      "score": 987,
-      "upstream_commits": 2
-    },
-    {
-      "local_changed_lines": 476,
-      "path": "package-lock.json",
-      "prior_conflicts": 0,
-      "score": 952,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 227,
-      "path": "apps/desktop/src/i18n/en.ts",
-      "prior_conflicts": 0,
-      "score": 908,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 215,
-      "path": "apps/desktop/src/i18n/zh-hant.ts",
-      "prior_conflicts": 0,
-      "score": 860,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 215,
-      "path": "apps/desktop/src/i18n/zh.ts",
-      "prior_conflicts": 0,
-      "score": 860,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 199,
-      "path": "cli.py",
-      "prior_conflicts": 0,
-      "score": 796,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 176,
-      "path": "tests/agent/transports/test_codex_transport.py",
-      "prior_conflicts": 0,
-      "score": 704,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 230,
-      "path": "gateway/status.py",
-      "prior_conflicts": 0,
-      "score": 690,
-      "upstream_commits": 2
-    },
-    {
-      "local_changed_lines": 228,
-      "path": "apps/desktop/src/i18n/ja.ts",
-      "prior_conflicts": 0,
-      "score": 684,
-      "upstream_commits": 2
-    },
-    {
-      "local_changed_lines": 296,
-      "path": "agent/agent_init.py",
-      "prior_conflicts": 0,
-      "score": 592,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 148,
-      "path": "hermes_cli/config.py",
-      "prior_conflicts": 0,
-      "score": 592,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 195,
-      "path": "apps/desktop/src/i18n/types.ts",
-      "prior_conflicts": 0,
-      "score": 585,
-      "upstream_commits": 2
-    },
-    {
-      "local_changed_lines": 131,
-      "path": "run_agent.py",
-      "prior_conflicts": 0,
-      "score": 524,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 174,
-      "path": "tests/hermes_cli/test_web_server_profile_unification.py",
-      "prior_conflicts": 0,
-      "score": 522,
-      "upstream_commits": 2
-    },
-    {
-      "local_changed_lines": 520,
-      "path": "tools/vision_tools.py",
-      "prior_conflicts": 0,
-      "score": 520,
+      "score": 526,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 512,
-      "path": "tools/delegate_tool.py",
+      "local_changed_lines": 517,
+      "path": "gateway/platforms/api_server.py",
       "prior_conflicts": 0,
-      "score": 512,
+      "score": 517,
       "upstream_commits": 0
     },
     {
@@ -256,24 +95,17 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 161,
-      "path": "hermes_cli/commands.py",
+      "local_changed_lines": 447,
+      "path": "tools/vision_tools.py",
       "prior_conflicts": 0,
-      "score": 483,
-      "upstream_commits": 2
+      "score": 447,
+      "upstream_commits": 0
     },
     {
-      "local_changed_lines": 236,
-      "path": "agent/credential_pool.py",
+      "local_changed_lines": 444,
+      "path": "tests/agent/transports/test_codex_transport.py",
       "prior_conflicts": 0,
-      "score": 472,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 468,
-      "path": "tests/tools/test_delegate.py",
-      "prior_conflicts": 0,
-      "score": 468,
+      "score": 444,
       "upstream_commits": 0
     },
     {
@@ -284,74 +116,25 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 210,
-      "path": "agent/agent_runtime_helpers.py",
+      "local_changed_lines": 410,
+      "path": "tui_gateway/server.py",
       "prior_conflicts": 0,
-      "score": 420,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 209,
-      "path": "hermes_cli/inventory.py",
-      "prior_conflicts": 0,
-      "score": 418,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 134,
-      "path": "tests/hermes_cli/test_web_server.py",
-      "prior_conflicts": 0,
-      "score": 402,
-      "upstream_commits": 2
-    },
-    {
-      "local_changed_lines": 197,
-      "path": "gateway/session.py",
-      "prior_conflicts": 0,
-      "score": 394,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 65,
-      "path": "hermes_cli/doctor.py",
-      "prior_conflicts": 0,
-      "score": 390,
-      "upstream_commits": 5
-    },
-    {
-      "local_changed_lines": 130,
-      "path": "tools/skills_sync.py",
-      "prior_conflicts": 0,
-      "score": 390,
-      "upstream_commits": 2
-    },
-    {
-      "local_changed_lines": 194,
-      "path": "agent/turn_context.py",
-      "prior_conflicts": 0,
-      "score": 388,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 96,
-      "path": "tests/gateway/test_session_api.py",
-      "prior_conflicts": 0,
-      "score": 384,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 375,
-      "path": "apps/desktop/src/global.d.ts",
-      "prior_conflicts": 0,
-      "score": 375,
+      "score": 410,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 168,
-      "path": "hermes_cli/auth.py",
+      "local_changed_lines": 391,
+      "path": "agent/anthropic_adapter.py",
       "prior_conflicts": 0,
-      "score": 336,
-      "upstream_commits": 1
+      "score": 391,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 381,
+      "path": "tests/gateway/test_background_command.py",
+      "prior_conflicts": 0,
+      "score": 381,
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 334,
@@ -361,31 +144,24 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 108,
-      "path": "agent/chat_completion_helpers.py",
-      "prior_conflicts": 0,
-      "score": 324,
-      "upstream_commits": 2
-    },
-    {
-      "local_changed_lines": 316,
+      "local_changed_lines": 328,
       "path": "agent/title_generator.py",
       "prior_conflicts": 0,
-      "score": 316,
+      "score": 328,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 315,
+      "local_changed_lines": 314,
       "path": "tests/run_agent/test_codex_app_server_integration.py",
       "prior_conflicts": 0,
-      "score": 315,
+      "score": 314,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 291,
-      "path": "agent/codex_runtime.py",
+      "local_changed_lines": 304,
+      "path": "tests/agent/test_auxiliary_client.py",
       "prior_conflicts": 0,
-      "score": 291,
+      "score": 304,
       "upstream_commits": 0
     },
     {
@@ -396,17 +172,24 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 283,
-      "path": "tests/gateway/test_email.py",
+      "local_changed_lines": 289,
+      "path": "agent/codex_runtime.py",
       "prior_conflicts": 0,
-      "score": 283,
+      "score": 289,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 268,
-      "path": "gateway/stream_consumer.py",
+      "local_changed_lines": 272,
+      "path": "tests/agent/test_gemini_native_adapter.py",
       "prior_conflicts": 0,
-      "score": 268,
+      "score": 272,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 267,
+      "path": "tests/gateway/test_media_extraction.py",
+      "prior_conflicts": 0,
+      "score": 267,
       "upstream_commits": 0
     },
     {
@@ -417,20 +200,6 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 249,
-      "path": "tests/agent/test_title_generator.py",
-      "prior_conflicts": 0,
-      "score": 249,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 49,
-      "path": "gateway/shutdown_watchdog.py",
-      "prior_conflicts": 0,
-      "score": 245,
-      "upstream_commits": 4
-    },
-    {
       "local_changed_lines": 243,
       "path": "tests/agent/test_credential_pool_oauth_writethrough.py",
       "prior_conflicts": 0,
@@ -438,24 +207,59 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 241,
+      "local_changed_lines": 243,
+      "path": "tests/gateway/test_shutdown_watchdog.py",
+      "prior_conflicts": 0,
+      "score": 243,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 237,
       "path": "tests/gateway/test_stream_consumer.py",
       "prior_conflicts": 0,
-      "score": 241,
+      "score": 237,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 236,
-      "path": "tools/send_message_tool.py",
+      "path": "agent/credential_pool.py",
       "prior_conflicts": 0,
       "score": 236,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 229,
+      "local_changed_lines": 77,
+      "path": "tools/file_operations.py",
+      "prior_conflicts": 0,
+      "score": 231,
+      "upstream_commits": 2
+    },
+    {
+      "local_changed_lines": 115,
+      "path": "apps/desktop/src/app/session/hooks/use-session-actions/utils.test.ts",
+      "prior_conflicts": 0,
+      "score": 230,
+      "upstream_commits": 1
+    },
+    {
+      "local_changed_lines": 228,
+      "path": "apps/desktop/src/i18n/ja.ts",
+      "prior_conflicts": 0,
+      "score": 228,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 227,
+      "path": "apps/desktop/src/i18n/en.ts",
+      "prior_conflicts": 0,
+      "score": 227,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 227,
       "path": "tests/tools/test_video_analyze.py",
       "prior_conflicts": 0,
-      "score": 229,
+      "score": 227,
       "upstream_commits": 0
     },
     {
@@ -466,39 +270,25 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 223,
-      "path": "tests/agent/test_anthropic_keychain.py",
+      "local_changed_lines": 218,
+      "path": "tests/gateway/test_api_server_active_work_drain.py",
       "prior_conflicts": 0,
-      "score": 223,
+      "score": 218,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 44,
-      "path": "agent/context_compressor.py",
+      "local_changed_lines": 215,
+      "path": "apps/desktop/src/i18n/zh-hant.ts",
       "prior_conflicts": 0,
-      "score": 220,
-      "upstream_commits": 4
+      "score": 215,
+      "upstream_commits": 0
     },
     {
-      "local_changed_lines": 110,
-      "path": "hermes_constants.py",
+      "local_changed_lines": 215,
+      "path": "apps/desktop/src/i18n/zh.ts",
       "prior_conflicts": 0,
-      "score": 220,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 108,
-      "path": "tests/agent/test_turn_context.py",
-      "prior_conflicts": 0,
-      "score": 216,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 72,
-      "path": "tests/gateway/test_api_server.py",
-      "prior_conflicts": 0,
-      "score": 216,
-      "upstream_commits": 2
+      "score": 215,
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 213,
@@ -512,6 +302,20 @@
       "path": "agent/tool_dispatch_helpers.py",
       "prior_conflicts": 0,
       "score": 212,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 209,
+      "path": "hermes_cli/inventory.py",
+      "prior_conflicts": 0,
+      "score": 209,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 208,
+      "path": "agent/agent_runtime_helpers.py",
+      "prior_conflicts": 0,
+      "score": 208,
       "upstream_commits": 0
     },
     {
@@ -529,17 +333,24 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 98,
-      "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx",
+      "local_changed_lines": 197,
+      "path": "gateway/session.py",
       "prior_conflicts": 0,
-      "score": 196,
-      "upstream_commits": 1
+      "score": 197,
+      "upstream_commits": 0
     },
     {
-      "local_changed_lines": 194,
-      "path": "tests/gateway/test_api_server_active_work_drain.py",
+      "local_changed_lines": 196,
+      "path": "agent/turn_context.py",
       "prior_conflicts": 0,
-      "score": 194,
+      "score": 196,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 195,
+      "path": "apps/desktop/src/i18n/types.ts",
+      "prior_conflicts": 0,
+      "score": 195,
       "upstream_commits": 0
     },
     {
@@ -557,20 +368,6 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 188,
-      "path": "tests/hermes_cli/test_commands.py",
-      "prior_conflicts": 0,
-      "score": 188,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 93,
-      "path": "tools/computer_use/cua_backend.py",
-      "prior_conflicts": 0,
-      "score": 186,
-      "upstream_commits": 1
-    },
-    {
       "local_changed_lines": 185,
       "path": "apps/desktop/scripts/after-pack.mjs",
       "prior_conflicts": 0,
@@ -578,38 +375,52 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 80,
-      "path": "hermes_cli/models.py",
+      "local_changed_lines": 184,
+      "path": "package-lock.json",
       "prior_conflicts": 0,
-      "score": 160,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 78,
-      "path": "tests/cron/test_scheduler.py",
-      "prior_conflicts": 0,
-      "score": 156,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 146,
-      "path": "tests/gateway/test_shutdown_watchdog.py",
-      "prior_conflicts": 0,
-      "score": 146,
+      "score": 184,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 143,
-      "path": "tests/hermes_cli/test_copilot_catalog_oauth_fallback.py",
+      "local_changed_lines": 177,
+      "path": "gateway/stream_consumer.py",
       "prior_conflicts": 0,
-      "score": 143,
+      "score": 177,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 71,
-      "path": "tests/gateway/test_api_server_runs.py",
+      "local_changed_lines": 177,
+      "path": "hermes_cli/auth.py",
       "prior_conflicts": 0,
-      "score": 142,
+      "score": 177,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 176,
+      "path": "tests/hermes_cli/test_web_server_profile_unification.py",
+      "prior_conflicts": 0,
+      "score": 176,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 170,
+      "path": "tests/agent/transports/test_codex_app_server_session.py",
+      "prior_conflicts": 0,
+      "score": 170,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 55,
+      "path": "hermes_cli/tools_config.py",
+      "prior_conflicts": 0,
+      "score": 165,
+      "upstream_commits": 2
+    },
+    {
+      "local_changed_lines": 81,
+      "path": "apps/desktop/src/app/session/hooks/use-session-actions/utils.ts",
+      "prior_conflicts": 0,
+      "score": 162,
       "upstream_commits": 1
     },
     {
@@ -620,24 +431,24 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 68,
-      "path": "apps/desktop/src/hermes.ts",
+      "local_changed_lines": 137,
+      "path": "tests/agent/transports/test_chat_completions.py",
       "prior_conflicts": 0,
-      "score": 136,
-      "upstream_commits": 1
+      "score": 137,
+      "upstream_commits": 0
     },
     {
-      "local_changed_lines": 68,
-      "path": "gateway/config.py",
+      "local_changed_lines": 131,
+      "path": "run_agent.py",
       "prior_conflicts": 0,
-      "score": 136,
-      "upstream_commits": 1
+      "score": 131,
+      "upstream_commits": 0
     },
     {
-      "local_changed_lines": 67,
-      "path": "agent/system_prompt.py",
+      "local_changed_lines": 65,
+      "path": "apps/desktop/electron/preload.ts",
       "prior_conflicts": 0,
-      "score": 134,
+      "score": 130,
       "upstream_commits": 1
     },
     {
@@ -655,11 +466,11 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 43,
-      "path": "agent/shell_hooks.py",
+      "local_changed_lines": 129,
+      "path": "tools/skills_sync.py",
       "prior_conflicts": 0,
       "score": 129,
-      "upstream_commits": 2
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 128,
@@ -676,20 +487,6 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 63,
-      "path": "agent/transports/codex_app_server.py",
-      "prior_conflicts": 0,
-      "score": 126,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 18,
-      "path": "hermes_cli/gateway.py",
-      "prior_conflicts": 0,
-      "score": 126,
-      "upstream_commits": 6
-    },
-    {
       "local_changed_lines": 125,
       "path": "agent/prompt_builder.py",
       "prior_conflicts": 0,
@@ -697,31 +494,17 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 40,
-      "path": "tests/agent/test_prompt_caching.py",
+      "local_changed_lines": 122,
+      "path": "apps/desktop/src/app/chat/right-rail/preview-file.tsx",
       "prior_conflicts": 0,
-      "score": 120,
-      "upstream_commits": 2
+      "score": 122,
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 120,
       "path": "tests/tools/test_skills_tool.py",
       "prior_conflicts": 0,
       "score": 120,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 117,
-      "path": "tests/gateway/test_multiplex_profile_authz.py",
-      "prior_conflicts": 0,
-      "score": 117,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 116,
-      "path": "apps/desktop/src/themes/presets.ts",
-      "prior_conflicts": 0,
-      "score": 116,
       "upstream_commits": 0
     },
     {
@@ -732,13 +515,6 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 115,
-      "path": "apps/desktop/src/app/session/hooks/use-session-actions/utils.test.ts",
-      "prior_conflicts": 0,
-      "score": 115,
-      "upstream_commits": 0
-    },
-    {
       "local_changed_lines": 114,
       "path": "hermes_cli/fallback_config.py",
       "prior_conflicts": 0,
@@ -746,18 +522,11 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 28,
-      "path": "agent/transports/codex.py",
+      "local_changed_lines": 113,
+      "path": "gateway/status.py",
       "prior_conflicts": 0,
-      "score": 112,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 56,
-      "path": "tests/hermes_cli/test_config.py",
-      "prior_conflicts": 0,
-      "score": 112,
-      "upstream_commits": 1
+      "score": 113,
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 110,
@@ -767,15 +536,15 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 55,
-      "path": "hermes_cli/tools_config.py",
+      "local_changed_lines": 110,
+      "path": "hermes_constants.py",
       "prior_conflicts": 0,
       "score": 110,
-      "upstream_commits": 1
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 110,
-      "path": "tests/gateway/test_profile_resolution.py",
+      "path": "tests/gateway/test_api_server_bind_guard.py",
       "prior_conflicts": 0,
       "score": 110,
       "upstream_commits": 0
@@ -788,18 +557,18 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 36,
-      "path": "tools/tts_tool.py",
+      "local_changed_lines": 108,
+      "path": "agent/chat_completion_helpers.py",
       "prior_conflicts": 0,
       "score": 108,
-      "upstream_commits": 2
+      "upstream_commits": 0
     },
     {
-      "local_changed_lines": 54,
-      "path": "tools/voice_mode.py",
+      "local_changed_lines": 108,
+      "path": "tests/agent/test_turn_context.py",
       "prior_conflicts": 0,
       "score": 108,
-      "upstream_commits": 1
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 106,
@@ -809,10 +578,10 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 102,
+      "local_changed_lines": 104,
       "path": "tests/tools/test_tool_search.py",
       "prior_conflicts": 0,
-      "score": 102,
+      "score": 104,
       "upstream_commits": 0
     },
     {
@@ -823,25 +592,32 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 100,
+      "path": "tools/send_message_tool.py",
+      "prior_conflicts": 0,
+      "score": 100,
+      "upstream_commits": 0
+    },
+    {
       "local_changed_lines": 98,
-      "path": "tests/gateway/test_42039_duplicate_user_message.py",
+      "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/index.test.tsx",
       "prior_conflicts": 0,
       "score": 98,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 98,
-      "path": "tests/hermes_cli/test_inventory.py",
+      "local_changed_lines": 49,
+      "path": "apps/desktop/src/styles.css",
       "prior_conflicts": 0,
       "score": 98,
-      "upstream_commits": 0
+      "upstream_commits": 1
     },
     {
-      "local_changed_lines": 32,
-      "path": "hermes_cli/backup.py",
+      "local_changed_lines": 96,
+      "path": "agent/agent_init.py",
       "prior_conflicts": 0,
       "score": 96,
-      "upstream_commits": 2
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 94,
@@ -851,32 +627,18 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 93,
-      "path": "tests/hermes_cli/test_custom_provider_context_length.py",
+      "local_changed_lines": 89,
+      "path": "hermes_cli/doctor.py",
       "prior_conflicts": 0,
-      "score": 93,
+      "score": 89,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 92,
-      "path": "apps/desktop/src/app/shell/model-menu-panel.test.tsx",
-      "prior_conflicts": 0,
-      "score": 92,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 23,
-      "path": "hermes_cli/profiles.py",
-      "prior_conflicts": 0,
-      "score": 92,
-      "upstream_commits": 3
-    },
-    {
-      "local_changed_lines": 88,
-      "path": "tests/agent/transports/test_codex_app_server_session.py",
+      "local_changed_lines": 44,
+      "path": "agent/context_compressor.py",
       "prior_conflicts": 0,
       "score": 88,
-      "upstream_commits": 0
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 88,
@@ -886,6 +648,13 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 43,
+      "path": "apps/desktop/src/app/session/hooks/use-session-actions/index.ts",
+      "prior_conflicts": 0,
+      "score": 86,
+      "upstream_commits": 1
+    },
+    {
       "local_changed_lines": 86,
       "path": "tests/test_fts_cjk_bigram.py",
       "prior_conflicts": 0,
@@ -893,52 +662,10 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 85,
-      "path": "web/src/lib/api.ts",
-      "prior_conflicts": 0,
-      "score": 85,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 42,
-      "path": "agent/prompt_caching.py",
-      "prior_conflicts": 0,
-      "score": 84,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 42,
-      "path": "cron/jobs.py",
-      "prior_conflicts": 0,
-      "score": 84,
-      "upstream_commits": 1
-    },
-    {
       "local_changed_lines": 83,
       "path": "agent/file_safety.py",
       "prior_conflicts": 0,
       "score": 83,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 83,
-      "path": "apps/desktop/src/components/assistant-ui/thread/list.tsx",
-      "prior_conflicts": 0,
-      "score": 83,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 41,
-      "path": "tests/gateway/test_session.py",
-      "prior_conflicts": 0,
-      "score": 82,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 81,
-      "path": "apps/desktop/src/app/session/hooks/use-session-actions/utils.ts",
-      "prior_conflicts": 0,
-      "score": 81,
       "upstream_commits": 0
     },
     {
@@ -963,46 +690,18 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 79,
-      "path": "tests/agent/transports/test_chat_completions.py",
+      "local_changed_lines": 80,
+      "path": "web/src/pages/SessionsPage.tsx",
       "prior_conflicts": 0,
-      "score": 79,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 79,
-      "path": "tests/hermes_cli/test_model_switch_custom_providers.py",
-      "prior_conflicts": 0,
-      "score": 79,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 26,
-      "path": "apps/desktop/src/types/hermes.ts",
-      "prior_conflicts": 0,
-      "score": 78,
-      "upstream_commits": 2
-    },
-    {
-      "local_changed_lines": 78,
-      "path": "tests/gateway/test_restart_notification.py",
-      "prior_conflicts": 0,
-      "score": 78,
+      "score": 80,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 78,
-      "path": "tests/gateway/test_usage_command.py",
+      "path": "hermes_cli/models.py",
       "prior_conflicts": 0,
       "score": 78,
       "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 26,
-      "path": "tests/hermes_cli/test_gateway_service.py",
-      "prior_conflicts": 0,
-      "score": 78,
-      "upstream_commits": 2
     },
     {
       "local_changed_lines": 77,
@@ -1012,57 +711,8 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 77,
-      "path": "tests/hermes_cli/test_codex_runtime_plugin_migration.py",
-      "prior_conflicts": 0,
-      "score": 77,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 77,
-      "path": "tools/file_operations.py",
-      "prior_conflicts": 0,
-      "score": 77,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 76,
-      "path": "web/src/App.tsx",
-      "prior_conflicts": 0,
-      "score": 76,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 75,
-      "path": "apps/desktop/src/app/contrib/controller.tsx",
-      "prior_conflicts": 0,
-      "score": 75,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 75,
-      "path": "tests/tools/test_image_generation_plugin_dispatch.py",
-      "prior_conflicts": 0,
-      "score": 75,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 75,
-      "path": "web/src/pages/SessionsPage.tsx",
-      "prior_conflicts": 0,
-      "score": 75,
-      "upstream_commits": 0
-    },
-    {
       "local_changed_lines": 74,
       "path": "agent/skill_commands.py",
-      "prior_conflicts": 0,
-      "score": 74,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 74,
-      "path": "tests/gateway/test_run_progress_topics.py",
       "prior_conflicts": 0,
       "score": 74,
       "upstream_commits": 0
@@ -1083,16 +733,16 @@
     },
     {
       "local_changed_lines": 73,
-      "path": "model_tools.py",
+      "path": "tests/run_agent/test_plugin_context_engine_init.py",
       "prior_conflicts": 0,
       "score": 73,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 73,
-      "path": "tests/run_agent/test_plugin_context_engine_init.py",
+      "local_changed_lines": 72,
+      "path": "apps/desktop/src/app/contrib/controller.tsx",
       "prior_conflicts": 0,
-      "score": 73,
+      "score": 72,
       "upstream_commits": 0
     },
     {
@@ -1103,15 +753,8 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 72,
-      "path": "tests/gateway/test_api_server_bind_guard.py",
-      "prior_conflicts": 0,
-      "score": 72,
-      "upstream_commits": 0
-    },
-    {
       "local_changed_lines": 71,
-      "path": "tests/gateway/test_slash_access.py",
+      "path": "tests/gateway/test_telegram_thread_fallback.py",
       "prior_conflicts": 0,
       "score": 71,
       "upstream_commits": 0
@@ -1124,17 +767,17 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 14,
-      "path": "tests/agent/test_anthropic_adapter.py",
+      "local_changed_lines": 69,
+      "path": "tools/session_search_tool.py",
       "prior_conflicts": 0,
-      "score": 70,
-      "upstream_commits": 4
+      "score": 69,
+      "upstream_commits": 0
     },
     {
-      "local_changed_lines": 70,
-      "path": "tests/agent/test_gemini_native_adapter.py",
+      "local_changed_lines": 68,
+      "path": "gateway/config.py",
       "prior_conflicts": 0,
-      "score": 70,
+      "score": 68,
       "upstream_commits": 0
     },
     {
@@ -1146,6 +789,13 @@
     },
     {
       "local_changed_lines": 67,
+      "path": "agent/system_prompt.py",
+      "prior_conflicts": 0,
+      "score": 67,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 67,
       "path": "hermes_cli/dashboard_auth/ws_tickets.py",
       "prior_conflicts": 0,
       "score": 67,
@@ -1153,9 +803,16 @@
     },
     {
       "local_changed_lines": 65,
-      "path": "apps/desktop/electron/preload.ts",
+      "path": "agent/turn_finalizer.py",
       "prior_conflicts": 0,
       "score": 65,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 64,
+      "path": "apps/desktop/src/app/chat/hooks/use-composer-actions.test.ts",
+      "prior_conflicts": 0,
+      "score": 64,
       "upstream_commits": 0
     },
     {
@@ -1166,25 +823,18 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 64,
-      "path": "tests/tools/test_mcp_tool.py",
-      "prior_conflicts": 0,
-      "score": 64,
-      "upstream_commits": 0
-    },
-    {
       "local_changed_lines": 63,
-      "path": "apps/desktop/src/app/chat/hooks/use-composer-actions.test.ts",
+      "path": "agent/transports/codex_app_server.py",
       "prior_conflicts": 0,
       "score": 63,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 31,
-      "path": "agent/model_metadata.py",
+      "local_changed_lines": 63,
+      "path": "apps/desktop/src/app/shell/model-edit-submenu.tsx",
       "prior_conflicts": 0,
-      "score": 62,
-      "upstream_commits": 1
+      "score": 63,
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 62,
@@ -1195,21 +845,14 @@
     },
     {
       "local_changed_lines": 61,
-      "path": "agent/turn_finalizer.py",
-      "prior_conflicts": 0,
-      "score": 61,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 61,
-      "path": "apps/desktop/src/app/shell/model-menu-panel.tsx",
-      "prior_conflicts": 0,
-      "score": 61,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 61,
       "path": "hermes_cli/runtime_provider.py",
+      "prior_conflicts": 0,
+      "score": 61,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 61,
+      "path": "hermes_state.py",
       "prior_conflicts": 0,
       "score": 61,
       "upstream_commits": 0
@@ -1222,45 +865,17 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 30,
+      "path": "ui-tui/src/app/useSessionLifecycle.ts",
+      "prior_conflicts": 0,
+      "score": 60,
+      "upstream_commits": 1
+    },
+    {
       "local_changed_lines": 58,
       "path": "apps/desktop/src/lib/desktop-fs.ts",
       "prior_conflicts": 0,
       "score": 58,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 58,
-      "path": "tests/gateway/test_session_hygiene.py",
-      "prior_conflicts": 0,
-      "score": 58,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 57,
-      "path": "apps/desktop/src/app/shell/model-edit-submenu.tsx",
-      "prior_conflicts": 0,
-      "score": 57,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 57,
-      "path": "tests/gateway/test_update_command.py",
-      "prior_conflicts": 0,
-      "score": 57,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 57,
-      "path": "tools/session_search_tool.py",
-      "prior_conflicts": 0,
-      "score": 57,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 56,
-      "path": "tests/tools/test_computer_use.py",
-      "prior_conflicts": 0,
-      "score": 56,
       "upstream_commits": 0
     },
     {
@@ -1278,6 +893,13 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 53,
+      "path": "apps/desktop/src/components/assistant-ui/thread/list.tsx",
+      "prior_conflicts": 0,
+      "score": 53,
+      "upstream_commits": 0
+    },
+    {
       "local_changed_lines": 52,
       "path": "tests/agent/test_codex_app_server_persist.py",
       "prior_conflicts": 0,
@@ -1285,15 +907,15 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 51,
-      "path": "tests/gateway/test_verbose_command.py",
+      "local_changed_lines": 50,
+      "path": "apps/desktop/src/app/settings/appearance-settings.tsx",
       "prior_conflicts": 0,
-      "score": 51,
+      "score": 50,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 50,
-      "path": "apps/desktop/src/app/settings/appearance-settings.tsx",
+      "path": "apps/desktop/src/hermes.ts",
       "prior_conflicts": 0,
       "score": 50,
       "upstream_commits": 0
@@ -1320,13 +942,6 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 50,
-      "path": "tests/tools/test_file_tools.py",
-      "prior_conflicts": 0,
-      "score": 50,
-      "upstream_commits": 0
-    },
-    {
       "local_changed_lines": 49,
       "path": "apps/desktop/src/app/chat/composer/enter-submit-dom-race.test.tsx",
       "prior_conflicts": 0,
@@ -1342,14 +957,21 @@
     },
     {
       "local_changed_lines": 49,
-      "path": "apps/desktop/src/styles.css",
+      "path": "gateway/shutdown_watchdog.py",
       "prior_conflicts": 0,
       "score": 49,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 48,
-      "path": "tests/gateway/test_slash_access_dispatch.py",
+      "path": "model_tools.py",
+      "prior_conflicts": 0,
+      "score": 48,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 48,
+      "path": "tests/agent/test_compression_fallback_budget.py",
       "prior_conflicts": 0,
       "score": 48,
       "upstream_commits": 0
@@ -1357,6 +979,13 @@
     {
       "local_changed_lines": 47,
       "path": "apps/desktop/electron/remote-lifecycle.ts",
+      "prior_conflicts": 0,
+      "score": 47,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 47,
+      "path": "web/src/components/ModelPickerDialog.tsx",
       "prior_conflicts": 0,
       "score": 47,
       "upstream_commits": 0
@@ -1376,24 +1005,31 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 46,
-      "path": "tests/cron/test_run_one_job.py",
+      "local_changed_lines": 45,
+      "path": "apps/desktop/src/store/preview.ts",
       "prior_conflicts": 0,
-      "score": 46,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 46,
-      "path": "tests/tools/test_tts_command_providers.py",
-      "prior_conflicts": 0,
-      "score": 46,
+      "score": 45,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 45,
-      "path": "web/src/components/ModelPickerDialog.tsx",
+      "path": "tests/agent/test_model_metadata.py",
       "prior_conflicts": 0,
       "score": 45,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 45,
+      "path": "web/src/lib/api.ts",
+      "prior_conflicts": 0,
+      "score": 45,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 44,
+      "path": "agent/prompt_caching.py",
+      "prior_conflicts": 0,
+      "score": 44,
       "upstream_commits": 0
     },
     {
@@ -1404,11 +1040,11 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 22,
-      "path": "tools/mcp_tool.py",
+      "local_changed_lines": 43,
+      "path": "agent/shell_hooks.py",
       "prior_conflicts": 0,
-      "score": 44,
-      "upstream_commits": 1
+      "score": 43,
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 43,
@@ -1419,16 +1055,23 @@
     },
     {
       "local_changed_lines": 42,
-      "path": "plugins/model-providers/kimi-coding/__init__.py",
+      "path": "cron/jobs.py",
       "prior_conflicts": 0,
       "score": 42,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 42,
-      "path": "tests/tools/test_async_delegation.py",
+      "path": "plugins/model-providers/kimi-coding/__init__.py",
       "prior_conflicts": 0,
       "score": 42,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 41,
+      "path": "tests/gateway/test_session.py",
+      "prior_conflicts": 0,
+      "score": 41,
       "upstream_commits": 0
     },
     {
@@ -1446,6 +1089,20 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 40,
+      "path": "tests/test_session_db_read_path_split.py",
+      "prior_conflicts": 0,
+      "score": 40,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 10,
+      "path": "tests/tools/test_file_operations.py",
+      "prior_conflicts": 0,
+      "score": 40,
+      "upstream_commits": 3
+    },
+    {
       "local_changed_lines": 39,
       "path": "apps/desktop/src/app/chat/composer/status-stack/preview-row.tsx",
       "prior_conflicts": 0,
@@ -1457,6 +1114,20 @@
       "path": "tests/tools/test_vision_tools.py",
       "prior_conflicts": 0,
       "score": 39,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 38,
+      "path": "apps/desktop/src/app/settings/model-settings.test.tsx",
+      "prior_conflicts": 0,
+      "score": 38,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 38,
+      "path": "apps/desktop/src/components/chat/generated-image-result.tsx",
+      "prior_conflicts": 0,
+      "score": 38,
       "upstream_commits": 0
     },
     {
@@ -1474,13 +1145,6 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 38,
-      "path": "tests/tools/test_skills_sync.py",
-      "prior_conflicts": 0,
-      "score": 38,
-      "upstream_commits": 0
-    },
-    {
       "local_changed_lines": 37,
       "path": "apps/desktop/src/store/model-presets.ts",
       "prior_conflicts": 0,
@@ -1488,29 +1152,8 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 37,
+      "local_changed_lines": 36,
       "path": "tests/agent/test_context_breakdown.py",
-      "prior_conflicts": 0,
-      "score": 37,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 36,
-      "path": "apps/desktop/src/components/chat/generated-image-result.tsx",
-      "prior_conflicts": 0,
-      "score": 36,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 36,
-      "path": "tests/gateway/test_platform_base.py",
-      "prior_conflicts": 0,
-      "score": 36,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 36,
-      "path": "tests/run_agent/test_compressor_fallback_update.py",
       "prior_conflicts": 0,
       "score": 36,
       "upstream_commits": 0
@@ -1523,10 +1166,10 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 35,
-      "path": "apps/desktop/src/app/settings/model-settings.test.tsx",
+      "local_changed_lines": 36,
+      "path": "tools/tts_tool.py",
       "prior_conflicts": 0,
-      "score": 35,
+      "score": 36,
       "upstream_commits": 0
     },
     {
@@ -1538,7 +1181,7 @@
     },
     {
       "local_changed_lines": 35,
-      "path": "tests/hermes_cli/test_overlay_slug_resolution.py",
+      "path": "tests/gateway/test_api_server.py",
       "prior_conflicts": 0,
       "score": 35,
       "upstream_commits": 0
@@ -1565,22 +1208,29 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 17,
+      "path": "apps/desktop/src/store/composer-queue.test.ts",
+      "prior_conflicts": 0,
+      "score": 34,
+      "upstream_commits": 1
+    },
+    {
+      "local_changed_lines": 17,
+      "path": "apps/desktop/src/store/session.ts",
+      "prior_conflicts": 0,
+      "score": 34,
+      "upstream_commits": 1
+    },
+    {
+      "local_changed_lines": 34,
+      "path": "tests/agent/test_shell_hooks.py",
+      "prior_conflicts": 0,
+      "score": 34,
+      "upstream_commits": 0
+    },
+    {
       "local_changed_lines": 34,
       "path": "tests/agent/test_usage_pricing.py",
-      "prior_conflicts": 0,
-      "score": 34,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 34,
-      "path": "tests/gateway/test_background_process_notifications.py",
-      "prior_conflicts": 0,
-      "score": 34,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 34,
-      "path": "tests/hermes_cli/test_moa_config.py",
       "prior_conflicts": 0,
       "score": 34,
       "upstream_commits": 0
@@ -1601,17 +1251,38 @@
     },
     {
       "local_changed_lines": 33,
-      "path": "apps/desktop/src/lib/media.remote.test.ts",
+      "path": "apps/desktop/src/lib/local-preview.ts",
       "prior_conflicts": 0,
       "score": 33,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 33,
-      "path": "tests/tools/test_session_search.py",
+      "path": "apps/desktop/src/lib/media.remote.test.ts",
       "prior_conflicts": 0,
       "score": 33,
       "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 16,
+      "path": "apps/desktop/electron/session-windows.ts",
+      "prior_conflicts": 0,
+      "score": 32,
+      "upstream_commits": 1
+    },
+    {
+      "local_changed_lines": 32,
+      "path": "hermes_cli/backup.py",
+      "prior_conflicts": 0,
+      "score": 32,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 16,
+      "path": "toolsets.py",
+      "prior_conflicts": 0,
+      "score": 32,
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 32,
@@ -1622,28 +1293,7 @@
     },
     {
       "local_changed_lines": 31,
-      "path": "apps/desktop/src/app/session/hooks/use-session-actions/index.ts",
-      "prior_conflicts": 0,
-      "score": 31,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 31,
-      "path": "apps/desktop/src/components/assistant-ui/thread/list.test.ts",
-      "prior_conflicts": 0,
-      "score": 31,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 31,
-      "path": "tests/cli/test_quick_commands.py",
-      "prior_conflicts": 0,
-      "score": 31,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 31,
-      "path": "tests/test_hermes_constants.py",
+      "path": "agent/model_metadata.py",
       "prior_conflicts": 0,
       "score": 31,
       "upstream_commits": 0
@@ -1651,20 +1301,6 @@
     {
       "local_changed_lines": 30,
       "path": "agent/gemini_native_adapter.py",
-      "prior_conflicts": 0,
-      "score": 30,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 15,
-      "path": "apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts",
-      "prior_conflicts": 0,
-      "score": 30,
-      "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 30,
-      "path": "ui-tui/src/app/useSessionLifecycle.ts",
       "prior_conflicts": 0,
       "score": 30,
       "upstream_commits": 0
@@ -1678,14 +1314,14 @@
     },
     {
       "local_changed_lines": 29,
-      "path": "plugins/model-providers/custom/__init__.py",
+      "path": "apps/desktop/src/store/preview.test.ts",
       "prior_conflicts": 0,
       "score": 29,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 29,
-      "path": "tests/hermes_cli/test_gui_command.py",
+      "path": "plugins/model-providers/custom/__init__.py",
       "prior_conflicts": 0,
       "score": 29,
       "upstream_commits": 0
@@ -1698,8 +1334,15 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 28,
+      "path": "agent/transports/codex.py",
+      "prior_conflicts": 0,
+      "score": 28,
+      "upstream_commits": 0
+    },
+    {
       "local_changed_lines": 14,
-      "path": "apps/desktop/package.json",
+      "path": "apps/desktop/electron/session-windows.test.ts",
       "prior_conflicts": 0,
       "score": 28,
       "upstream_commits": 1
@@ -1707,13 +1350,6 @@
     {
       "local_changed_lines": 28,
       "path": "apps/desktop/src/app/gateway/hooks/use-gateway-boot.ts",
-      "prior_conflicts": 0,
-      "score": 28,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 28,
-      "path": "tests/tui_gateway/test_protocol.py",
       "prior_conflicts": 0,
       "score": 28,
       "upstream_commits": 0
@@ -1741,35 +1377,28 @@
     },
     {
       "local_changed_lines": 27,
-      "path": "tests/hermes_cli/test_web_server_fs.py",
+      "path": "tests/hermes_cli/test_web_server_session_search.py",
       "prior_conflicts": 0,
       "score": 27,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 26,
-      "path": "apps/desktop/src/app/session/hooks/use-message-stream/gateway-event.ts",
+      "path": "apps/desktop/src/components/assistant-ui/tool/fallback.tsx",
       "prior_conflicts": 0,
       "score": 26,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 26,
-      "path": "tests/hermes_cli/test_web_server_session_search.py",
+      "path": "apps/desktop/src/types/hermes.ts",
       "prior_conflicts": 0,
       "score": 26,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 25,
-      "path": "apps/desktop/src/components/assistant-ui/tool/fallback.tsx",
-      "prior_conflicts": 0,
-      "score": 25,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 25,
-      "path": "tests/hermes_cli/test_model_validation.py",
+      "path": "hermes_cli/update_cmd.py",
       "prior_conflicts": 0,
       "score": 25,
       "upstream_commits": 0
@@ -1783,14 +1412,7 @@
     },
     {
       "local_changed_lines": 24,
-      "path": "tests/agent/test_shell_hooks.py",
-      "prior_conflicts": 0,
-      "score": 24,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 24,
-      "path": "tools/file_tools.py",
+      "path": "apps/desktop/src/lib/model-status-label.test.ts",
       "prior_conflicts": 0,
       "score": 24,
       "upstream_commits": 0
@@ -1803,18 +1425,18 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 11,
-      "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/submit.ts",
+      "local_changed_lines": 23,
+      "path": "apps/desktop/src/components/assistant-ui/thread/list.test.ts",
       "prior_conflicts": 0,
-      "score": 22,
-      "upstream_commits": 1
+      "score": 23,
+      "upstream_commits": 0
     },
     {
-      "local_changed_lines": 11,
-      "path": "apps/desktop/src/app/settings/index.tsx",
+      "local_changed_lines": 23,
+      "path": "hermes_cli/profiles.py",
       "prior_conflicts": 0,
-      "score": 22,
-      "upstream_commits": 1
+      "score": 23,
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 22,
@@ -1825,7 +1447,21 @@
     },
     {
       "local_changed_lines": 22,
+      "path": "tests/hermes_cli/test_memory_setup.py",
+      "prior_conflicts": 0,
+      "score": 22,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 22,
       "path": "tools/browser_dialog_tool.py",
+      "prior_conflicts": 0,
+      "score": 22,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 22,
+      "path": "tools/mcp_tool.py",
       "prior_conflicts": 0,
       "score": 22,
       "upstream_commits": 0
@@ -1860,21 +1496,7 @@
     },
     {
       "local_changed_lines": 21,
-      "path": "tests/state/test_fts_runtime_rebuild.py",
-      "prior_conflicts": 0,
-      "score": 21,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 21,
       "path": "tests/tools/conftest.py",
-      "prior_conflicts": 0,
-      "score": 21,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 21,
-      "path": "tests/tools/test_browser_homebrew_paths.py",
       "prior_conflicts": 0,
       "score": 21,
       "upstream_commits": 0
@@ -1892,13 +1514,6 @@
       "prior_conflicts": 0,
       "score": 21,
       "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 10,
-      "path": "apps/desktop/src/app/routes.ts",
-      "prior_conflicts": 0,
-      "score": 20,
-      "upstream_commits": 1
     },
     {
       "local_changed_lines": 20,
@@ -1923,9 +1538,23 @@
     },
     {
       "local_changed_lines": 20,
+      "path": "tests/tools/test_tts_text_normalize.py",
+      "prior_conflicts": 0,
+      "score": 20,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 20,
       "path": "website/docs/reference/tools-reference.md",
       "prior_conflicts": 0,
       "score": 20,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 19,
+      "path": "apps/desktop/src/app/chat/composer/hooks/use-composer-submit.ts",
+      "prior_conflicts": 0,
+      "score": 19,
       "upstream_commits": 0
     },
     {
@@ -1943,6 +1572,20 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 19,
+      "path": "apps/desktop/src/themes/profile-theme.test.ts",
+      "prior_conflicts": 0,
+      "score": 19,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 19,
+      "path": "tests/run_agent/test_compression_persistence.py",
+      "prior_conflicts": 0,
+      "score": 19,
+      "upstream_commits": 0
+    },
+    {
       "local_changed_lines": 18,
       "path": "apps/desktop/src/app/session/hooks/use-message-stream/utils.ts",
       "prior_conflicts": 0,
@@ -1951,7 +1594,14 @@
     },
     {
       "local_changed_lines": 18,
-      "path": "apps/desktop/src/lib/model-status-label.test.ts",
+      "path": "hermes_cli/gateway.py",
+      "prior_conflicts": 0,
+      "score": 18,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 18,
+      "path": "scripts/run_tests.sh",
       "prior_conflicts": 0,
       "score": 18,
       "upstream_commits": 0
@@ -1985,6 +1635,13 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 18,
+      "path": "tools/tts_text_normalize.py",
+      "prior_conflicts": 0,
+      "score": 18,
+      "upstream_commits": 0
+    },
+    {
       "local_changed_lines": 17,
       "path": "apps/desktop/src/app/chat/composer/hooks/use-composer-queue.ts",
       "prior_conflicts": 0,
@@ -2007,14 +1664,7 @@
     },
     {
       "local_changed_lines": 17,
-      "path": "apps/desktop/src/store/composer-queue.test.ts",
-      "prior_conflicts": 0,
-      "score": 17,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 17,
-      "path": "apps/desktop/src/store/session.ts",
+      "path": "cli.py",
       "prior_conflicts": 0,
       "score": 17,
       "upstream_commits": 0
@@ -2035,45 +1685,45 @@
     },
     {
       "local_changed_lines": 16,
-      "path": "apps/desktop/electron/session-windows.ts",
+      "path": "agent/iteration_budget.py",
+      "prior_conflicts": 0,
+      "score": 16,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 16,
+      "path": "apps/desktop/package.json",
+      "prior_conflicts": 0,
+      "score": 16,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 16,
+      "path": "apps/desktop/src/components/assistant-ui/markdown-text.media.test.tsx",
+      "prior_conflicts": 0,
+      "score": 16,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 16,
+      "path": "hermes_cli/memory_setup.py",
+      "prior_conflicts": 0,
+      "score": 16,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 16,
+      "path": "optional-skills/creative/pixel-art/SKILL.md",
       "prior_conflicts": 0,
       "score": 16,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 8,
-      "path": "hermes_cli/setup.py",
+      "path": "uv.lock",
       "prior_conflicts": 0,
       "score": 16,
       "upstream_commits": 1
-    },
-    {
-      "local_changed_lines": 16,
-      "path": "tests/gateway/test_delivery.py",
-      "prior_conflicts": 0,
-      "score": 16,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 16,
-      "path": "tests/hermes_cli/test_gateway_service_paths.py",
-      "prior_conflicts": 0,
-      "score": 16,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 16,
-      "path": "tests/run_agent/test_session_reset_fix.py",
-      "prior_conflicts": 0,
-      "score": 16,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 16,
-      "path": "toolsets.py",
-      "prior_conflicts": 0,
-      "score": 16,
-      "upstream_commits": 0
     },
     {
       "local_changed_lines": 15,
@@ -2105,38 +1755,31 @@
     },
     {
       "local_changed_lines": 15,
-      "path": "tests/gateway/test_background_command.py",
-      "prior_conflicts": 0,
-      "score": 15,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 15,
       "path": "tests/tui_gateway/test_make_agent_provider.py",
       "prior_conflicts": 0,
       "score": 15,
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 15,
+      "path": "tools/computer_use/tool.py",
+      "prior_conflicts": 0,
+      "score": 15,
+      "upstream_commits": 0
+    },
+    {
       "local_changed_lines": 14,
-      "path": "agent/iteration_budget.py",
+      "path": "tests/agent/test_anthropic_adapter.py",
       "prior_conflicts": 0,
       "score": 14,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 14,
-      "path": "apps/desktop/electron/session-windows.test.ts",
+      "path": "tests/hermes_cli/test_update_autostash.py",
       "prior_conflicts": 0,
       "score": 14,
       "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 7,
-      "path": "apps/desktop/src/lib/chat-messages.ts",
-      "prior_conflicts": 0,
-      "score": 14,
-      "upstream_commits": 1
     },
     {
       "local_changed_lines": 14,
@@ -2148,6 +1791,13 @@
     {
       "local_changed_lines": 14,
       "path": "tests/tools/test_mcp_dynamic_discovery.py",
+      "prior_conflicts": 0,
+      "score": 14,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 14,
+      "path": "ui-tui/src/components/modelPicker.tsx",
       "prior_conflicts": 0,
       "score": 14,
       "upstream_commits": 0
@@ -2175,10 +1825,24 @@
     },
     {
       "local_changed_lines": 13,
+      "path": "apps/desktop/src/vite-env.d.ts",
+      "prior_conflicts": 0,
+      "score": 13,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 13,
       "path": "tests/gateway/test_stream_consumer_fresh_final.py",
       "prior_conflicts": 0,
       "score": 13,
       "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 6,
+      "path": "apps/desktop/src/app/contrib/wiring.tsx",
+      "prior_conflicts": 0,
+      "score": 12,
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 12,
@@ -2188,8 +1852,22 @@
       "upstream_commits": 0
     },
     {
+      "local_changed_lines": 12,
+      "path": "cron/scheduler.py",
+      "prior_conflicts": 0,
+      "score": 12,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 12,
+      "path": "hermes_cli/web_routers/sessions.py",
+      "prior_conflicts": 0,
+      "score": 12,
+      "upstream_commits": 0
+    },
+    {
       "local_changed_lines": 4,
-      "path": "scripts/run_tests_parallel.py",
+      "path": "pyproject.toml",
       "prior_conflicts": 0,
       "score": 12,
       "upstream_commits": 2
@@ -2202,25 +1880,32 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 12,
-      "path": "ui-tui/src/components/modelPicker.tsx",
-      "prior_conflicts": 0,
-      "score": 12,
-      "upstream_commits": 0
-    },
-    {
       "local_changed_lines": 11,
-      "path": "apps/desktop/src/app/chat/composer/index.tsx",
+      "path": "apps/desktop/src/app/session/hooks/use-prompt-actions/submit.ts",
       "prior_conflicts": 0,
       "score": 11,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 11,
-      "path": "tests/hermes_cli/test_serve_command.py",
+      "path": "apps/desktop/src/app/settings/index.tsx",
       "prior_conflicts": 0,
       "score": 11,
       "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 10,
+      "path": "apps/desktop/src/app/routes.ts",
+      "prior_conflicts": 0,
+      "score": 10,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 5,
+      "path": "apps/desktop/src/app/session/hooks/use-message-stream/index.ts",
+      "prior_conflicts": 0,
+      "score": 10,
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 10,
@@ -2237,22 +1922,15 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 10,
-      "path": "tests/conftest.py",
+      "local_changed_lines": 9,
+      "path": "apps/desktop/src/app/right-sidebar/files/use-project-tree.ts",
       "prior_conflicts": 0,
-      "score": 10,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 10,
-      "path": "tests/tools/test_file_operations.py",
-      "prior_conflicts": 0,
-      "score": 10,
+      "score": 9,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 9,
-      "path": "apps/desktop/src/app/right-sidebar/files/use-project-tree.ts",
+      "path": "apps/desktop/src/themes/context.tsx",
       "prior_conflicts": 0,
       "score": 9,
       "upstream_commits": 0
@@ -2273,10 +1951,24 @@
     },
     {
       "local_changed_lines": 8,
+      "path": "apps/desktop/electron/hardening.ts",
+      "prior_conflicts": 0,
+      "score": 8,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 8,
       "path": "apps/desktop/electron/remote-lifecycle.test.ts",
       "prior_conflicts": 0,
       "score": 8,
       "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 4,
+      "path": "apps/desktop/src/main.tsx",
+      "prior_conflicts": 0,
+      "score": 8,
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 8,
@@ -2286,15 +1978,50 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 4,
-      "path": "hermes_cli/plugins.py",
+      "local_changed_lines": 8,
+      "path": "hermes_cli/setup.py",
       "prior_conflicts": 0,
       "score": 8,
-      "upstream_commits": 1
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 8,
+      "path": "optional-skills/creative/baoyu-article-illustrator/SKILL.md",
+      "prior_conflicts": 0,
+      "score": 8,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 8,
+      "path": "optional-skills/creative/baoyu-comic/SKILL.md",
+      "prior_conflicts": 0,
+      "score": 8,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 8,
+      "path": "optional-skills/mlops/stable-diffusion/SKILL.md",
+      "prior_conflicts": 0,
+      "score": 8,
+      "upstream_commits": 0
     },
     {
       "local_changed_lines": 8,
       "path": "plugins/platforms/matrix/adapter.py",
+      "prior_conflicts": 0,
+      "score": 8,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 8,
+      "path": "skills/creative/baoyu-infographic/SKILL.md",
+      "prior_conflicts": 0,
+      "score": 8,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 8,
+      "path": "skills/creative/comfyui/SKILL.md",
       "prior_conflicts": 0,
       "score": 8,
       "upstream_commits": 0
@@ -2314,17 +2041,17 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 8,
-      "path": "tests/gateway/test_config.py",
+      "local_changed_lines": 7,
+      "path": "apps/desktop/src/components/assistant-ui/markdown-text.tsx",
       "prior_conflicts": 0,
-      "score": 8,
+      "score": 7,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 8,
-      "path": "tests/tui_gateway/test_billing_rpc.py",
+      "local_changed_lines": 7,
+      "path": "apps/desktop/src/lib/chat-messages.ts",
       "prior_conflicts": 0,
-      "score": 8,
+      "score": 7,
       "upstream_commits": 0
     },
     {
@@ -2343,14 +2070,7 @@
     },
     {
       "local_changed_lines": 7,
-      "path": "package.json",
-      "prior_conflicts": 0,
-      "score": 7,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 7,
-      "path": "tests/gateway/test_telegram_thread_fallback.py",
+      "path": "plugins/web/parallel/provider.py",
       "prior_conflicts": 0,
       "score": 7,
       "upstream_commits": 0
@@ -2385,21 +2105,7 @@
     },
     {
       "local_changed_lines": 6,
-      "path": "apps/desktop/src/app/contrib/wiring.tsx",
-      "prior_conflicts": 0,
-      "score": 6,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 6,
       "path": "apps/desktop/src/components/assistant-ui/markdown-text.test.ts",
-      "prior_conflicts": 0,
-      "score": 6,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 6,
-      "path": "apps/desktop/src/hermes-profile-scope.test.ts",
       "prior_conflicts": 0,
       "score": 6,
       "upstream_commits": 0
@@ -2412,24 +2118,10 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 3,
-      "path": "hermes_cli/dashboard_auth/public_paths.py",
-      "prior_conflicts": 0,
-      "score": 6,
-      "upstream_commits": 1
-    },
-    {
       "local_changed_lines": 6,
-      "path": "tests/agent/test_vision_routing_31179.py",
+      "path": "hermes_cli/commands.py",
       "prior_conflicts": 0,
       "score": 6,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 5,
-      "path": "apps/desktop/src/app/session/hooks/use-message-stream/index.ts",
-      "prior_conflicts": 0,
-      "score": 5,
       "upstream_commits": 0
     },
     {
@@ -2441,14 +2133,7 @@
     },
     {
       "local_changed_lines": 5,
-      "path": "apps/desktop/src/main.tsx",
-      "prior_conflicts": 0,
-      "score": 5,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 5,
-      "path": "scripts/run_tests.sh",
+      "path": "gateway/turn_context.py",
       "prior_conflicts": 0,
       "score": 5,
       "upstream_commits": 0
@@ -2483,13 +2168,6 @@
     },
     {
       "local_changed_lines": 4,
-      "path": "apps/desktop/electron/hardening.ts",
-      "prior_conflicts": 0,
-      "score": 4,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 4,
       "path": "apps/desktop/src/app/right-sidebar/files/ipc.ts",
       "prior_conflicts": 0,
       "score": 4,
@@ -2504,6 +2182,13 @@
     },
     {
       "local_changed_lines": 4,
+      "path": "apps/desktop/src/components/chat/preview-attachment.tsx",
+      "prior_conflicts": 0,
+      "score": 4,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 4,
       "path": "apps/desktop/src/components/ui/segmented-control.tsx",
       "prior_conflicts": 0,
       "score": 4,
@@ -2511,28 +2196,21 @@
     },
     {
       "local_changed_lines": 4,
-      "path": "tests/agent/test_compression_fallback_budget.py",
+      "path": "hermes_cli/plugins.py",
       "prior_conflicts": 0,
       "score": 4,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 4,
-      "path": "tests/gateway/test_profile_routing.py",
+      "path": "package.json",
       "prior_conflicts": 0,
       "score": 4,
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 2,
-      "path": "tests/hermes_cli/test_doctor.py",
-      "prior_conflicts": 0,
-      "score": 4,
-      "upstream_commits": 1
-    },
-    {
       "local_changed_lines": 4,
-      "path": "tests/tools/test_browser_chromium_autoinstall.py",
+      "path": "scripts/run_tests_parallel.py",
       "prior_conflicts": 0,
       "score": 4,
       "upstream_commits": 0
@@ -2540,13 +2218,6 @@
     {
       "local_changed_lines": 4,
       "path": "tests/tools/test_browser_orphan_reaper.py",
-      "prior_conflicts": 0,
-      "score": 4,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 4,
-      "path": "tests/tools/test_command_guards.py",
       "prior_conflicts": 0,
       "score": 4,
       "upstream_commits": 0
@@ -2567,7 +2238,21 @@
     },
     {
       "local_changed_lines": 3,
-      "path": "apps/desktop/src/components/model-picker.tsx",
+      "path": "apps/desktop/src/hermes-profile-scope.test.ts",
+      "prior_conflicts": 0,
+      "score": 3,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 3,
+      "path": "hermes_cli/config_defaults.py",
+      "prior_conflicts": 0,
+      "score": 3,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 3,
+      "path": "hermes_cli/dashboard_auth/public_paths.py",
       "prior_conflicts": 0,
       "score": 3,
       "upstream_commits": 0
@@ -2622,22 +2307,15 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 2,
-      "path": "apps/desktop/src/app/hooks/use-keybinds.ts",
+      "local_changed_lines": 1,
+      "path": "apps/desktop/src/app/session/hooks/use-background-queue-drain.ts",
       "prior_conflicts": 0,
       "score": 2,
-      "upstream_commits": 0
+      "upstream_commits": 1
     },
     {
       "local_changed_lines": 2,
       "path": "apps/desktop/src/components/assistant-ui/embeds/url-embed.tsx",
-      "prior_conflicts": 0,
-      "score": 2,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 2,
-      "path": "apps/desktop/src/lib/voice-playback.ts",
       "prior_conflicts": 0,
       "score": 2,
       "upstream_commits": 0
@@ -2665,7 +2343,14 @@
     },
     {
       "local_changed_lines": 2,
-      "path": "plugins/model-providers/gemini/__init__.py",
+      "path": "plugins/platforms/buzz/adapter.py",
+      "prior_conflicts": 0,
+      "score": 2,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 2,
+      "path": "tests/conftest.py",
       "prior_conflicts": 0,
       "score": 2,
       "upstream_commits": 0
@@ -2679,14 +2364,14 @@
     },
     {
       "local_changed_lines": 2,
-      "path": "tests/gateway/test_title_command.py",
+      "path": "tests/tools/test_browser_open_timeout.py",
       "prior_conflicts": 0,
       "score": 2,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 2,
-      "path": "tests/tools/test_browser_open_timeout.py",
+      "path": "tools/lazy_deps.py",
       "prior_conflicts": 0,
       "score": 2,
       "upstream_commits": 0
@@ -2699,15 +2384,15 @@
       "upstream_commits": 0
     },
     {
-      "local_changed_lines": 1,
-      "path": "agent/subscription_view.py",
+      "local_changed_lines": 2,
+      "path": "website/docs/user-guide/features/tts.md",
       "prior_conflicts": 0,
-      "score": 1,
+      "score": 2,
       "upstream_commits": 0
     },
     {
       "local_changed_lines": 1,
-      "path": "apps/desktop/src/app/session/hooks/use-background-queue-drain.ts",
+      "path": "agent/subscription_view.py",
       "prior_conflicts": 0,
       "score": 1,
       "upstream_commits": 0
@@ -2735,21 +2420,14 @@
     },
     {
       "local_changed_lines": 1,
-      "path": "pyproject.toml",
-      "prior_conflicts": 0,
-      "score": 1,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 1,
-      "path": "tests/agent/test_model_metadata.py",
-      "prior_conflicts": 0,
-      "score": 1,
-      "upstream_commits": 0
-    },
-    {
-      "local_changed_lines": 1,
       "path": "tests/cron/test_cron_provider_pin.py",
+      "prior_conflicts": 0,
+      "score": 1,
+      "upstream_commits": 0
+    },
+    {
+      "local_changed_lines": 1,
+      "path": "tests/gateway/test_api_server_runs.py",
       "prior_conflicts": 0,
       "score": 1,
       "upstream_commits": 0
@@ -2769,9 +2447,9 @@
       "upstream_commits": 0
     }
   ],
-  "merge_base": "fb8d824bcb7523808b6599425e0545eecc3d0190",
+  "merge_base": "b4f8c491d3452926deb7628edbdb6fe2a85ff576",
   "upstream": "origin/main",
-  "upstream_sha": "a979ca2a67a6fe3c08dd97a10ec6131aca913c14",
+  "upstream_sha": "f5a18cde69001aec152c3d40805fb65c60bee65d",
   "version": 1,
-  "weighted_score": 128584
+  "weighted_score": 33562
 }
