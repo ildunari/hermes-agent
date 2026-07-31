@@ -35,9 +35,10 @@ from typing import Any, Dict, List, Optional, Union
 
 # Sources that are excluded from session browsing/searching by default.
 # Third-party integrations tag their sessions with HERMES_SESSION_SOURCE=tool;
-# delegate runs use "subagent", and validation probes use "smoke-test". These
-# internal runs do not belong in the user's session history by default.
-_HIDDEN_SESSION_SOURCES = ("subagent", "tool", "smoke-test")
+# delegate subagent runs are tagged "subagent"; kanban dispatcher workers are
+# tagged "kanban"; validation probes use "smoke-test" — none belongs in the
+# user's session history.
+_HIDDEN_SESSION_SOURCES = ("kanban", "subagent", "tool", "smoke-test")
 
 # Automation sources that are kept searchable but DEMOTED below interactive
 # sessions in discover ranking. Cron jobs run on a schedule and accumulate

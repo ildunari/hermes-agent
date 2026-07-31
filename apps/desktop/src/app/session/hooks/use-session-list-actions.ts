@@ -29,10 +29,20 @@ import {
 } from '@/store/session'
 import { $workingSessionIds, getRecentlySettledSessionIds } from '@/store/session-states'
 
-// The recents list is local-only: cron rows and messaging platform rows have
-// independent sidebar sections. The coalesced snapshot preserves those slices
-// without letting gateway threads bury interactive local chats during paging.
-const SIDEBAR_EXCLUDED_SOURCES = ['cron', 'subagent', 'tool', 'smoke-test', ...MESSAGING_SESSION_SOURCE_IDS]
+// The recents list is local-only: cron rows have their own section, kanban
+// dispatcher workers are read on the board, and each messaging platform
+// (telegram, discord, …) is fetched separately into its own self-managed
+// sidebar section (refreshMessagingSessions). Excluding them here keeps
+// "Load more" paging through interactive local chats instead of
+// interleaving gateway threads that bury them.
+const SIDEBAR_EXCLUDED_SOURCES = [
+  'cron',
+  'kanban',
+  'subagent',
+  'tool',
+  'smoke-test',
+  ...MESSAGING_SESSION_SOURCE_IDS
+]
 // The messaging slice is the inverse: drop cron + every local source so only
 // external-platform conversations remain, then split per platform in the UI.
 const MESSAGING_EXCLUDED_SOURCES = ['cron', ...LOCAL_SESSION_SOURCE_IDS]

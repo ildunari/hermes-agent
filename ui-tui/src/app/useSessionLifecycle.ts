@@ -196,7 +196,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     setHistoryItems([])
     setLastUserMsg('')
     setStickyPrompt('')
-    composerActions.setPasteSnips([])
+    composerActions.setComposerTokens([])
     // Half-prune: new session has new keys, but keep a warm pool in case
     // the user resumes back to the prior session.
     evictInkCaches('half')
@@ -220,7 +220,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       setHistoryItems(info ? [introMsg(info)] : [])
       setStickyPrompt('')
       setLastUserMsg('')
-      composerActions.setPasteSnips([])
+      composerActions.setComposerTokens([])
       patchTurnState({ activity: [] })
       patchUiState({ info, usage: usageFrom(info) })
     },
