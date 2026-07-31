@@ -2104,10 +2104,13 @@ def restart_busy_snapshot(repo: Path, scope: str = "hermes") -> dict[str, Any]:
 
 
 def live_dependency_refresh(root: Path, run_id: str, repo: Path) -> None:
-    """Refresh the live checkout's npm and uv trees concurrently.
+    """Refresh live dependency trees, then restore configured provider pins.
 
-    The two installers target independent trees (node_modules vs .venv), so
-    they overlap; either failure fails the phase with that command's error.
+    The npm and uv installers target independent trees (node_modules vs .venv),
+    so they overlap. Memory provider manifests are external to the uv project,
+    and their resolved extras can vary by profile mode, so every configured
+    profile is refreshed strictly after uv finishes. Any failure fails the
+    phase with that command's error.
     """
     evidence = run_dir(root, run_id) / "evidence"
     jobs = (
@@ -2136,6 +2139,48 @@ def live_dependency_refresh(root: Path, run_id: str, repo: Path) -> None:
                 honor_abort=False,
             )
             untrack_owned_child(root, run_id, name)
+
+        hermes_root = repo.parent
+        config_paths = [hermes_root / "config.yaml"]
+        config_paths.extend(sorted((hermes_root / "profiles").glob("*/config.yaml")))
+        provider_homes: list[tuple[str, Path]] = []
+        try:
+            import yaml
+
+            for config_path in config_paths:
+                if not config_path.is_file():
+                    continue
+                config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+                memory = config.get("memory") if isinstance(config, dict) else None
+                if not isinstance(memory, dict) or memory.get("enabled") is False:
+                    continue
+                provider = str(memory.get("provider") or "").strip()
+                if provider and provider not in {"default", "builtin", "none"}:
+                    provider_homes.append((provider, config_path.parent))
+        except Exception as exc:
+            raise RuntimeError("failed to discover configured memory providers") from exc
+
+        refresh_code = (
+            "from hermes_cli.update_cmd import "
+            "_refresh_active_memory_provider_dependencies as refresh; "
+            "refresh(strict=True)"
+        )
+        for provider, profile_home in provider_homes:
+            safe_provider = re.sub(r"[^A-Za-z0-9_.-]+", "-", provider)
+            safe_profile = re.sub(r"[^A-Za-z0-9_.-]+", "-", profile_home.name)
+            env = os.environ.copy()
+            env["HERMES_HOME"] = str(profile_home)
+            env["PYTHONPATH"] = str(repo)
+            worker_command(
+                root,
+                run_id,
+                [str(repo / ".venv" / "bin" / "python"), "-c", refresh_code],
+                repo,
+                f"live-memory-provider-{safe_profile}-{safe_provider}",
+                300,
+                env=env,
+                honor_abort=False,
+            )
     except BaseException:
         for child, output, _, name in started:
             kill_owned_child(child, output)

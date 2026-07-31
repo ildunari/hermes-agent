@@ -89,6 +89,20 @@ def test_refresh_active_memory_provider_dependencies_reinstalls_active_provider(
     assert recorded == [("mem0", True)]
 
 
+def test_refresh_active_memory_provider_dependencies_strict_failure(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"memory": {"provider": "mem0_oss"}},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.memory_setup._install_dependencies",
+        lambda provider_name, force=False: False,
+    )
+
+    with pytest.raises(RuntimeError, match="remain unsatisfied"):
+        hermes_main._refresh_active_memory_provider_dependencies(strict=True)
+
+
 
 
 def test_reload_updated_runtime_modules_restores_new_hermes_constants_symbol(monkeypatch):

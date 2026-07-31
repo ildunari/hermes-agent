@@ -1558,7 +1558,7 @@ def _refresh_active_lazy_features(
         )
     return False
 
-def _refresh_active_memory_provider_dependencies() -> None:
+def _refresh_active_memory_provider_dependencies(*, strict: bool = False) -> bool:
     """Refresh pip dependencies for the configured external memory provider.
 
     Memory-provider bridge packages are declared in each provider's
@@ -1570,41 +1570,52 @@ def _refresh_active_memory_provider_dependencies() -> None:
     core install and lazy refresh, so the last write to any shared package
     is the one the active provider needs.
 
-    Never raises. A failure here must not block the rest of the update.
+    The normal updater keeps this best-effort. Transactional callers can pass
+    ``strict=True`` so a provider dependency mismatch fails before restart.
     """
     try:
         from hermes_cli.config import load_config
 
         cfg = load_config()
     except Exception as exc:
+        if strict:
+            raise RuntimeError("active memory provider config failed to load") from exc
         logger.debug("Memory provider refresh skipped (config load failed): %s", exc)
-        return
+        return False
 
     provider = ""
     if isinstance(cfg, dict):
         memory_cfg = cfg.get("memory")
         if isinstance(memory_cfg, dict):
             if memory_cfg.get("enabled") is False:
-                return
+                return True
             provider = str(memory_cfg.get("provider") or "").strip()
 
     # "default" / empty is the built-in file-backed store — no pip deps.
     if not provider or provider in {"default", "builtin", "none"}:
-        return
+        return True
 
     try:
         from hermes_cli.memory_setup import _install_dependencies
     except Exception as exc:
+        if strict:
+            raise RuntimeError("memory provider dependency installer unavailable") from exc
         logger.debug("Memory provider refresh skipped (import failed): %s", exc)
-        return
+        return False
 
     print()
     print(f"→ Refreshing active memory provider dependencies ({provider})...")
 
     try:
-        _install_dependencies(provider, force=True)
+        refreshed = _install_dependencies(provider, force=True)
+        if refreshed is False:
+            raise RuntimeError(f"{provider} dependencies remain unsatisfied")
     except Exception as exc:
+        if strict:
+            raise
         print(f"  ⚠ {provider} dependencies failed to refresh: {exc}")
+        return False
+    return True
 
 def _is_android_python() -> bool:
     return _m().sys.platform == "android"

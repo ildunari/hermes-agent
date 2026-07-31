@@ -1351,6 +1351,61 @@ def test_live_dependency_refresh_success_waits_both(
     ]
 
 
+def test_live_dependency_refresh_restores_each_configured_profile_after_uv(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path / "hermes-agent"
+    repo.mkdir()
+    profile = tmp_path / "profiles" / "coding"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text(
+        "memory:\n  provider: mem0_oss\n", encoding="utf-8"
+    )
+    second = tmp_path / "profiles" / "gpt"
+    second.mkdir(parents=True)
+    (second / "config.yaml").write_text(
+        "memory:\n  provider: mem0_oss\n", encoding="utf-8"
+    )
+    state = tmp_path / "update-service"
+    run_id = "20260723T120000Z-abcdefabcde5"
+    make_ledger(state, run_id)
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        SERVICE,
+        "start_owned_child",
+        lambda command_args, cwd, log, env=None, child_fd_limit=0: (
+            events.append(f"start:{command_args[0]}"),
+            events,
+        ),
+    )
+    monkeypatch.setattr(
+        SERVICE,
+        "wait_worker_child",
+        lambda root, rid, child, output, command_args, timeout, **kwargs: events.append(
+            f"wait:{command_args[0]}"
+        ),
+    )
+    monkeypatch.setattr(SERVICE, "track_owned_child", lambda *args: None)
+    monkeypatch.setattr(SERVICE, "untrack_owned_child", lambda *args: None)
+
+    def fake_worker(root, rid, command_args, cwd, name, timeout, env=None, **kwargs):
+        assert env is not None
+        events.append(f"provider:{name}:{env['HERMES_HOME']}")
+        assert "refresh(strict=True)" in command_args[-1]
+        return 0
+
+    monkeypatch.setattr(SERVICE, "worker_command", fake_worker)
+
+    SERVICE.live_dependency_refresh(state, run_id, repo)
+
+    assert events[:4] == ["start:npm", "start:uv", "wait:npm", "wait:uv"]
+    assert events[4:] == [
+        f"provider:live-memory-provider-coding-mem0_oss:{profile}",
+        f"provider:live-memory-provider-gpt-mem0_oss:{second}",
+    ]
+
+
 def test_desktop_build_starts_only_after_validation_in_source() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     build = "desktop_build_child, desktop_build_output = start_owned_child("

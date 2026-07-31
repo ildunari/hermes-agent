@@ -92,7 +92,27 @@ def test_install_dependencies_force_reinstalls_versioned_specs(tmp_path, monkeyp
 
     monkeypatch.setattr("tools.lazy_deps.install_specs", fake_install_specs)
 
-    memory_setup._install_dependencies("mem0", force=True)
+    refreshed = memory_setup._install_dependencies("mem0", force=True)
 
+    assert refreshed is True
     assert installed, "force=True must reach the install step"
     assert any("mem0ai>=2.0.10,<3" in specs for specs in installed)
+
+
+def test_install_dependencies_reports_failed_install(tmp_path, monkeypatch):
+    import yaml as _yaml
+
+    plugin_dir = tmp_path / "mem0"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.yaml").write_text(
+        _yaml.safe_dump({"pip_dependencies": ["mem0ai==9.9.9"]}), encoding="utf-8"
+    )
+    monkeypatch.setattr("plugins.memory.find_provider_dir", lambda name: plugin_dir)
+    monkeypatch.setattr(
+        "tools.lazy_deps.install_specs",
+        lambda specs, timeout=120: SimpleNamespace(
+            ok=False, blocked=False, reason="", stderr="resolver failed"
+        ),
+    )
+
+    assert memory_setup._install_dependencies("mem0", force=True) is False

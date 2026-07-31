@@ -366,6 +366,8 @@ features:
     class: keep-core
     owner_paths:
       - apps/desktop/vitest.config.ts
+      - hermes_cli/memory_setup.py
+      - hermes_cli/update_cmd.py
       - scripts/hermes_checkpoint.py
       - scripts/carry.py
       - scripts/carry_gate.py
@@ -376,6 +378,7 @@ features:
       - scripts/thinning.py
       - scripts/thinning_baseline.json
       - scripts/verify_deployed_turn.py
+      - tools/lazy_deps.py
       - scripts/local_carry_exemptions.yaml
       - scripts/run_tests.sh
       - scripts/run_tests_parallel.py

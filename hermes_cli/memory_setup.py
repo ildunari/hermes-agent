@@ -104,7 +104,7 @@ def _prompt(label: str, default: str | None = None, secret: bool = False) -> str
 # Provider discovery
 # ---------------------------------------------------------------------------
 
-def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
+def _install_dependencies(provider_name: str, *, force: bool = False) -> bool:
     """Install pip dependencies declared in ``plugin.yaml``.
 
     When ``force`` is true, every declared dependency is handed to the
@@ -119,21 +119,21 @@ def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
 
     plugin_dir = find_provider_dir(provider_name)
     if not plugin_dir:
-        return
+        return False
     yaml_path = plugin_dir / "plugin.yaml"
     if not yaml_path.exists():
-        return
+        return False
 
     try:
         import yaml
         with open(yaml_path, encoding="utf-8") as f:
             meta = yaml.safe_load(f) or {}
     except Exception:
-        return
+        return False
 
     pip_deps = _provider_pip_dependencies(provider_name, meta.get("pip_dependencies", []))
     if not pip_deps:
-        return
+        return True
 
     # pip name → import name mapping for packages where they differ
     _IMPORT_NAMES = {
@@ -158,7 +158,7 @@ def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
             missing.append(dep)
 
     if not missing:
-        return
+        return True
 
     print(f"\n  Installing dependencies: {', '.join(missing)}")
 
@@ -169,9 +169,11 @@ def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
     from tools.lazy_deps import install_specs
 
     manual_cmd = f"uv pip install {' '.join(missing)}"
+    install_ok = False
     try:
         outcome = install_specs(missing, timeout=120)
         if outcome.ok:
+            install_ok = True
             print(f"  ✓ Installed {', '.join(missing)}")
         elif outcome.blocked:
             print(f"  ⚠ Cannot install {', '.join(missing)}: {outcome.reason}")
@@ -200,6 +202,8 @@ def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
                 if install_cmd:
                     print(f"\n  ⚠ '{dep_name}' not found. Install with:")
                     print(f"    {install_cmd}")
+
+    return install_ok
 
 
 def _get_available_providers() -> list:
