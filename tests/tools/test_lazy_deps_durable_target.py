@@ -196,6 +196,9 @@ class TestInstallArgConstruction:
         assert result.success
         assert "--target" not in captured["cmd"]
         assert "--constraint" not in captured["cmd"]
+        # A user-level pip config may set global.user=true for system Python.
+        # Venv installs must override it or pip rejects its implicit --user.
+        assert "--no-user" in captured["cmd"]
 
 
 @pytest.mark.skipif(
