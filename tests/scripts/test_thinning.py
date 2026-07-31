@@ -126,3 +126,19 @@ def test_check_new_hotspot_always_fails(tmp_path: Path) -> None:
     git(repo, "commit", "-qam", "new carry file")
 
     assert _check(repo, baseline_path, tolerance_pct=1000.0) == 1
+
+
+def test_check_reports_stale_baseline_after_pinned_upstream_is_merged(
+    tmp_path: Path, capsys
+) -> None:
+    repo = _make_carry_repo(tmp_path)
+    git(repo, "checkout", "-q", "upstream")
+    (repo / "other.py").write_text("OTHER = 2\n")
+    git(repo, "commit", "-qam", "upstream change")
+    git(repo, "checkout", "-q", "main")
+    baseline_path = _write_baseline(repo)
+
+    git(repo, "merge", "--no-edit", "upstream")
+
+    assert _check(repo, baseline_path) == 1
+    assert "baseline is stale after an upstream merge" in capsys.readouterr().err

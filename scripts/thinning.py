@@ -124,6 +124,15 @@ def check(args: argparse.Namespace) -> int:
         return 1
     upstream = str(upstream_sha)
     current = compute(root, upstream)
+    prior_merge_base = prior.get("merge_base")
+    if prior_merge_base and current["merge_base"] != prior_merge_base:
+        print(
+            "Thinning ratchet: baseline is stale after an upstream merge "
+            f"({prior_merge_base} -> {current['merge_base']}). Regenerate it only "
+            "after reviewing the integrated carry: ./scripts/thinning.py baseline",
+            file=sys.stderr,
+        )
+        return 1
     prior_paths = {item["path"] for item in prior["hotspots"]}
     current_paths = {item["path"] for item in current["hotspots"]}
     new_paths = sorted(current_paths - prior_paths)
