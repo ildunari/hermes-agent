@@ -165,12 +165,8 @@ def test_multiplex_topology_probe_uses_readonly_config_without_gateway_discovery
 
     monkeypatch.delenv("GATEWAY_MULTIPLEX_PROFILES", raising=False)
     monkeypatch.setattr(
-        "hermes_cli.config.load_config_readonly",
+        "hermes_cli.config.read_user_config_raw",
         lambda **_kwargs: config,
-    )
-    monkeypatch.setattr(
-        "hermes_cli.config.read_raw_config",
-        lambda **_kwargs: {"multiplex_profiles": True},
     )
     monkeypatch.setattr(
         "gateway.config.load_gateway_config",
