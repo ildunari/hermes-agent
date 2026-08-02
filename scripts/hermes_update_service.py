@@ -2113,6 +2113,15 @@ def live_dependency_refresh(root: Path, run_id: str, repo: Path) -> None:
     phase with that command's error.
     """
     evidence = run_dir(root, run_id) / "evidence"
+    # Load PyYAML before ``uv sync`` can replace the live virtualenv that this
+    # worker itself is running from (for example when .python-version changes).
+    # Keeping the imported module alive lets provider discovery continue after
+    # the old site-packages directory has been removed.
+    try:
+        import yaml
+    except Exception as exc:
+        raise RuntimeError("failed to load memory-provider config parser") from exc
+
     jobs = (
         (["npm", "ci"], "live-npm-ci"),
         (["uv", "sync", *UV_SYNC_EXTRA_ARGS], "live-uv-sync"),
@@ -2145,8 +2154,6 @@ def live_dependency_refresh(root: Path, run_id: str, repo: Path) -> None:
         config_paths.extend(sorted((hermes_root / "profiles").glob("*/config.yaml")))
         provider_homes: list[tuple[str, Path]] = []
         try:
-            import yaml
-
             for config_path in config_paths:
                 if not config_path.is_file():
                     continue

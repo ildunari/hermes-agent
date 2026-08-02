@@ -1351,6 +1351,40 @@ def test_live_dependency_refresh_success_waits_both(
     ]
 
 
+def test_live_dependency_refresh_loads_yaml_before_uv_replaces_worker_venv(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Python-version change may delete this worker's site-packages mid-run."""
+    import builtins
+
+    repo = tmp_path / "hermes-agent"
+    repo.mkdir()
+    state = tmp_path / "update-service"
+    run_id = "20260723T120000Z-abcdefabcde6"
+    make_ledger(state, run_id)
+    env_replaced = False
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "yaml" and env_replaced:
+            raise ModuleNotFoundError("old virtualenv was replaced")
+        return real_import(name, *args, **kwargs)
+
+    def fake_start(command_args, cwd, log, env=None, child_fd_limit=0):
+        nonlocal env_replaced
+        env_replaced = True
+        return object(), object()
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(SERVICE, "start_owned_child", fake_start)
+    monkeypatch.setattr(SERVICE, "wait_worker_child", lambda *args, **kwargs: None)
+    monkeypatch.setattr(SERVICE, "track_owned_child", lambda *args: None)
+    monkeypatch.setattr(SERVICE, "untrack_owned_child", lambda *args: None)
+
+    SERVICE.live_dependency_refresh(state, run_id, repo)
+
+
+
 def test_live_dependency_refresh_restores_each_configured_profile_after_uv(
     tmp_path: Path, monkeypatch
 ) -> None:
