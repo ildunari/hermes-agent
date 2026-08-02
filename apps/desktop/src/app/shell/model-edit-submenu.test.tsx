@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import {
   DropdownMenu,
@@ -7,39 +7,14 @@ import {
   DropdownMenuSub,
   DropdownMenuSubTrigger
 } from '@/components/ui/dropdown-menu'
-import type * as HermesApi from '@/hermes'
-import { $modelPresets, getModelPreset } from '@/store/model-presets'
-import {
-  $activeSessionId,
-  $currentFastMode,
-  $currentReasoningEffort,
-  getCurrentModelSource,
-  setCurrentFastMode,
-  setCurrentModelSource,
-  setCurrentReasoningEffort
-} from '@/store/session'
 
 import { type FastControl, ModelEditSubmenu, normalizeReasoningEffort } from './model-edit-submenu'
-
-vi.mock('@/hermes', async importOriginal => {
-  const actual = await importOriginal<typeof HermesApi>()
-
-  return { ...actual, setApiRequestProfile: vi.fn() }
-})
 
 // Radix calls these on open; jsdom doesn't implement them.
 beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn()
   Element.prototype.hasPointerCapture = vi.fn(() => false)
   Element.prototype.releasePointerCapture = vi.fn()
-})
-
-beforeEach(() => {
-  $modelPresets.set({})
-  $activeSessionId.set(null)
-  setCurrentFastMode(false)
-  setCurrentModelSource('')
-  setCurrentReasoningEffort('')
 })
 
 afterEach(() => {
@@ -49,12 +24,16 @@ afterEach(() => {
 
 // Render the submenu inside an open menu/sub so its content (switches) mounts.
 function renderSubmenu(opts: {
+  defaultEffort?: string
+  effort?: string
   fastControl: FastControl
+  isActive?: boolean
+  onSelectModel?: (model: string) => void
+  onSetOptions: (patch: { effort?: string; fast?: boolean }) => void
   provider?: string
   reasoning: boolean
   reasoningAlwaysOn?: boolean
   reasoningEfforts?: string[]
-  requestGateway: () => Promise<unknown>
 }) {
   return render(
     <DropdownMenu open>
@@ -62,16 +41,17 @@ function renderSubmenu(opts: {
         <DropdownMenuSub open>
           <DropdownMenuSubTrigger>edit</DropdownMenuSubTrigger>
           <ModelEditSubmenu
-            effort="medium"
+            defaultEffort={opts.defaultEffort ?? 'medium'}
+            effort={opts.effort ?? 'medium'}
             fastControl={opts.fastControl}
-            isActive
+            isActive={opts.isActive ?? true}
             model="m1"
-            onSelectModel={vi.fn()}
+            onSelectModel={opts.onSelectModel ?? vi.fn()}
+            onSetOptions={opts.onSetOptions}
             provider={opts.provider ?? 'p1'}
             reasoning={opts.reasoning}
             reasoningAlwaysOn={opts.reasoningAlwaysOn}
             reasoningEfforts={opts.reasoningEfforts}
-            requestGateway={opts.requestGateway as never}
           />
         </DropdownMenuSub>
       </DropdownMenuContent>
@@ -103,10 +83,10 @@ describe('ModelEditSubmenu model-aware effort options', () => {
   it('shows the Codex-supported levels without duplicate minimal or ultra choices', () => {
     renderSubmenu({
       fastControl: { kind: 'none' },
+      onSetOptions: vi.fn(),
       provider: 'openai-codex',
       reasoning: true,
-      reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-      requestGateway: vi.fn().mockResolvedValue({})
+      reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max']
     })
 
     expect(screen.queryByText('Minimal')).toBeNull()
@@ -118,61 +98,96 @@ describe('ModelEditSubmenu model-aware effort options', () => {
   })
 
   it('shows K3 as always-on with only max selectable', () => {
-    const requestGateway = vi.fn().mockResolvedValue({})
+    const onSetOptions = vi.fn()
     renderSubmenu({
       fastControl: { kind: 'none' },
+      onSetOptions,
       provider: 'kimi-coding',
       reasoning: true,
       reasoningAlwaysOn: true,
-      reasoningEfforts: ['max'],
-      requestGateway
+      reasoningEfforts: ['max']
     })
 
     expect((screen.getByRole('switch') as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByText('Max')).toBeTruthy()
     expect(screen.queryByText('Medium')).toBeNull()
     fireEvent.click(screen.getByRole('switch'))
-    expect(requestGateway).not.toHaveBeenCalled()
+    expect(onSetOptions).not.toHaveBeenCalled()
   })
 })
 
-// Regression: editing the active row before a live session exists must stay
-// preset-only — the gateway's config.set falls back to global config when no
-// session matches, so it must not be called. (Caught in the second review.)
-describe('ModelEditSubmenu no-session guard', () => {
-  it('param fast: records explicit off in the draft but skips the gateway without a session', () => {
-    const requestGateway = vi.fn().mockResolvedValue({})
-    setCurrentFastMode(true)
-    renderSubmenu({ fastControl: { kind: 'param', on: true }, reasoning: false, requestGateway })
+// The submenu is PURE: it reports edits and never writes to a session, a
+// preset store, or the gateway. That's the invariant that lets the same
+// component drive a live chat session AND a detached per-task override — if it
+// ever writes directly again, picking an effort for a kanban card would reach
+// over and change the user's live chat.
+describe('ModelEditSubmenu reports edits without performing them', () => {
+  it('param fast: reports the toggle', () => {
+    const onSetOptions = vi.fn()
+    renderSubmenu({ fastControl: { kind: 'param', on: true }, onSetOptions, reasoning: false })
 
     fireEvent.click(screen.getByRole('switch'))
 
-    expect(getModelPreset('p1', 'm1').fast).toBe(false)
-    expect($currentFastMode.get()).toBe(false)
-    expect(getCurrentModelSource()).toBe('manual')
-    expect(requestGateway).not.toHaveBeenCalled()
+    expect(onSetOptions).toHaveBeenCalledWith({ fast: false })
   })
 
-  it('reasoning: records the preset but skips the gateway without a session', () => {
-    const requestGateway = vi.fn().mockResolvedValue({})
-    renderSubmenu({ fastControl: { kind: 'none' }, reasoning: true, requestGateway })
+  it('thinking: toggling off reports the none level', () => {
+    const onSetOptions = vi.fn()
+    renderSubmenu({ fastControl: { kind: 'none' }, onSetOptions, reasoning: true })
 
-    // Thinking starts on (medium); toggling it off routes through patchReasoning.
+    // Thinking starts on (medium); toggling it off reports 'none'.
     fireEvent.click(screen.getByRole('switch'))
 
-    expect(getModelPreset('p1', 'm1').effort).toBe('none')
-    expect($currentReasoningEffort.get()).toBe('none')
-    expect(getCurrentModelSource()).toBe('manual')
-    expect(requestGateway).not.toHaveBeenCalled()
+    expect(onSetOptions).toHaveBeenCalledWith({ effort: 'none' })
   })
 
-  it('param fast: pushes to the gateway once a session is active', async () => {
-    const requestGateway = vi.fn().mockResolvedValue({})
-    $activeSessionId.set('sess1')
-    renderSubmenu({ fastControl: { kind: 'param', on: false }, reasoning: false, requestGateway })
+  it('thinking: toggling back on restores the row level, not the hardcoded default', () => {
+    const onSetOptions = vi.fn()
+    renderSubmenu({
+      defaultEffort: 'high',
+      effort: 'none',
+      fastControl: { kind: 'none' },
+      onSetOptions,
+      reasoning: true
+    })
 
     fireEvent.click(screen.getByRole('switch'))
 
-    expect(requestGateway).toHaveBeenCalledWith('config.set', { key: 'fast', session_id: 'sess1', value: 'fast' })
+    expect(onSetOptions).toHaveBeenCalledWith({ effort: 'high' })
+  })
+
+  it('variant fast: swaps the model only when the row is active', () => {
+    const onSelectModel = vi.fn()
+    const onSetOptions = vi.fn()
+
+    renderSubmenu({
+      fastControl: { baseId: 'm1', fastId: 'm1-fast', kind: 'variant', on: false },
+      isActive: false,
+      onSelectModel,
+      onSetOptions,
+      reasoning: false
+    })
+
+    fireEvent.click(screen.getByRole('switch'))
+
+    // Inactive rows stay preference-only — no model switch.
+    expect(onSetOptions).toHaveBeenCalledWith({ fast: true })
+    expect(onSelectModel).not.toHaveBeenCalled()
+  })
+
+  it('variant fast: active row swaps to the -fast sibling', () => {
+    const onSelectModel = vi.fn()
+    const onSetOptions = vi.fn()
+
+    renderSubmenu({
+      fastControl: { baseId: 'm1', fastId: 'm1-fast', kind: 'variant', on: false },
+      onSelectModel,
+      onSetOptions,
+      reasoning: false
+    })
+
+    fireEvent.click(screen.getByRole('switch'))
+
+    expect(onSelectModel).toHaveBeenCalledWith('m1-fast')
   })
 })

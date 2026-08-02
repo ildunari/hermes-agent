@@ -30,6 +30,7 @@ import { MODE_OPTIONS } from './constants'
 import { LocalEnhancementsSection } from './local-enhancements-section'
 import { PetSettings } from './pet-settings'
 import { ListRow, SectionHeading, SettingsContent } from './primitives'
+import { TerminalFontSetting } from './terminal-font-setting'
 
 function ThemePreview({ name, mode }: { name: string; mode: 'light' | 'dark' }) {
   // Preview in the *current* mode: the dark palette in Dark, and the light
@@ -445,6 +446,8 @@ export function AppearanceSettings() {
             description={a.uiScaleDesc(zoomPercent)}
             title={a.uiScaleTitle}
           />
+
+          <TerminalFontSetting />
 
           <ListRow
             action={

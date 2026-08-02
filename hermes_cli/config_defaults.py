@@ -239,6 +239,14 @@ DEFAULT_CONFIG = {
         "backend": "local",
         "modal_mode": "auto",
         "cwd": ".",  # Use current directory
+        # Terminal font family for the desktop app's embedded xterm.js terminal.
+        # When set (e.g. "'CaskaydiaCoveNerdFont', 'JetBrains Mono', monospace"),
+        # the desktop terminal uses this as the CSS font-family value, with the
+        # built-in default ("'JetBrains Mono', 'Cascadia Code', 'SF Mono', Menlo,
+        # Consolas, monospace") as fallback when the field is empty or unset.
+        # This lets users install a Nerd Font (or any custom font) and configure
+        # it here without patching the built desktop app.
+        "font_family": "",
         "timeout": 180,
         # Bounded grace period (seconds) between SIGTERM and an escalated
         # SIGKILL when terminating a host process tree (browser daemons, etc.).
@@ -317,6 +325,11 @@ DEFAULT_CONFIG = {
         # Docker runs with --network=none so commands cannot reach the network.
         "docker_network": True,
         "docker_extra_args": [],        # Extra flags passed verbatim to docker run
+        # /dev/shm size for the Docker sandbox. Docker's 64 MB default silently
+        # breaks Chromium/Playwright and PyTorch DataLoader workers; tmpfs is
+        # lazily allocated so the higher ceiling costs nothing until used.
+        # Set to "" (or "0") to omit the flag and use Docker's default.
+        "docker_shm_size": "1g",
         # Explicit opt-in: run the Docker container as the host user's uid:gid
         # (via `--user`).  When enabled, files written into bind-mounted dirs
         # (docker_volumes, the persistent workspace, or the auto-mounted cwd)
@@ -460,6 +473,16 @@ DEFAULT_CONFIG = {
     # (see agent/turn_context.py), so correctness never depends on it.  Keep it
     # small so a slow/dead server adds little to first-response latency.
     "mcp_discovery_timeout": 1.5,
+
+    # Single-query (``hermes -q/-z "..."``) variant of mcp_discovery_timeout.
+    # In one-shot mode there is only ONE turn, so the between-turns late-binding
+    # refresh never runs: a server that misses the small interactive bound is
+    # invisible to the LLM for the whole session.  This larger bound gives slow
+    # cold-start servers (npx, uvx, remote HTTP) a chance to land in the one
+    # tool snapshot.  ``thread.join(timeout)`` returns the instant discovery
+    # completes, so reachable servers only wait for their real handshake time
+    # while unavailable servers remain bounded.
+    "mcp_single_query_discovery_timeout": 15.0,
 
     # MCP runtime behavior (distinct from the per-server definitions in
     # mcp_servers: and from the auxiliary.mcp side-LLM task settings).
@@ -700,7 +723,9 @@ DEFAULT_CONFIG = {
     },
 
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).
-    # cache_ttl must be "5m" or "1h" (Anthropic-supported tiers); other values are ignored.
+    # cache_ttl: "5m" or "1h" (Anthropic-supported tiers). Other non-falsy
+    # values are silently ignored. Falsy values (false, null, "off",
+    # "disabled", "no", "none") disable prompt caching entirely.
     "prompt_caching": {
         "cache_ttl": "5m",
     },
@@ -780,6 +805,20 @@ DEFAULT_CONFIG = {
         # not a meaningful recovery, so an unretried blip silently loses the
         # call.
         "transient_retries": 2,
+        # Restrict the auxiliary auto-chain's OpenRouter fallback to free
+        # (:free) SKUs. When true, the OpenRouter step is skipped entirely
+        # unless the resolved fallback model ends in ":free" — a PAID lane
+        # is never engaged for background auxiliary traffic (compression,
+        # title generation, session search, vision, web extract) even when
+        # OPENROUTER_API_KEY is present. Default false keeps the historical
+        # paid fallback for users who want it.
+        "free_only": False,
+        # Override the auxiliary auto-chain's OpenRouter fallback model
+        # (default: google/gemini-3.6-flash, a PAID model). Set e.g.
+        # "nvidia/nemotron-3-ultra-550b-a55b:free" together with
+        # free_only: true to keep auxiliary traffic free-only. A one-time
+        # WARNING is logged whenever a non-":free" model is engaged.
+        "openrouter_model": "",
         # Endpoints that reject NON-streaming chat requests outright (e.g.
         # Tencent Copilot returns HTTP 400 "Non-stream chat request is
         # currently not supported"). Auxiliary calls to a matching endpoint
@@ -2589,6 +2628,9 @@ DEFAULT_CONFIG = {
         # 100MB, so it only runs at startup, and only when prune deleted
         # ≥1 session.
         "vacuum_after_prune": True,
+        # Minimum days between successful VACUUM rewrites. Pruning can still
+        # run on its normal cadence while SQLite reuses the freed pages.
+        "min_vacuum_interval_days": 30,
         # Minimum hours between auto-maintenance runs (avoids repeating
         # the sweep on every CLI invocation).  Tracked via state_meta in
         # state.db itself, so it's shared across all processes.
