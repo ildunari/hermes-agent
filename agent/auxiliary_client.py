@@ -4308,9 +4308,10 @@ def _call_fallback_candidate_sync(
     max_tokens: Optional[int],
     tools: Optional[list],
     effective_timeout: float,
-    fallback_extra_body: dict,
+    fallback_extra_body: Optional[dict] = None,
     reasoning_config: Optional[Dict[str, Any]] = None,
     request_overrides: Optional[Dict[str, Any]] = None,
+    effective_extra_body: Optional[dict] = None,
 ) -> Optional[Any]:
     """Call one fallback candidate with stale-credential recovery.
 
@@ -4331,7 +4332,16 @@ def _call_fallback_candidate_sync(
     candidate with its own ``timeout`` entry gets that instead, so a
     fallback tuned differently from the primary is allowed its own budget
     (#62452).
+
+    ``effective_extra_body`` is the original direct-helper keyword. Keep it as
+    a compatibility alias while preferring the provider-safe
+    ``fallback_extra_body`` name for internal callers.
     """
+    if fallback_extra_body is None:
+        fallback_extra_body = dict(effective_extra_body or {})
+    else:
+        fallback_extra_body = dict(fallback_extra_body)
+
     fb_timeout = _fallback_entry_timeout(task, fb_label)
     if fb_timeout is not None and fb_timeout != effective_timeout:
         logger.info(
@@ -4403,11 +4413,17 @@ async def _call_fallback_candidate_async(
     max_tokens: Optional[int],
     tools: Optional[list],
     effective_timeout: float,
-    fallback_extra_body: dict,
+    fallback_extra_body: Optional[dict] = None,
     reasoning_config: Optional[Dict[str, Any]] = None,
     request_overrides: Optional[Dict[str, Any]] = None,
+    effective_extra_body: Optional[dict] = None,
 ) -> Optional[Any]:
     """Async mirror of :func:`_call_fallback_candidate_sync`."""
+    if fallback_extra_body is None:
+        fallback_extra_body = dict(effective_extra_body or {})
+    else:
+        fallback_extra_body = dict(fallback_extra_body)
+
     fb_timeout = _fallback_entry_timeout(task, fb_label)
     if fb_timeout is not None and fb_timeout != effective_timeout:
         logger.info(

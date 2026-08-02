@@ -98,6 +98,14 @@ class TestExactMatch:
         assert strategy == "exact"
         assert new == "key: new value\n"
 
+    def test_whitespace_only_pattern_requires_explicit_replace_all(self):
+        content = "    x\n"
+        new, count, strategy, err = fuzzy_find_and_replace(content, "  ", "")
+        assert err is not None
+        assert count == 0
+        assert strategy is None
+        assert new == content
+
     def test_whitespace_only_pattern_does_not_expand_to_line_boundary(self):
         new, count, strategy, err = fuzzy_find_and_replace(
             "    x\n", "  ", "", replace_all=True

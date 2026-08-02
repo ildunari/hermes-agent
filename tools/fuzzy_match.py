@@ -83,6 +83,18 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
     if not old_string:
         return content, 0, None, "old_string cannot be empty"
 
+    if not old_string.strip():
+        # Whitespace-only anchors must never enter the fuzzy strategies: those
+        # can expand a tiny indentation edit to a line boundary. Reject them by
+        # default, but preserve the intentional exact-edit use case when the
+        # caller explicitly opts into replace_all.
+        if not replace_all:
+            return content, 0, None, "old_string is only whitespace — use replace_all=True for exact replacement"
+        count = content.count(old_string)
+        if count == 0:
+            return content, 0, None, "whitespace-only old_string has no exact match"
+        return content.replace(old_string, new_string), count, "exact", None
+
     if old_string == new_string:
         return content, 0, None, "old_string and new_string are identical"
 

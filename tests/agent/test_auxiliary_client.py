@@ -1750,6 +1750,30 @@ class TestStaleFallbackCandidateSkip:
                 )
 
 
+class TestFallbackHelperKeywordCompatibility:
+    def test_original_effective_extra_body_keyword_still_binds(self):
+        """Direct callers from upstream and plugins retain the original API."""
+        import inspect
+
+        from agent.auxiliary_client import (
+            _call_fallback_candidate_async,
+            _call_fallback_candidate_sync,
+        )
+
+        common = {
+            "task": "compression",
+            "messages": [{"role": "user", "content": "summarize"}],
+            "temperature": None,
+            "max_tokens": None,
+            "tools": None,
+            "effective_timeout": 30.0,
+            "effective_extra_body": {"legacy": True},
+        }
+        for helper in (_call_fallback_candidate_sync, _call_fallback_candidate_async):
+            bound = inspect.signature(helper).bind(object(), "model", "provider", **common)
+            assert bound.arguments["effective_extra_body"] == {"legacy": True}
+
+
 class TestAuxiliaryFallbackLayering:
     """Explicit-provider users get layered fallback: configured_chain → main agent → warn."""
 
