@@ -1852,6 +1852,8 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 ensure_not_aborted(root, run_id)
                 if dependency_manifests_changed(changed):
                     materialize_node_dependencies(root, run_id, worktree)
+                carry_env = os.environ.copy()
+                carry_env["HERMES_CARRY_TEST_JOBS"] = "1"
                 worker_command(
                     root,
                     run_id,
@@ -1872,6 +1874,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     worktree,
                     "carry-verify",
                     3600,
+                    carry_env,
                 )
                 validation_env = os.environ.copy()
                 validation_env["HERMES_REPO_ROOT"] = str(worktree)

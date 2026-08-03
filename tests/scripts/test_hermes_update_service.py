@@ -1449,6 +1449,14 @@ def test_desktop_build_starts_only_after_validation_in_source() -> None:
     assert "kill_owned_child(desktop_build_child, desktop_build_output)" in source
 
 
+def test_transactional_carry_validation_is_serialized_in_source() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    carry_verify = source.index('"carry-verify"')
+    override = source.rindex('carry_env["HERMES_CARRY_TEST_JOBS"] = "1"', 0, carry_verify)
+
+    assert override < carry_verify
+
+
 def test_deployed_carry_verify_is_probes_only_in_source() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     deployed = source.index('"deployed-carry-verify"')

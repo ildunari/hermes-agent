@@ -107,6 +107,33 @@ def test_batched_verify_runs_at_most_three_commands(
     assert results["beta"].returncode == 0
 
 
+def test_batched_verify_honors_test_job_override(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: list[tuple[Path, tuple[str, ...]]] = []
+
+    def fake_command(cwd, *args, check=True, env=None):
+        calls.append((cwd, args))
+        return completed(list(args))
+
+    monkeypatch.setenv("HERMES_CARRY_TEST_JOBS", "1")
+    monkeypatch.setattr(CARRY, "command", fake_command)
+
+    CARRY.run_batched_tests(
+        registry(tmp_path), [feature("alpha", ("tests/test_a.py",))]
+    )
+
+    assert calls[0][1][1:3] == ("-j", "1")
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "many"])
+def test_carry_test_jobs_rejects_invalid_override(value: str, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_CARRY_TEST_JOBS", value)
+
+    with pytest.raises(ValueError, match="positive integer"):
+        CARRY.carry_test_jobs()
+
+
 def test_batch_failure_falls_back_per_feature_for_attribution(
     tmp_path: Path, monkeypatch
 ) -> None:

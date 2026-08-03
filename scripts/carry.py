@@ -524,6 +524,26 @@ def run_feature_tests(
     )
 
 
+def carry_test_jobs() -> int:
+    """Return bounded Python test parallelism for the carry union.
+
+    Standalone carry verification keeps its fast host-sized default.  The
+    transactional update service can force a lower value through the
+    environment when aggregate load would make large timing-sensitive files
+    fail spuriously.
+    """
+    raw = os.environ.get("HERMES_CARRY_TEST_JOBS")
+    if raw is None:
+        return max(2, (os.cpu_count() or 2) // 2)
+    try:
+        jobs = int(raw)
+    except ValueError as exc:
+        raise ValueError("HERMES_CARRY_TEST_JOBS must be a positive integer") from exc
+    if jobs < 1:
+        raise ValueError("HERMES_CARRY_TEST_JOBS must be a positive integer")
+    return jobs
+
+
 def run_batched_tests(
     registry: Registry,
     features: list[Feature],
@@ -552,7 +572,7 @@ def run_batched_tests(
             registry.root,
             str(registry.root / "scripts" / "run_tests.sh"),
             "-j",
-            str(max(2, (os.cpu_count() or 2) // 2)),
+            str(carry_test_jobs()),
             *python_union,
             "-q",
             check=False,
