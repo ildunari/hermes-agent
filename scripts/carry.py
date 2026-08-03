@@ -623,6 +623,19 @@ def run_batched_tests(
     return results
 
 
+def run_selected_feature_tests(
+    registry: Registry,
+    features: list[Feature],
+) -> dict[str, subprocess.CompletedProcess[str]]:
+    """Run selected tests using the configured attribution strategy."""
+    if os.environ.get("HERMES_CARRY_PER_FEATURE") == "1":
+        return {
+            feature.id: run_feature_tests(registry, feature)
+            for feature in features
+        }
+    return run_batched_tests(registry, features)
+
+
 def verify(args: argparse.Namespace) -> int:
     registry = load(args)
     failures = validate_checks(registry)
@@ -635,7 +648,7 @@ def verify(args: argparse.Namespace) -> int:
     evidence: dict[str, Any] = {"features": {}, "failures": failures}
     test_results: dict[str, subprocess.CompletedProcess[str]] = {}
     if not args.probes_only:
-        test_results = run_batched_tests(registry, selected)
+        test_results = run_selected_feature_tests(registry, selected)
     for feature in selected:
         record: dict[str, Any] = {}
         provisional = bool(

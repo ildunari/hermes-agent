@@ -1453,8 +1453,10 @@ def test_transactional_carry_validation_is_serialized_in_source() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     carry_verify = source.index('"carry-verify"')
     override = source.rindex('carry_env["HERMES_CARRY_TEST_JOBS"] = "1"', 0, carry_verify)
+    per_feature = source.rindex('carry_env["HERMES_CARRY_PER_FEATURE"] = "1"', 0, carry_verify)
 
     assert override < carry_verify
+    assert per_feature < carry_verify
 
 
 def test_deployed_carry_verify_is_probes_only_in_source() -> None:

@@ -1854,6 +1854,7 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     materialize_node_dependencies(root, run_id, worktree)
                 carry_env = os.environ.copy()
                 carry_env["HERMES_CARRY_TEST_JOBS"] = "1"
+                carry_env["HERMES_CARRY_PER_FEATURE"] = "1"
                 worker_command(
                     root,
                     run_id,

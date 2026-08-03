@@ -134,6 +134,34 @@ def test_carry_test_jobs_rejects_invalid_override(value: str, monkeypatch) -> No
         CARRY.carry_test_jobs()
 
 
+def test_per_feature_override_bypasses_union_and_runs_each_feature_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setenv("HERMES_CARRY_PER_FEATURE", "1")
+    monkeypatch.setattr(
+        CARRY,
+        "run_batched_tests",
+        lambda *_: pytest.fail("per-feature mode must bypass the union"),
+    )
+
+    def fake_per_feature(reg, item):
+        calls.append(item.id)
+        return completed([item.id])
+
+    monkeypatch.setattr(CARRY, "run_feature_tests", fake_per_feature)
+    features = [
+        feature("alpha", ("tests/test_a.py",)),
+        feature("beta", ("tests/test_b.py",)),
+    ]
+
+    results = CARRY.run_selected_feature_tests(registry(tmp_path), features)
+
+    assert calls == ["alpha", "beta"]
+    assert list(results) == ["alpha", "beta"]
+
+
 def test_batch_failure_falls_back_per_feature_for_attribution(
     tmp_path: Path, monkeypatch
 ) -> None:
