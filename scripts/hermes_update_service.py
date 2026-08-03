@@ -50,6 +50,7 @@ MAX_PAYLOAD = 4096
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 REQUEST_TTL = 60
 FD_LIMIT = 256
+VALIDATION_FD_LIMIT = 2048
 DESKTOP_BUILD_FD_LIMIT = 2048
 DESCENDANT_LIMIT = 64
 WORKER_LIMIT = 2
@@ -1875,7 +1876,8 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     worktree,
                     "carry-verify",
                     3600,
-                    carry_env,
+                    env=carry_env,
+                    child_fd_limit=VALIDATION_FD_LIMIT,
                 )
                 validation_env = os.environ.copy()
                 validation_env["HERMES_REPO_ROOT"] = str(worktree)
@@ -1903,7 +1905,8 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                     worktree,
                     "curated-validation",
                     7200,
-                    validation_env,
+                    env=validation_env,
+                    child_fd_limit=VALIDATION_FD_LIMIT,
                 )
                 transition(
                     root,

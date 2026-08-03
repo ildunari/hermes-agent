@@ -1459,6 +1459,17 @@ def test_transactional_carry_validation_is_serialized_in_source() -> None:
     assert per_feature < carry_verify
 
 
+def test_validation_workers_receive_elevated_fd_limit_in_source() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    carry_verify = source.index('"carry-verify"')
+    curated = source.index('"curated-validation"')
+
+    carry_window = source[carry_verify:carry_verify + 200]
+    curated_window = source[curated:curated + 200]
+    assert "child_fd_limit=VALIDATION_FD_LIMIT" in carry_window
+    assert "child_fd_limit=VALIDATION_FD_LIMIT" in curated_window
+
+
 def test_deployed_carry_verify_is_probes_only_in_source() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     deployed = source.index('"deployed-carry-verify"')
