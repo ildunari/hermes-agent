@@ -2594,6 +2594,8 @@ async def _record_proactive_inbound(
     platform = getattr(getattr(source, "platform", None), "value", None)
     if platform != "bluebubbles":
         return None
+    if not _proactive_contact_allowlisted(config_raw, trusted_scope, str(profile or "default")):
+        return None
     try:
         from gateway.proactive_scheduler import ProactiveConfig, handle_inbound
 
@@ -2740,6 +2742,36 @@ async def _bounded_serious_register(
         return False
 
 
+def _proactive_contact_allowlisted(
+    config_raw: Mapping[str, Any], trusted_scope: Any, profile: str,
+) -> bool:
+    """True only when this contact is in the exact proactive allowlist.
+
+    Approved conversation contacts outside the allowlist (e.g. family guests)
+    are out of scope for the proactive layer entirely: recording their ingress
+    would poison the arrival/inbound ledgers, and letting ``register_contact``
+    raise its allowlist ValueError gets misclassified as a persistence failure,
+    opening the global circuit and killing the reactive turn.
+    """
+    from gateway.proactive_scheduler import ProactiveConfig
+
+    try:
+        cfg = ProactiveConfig.from_mapping(dict(config_raw))
+    except Exception:
+        return False
+    principal = "guest" if profile == "guest" else "owner"
+    contact_id = str(getattr(trusted_scope, "contact_id", "") or "")
+    return (profile, contact_id, principal) in cfg.allowed_contacts
+
+
+def _proactive_profile_for_home(profile_home: Any) -> str:
+    """Profile name owning a proactive state root (profiles/<name> layout)."""
+    root = Path(profile_home).resolve()
+    if root.parent.name == "profiles":
+        return root.name
+    return str(os.getenv("HERMES_PROFILE") or "default")
+
+
 async def _record_proactive_arrival(
     *, config_raw: Any, trusted_scope: Any, profile_home: Any, source: Any,
     source_id: str, received_at: float,
@@ -2752,6 +2784,10 @@ async def _record_proactive_arrival(
         return None
     platform = getattr(getattr(source, "platform", None), "value", None)
     if getattr(source, "chat_type", "") != "dm" or platform != "bluebubbles":
+        return None
+    if not _proactive_contact_allowlisted(
+        config_raw, trusted_scope, _proactive_profile_for_home(profile_home)
+    ):
         return None
     root = Path(profile_home).resolve()
     ownership = root.parent.parent / "proactive-contact-ownership.db" if root.parent.name == "profiles" else root.parent / "proactive-contact-ownership.db"

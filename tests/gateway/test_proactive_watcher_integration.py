@@ -20,6 +20,52 @@ async def test_non_poke_runner_cannot_start_proactive_watcher(monkeypatch):
     assert runner._running is True
 
 
+@pytest.mark.asyncio
+async def test_non_allowlisted_contact_ingress_is_noop_not_circuit_open(tmp_path):
+    """An approved conversation contact outside the proactive allowlist (e.g.
+    a family guest like ``mom``) must be invisible to the proactive layer.
+
+    Regression: ``register_contact`` raised its allowlist ValueError inside
+    ``_record_proactive_inbound``, which was misclassified as a persistence
+    failure — opening the global circuit and failing the reactive turn."""
+    from gateway.proactive_scheduler import ProactiveOwnershipRegistry, ProactiveStateStore
+
+    home = tmp_path / "profiles" / "guest"
+    raw = _proactive_config()
+    source = SimpleNamespace(
+        chat_type="dm", platform=SimpleNamespace(value="bluebubbles"),
+        chat_id="dm-mom", user_id="mom",
+    )
+    scope = TrustedContactScope("guest", "mom")
+    sequence = await _record_proactive_arrival(
+        config_raw=raw, trusted_scope=scope, profile_home=home, source=source,
+        source_id="mom-msg-1", received_at=100,
+    )
+    assert sequence is None
+    result = await _record_proactive_inbound(
+        config_raw=raw, trusted_scope=scope, profile_home=home, profile="guest",
+        source=source, session_id="session", source_id="mom-msg-1", text="hello",
+        received_at=100, arrival_sequence=1,
+    )
+    assert result is None
+    # No ledger rows were written and the global circuit stayed closed.
+    state_db = home / "state.db"
+    if state_db.is_file():
+        store = ProactiveStateStore(state_db)
+        assert store.current_ingress_sequence() == 0
+    registry = ProactiveOwnershipRegistry(tmp_path / "proactive-contact-ownership.db")
+    circuit = registry.global_send_status(now=102.0).get("circuit") or {}
+    assert circuit.get("state") != "open"
+
+    # The allowlisted guest contact on the same profile still records normally.
+    allowed_scope = TrustedContactScope("guest", "stephen-lucier")
+    allowed_sequence = await _record_proactive_arrival(
+        config_raw=raw, trusted_scope=allowed_scope, profile_home=home, source=source,
+        source_id="steve-msg-1", received_at=101,
+    )
+    assert allowed_sequence == 1
+
+
 def test_runtime_model_calls_are_exact_and_nonfallback(monkeypatch):
     seen = []
 
