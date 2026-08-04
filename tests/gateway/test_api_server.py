@@ -1078,6 +1078,35 @@ class TestChatCompletionsEndpoint:
 
 
     @pytest.mark.asyncio
+    async def test_session_chat_ignores_persisted_virtual_model(self, adapter):
+        """A session row storing the advertised virtual model name must not
+        forward it as a session-persisted model — the virtual name (usually
+        "hermes-agent") is an alias, not a provider model id, and forwarding
+        it 400s at the provider (Codex: "The 'hermes-agent' model is not
+        supported"). Regression: broke the update service's authenticated
+        representative turn."""
+        app = _create_app(adapter)
+        stored = {"id": "s1", "model": adapter._model_name}
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(adapter, "_get_existing_session_or_404", return_value=(stored, None)),
+                patch.object(adapter, "_conversation_history_for_session", return_value=[]),
+                patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run,
+            ):
+                mock_run.return_value = (
+                    {"final_response": "ok", "messages": [], "api_calls": 1},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+                resp = await cli.post("/api/sessions/s1/chat", json={"message": "hi"})
+                assert resp.status == 200
+                resp_stream = await cli.post("/api/sessions/s1/chat/stream", json={"message": "hi"})
+                assert resp_stream.status == 200
+
+        for call in mock_run.call_args_list:
+            assert call.kwargs.get("session_model") is None
+
+
+    @pytest.mark.asyncio
     async def test_stream_task_done_callback_enqueues_eos_for_chat_completions(self, adapter):
         """Regression guard for #24451: completion callback must signal SSE EOS."""
         app = _create_app(adapter)

@@ -3745,7 +3745,16 @@ class APIServerAdapter(BasePlatformAdapter):
             stored_model = session.get("model") if isinstance(session, dict) else None
             stored_route = self._resolve_route(stored_model)
             route = stored_route or self._resolve_route(body.get("model"))
-            session_model = stored_model if (stored_model and stored_route is None) else None
+            # The virtual model name (usually "hermes-agent") is what
+            # _handle_create_session persists when the client sent no model —
+            # it is an advertised alias, not a runtime selection. Forwarding
+            # it as a session-persisted model sends a nonexistent model id to
+            # the provider (Codex rejects it with HTTP 400).
+            session_model = (
+                stored_model
+                if (stored_model and stored_model != self._model_name and stored_route is None)
+                else None
+            )
             agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
             selection_error = self._request_route_conflict_error(
                 session_id=session_id,
@@ -3869,7 +3878,13 @@ class APIServerAdapter(BasePlatformAdapter):
             stored_model = session.get("model") if isinstance(session, dict) else None
             stored_route = self._resolve_route(stored_model)
             route = stored_route or self._resolve_route(body.get("model"))
-            session_model = stored_model if (stored_model and stored_route is None) else None
+            # Virtual model name is an advertised alias, not a runtime
+            # selection — see _handle_session_chat.
+            session_model = (
+                stored_model
+                if (stored_model and stored_model != self._model_name and stored_route is None)
+                else None
+            )
             agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
             selection_error = self._request_route_conflict_error(
                 session_id=session_id,
