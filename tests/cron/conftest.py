@@ -39,3 +39,23 @@ def _isolate_cron_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs_mod, "OUTPUT_DIR", cron_dir / "output")
     monkeypatch.setattr(jobs_mod, "TICKER_HEARTBEAT_FILE", cron_dir / "ticker_heartbeat")
     monkeypatch.setattr(jobs_mod, "TICKER_SUCCESS_FILE", cron_dir / "ticker_last_success")
+
+
+@pytest.fixture(autouse=True)
+def _reset_session_context_vars():
+    """Restore session ContextVars around cron tests that call run_job directly.
+
+    Production confines each cron run to a copied context, but direct unit tests
+    share the pytest context. ``run_job`` intentionally clears ordinary session
+    variables to explicit empty values, which would otherwise shadow legacy env
+    fallbacks used by later approval tests in the same process.
+    """
+    from gateway.session_context import _UNSET, _VAR_MAP
+
+    def _reset_all():
+        for var in _VAR_MAP.values():
+            var.set(_UNSET)
+
+    _reset_all()
+    yield
+    _reset_all()

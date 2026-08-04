@@ -52,6 +52,7 @@ from hermes_cli.config import (
 )
 from hermes_cli.fallback_config import get_fallback_chain
 from hermes_time import now as _hermes_now
+from agent.interrupt_compat import request_hard_interrupt
 
 logger = logging.getLogger(__name__)
 
@@ -863,9 +864,19 @@ def _seed_cron_thread_session(
             except (ValueError, KeyError):
                 platform_enum = None
             if platform_enum is not None:
+                # Discord thread destinations must key on the thread's OWN id
+                # to match how the Discord adapter keys organic in-thread
+                # messages (chat_id == thread_id). Other platforms (Slack,
+                # Telegram) use chat_id == parent_channel for thread messages,
+                # so the parent chat_id is correct for them. See the matching
+                # guard in GatewayRunner._process_handoff.
+                if platform_enum == Platform.DISCORD:
+                    seed_chat_id = str(thread_id)
+                else:
+                    seed_chat_id = str(chat_id)
                 dest_source = SessionSource(
                     platform=platform_enum,
-                    chat_id=str(chat_id),
+                    chat_id=seed_chat_id,
                     chat_name=chat_name,
                     chat_type="thread",
                     user_id="system:cron",
@@ -3117,11 +3128,6 @@ def run_job(
 
     agent = None
 
-    # Mark this as a cron session so the approval system can apply cron_mode.
-    # This env var is process-wide and persists for the lifetime of the
-    # scheduler process — every job this process runs is a cron job.
-    os.environ["HERMES_CRON_SESSION"] = "1"
-
     # Use ContextVars for per-job session/delivery state so parallel jobs
     # don't clobber each other's targets (os.environ is process-global).
     from gateway.session_context import set_session_vars, clear_session_vars, _VAR_MAP
@@ -3224,7 +3230,14 @@ def run_job(
     # statement raises.  A leaked writer would deadlock the whole scheduler
     # (every future job blocks on acquire_*); a leaked reader blocks all
     # future writers.  Acquire itself can't leak (it either blocks or returns).
+    _cron_session_var = _VAR_MAP["HERMES_CRON_SESSION"]
+    _cron_session_token = None
     try:
+        # Scope cron approval policy to this job. Keep the token so the finally
+        # restores the pre-job state instead of pinning an explicit empty value,
+        # which would suppress the legacy os.environ fallback used by standalone
+        # cron entrypoints and tests.
+        _cron_session_token = _cron_session_var.set("1")
         if _job_workdir:
             os.environ["TERMINAL_CWD"] = _job_workdir
             logger.info("Job '%s': using workdir %s", job_id, _job_workdir)
@@ -3741,8 +3754,7 @@ def run_job(
                 _last_desc, _iter_n, _iter_max,
                 _cur_tool or "none",
             )
-            if hasattr(agent, "interrupt"):
-                agent.interrupt("Cron job timed out (inactivity)")
+            request_hard_interrupt(agent, "Cron job timed out (inactivity)")
             raise TimeoutError(
                 f"Cron job '{job_name}' idle for "
                 f"{int(_secs_ago)}s (limit {int(_cron_inactivity_limit)}s) "
@@ -3872,6 +3884,8 @@ def run_job(
         # clear_session_vars also clears _SESSION_CWD internally, so no
         # separate clear_session_cwd() call is needed.
         clear_session_vars(_ctx_tokens)
+        if _cron_session_token is not None:
+            _cron_session_var.reset(_cron_session_token)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
         if _session_db:
@@ -4288,8 +4302,20 @@ def tick(
 
         due_jobs = get_due_jobs()
 
-        if verbose and not due_jobs:
-            logger.info("%s - No jobs due", _hermes_now().strftime('%H:%M:%S'))
+        if not due_jobs:
+            # Idle tick: skip config load + pool partitioning entirely
+            # (#33612 — the gateway ticker calls tick(verbose=False) every
+            # 60s, so idle ticks previously fell through to load_config()).
+            # Still run the post-tick MCP orphan sweep: main intentionally
+            # sweeps on idle ticks so orphaned stdio children from crashed
+            # jobs are reaped even when nothing is due.
+            if verbose:
+                logger.info("%s - No jobs due", _hermes_now().strftime('%H:%M:%S'))
+            try:
+                from tools.mcp_tool import _kill_orphaned_mcp_children
+                _kill_orphaned_mcp_children()
+            except Exception as _e:
+                logger.debug("Post-tick MCP orphan cleanup failed: %s", _e)
             return 0
 
         if verbose:

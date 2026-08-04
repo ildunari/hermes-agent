@@ -484,6 +484,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           const resumed = await requestGateway<{ session_id: string }>('session.resume', {
             session_id: targetStoredSessionId,
             source: 'desktop',
+            omit_messages: true,
             ...(resumeProfile ? { profile: resumeProfile } : {})
           })
 
@@ -648,6 +649,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             const resumed = await requestGateway<{ session_id: string }>('session.resume', {
               session_id: recoverStoredSessionId,
               source: 'desktop',
+              omit_messages: true,
               ...(resumeProfile ? { profile: resumeProfile } : {})
             })
 

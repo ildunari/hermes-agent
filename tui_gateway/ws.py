@@ -307,6 +307,14 @@ async def handle_ws(ws: Any, *, transport: WSTransport | None = None) -> None:
         if active_transport is None:
             active_transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer)
 
+        # resolve_skin() reads config + initializes the skin engine —
+        # synchronous I/O + CPU work that should not block the event loop
+        # during the cold-start window. Run it in the thread pool so the
+        # WS read loop stays free to drain the frontend's initial RPC
+        # burst (setup.status, session.list, ...) without a stall
+        # (#60800). The skin payload is small (a dict of strings/arrays),
+        # so the to_thread overhead is negligible.
+        skin_payload = await asyncio.to_thread(server.resolve_skin)
         ready_ok = await active_transport.write_async(
             {
                 "jsonrpc": "2.0",
@@ -316,7 +324,7 @@ async def handle_ws(ws: Any, *, transport: WSTransport | None = None) -> None:
                     # change_events: this backend broadcasts pet.changed /
                     # cron.changed / sessions.changed, so clients can demote
                     # their legacy polls to slow backstops.
-                    "payload": {"skin": server.resolve_skin(), "change_events": True},
+                    "payload": {"skin": skin_payload, "change_events": True},
                 },
             }
         )
@@ -430,7 +438,7 @@ async def handle_ws(ws: Any, *, transport: WSTransport | None = None) -> None:
             active_transport.close()
 
             try:
-                await asyncio.to_thread(server._release_wake_for_transport, transport)
+                await asyncio.to_thread(server._release_wake_for_transport, active_transport)
             except Exception:
                 _log.exception("ws wake-word teardown failed peer=%s", peer)
 

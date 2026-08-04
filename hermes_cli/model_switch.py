@@ -3102,6 +3102,7 @@ def list_authenticated_providers(
                     live_models = fetch_api_models(
                         api_key,
                         api_url,
+                        timeout=1.5 if for_picker else 5.0,  # picker: fail fast so a slow custom endpoint doesn't block /model
                         headers=_extra_headers_from_config(ep_cfg) or None,
                     )
                     if live_models:
@@ -3169,7 +3170,11 @@ def list_authenticated_providers(
             try:
                 from hermes_cli.models import fetch_api_models
 
-                _live_models = fetch_api_models("", str(current_base_url).strip().rstrip("/"))
+                _live_models = fetch_api_models(
+                    "",
+                    str(current_base_url).strip().rstrip("/"),
+                    timeout=1.5 if for_picker else 5.0,  # picker: fail fast on a slow current endpoint
+                )
                 if _live_models:
                     _models = _live_models
             except Exception:
@@ -3427,6 +3432,7 @@ def list_authenticated_providers(
                     live_models = fetch_api_models(
                         api_key,
                         api_url,
+                        timeout=1.5 if for_picker else 5.0,  # picker: fail fast so a slow custom endpoint doesn't block /model
                         headers=grp.get("extra_headers") or None,
                     )
                     if live_models:

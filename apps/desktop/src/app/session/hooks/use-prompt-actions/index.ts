@@ -642,6 +642,7 @@ export function usePromptActions({
           const resumed = await requestGateway<{ session_id: string }>('session.resume', {
             session_id: selectedStoredSessionIdRef.current,
             source: 'desktop',
+            omit_messages: true,
             ...(resumeProfile ? { profile: resumeProfile } : {})
           })
 
@@ -747,6 +748,7 @@ export function usePromptActions({
             const resumed = await requestGateway<{ session_id: string }>('session.resume', {
               session_id: selectedStoredSessionIdRef.current,
               source: 'desktop',
+              omit_messages: true,
               ...(resumeProfile ? { profile: resumeProfile } : {})
             })
 

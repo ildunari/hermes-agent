@@ -8,7 +8,10 @@ import {
   liveTailStart,
   messageGroupClassName,
   turnTailClassName,
-  type MessageGroup
+  type MessageGroup,
+  messageRenderWeight,
+  RENDER_WEIGHT_CHARS,
+  resolveThreadScrollTarget
 } from './list'
 
 // Signature rows are `${index}:${id}:${role}:${weight}` (see the useAuiState
@@ -62,6 +65,53 @@ describe('buildGroups', () => {
   })
 })
 
+describe('resolveThreadScrollTarget', () => {
+  const context = (scrollElement: Pick<HTMLElement, 'scrollTop'>) => ({
+    contentElement: document.createElement('div'),
+    scrollElement: scrollElement as HTMLElement
+  })
+
+  it('settles when the browser clamps the requested bottom within half a CSS pixel', () => {
+    let actualScrollTop = 0
+    let writes = 0
+
+    const scrollElement = {
+      get scrollTop() {
+        return actualScrollTop
+      },
+      set scrollTop(value: number) {
+        writes += 1
+        actualScrollTop = value - 0.125
+      }
+    }
+
+    const target = 899
+
+    const requested = resolveThreadScrollTarget(target, context(scrollElement))
+    scrollElement.scrollTop = requested
+    const settled = resolveThreadScrollTarget(target, context(scrollElement))
+
+    expect(requested).toBe(target)
+    expect(actualScrollTop).toBe(898.875)
+    expect(settled).toBe(actualScrollTop)
+    expect(actualScrollTop < settled).toBe(false)
+    expect(writes).toBe(1)
+  })
+
+  it('keeps following while more than half a CSS pixel remains', () => {
+    const scrollElement = { scrollTop: 898.25 }
+
+    expect(resolveThreadScrollTarget(899, context(scrollElement))).toBe(899)
+  })
+
+  it('re-arms after streaming content increases the target', () => {
+    const scrollElement = { scrollTop: 898.875 }
+
+    expect(resolveThreadScrollTarget(899, context(scrollElement))).toBe(898.875)
+    expect(resolveThreadScrollTarget(999, context(scrollElement))).toBe(999)
+  })
+})
+
 describe('firstVisibleGroupIndex', () => {
   const group = (id: string, weight: number): MessageGroup => ({ id, index: 0, kind: 'standalone', weight })
 
@@ -108,6 +158,50 @@ describe('messageGroupClassName', () => {
   it('moves skipped-content containment below the sticky user bubble', () => {
     expect(turnTailClassName()).toContain('content-visibility:auto')
     expect(turnTailClassName()).toContain('contain-intrinsic-size:auto_37.5rem')
+  })
+})
+
+describe('messageRenderWeight', () => {
+  it('charges large text and tool results by character cost, not only part count', () => {
+    const text = [{ type: 'text', text: 'x'.repeat(RENDER_WEIGHT_CHARS * 3) }]
+
+    const tool = [
+      {
+        type: 'tool-call',
+        toolName: 'skill_view',
+        args: { name: 'hermes-agent' },
+        result: { content: 'x'.repeat(RENDER_WEIGHT_CHARS * 100) }
+      }
+    ]
+
+    expect(messageRenderWeight(text)).toBe(4)
+    expect(messageRenderWeight(tool)).toBeGreaterThanOrEqual(101)
+  })
+
+  it('makes repeated 51KB tool outputs exceed the normal transcript page', () => {
+    const toolOutput = () => [
+      {
+        type: 'tool-call',
+        toolName: 'skill_view',
+        result: { content: 'x'.repeat(51_236) }
+      }
+    ]
+
+    const groups = Array.from({ length: 5 }, (_, index) => ({
+      id: `tool-${index}`,
+      index,
+      kind: 'standalone' as const,
+      weight: messageRenderWeight(toolOutput())
+    }))
+
+    expect(firstVisibleGroupIndex(groups, 300)).toBeGreaterThan(0)
+  })
+
+  it('handles circular tool payloads without recursing forever', () => {
+    const result: { content: string; self?: unknown } = { content: 'ok' }
+    result.self = result
+
+    expect(messageRenderWeight([{ type: 'tool-call', result }])).toBe(2)
   })
 })
 
