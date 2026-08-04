@@ -2806,6 +2806,54 @@ async def _record_proactive_arrival(
         raise RuntimeError("proactive ingress arrival barrier failed closed") from exc
 
 
+class _ProactiveSessionLookup:
+    """Route proactive session reads/writes to the store that owns the session.
+
+    Gateway sessions live in the runner's own store (root ``state.db`` for the
+    default-profile gateway) while proactive scheduling state lives in the
+    per-profile ``state.db``. Depending on which gateway created the DM
+    session, the parent row can be in either; resolve per session id."""
+
+    def __init__(self, *stores: Any) -> None:
+        self._stores = [store for store in stores if store is not None]
+        if not self._stores:
+            raise ValueError("at least one session store is required")
+
+    def _store_for(self, session_id: str) -> Any:
+        for store in self._stores:
+            try:
+                if store.get_session(session_id) is not None:
+                    return store
+            except Exception:
+                continue
+        return self._stores[0]
+
+    def get_session(self, session_id: str) -> Any:
+        for store in self._stores:
+            try:
+                row = store.get_session(session_id)
+            except Exception:
+                continue
+            if row is not None:
+                return row
+        return None
+
+    def get_messages(self, session_id: str) -> Any:
+        return self._store_for(session_id).get_messages(session_id)
+
+    def create_initiated_assistant_child(self, *, parent_session_id: str, **kwargs: Any) -> Any:
+        return self._store_for(parent_session_id).create_initiated_assistant_child(
+            parent_session_id=parent_session_id, **kwargs
+        )
+
+    def close(self) -> None:
+        for store in self._stores:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+
 def _run_proactive_tick_once(
     *,
     profile_home: Any,
@@ -11676,11 +11724,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
 
                     def _tick_profile() -> dict[str, int]:
-                        db = SessionDB(Path(profile_home) / "state.db")
+                        # Sessions live in the gateway's own store (root
+                        # state.db for the default-profile gateway), not in
+                        # the per-profile proactive state.db. Opening the
+                        # profile db here made every parent-session lookup a
+                        # KeyError, surfacing as slot reason=compose_error.
+                        db = SessionDB()
+                        profile_db = SessionDB(Path(profile_home) / "state.db")
+                        session_db = _ProactiveSessionLookup(db, profile_db)
                         try:
                             result = _run_proactive_tick_once(
                                 profile_home=profile_home, profile=profile,
-                                config_raw=config_raw, session_db=db,
+                                config_raw=config_raw, session_db=session_db,
                                 generate=self._proactive_compose_generate,
                                 gate_verdict=self._proactive_gate_verdict,
                                 prepared_sink=prepared,
@@ -11695,7 +11750,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             scheduler.record_health("watcher", {"result": result, "correlation_id": correlation_id})
                             return result
                         finally:
-                            db.close()
+                            session_db.close()
 
                     result = await asyncio.to_thread(_tick_profile)
                     latest_config = _load_gateway_config_for_profile(profile)

@@ -24,7 +24,7 @@ from gateway.proactive_scheduler import (
     request_proactive_wake,
 )
 
-_EXACT_CONTACT = {"poke": "kosta-owner"}
+_EXACT_CONTACT = {"poke": "kosta-owner", "guest": "stephen-lucier"}
 
 
 def _operator_candidate(now: float) -> dict[str, Any]:
