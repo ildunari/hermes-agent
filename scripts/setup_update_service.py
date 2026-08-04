@@ -58,7 +58,14 @@ def plist_payload(python: str, service: Path, repo: Path, state: Path) -> dict[s
         ],
         "RunAtLoad": True,
         "KeepAlive": True,
-        "ProcessType": "Background",
+        # NOT "Background": launchd's Background ProcessType applies a darwin
+        # background QoS clamp that children inherit. Under that clamp the
+        # syscall-heavy TUI gateway test file runs ~9-10x slower (34s -> 317s
+        # measured), blowing the 300s per-file validation timeout with a
+        # SIGKILL near completion — a false failure that no validator-side
+        # serialization or fd tweak can fix. Standard keeps the service
+        # unclamped so validation matches interactive test timing.
+        "ProcessType": "Standard",
         # No APPLE_NOTARY_PROFILE: ordinary updates must not notarize. The
         # Desktop afterSign hook notarizes whenever that variable is present,
         # so injecting it here made every Desktop-changing update perform a
