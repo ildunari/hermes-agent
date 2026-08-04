@@ -27701,6 +27701,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 next_message_type = None
                 if pending_event is not None:
                     next_source = getattr(pending_event, "source", None) or source
+                    # Guest-routing invariant (review P0-1): queued follow-ups
+                    # are RAW adapter events that never went through BlueBubbles
+                    # guest classification, so a guest's double-text would
+                    # otherwise recurse into an owner-context turn (owner tools,
+                    # owner memory, no guest policy). If the completed turn's
+                    # source carries routing markers and the queued source does
+                    # not, but they identify the same platform chat, inherit the
+                    # classified identity instead of trusting the raw source.
+                    try:
+                        if (
+                            next_source is not source
+                            and (_is_guest_source(source) or _is_owner_routed_source(source))
+                            and not (
+                                _is_guest_source(next_source)
+                                or _is_owner_routed_source(next_source)
+                            )
+                            and getattr(next_source, "platform", None) == getattr(source, "platform", None)
+                            and str(getattr(next_source, "chat_id", "") or "") == str(getattr(source, "chat_id", "") or "")
+                        ):
+                            next_source = dataclasses.replace(
+                                next_source,
+                                profile=source.profile,
+                                user_id_alt=source.user_id_alt,
+                                chat_id_alt=source.chat_id_alt,
+                            )
+                    except Exception:
+                        logger.debug(
+                            "Queued follow-up guest-identity re-stamp failed; keeping raw source",
+                            exc_info=True,
+                        )
                     if self._is_goal_continuation_event(pending_event) and not self._goal_still_active_for_session(session_id):
                         logger.info(
                             "Discarding stale goal continuation for session %s — goal is no longer active",
