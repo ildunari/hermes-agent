@@ -65,6 +65,9 @@ class TurnContext:
     # --- progress threading metadata (assigned after construction, before
     #     send_progress_messages is scheduled) ----------------------------
     _progress_metadata: Optional[dict] = None
+    # Send-path variant of ``_progress_metadata``: Telegram progress bubbles
+    # suppress rich-message rendering so tool/status chatter stays plain.
+    _progress_delivery_metadata: Optional[dict] = None
     _progress_reply_to: Optional[Any] = None
 
     # ------------------------------------------------------------------
@@ -96,6 +99,8 @@ class TurnContext:
     user_config: Any = None
     enabled_toolsets: Any = None
     disabled_toolsets: Any = None
+    guest_session: bool = False
+    trusted_contact_scope: Any = None
     log_mode_enabled: bool = False
     interim_assistant_messages_enabled: bool = False
     needs_progress_queue: bool = False

@@ -58,8 +58,34 @@ def test_gateway_forwards_canonical_event_ids_to_post_turn_extraction() -> None:
     ]
     assert len(calls) == 1
     forwarded = {keyword.arg: keyword.value for keyword in calls[0].keywords}
-    value = forwarded["canonical_event_ids"]
-    assert isinstance(value, ast.Name) and value.id == "canonical_event_ids"
+    if "canonical_event_ids" in forwarded:
+        value = forwarded["canonical_event_ids"]
+        assert isinstance(value, ast.Name) and value.id == "canonical_event_ids"
+    else:
+        # Opt-in kwargs seam: the handler forwards via
+        # ``_agent_kwargs["canonical_event_ids"] = canonical_event_ids`` and
+        # splats ``**_agent_kwargs`` so test doubles written against the
+        # four-positional upstream contract stay compatible.
+        assert any(
+            keyword.arg is None
+            and isinstance(keyword.value, ast.Name)
+            and keyword.value.id == "_agent_kwargs"
+            for keyword in calls[0].keywords
+        )
+        assigns = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Subscript)
+            and isinstance(node.targets[0].value, ast.Name)
+            and node.targets[0].value.id == "_agent_kwargs"
+            and isinstance(node.targets[0].slice, ast.Constant)
+            and node.targets[0].slice.value == "canonical_event_ids"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "canonical_event_ids"
+        ]
+        assert assigns
 
 
 def raw_fact(**overrides):

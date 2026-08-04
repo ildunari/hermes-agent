@@ -920,3 +920,51 @@ features:
         path: apps/desktop/electron/main.ts
         needles: [MEDIA_PROTOCOL, corsEnabled, supportFetchAPI, "'.docx'", "'.pdf'"]
         description: local document streams remain fetchable across the renderer and media protocol origins
+  - id: gateway.poke-guest-conversation-stack
+    title: Poke/Guest BlueBubbles conversation stack (texture, guest identity, contact memory, proactive)
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - gateway/run.py
+      - gateway/turn_context.py
+      - gateway/guest_access.py
+      - gateway/conversation_texture.py
+      - gateway/conversation_texture_v2.py
+      - gateway/proactive_checkin.py
+      - hermes_state.py
+      - hermes_cli/env_loader.py
+    collision_paths:
+      - gateway/run.py
+      - hermes_state.py
+    tests:
+      - tests/gateway/test_conversation_texture_integration.py
+      - tests/gateway/test_conversation_texture_v2.py
+      - tests/gateway/test_bluebubbles_guest_policy.py
+      - tests/gateway/test_guest_access.py
+      - tests/gateway/test_proactive_watcher_integration.py
+      - tests/gateway/test_42039_duplicate_user_message.py
+    checks:
+      - id: texture-callsite-wiring
+        path: gateway/run.py
+        needles: [_compile_conversation_texture_prompt, _with_conversation_texture, _conversation_texture_visible_text]
+        description: conversation texture v1/v2 private per-turn guidance is compiled and injected at the gateway callsite outside the cache signature
+      - id: guest-identity-and-contact-memory-wiring
+        path: gateway/run.py
+        needles: [_prepend_guest_profile_identity_prompt, _compile_contact_memory_prompt, _trusted_contact_scope_from_metadata, _snapshot_interest_digest]
+        description: guest profile identity prompt, contact-memory recall lane, and interest digest survive upstream merges
+      - id: guest-policy-context-scoping
+        path: gateway/run.py
+        needles: [guest_policy_context]
+        description: guest tool policy is applied via the request-scoped ContextVar around guest turns, never via process-global env
+      - id: guest-policy-multiplex-env-guard
+        path: gateway/guest_access.py
+        needles: [is_multiplex_active, cross-profile leakage]
+        description: leaked HERMES_GUEST_POLICY in os.environ must not gate non-guest turns under multiplex
+      - id: guest-policy-env-scrub
+        path: hermes_cli/env_loader.py
+        needles: [HERMES_GUEST_POLICY, HERMES_GUEST_SANDBOX_ROOT]
+        description: inherited guest-policy env keys are scrubbed at startup when absent from the profile .env
+      - id: proactive-initiated-child-persistence
+        path: hermes_state.py
+        needles: [create_initiated_assistant_child, initiated child did not persist assistant first]
+        description: agent-initiated proactive child sessions persist assistant-first without synthetic user rows

@@ -78,6 +78,13 @@ _PROFILE_MANAGED_ENV_KEYS: frozenset[str] = frozenset({
     "HERMES_ACP_AUTO_APPROVE",
     "HERMES_COPILOT_ACP_COMMAND",
     "HERMES_COPILOT_ACP_ARGS",
+    # Guest-policy scope keys: profile-behavioral, never credentials. A guest
+    # profile's .env legitimately sets these for its own process, but when a
+    # parent/gateway process inherits them and the current profile's .env does
+    # not define them, every tool call in this process would be guest-gated
+    # (observed as owner/GPT turns receiving guest_policy denials).
+    "HERMES_GUEST_POLICY",
+    "HERMES_GUEST_SANDBOX_ROOT",
     "COPILOT_CLI_PATH",
     "COPILOT_ACP_BASE_URL",
 })

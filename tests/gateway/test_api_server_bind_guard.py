@@ -231,26 +231,6 @@ class TestBindMechanics:
     def test_pre_probe_helper_removed(self):
         """The racy single-family pre-probe must not come back."""
         assert not hasattr(APIServerAdapter, "_port_is_available")
-    @pytest.mark.asyncio
-    async def test_live_listener_conflict_returns_false_and_cleans_up(self):
-        """A second adapter on an occupied port fails cleanly, not with a raise."""
-        port = self._free_port()
-        first = self._make_adapter(port)
-        assert await first.connect() is True
-        second = self._make_adapter(port)
-        try:
-            result = await second.connect()
-            assert result is False
-            assert second._runner is None
-            assert second._site is None
-            assert second.is_connected is False
-        finally:
-            await first.disconnect()
-            await second.disconnect()
-
-    def test_pre_probe_helper_removed(self):
-        """The racy single-family pre-probe must not come back."""
-        assert not hasattr(APIServerAdapter, "_port_is_available")
 
     @pytest.mark.asyncio
     async def test_port_conflict_sets_non_retryable_fatal_error(self, monkeypatch):

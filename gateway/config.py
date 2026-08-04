@@ -2153,12 +2153,11 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # unauthenticated platform whose adapter refuses to start at connect()
     # anyway (startup guard in gateway/platforms/api_server.py), leaving the
     # reconnect watcher spinning and logging errors forever. Same strength
-    # bar as the startup guard (has_usable_secret, min_length=16). Also respect
-    # an explicitly disabled API server in multiplexed profile configs.
-    if _has_usable_api_server_key(api_server_key) and not (
-        Platform.API_SERVER in config.platforms
-        and config.platforms[Platform.API_SERVER].enabled is False
-    ):
+    # bar as the startup guard (has_usable_secret, min_length=16). An
+    # explicitly disabled API server (multiplexed profile configs) is honored
+    # inside the block via ``_enabled_explicit`` so the key is still wired
+    # through for the shared listener.
+    if _has_usable_api_server_key(api_server_key):
         if Platform.API_SERVER not in config.platforms:
             config.platforms[Platform.API_SERVER] = PlatformConfig()
         # Respect an explicit ``enabled: false`` in config.yaml (flagged by
@@ -2168,10 +2167,12 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         # profile still inherits the process-level env (including
         # ``API_SERVER_KEY``); without this guard the env-var presence would
         # force-enable the listener and trip the MultiplexConfigError check.
-        # Pop (don't read) the marker — the api_server branch is terminal (no
-        # later registry pass re-enables it), so this both consumes the flag and
-        # avoids reading it twice, matching the pop convention used elsewhere.
-        api_server_explicit = config.platforms[Platform.API_SERVER].extra.pop("_enabled_explicit", False)
+        # Read (don't pop) the marker — the registry-driven plugin-enable pass
+        # later in this function also consults ``_enabled_explicit`` to avoid
+        # re-enabling an explicitly disabled api_server; the flag is cleared
+        # for all platforms in the final cleanup at the end of
+        # _apply_env_overrides.
+        api_server_explicit = bool(config.platforms[Platform.API_SERVER].extra.get("_enabled_explicit", False))
         if not api_server_explicit or config.platforms[Platform.API_SERVER].enabled:
             config.platforms[Platform.API_SERVER].enabled = True
         if api_server_key:

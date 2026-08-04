@@ -963,6 +963,7 @@ class TestSilentDelivery:
             "monitor-job",
             False,
             "Agent completed but produced empty response (model error, timeout, or misconfiguration)",
+            probe_run_snapshot=None,
             delivery_error=None,
         )
 

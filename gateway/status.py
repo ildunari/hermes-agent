@@ -519,7 +519,9 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
         profile_lc = profile_name.lower()
         return (
             f"--profile {profile_lc}" in command_lc
+            or f"--profile={profile_lc}" in command_lc
             or f"-p {profile_lc}" in command_lc
+            or f"-p={profile_lc}" in command_lc
             or f"hermes_home={home_lc}" in command_lc
         )
 
@@ -528,7 +530,12 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
     # a non-matching explicit HERMES_HOME= on the argv. HERMES_HOME is usually
     # passed via the environment (not visible on the command line), so its mere
     # absence is not disqualifying — only a conflicting explicit value is.
-    if "--profile " in command_lc or " -p " in command_lc:
+    if (
+        "--profile " in command_lc
+        or "--profile=" in command_lc
+        or " -p " in command_lc
+        or " -p=" in command_lc
+    ):
         return False
     if "hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc:
         return False
@@ -979,9 +986,6 @@ def write_pid_file() -> None:
         raise
 
 
-_RUNTIME_STATUS_WRITE_LOCK = threading.Lock()
-
-
 def _process_owns_runtime_status(existing: Optional[dict[str, Any]]) -> bool:
     """Return whether this process may stamp the live gateway's identity.
 
@@ -1004,10 +1008,80 @@ def _process_owns_runtime_status(existing: Optional[dict[str, Any]]) -> bool:
     return not runtime_status_pid_is_live(existing)
 
 
+def write_runtime_status(
+    *,
+    gateway_state: Any = _UNSET,
+    exit_reason: Any = _UNSET,
+    restart_requested: Any = _UNSET,
+    active_agents: Any = _UNSET,
+    platform: Any = _UNSET,
+    platform_state: Any = _UNSET,
+    error_code: Any = _UNSET,
+    error_message: Any = _UNSET,
+    platform_metadata: Any = _UNSET,
+    served_profiles: Any = _UNSET,
+    status_path: Optional[Path] = None,
+) -> None:
+    """Persist gateway runtime health information for diagnostics/status.
+
+    Identity (``pid``/``argv``/``start_time``), the top-level ``updated_at``
+    freshness signal, and every gateway-level lifecycle field
+    (``gateway_state``/``exit_reason``/``restart_requested``/``active_agents``/
+    ``served_profiles``) are only written when the calling process owns this
+    HERMES_HOME's gateway (see :func:`_process_owns_runtime_status`) — all of
+    their legitimate writers run inside the gateway process. Non-owner callers
+    (detached helpers, dashboards, imported platform adapters) merge only their
+    named ``platform`` payload.
+
+    Concurrency: the whole read-merge-write is serialized under a process-wide
+    lock. Claim/release writers race from the event loop, API threads, and
+    cron worker threads; atomic file replacement alone prevents corruption but
+    not lost updates (a delayed writer holding a stale snapshot can clobber a
+    newer count). ``active_agents`` may be passed as a CALLABLE, which is
+    invoked under the lock so the persisted count is re-snapshotted after
+    serialization — a captured-early stale value can never overwrite a newer
+    one.
+    """
+    # Cross-PROCESS lock: the owner gateway, detached helpers, and imported
+    # platform adapters (dashboards) all write this file from separate
+    # processes. A threading.Lock only orders this process's threads; without
+    # an flock a non-owner reading count 0 could atomically replace a file the
+    # owner just wrote count 1 into (Codex batch-2 review P1-1). The in-process
+    # lock still guards the callable recount ordering within this process.
+    path = status_path or _get_runtime_status_path()
+    # An explicit path is for multiplexed profile platform visibility only.
+    # Gateway identity/lifecycle remains owned by the process HERMES_HOME.
+    platform_only = status_path is not None and path != _get_runtime_status_path()
+    with _RUNTIME_STATUS_WRITE_LOCK, _runtime_status_file_lock(path):
+        _write_runtime_status_locked(
+            gateway_state=gateway_state,
+            exit_reason=exit_reason,
+            restart_requested=restart_requested,
+            active_agents=active_agents,
+            platform=platform,
+            platform_state=platform_state,
+            error_code=error_code,
+            error_message=error_message,
+            platform_metadata=platform_metadata,
+            served_profiles=served_profiles,
+            path=path,
+            platform_only=platform_only,
+        )
+
+
+_RUNTIME_STATUS_WRITE_LOCK = threading.Lock()
+
+
 @contextlib.contextmanager
-def _runtime_status_file_lock():
-    """Serialize runtime-status read/merge/write across processes."""
-    lock_path = _get_runtime_status_path().with_suffix(".lock")
+def _runtime_status_file_lock(path: Optional[Path] = None):
+    """Cross-process exclusive lock guarding the runtime-status read-merge-write.
+
+    Uses an flock on a sidecar ``.lock`` next to gateway_state.json so writers
+    in different processes serialize. Best-effort: if flock is unavailable
+    (unsupported FS, permission), fall back to no cross-process guard rather
+    than blocking a status write — the in-process lock still applies.
+    """
+    lock_path = (path or _get_runtime_status_path()).with_suffix(".lock")
     handle = None
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1048,41 +1122,6 @@ def _runtime_status_file_lock():
                 handle.close()
 
 
-def write_runtime_status(
-    *,
-    gateway_state: Any = _UNSET,
-    exit_reason: Any = _UNSET,
-    restart_requested: Any = _UNSET,
-    active_agents: Any = _UNSET,
-    platform: Any = _UNSET,
-    platform_state: Any = _UNSET,
-    error_code: Any = _UNSET,
-    error_message: Any = _UNSET,
-    served_profiles: Any = _UNSET,
-) -> None:
-    """Persist gateway runtime health information for diagnostics/status."""
-    with _RUNTIME_STATUS_WRITE_LOCK, _runtime_status_file_lock():
-        existing = _read_json_file(_get_runtime_status_path())
-        if not _process_owns_runtime_status(existing):
-            logger.debug(
-                "Skipping runtime-status write from non-owner pid=%s; owner pid=%s",
-                os.getpid(),
-                _pid_from_record(existing),
-            )
-            return
-        _write_runtime_status_locked(
-            gateway_state=gateway_state,
-            exit_reason=exit_reason,
-            restart_requested=restart_requested,
-            active_agents=active_agents,
-            platform=platform,
-            platform_state=platform_state,
-            error_code=error_code,
-            error_message=error_message,
-            served_profiles=served_profiles,
-        )
-
-
 def _write_runtime_status_locked(
     *,
     gateway_state: Any = _UNSET,
@@ -1093,7 +1132,10 @@ def _write_runtime_status_locked(
     platform_state: Any = _UNSET,
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
+    platform_metadata: Any = _UNSET,
     served_profiles: Any = _UNSET,
+    path: Optional[Path] = None,
+    platform_only: bool = False,
 ) -> None:
     if callable(active_agents):
         try:
@@ -1102,31 +1144,48 @@ def _write_runtime_status_locked(
             # Unknown is not idle: preserve the previous count rather than
             # authorizing a restart with a fabricated zero.
             active_agents = _UNSET
-    path = _get_runtime_status_path()
-    payload = _read_json_file(path) or _build_runtime_status_record()
+    path = path or _get_runtime_status_path()
+    existing = _read_json_file(path)
+    is_owner = False if platform_only else _process_owns_runtime_status(existing)
+    if is_owner:
+        payload = existing or _build_runtime_status_record()
+    elif existing is not None:
+        payload = existing
+    else:
+        # A non-owner creating the file must not advertise its own process as
+        # the gateway, nor invent lifecycle state (`gateway_state`,
+        # `active_agents`, `updated_at` freshness): a fabricated fresh record
+        # would satisfy liveness checks for a gateway that never wrote it.
+        # Leave identity and lifecycle unset until the real owner stamps them.
+        payload = {"pid": None, "argv": None, "start_time": None}
     previous_payload = copy.deepcopy(payload)
-    current_record = _build_pid_record()
     payload.setdefault("platforms", {})
-    payload["kind"] = current_record["kind"]
-    payload["pid"] = current_record["pid"]
-    payload["argv"] = current_record["argv"]
-    payload["start_time"] = current_record["start_time"]
-    payload["updated_at"] = _utc_now_iso()
+    if is_owner:
+        current_record = _build_pid_record()
+        payload["kind"] = current_record["kind"]
+        payload["pid"] = current_record["pid"]
+        payload["argv"] = current_record["argv"]
+        payload["start_time"] = current_record["start_time"]
+        payload["updated_at"] = _utc_now_iso()
 
-    if gateway_state is not _UNSET:
-        payload["gateway_state"] = gateway_state
-    if exit_reason is not _UNSET:
-        payload["exit_reason"] = exit_reason
-    if restart_requested is not _UNSET:
-        payload["restart_requested"] = bool(restart_requested)
-    if active_agents is not _UNSET:
-        payload["active_agents"] = parse_active_agents(active_agents)
-        payload["active_agents_updated_at"] = _utc_now_iso()
-    if served_profiles is not _UNSET:
-        # Profiles this gateway multiplexes (multi-profile mode). Absent/empty
-        # for a single-profile gateway. Lets `hermes status` show per-profile
-        # coverage without a second probe.
-        payload["served_profiles"] = list(served_profiles or [])
+        if gateway_state is not _UNSET:
+            payload["gateway_state"] = gateway_state
+        if exit_reason is not _UNSET:
+            payload["exit_reason"] = exit_reason
+        if restart_requested is not _UNSET:
+            payload["restart_requested"] = bool(restart_requested)
+        if active_agents is not _UNSET:
+            payload["active_agents"] = parse_active_agents(active_agents)
+            # Dedicated freshness stamp: the watchdog's identity restamp
+            # refreshes top-level updated_at every ~30s WITHOUT touching the
+            # count, so updated_at cannot serve as count freshness (a healthy
+            # loop would keep re-blessing a stale phantom count forever).
+            payload["active_agents_updated_at"] = _utc_now_iso()
+        if served_profiles is not _UNSET:
+            # Profiles this gateway multiplexes (multi-profile mode). Absent/empty
+            # for a single-profile gateway. Lets `hermes status` show per-profile
+            # coverage without a second probe.
+            payload["served_profiles"] = list(served_profiles or [])
 
     if platform is not _UNSET:
         platform_payload = payload["platforms"].get(platform, {})
@@ -1136,9 +1195,29 @@ def _write_runtime_status_locked(
             platform_payload["error_code"] = error_code
         if error_message is not _UNSET:
             platform_payload["error_message"] = error_message
+        if platform_metadata is not _UNSET:
+            if platform_metadata is None:
+                platform_payload.pop("metadata", None)
+            elif isinstance(platform_metadata, dict):
+                metadata_payload = platform_payload.get("metadata")
+                if not isinstance(metadata_payload, dict):
+                    metadata_payload = {}
+                metadata_payload.update(platform_metadata)
+                platform_payload["metadata"] = metadata_payload
+            else:
+                platform_payload["metadata"] = platform_metadata
         platform_payload["updated_at"] = _utc_now_iso()
         payload["platforms"][platform] = platform_payload
 
+    # A targeted multiplex-profile write must never preserve stale lifecycle
+    # claims from an old standalone gateway for that profile.
+    if platform_only:
+        payload = {
+            "pid": None,
+            "argv": None,
+            "start_time": None,
+            "platforms": payload.get("platforms", {}),
+        }
     _write_json_file(path, payload)
     try:
         from agent.monitoring.gateway_health import emit_runtime_status_transition
@@ -1417,11 +1496,9 @@ def get_runtime_status_running_pid(
     OS process identity.
 
     ``expected_home`` scopes the OS-identity check to a specific profile's
-    HERMES_HOME.  Pass it when validating *another* profile's state file (the
-    dashboard enumerating every profile): a stale record whose PID the OS has
-    recycled onto a different profile's live gateway must not be reported
-    running for the dead profile.  Omit it (the default) for the active
-    profile, where any live gateway command line is acceptable.
+    HERMES_HOME.  Pass it whenever the caller knows which profile/home the
+    runtime file belongs to.  A stale record whose PID now belongs to a
+    different profile's live gateway must not make this profile look running.
     """
     payload = runtime if runtime is not None else read_runtime_status()
     if not isinstance(payload, dict):
@@ -2281,9 +2358,10 @@ def get_running_pid(
     resolved_pid_path = pid_path or _get_pid_path()
     resolved_lock_path = _get_gateway_lock_path(resolved_pid_path)
     lock_active = is_gateway_runtime_lock_active(resolved_lock_path)
+    expected_home = resolved_pid_path.parent
     if not lock_active:
         if pid_path is None:
-            runtime_pid = get_runtime_status_running_pid()
+            runtime_pid = get_runtime_status_running_pid(expected_home=expected_home)
             if runtime_pid is not None:
                 return runtime_pid
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
@@ -2293,6 +2371,8 @@ def get_running_pid(
     fallback_record = _read_gateway_lock_record(resolved_lock_path)
 
     for record in (primary_record, fallback_record):
+        if record is None:
+            continue
         pid = _pid_from_record(record)
         if pid is None:
             continue
@@ -2305,12 +2385,12 @@ def get_running_pid(
         if recorded_start is not None and current_start is not None and current_start != recorded_start:
             continue
 
-        if _record_matches_live_gateway_pid(record, pid):
+        if _record_matches_live_gateway_pid(record, pid, expected_home=expected_home):
             return pid
 
     _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
     if pid_path is None:
-        runtime_pid = get_runtime_status_running_pid()
+        runtime_pid = get_runtime_status_running_pid(expected_home=expected_home)
         if runtime_pid is not None:
             return runtime_pid
     return None

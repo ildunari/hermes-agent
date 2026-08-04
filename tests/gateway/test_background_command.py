@@ -490,6 +490,7 @@ class TestRunBackgroundTask:
         mock_adapter.send.assert_called_once()
         assert mock_adapter.send.call_args.kwargs["metadata"] == {
             "thread_id": "20197",
+            "chat_type": "dm",
             "telegram_dm_topic_reply_fallback": True,
             "direct_messages_topic_id": "20197",
             "telegram_reply_to_message_id": "463",
@@ -510,8 +511,11 @@ class TestRunBackgroundTask:
             user_name="testuser",
         )
 
-        with patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}), \
-             patch("run_agent.AIAgent") as MockAgent:
+        runner._resolve_session_agent_runtime = MagicMock(
+            return_value=("test-model", {"api_key": "test-key"})
+        )
+
+        with patch("run_agent.AIAgent") as MockAgent:
             mock_agent_instance = MagicMock()
             mock_agent_instance.shutdown_memory_provider = MagicMock()
             mock_agent_instance.close = MagicMock()

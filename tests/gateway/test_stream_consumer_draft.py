@@ -163,6 +163,26 @@ class TestDraftStreamingHappyPath:
         assert sent_metadata.get("notify") is True
         assert "expect_edits" not in sent_metadata
 
+    @pytest.mark.asyncio
+    async def test_group_chat_skips_draft_path(self):
+        adapter = _make_draft_capable_adapter()
+        cfg = StreamConsumerConfig(
+            transport="auto", chat_type="group",
+            edit_interval=0.01, buffer_threshold=5, cursor="",
+        )
+        consumer = GatewayStreamConsumer(adapter, "67890", cfg)
+
+        consumer.on_delta("Group message")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.05)
+        consumer.finish()
+        await task
+
+        # Group chats skip drafts entirely — no send_draft calls at all.
+        assert adapter.draft_calls == []
+        # Edit-based path delivered via send (first message).
+        adapter.send.assert_awaited()
+
 
 class TestDraftFallbackOnFailure:
     """When a draft frame fails, the consumer disables drafts for the rest

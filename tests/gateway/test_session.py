@@ -1342,6 +1342,47 @@ class TestSessionCwdBindings:
         assert restored.to_dict()["cwd_override"] == "/tmp/project-b"
 
 
+class TestSessionCwdBindings:
+    def test_set_session_cwd_persists_and_survives_reset(self, tmp_path):
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._loaded = True
+
+        source = SessionSource(platform=Platform.TELEGRAM, chat_id="123", chat_type="dm")
+        entry = store.get_or_create_session(source)
+        session_key = entry.session_key
+
+        updated = store.set_session_cwd(session_key, "/tmp/project-a")
+        assert updated is not None
+        assert updated.cwd_override == "/tmp/project-a"
+        assert store.get_session(session_key) is not None
+        assert store.get_session(session_key).cwd_override == "/tmp/project-a"
+
+        reset_entry = store.reset_session(session_key)
+        assert reset_entry is not None
+        assert reset_entry.cwd_override == "/tmp/project-a"
+
+        switched = store.switch_session(session_key, "restored-session")
+        assert switched is not None
+        assert switched.cwd_override == "/tmp/project-a"
+
+    def test_session_entry_roundtrip_preserves_cwd_override(self):
+        payload = {
+            "session_key": "agent:main:telegram:dm:123",
+            "session_id": "sess-123",
+            "created_at": "2026-04-16T10:00:00",
+            "updated_at": "2026-04-16T10:05:00",
+            "platform": "telegram",
+            "chat_type": "dm",
+            "cwd_override": "/tmp/project-b",
+        }
+
+        restored = SessionEntry.from_dict(payload)
+        assert restored.cwd_override == "/tmp/project-b"
+        assert restored.to_dict()["cwd_override"] == "/tmp/project-b"
+
+
 class TestGatewaySessionDbRecovery:
     def test_compression_closed_parent_reroutes_without_retry_queue(self, tmp_path):
         import threading

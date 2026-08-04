@@ -349,6 +349,34 @@ def test_guest_policy_guard_fails_closed_before_tool_dispatch(monkeypatch, tmp_p
     assert result["requires_approval"] is True
 
 
+def test_env_guest_policy_is_ignored_under_multiplex(monkeypatch):
+    """A leaked process-global HERMES_GUEST_POLICY must not gate non-guest turns
+    in a multiplexed gateway; only the request-scoped ContextVar may."""
+    from agent.secret_scope import set_multiplex_active
+    from gateway.guest_access import guest_policy_context, is_guest_policy_enabled
+
+    monkeypatch.setenv("HERMES_GUEST_POLICY", "1")
+    set_multiplex_active(True)
+    try:
+        assert is_guest_policy_enabled() is False
+        with guest_policy_context(True):
+            assert is_guest_policy_enabled() is True
+        assert is_guest_policy_enabled() is False
+    finally:
+        set_multiplex_active(False)
+    # Single-profile (non-multiplex) processes keep the env-driven behavior.
+    assert is_guest_policy_enabled() is True
+
+
+def test_guest_policy_env_keys_are_profile_managed():
+    """Inherited HERMES_GUEST_POLICY/SANDBOX_ROOT are scrubbed at startup when
+    absent from the current profile's .env (cross-profile leak guard)."""
+    from hermes_cli.env_loader import _PROFILE_MANAGED_ENV_KEYS
+
+    assert "HERMES_GUEST_POLICY" in _PROFILE_MANAGED_ENV_KEYS
+    assert "HERMES_GUEST_SANDBOX_ROOT" in _PROFILE_MANAGED_ENV_KEYS
+
+
 def test_guest_terminal_blocks_dynamic_escapes(tmp_path):
     """Codex fix-lane review P1-4: lexical bypasses of the absolute-path scan
     must trip the dynamic-escape guard instead."""

@@ -545,7 +545,20 @@ def resolve_under_sandbox(path_value: Any, sandbox_root: Path | None = None) -> 
 
 
 def is_guest_policy_enabled() -> bool:
-    return _GUEST_POLICY_CONTEXT.get() or str(os.environ.get("HERMES_GUEST_POLICY") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if _GUEST_POLICY_CONTEXT.get():
+        return True
+    try:
+        from agent.secret_scope import is_multiplex_active
+
+        if is_multiplex_active():
+            # In a multiplexed gateway process the request-scoped ContextVar is
+            # authoritative. A process-global HERMES_GUEST_POLICY here is
+            # cross-profile leakage (e.g. the guest profile's .env loaded into
+            # shared os.environ) and must not gate owner/other-profile turns.
+            return False
+    except Exception:
+        pass
+    return str(os.environ.get("HERMES_GUEST_POLICY") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def evaluate_guest_tool_call(function_name: str, function_args: Mapping[str, Any] | None, sandbox_root: Path | None = None) -> GuestToolDecision:

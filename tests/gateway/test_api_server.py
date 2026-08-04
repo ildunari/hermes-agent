@@ -699,15 +699,6 @@ class TestHealthEndpoint:
             data = await resp.json()
             assert data["status"] == "ok"
             assert data["platform"] == "hermes-agent"
-    @pytest.mark.asyncio
-    async def test_health_returns_ok(self, adapter):
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            resp = await cli.get("/health")
-            assert resp.status == 200
-            data = await resp.json()
-            assert data["status"] == "ok"
-            assert data["platform"] == "hermes-agent"
 
     @pytest.mark.asyncio
     async def test_health_reports_version(self, adapter):

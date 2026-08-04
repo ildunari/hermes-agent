@@ -12,21 +12,53 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-from hermes_constants import get_hermes_home
+from hermes_constants import (
+    get_hermes_home,
+    reset_hermes_home_override,
+    set_hermes_home_override,
+)
 from hermes_time import now as _hermes_now
 
 EXECUTIONS_FILE = get_hermes_home().resolve() / "cron" / "executions.db"
+# Import-time snapshot so a deliberately re-pointed module constant (the
+# documented test/embedder escape hatch) is distinguishable from the constant
+# merely being stale for the active cron store.
+_IMPORT_EXECUTIONS_FILE = EXECUTIONS_FILE
 MAX_TERMINAL_EXECUTIONS = 1000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
 
 
+def _store_paths() -> "tuple[Path, Optional[Path]]":
+    """Return ``(db_path, profile_home)`` for the active cron store.
+
+    When ``EXECUTIONS_FILE`` has been re-pointed (tests/embedders), honor it
+    and leave config resolution on the ambient profile (``profile_home`` is
+    ``None``). Otherwise derive the ledger path from the active cron store so
+    a ``use_cron_store()``-scoped caller reads/writes ITS OWN profile's
+    ledger — and report that profile home so schema init can resolve
+    journal-mode config against the same profile instead of mkdir-ing the
+    ambient ``HERMES_HOME``.
+    """
+    if EXECUTIONS_FILE != _IMPORT_EXECUTIONS_FILE:
+        return EXECUTIONS_FILE, None
+    try:
+        from cron.jobs import _current_cron_store
+
+        store = _current_cron_store()
+    except Exception:
+        return EXECUTIONS_FILE, None
+    return store.cron_dir / "executions.db", store.cron_dir.parent
+
+
 def _connect() -> sqlite3.Connection:
-    EXECUTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(EXECUTIONS_FILE, timeout=5)
+    db_path, _ = _store_paths()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(db_path, timeout=5)
 
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
@@ -34,7 +66,19 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
 
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
-    apply_wal_with_fallback(conn, db_label="cron/executions.db")
+    # Resolve journal-mode config against the profile that owns this ledger:
+    # resolve_journal_mode() → load_config_readonly() → ensure_hermes_home()
+    # otherwise mkdirs the ambient HERMES_HOME even when the ledger belongs to
+    # an explicitly scoped profile store (profile-isolation decoy leak).
+    _, profile_home = _store_paths()
+    token = (
+        set_hermes_home_override(profile_home) if profile_home is not None else None
+    )
+    try:
+        apply_wal_with_fallback(conn, db_label="cron/executions.db")
+    finally:
+        if token is not None:
+            reset_hermes_home_override(token)
     conn.execute("PRAGMA synchronous=FULL")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS executions (

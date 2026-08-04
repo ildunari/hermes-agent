@@ -2521,6 +2521,89 @@ class GatewaySlashCommandsMixin:
         finally:
             event.text = original_text
 
+    @staticmethod
+    def _normalize_model_topic_label(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.strip().casefold().split())
+
+    def _configured_model_topic_aliases(self) -> dict[str, str]:
+        from gateway.run import _load_gateway_config
+
+        try:
+            cfg = _load_gateway_config() or {}
+        except Exception:
+            return {}
+        aliases: Any = None
+        telegram_cfg = cfg.get("telegram") if isinstance(cfg, dict) else None
+        if isinstance(telegram_cfg, dict):
+            aliases = telegram_cfg.get("model_topic_aliases")
+            if aliases is None and isinstance(telegram_cfg.get("extra"), dict):
+                aliases = telegram_cfg["extra"].get("model_topic_aliases")
+        if aliases is None and isinstance(cfg, dict):
+            platforms = cfg.get("platforms")
+            platform_cfg = platforms.get("telegram") if isinstance(platforms, dict) else None
+            if isinstance(platform_cfg, dict) and isinstance(platform_cfg.get("extra"), dict):
+                aliases = platform_cfg["extra"].get("model_topic_aliases")
+
+        def target_from_entry(entry: Any) -> str:
+            if isinstance(entry, str):
+                return entry.strip()
+            if not isinstance(entry, dict):
+                return ""
+            target = str(entry.get("target") or entry.get("alias") or "").strip()
+            if target:
+                return target
+            model = str(entry.get("model") or "").strip()
+            provider = str(entry.get("provider") or "").strip()
+            if not model:
+                return ""
+            return f"{model} --provider {provider}" if provider else model
+
+        result: dict[str, str] = {}
+        if isinstance(aliases, dict):
+            for label, entry in aliases.items():
+                normalized = self._normalize_model_topic_label(str(label))
+                target = target_from_entry(entry)
+                if normalized and target:
+                    result[normalized] = target
+        elif isinstance(aliases, list):
+            for entry in aliases:
+                if not isinstance(entry, dict):
+                    continue
+                target = target_from_entry(entry)
+                names = entry.get("names", [entry.get("name") or entry.get("label")])
+                if isinstance(names, str):
+                    names = [names]
+                if not target or not isinstance(names, list):
+                    continue
+                for label in names:
+                    normalized = self._normalize_model_topic_label(label)
+                    if normalized:
+                        result[normalized] = target
+        return result
+
+    async def _maybe_handle_model_topic_alias(self, event: MessageEvent) -> Optional[str]:
+        source = getattr(event, "source", None)
+        if not source or getattr(source, "platform", None) != Platform.TELEGRAM:
+            return None
+        if getattr(event, "message_type", MessageType.TEXT) != MessageType.TEXT:
+            return None
+        text = (getattr(event, "text", None) or "").strip()
+        if not text or text.startswith("/") or "\n" in text:
+            return None
+        target = self._configured_model_topic_aliases().get(
+            self._normalize_model_topic_label(text)
+        )
+        if not target:
+            return None
+        original_text = event.text
+        try:
+            event.text = f"/model {target}"
+            return await self._handle_model_command(event)
+        finally:
+            event.text = original_text
+
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /model command — switch model.
 
