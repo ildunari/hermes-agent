@@ -3036,21 +3036,31 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 model_config = {}
             model_config["_proactive_from"] = parent_session_id
             model_config["_proactive_kind"] = initiated_kind
+            columns = [
+                "id", "source", "user_id", "session_key", "chat_id", "chat_type",
+                "thread_id", "display_name", "origin_json", "model", "model_config",
+                "system_prompt", "parent_session_id", "started_at", "message_count",
+                "cwd", "git_branch", "git_repo_root",
+            ]
+            values = [
+                child_session_id, parent["source"], parent["user_id"],
+                None, parent["chat_id"], parent["chat_type"],
+                parent["thread_id"], parent["display_name"], parent["origin_json"],
+                parent["model"], json.dumps(model_config, sort_keys=True),
+                parent["system_prompt"], parent_session_id, when, 1,
+                parent["cwd"], parent["git_branch"], parent["git_repo_root"],
+            ]
+            # Schemas with the deduplicated system_prompts table keep the
+            # parent's prompt as a hash and NULL the raw column; the child
+            # must inherit the hash too or its resolved cache prompt would
+            # come back empty and break the byte-for-byte parent snapshot.
+            if "system_prompt_hash" in parent.keys():
+                columns.append("system_prompt_hash")
+                values.append(parent["system_prompt_hash"])
             conn.execute(
-                """INSERT INTO sessions(
-                   id,source,user_id,session_key,chat_id,chat_type,thread_id,
-                   display_name,origin_json,model,model_config,system_prompt,
-                   parent_session_id,started_at,message_count,cwd,
-                   git_branch,git_repo_root
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    child_session_id, parent["source"], parent["user_id"],
-                    None, parent["chat_id"], parent["chat_type"],
-                    parent["thread_id"], parent["display_name"], parent["origin_json"],
-                    parent["model"], json.dumps(model_config, sort_keys=True),
-                    parent["system_prompt"], parent_session_id, when, 1,
-                    parent["cwd"], parent["git_branch"], parent["git_repo_root"],
-                ),
+                "INSERT INTO sessions(" + ",".join(columns) + ") VALUES("
+                + ",".join("?" for _ in columns) + ")",
+                values,
             )
             conn.execute(
                 "INSERT INTO messages(session_id,role,content,timestamp,active,observed) "
