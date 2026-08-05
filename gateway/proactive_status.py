@@ -214,7 +214,18 @@ def health_snapshot(*, profile_home: str | Path, profile: str, config: Mapping[s
                 if last:
                     if last["state"] == "sent": result["last_success_at"] = float(last["updated_at"])
                     result["last_error_class"] = last["last_error_class"]
-                if result["deliveries"].get("failed", 0): result["reasons"].append("transport_failure_exhaustion")
+                recent_deliveries = con.execute(
+                    "SELECT state,updated_at FROM proactive_delivery ORDER BY updated_at DESC LIMIT ?",
+                    (cfg.circuit_breaker_failures,),
+                ).fetchall()
+                failed_states = {"failed", "delivery_unknown", "partial_delivery"}
+                if (
+                    len(recent_deliveries) >= cfg.circuit_breaker_failures
+                    and all(str(row["state"]) in failed_states for row in recent_deliveries)
+                    and timestamp - float(recent_deliveries[0]["updated_at"])
+                    < cfg.circuit_breaker_cooldown_seconds
+                ):
+                    result["reasons"].append("transport_failure_exhaustion")
                 projection_failures = int(con.execute(
                     "SELECT count(*) FROM proactive_delivery WHERE state='sent' AND projection_state!='complete'"
                 ).fetchone()[0])

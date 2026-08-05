@@ -70,6 +70,35 @@ def test_real_ingress_drift_and_extraction_health_fail_closed(tmp_path: Path):
     assert {'inbound_tracking_drift','extraction_worker_dead','extraction_queue_full'} <= set(status['reasons'])
 
 
+def test_transport_failure_health_tracks_active_circuit_window_not_all_history(tmp_path: Path):
+    raw=config(); cfg=ProactiveConfig.from_mapping(raw)
+    ProactiveScheduler(
+        state_db_path=tmp_path/'state.db',profile_home=tmp_path,
+        profile_name='poke',config=cfg,
+    )
+    with sqlite3.connect(tmp_path/'state.db') as con:
+        for index in range(cfg.circuit_breaker_failures):
+            con.execute(
+                "INSERT INTO proactive_delivery(slot_id,state,payload_hash,last_error_class,updated_at) "
+                "VALUES(?,?,?,?,?)",
+                (f'failed-{index}','failed',f'hash-{index}','route_auth_failed',4990 + index),
+            )
+
+    failed=health_snapshot(profile_home=tmp_path,profile='poke',config=raw,now=5001)
+    assert 'transport_failure_exhaustion' in failed['reasons']
+
+    with sqlite3.connect(tmp_path/'state.db') as con:
+        con.execute(
+            "INSERT INTO proactive_delivery(slot_id,state,payload_hash,last_error_class,updated_at) "
+            "VALUES(?,?,?,?,?)",
+            ('recovered','sent','recovery-hash','sent',5002),
+        )
+
+    recovered=health_snapshot(profile_home=tmp_path,profile='poke',config=raw,now=5003)
+    assert recovered['deliveries']['failed'] == cfg.circuit_breaker_failures
+    assert 'transport_failure_exhaustion' not in recovered['reasons']
+
+
 def test_status_reads_real_contact_store_and_matching_digest_paths(tmp_path: Path):
     raw=config(); cfg=ProactiveConfig.from_mapping(raw)
     scheduler=ProactiveScheduler(state_db_path=tmp_path/'state.db',profile_home=tmp_path,profile_name='poke',config=cfg)
