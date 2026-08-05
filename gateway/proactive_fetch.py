@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shutil
 import subprocess
 import sys
 import time
@@ -267,6 +268,17 @@ def discover_last30days_script(*, profile: str | None = None, home: Path | None 
     return None
 
 
+def _last30days_interpreter() -> str:
+    """Prefer a Python >= 3.12 interpreter; last30days v3 refuses older runtimes."""
+    if sys.version_info >= (3, 12):
+        return sys.executable
+    for name in ("python3.13", "python3.12"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return sys.executable
+
+
 class Last30DaysSubprocessSource:
     """Run the installed last30days engine with bounded stdout and no persistence."""
 
@@ -355,7 +367,7 @@ class Last30DaysSubprocessSource:
         script = self.script or discover_last30days_script(profile=self.profile)
         if script is None:
             return None
-        argv = [sys.executable, str(script), query, "--emit=json", "--quick", "--days", "10"]
+        argv = [_last30days_interpreter(), str(script), query, "--emit=json", "--quick", "--days", "10"]
         try:
             process = self.popen(
                 argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
