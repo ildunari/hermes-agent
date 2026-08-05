@@ -2991,8 +2991,8 @@ def _run_proactive_tick_once(
         operator_gate_bypass = bool(
             claim.payload.get("operator_smoke") is True
             and candidate_override is not None
-            and route.profile_name == "poke"
-            and route.contact_id == "kosta-owner"
+            and (route.profile_name, route.contact_id, route.principal)
+            in scheduler.config.allowed_contacts
             and str(claim.payload.get("route_commitment") or "")
             == scheduler.operator_route_commitment(route.as_dict())
         )

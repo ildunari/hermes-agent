@@ -1193,12 +1193,26 @@ class ProactiveScheduler:
                 (contact_hash, timestamp - 14 * _DAY),
             ).fetchone()[0])
 
-    def _eligibility_reason_in(self, con: sqlite3.Connection, contact_hash: str, kind: str, now: float) -> str | None:
+    def _eligibility_reason_in(
+        self,
+        con: sqlite3.Connection,
+        contact_hash: str,
+        kind: str,
+        now: float,
+        *,
+        operator_smoke: bool = False,
+    ) -> str | None:
         contact = con.execute(
             "SELECT * FROM proactive_contact WHERE contact_hash=?", (contact_hash,)
         ).fetchone()
         if contact is None or contact["profile_name"] != self.profile_name:
             return "unknown_or_foreign_contact"
+        if operator_smoke:
+            # Operator smokes are explicit audited diagnostics: identity must
+            # still match, but audience-pacing rules (recency, gaps, caps,
+            # unanswered strikes) do not apply, mirroring the existing
+            # active-hours override.
+            return None
         inbound_count = int(con.execute(
             "SELECT count(*) FROM proactive_inbound WHERE contact_hash=? AND received_at>=?",
             (contact_hash, now - 14 * _DAY),
@@ -1239,10 +1253,19 @@ class ProactiveScheduler:
             return "one_strike_unanswered"
         return None
 
-    def eligibility_reason(self, contact_hash: str, kind: str, *, now: float | None = None) -> str | None:
+    def eligibility_reason(
+        self,
+        contact_hash: str,
+        kind: str,
+        *,
+        now: float | None = None,
+        operator_smoke: bool = False,
+    ) -> str | None:
         timestamp = _finite(time.time() if now is None else now, "now")
         with self._connect() as con:
-            return self._eligibility_reason_in(con, contact_hash, kind, timestamp)
+            return self._eligibility_reason_in(
+                con, contact_hash, kind, timestamp, operator_smoke=operator_smoke
+            )
 
     def arm_slot(
         self,
@@ -1716,7 +1739,9 @@ class ProactiveScheduler:
             and not (start_h * 60 + start_m <= current <= end_h * 60 + end_m)
         ):
             return "outside_active_hours"
-        return self.eligibility_reason(claim.contact_hash, claim.kind, now=timestamp)
+        return self.eligibility_reason(
+            claim.contact_hash, claim.kind, now=timestamp, operator_smoke=operator_smoke
+        )
 
     def alarm_sink_probe_is_fresh(self, *, now: float | None = None) -> bool:
         timestamp = _finite(time.time() if now is None else now, "now")
