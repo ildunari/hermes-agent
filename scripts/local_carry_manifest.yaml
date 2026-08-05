@@ -186,6 +186,10 @@ checks:
     path: tools/daemon_pool.py
     needles: [_create_worker_context, worker_args]
     description: daemon executor supports both legacy initializer args and Python 3.14 worker contexts
+  - id: external-profile-cron-status-contract
+    path: hermes_cli/cron.py
+    needles: [_external_profile_ticker_state, ticker_external.json]
+    description: cron status recognizes the cadence and health evidence of the profile LaunchAgent ticker
   - id: restart-first-upgrade-idle-bridge
     path: hermes_cli/restart_surfaces.py
     needles: [_old_writer_requires_graceful_transition, owner-controlled graceful drain]

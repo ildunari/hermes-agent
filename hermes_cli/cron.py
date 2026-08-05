@@ -6,7 +6,9 @@ pause/resume/run/remove, status, and tick.
 """
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -214,6 +216,47 @@ def cron_runs(job_id: Optional[str] = None, limit: int = 20):
             print(f"    {record['error']}")
 
 
+def _external_profile_ticker_state() -> Optional[dict]:
+    """Return the explicit profile-LaunchAgent ticker contract, if installed.
+
+    This marker is intentionally distinct from the built-in gateway ticker's
+    heartbeat. A profile launchd wrapper runs every five minutes rather than
+    every 60 seconds, so reusing the native heartbeat threshold would report a
+    healthy external ticker as stalled.
+    """
+    home_raw = os.environ.get("HERMES_HOME")
+    if not home_raw:
+        return None
+    cron_dir = Path(home_raw).expanduser().resolve() / "cron"
+    contract_path = cron_dir / "ticker_external.json"
+    try:
+        contract = json.loads(contract_path.read_text())
+        if contract.get("kind") != "profile-launchd":
+            return None
+        updated_at = float(contract["updated_at"])
+        stale_after = max(60.0, float(contract["stale_after_seconds"]))
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+    now = time.time()
+    state = {
+        "healthy": max(0.0, now - updated_at) <= stale_after,
+        "contract_age": max(0.0, now - updated_at),
+        "stale_after": stale_after,
+        "interval": contract.get("interval_seconds"),
+    }
+    for key, filename in (
+        ("active", "ticker_active.json"),
+        ("last_result", "ticker_last_result.json"),
+        ("last_dispatch", "ticker_last_dispatch.json"),
+    ):
+        try:
+            state[key] = json.loads((cron_dir / filename).read_text())
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            state[key] = None
+    return state
+
+
 def cron_status():
     """Show cron execution status."""
     from cron.jobs import list_jobs
@@ -305,12 +348,52 @@ def cron_status():
             if hb_age is not None:
                 print(f"  Ticker heartbeat: {int(hb_age)}s ago")
     else:
-        print(color("✗ Gateway is not running — cron jobs will NOT fire", Colors.RED))
-        print()
-        print("  To enable automatic execution:")
-        print("    hermes gateway install    # Install as a user service")
-        print("    sudo hermes gateway install --system  # Linux servers: boot-time system service")
-        print("    hermes gateway            # Or run in foreground")
+        external = _external_profile_ticker_state()
+        if external is not None:
+            interval = external.get("interval") or "unknown"
+            active = external.get("active") or {}
+            last_result = external.get("last_result") or {}
+            last_failed = (
+                last_result.get("status") in {"error", "timeout"}
+                or (
+                    last_result.get("status") == "completed"
+                    and last_result.get("returncode") not in {None, 0}
+                )
+            )
+            if not external["healthy"]:
+                print(color(
+                    "⚠ External profile cron ticker looks STALLED — "
+                    f"no launchd dispatch for {int(external['contract_age'])}s.",
+                    Colors.YELLOW,
+                ))
+                print("  Cron jobs may NOT be firing. Check ai.hermes.cron-profiles.")
+            elif last_failed:
+                print(color(
+                    "⚠ External profile cron ticker is running, but its last "
+                    f"child tick {last_result.get('status')} "
+                    f"(exit {last_result.get('returncode')}).",
+                    Colors.YELLOW,
+                ))
+            else:
+                print(color(
+                    "✓ External profile cron ticker is running — jobs will fire automatically",
+                    Colors.GREEN,
+                ))
+            print(f"  LaunchAgent cadence: {interval}s")
+            print(f"  Last dispatch evidence: {int(external['contract_age'])}s ago")
+            if active.get("status") == "running":
+                try:
+                    age = max(0, int(time.time() - float(active["started_at"])))
+                except (KeyError, TypeError, ValueError):
+                    age = "unknown"
+                print(f"  Active child tick: {age}s")
+        else:
+            print(color("✗ Gateway is not running — cron jobs will NOT fire", Colors.RED))
+            print()
+            print("  To enable automatic execution:")
+            print("    hermes gateway install    # Install as a user service")
+            print("    sudo hermes gateway install --system  # Linux servers: boot-time system service")
+            print("    hermes gateway            # Or run in foreground")
 
     print()
 
