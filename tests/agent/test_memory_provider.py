@@ -160,6 +160,39 @@ class TestMemoryManager:
         assert len(mgr.providers) == 1
         assert [p.name for p in mgr.providers] == ["test1"]
 
+    def test_tools_only_manager_routes_tools_without_passive_memory(self):
+        provider = FakeMemoryProvider(
+            "external",
+            tools=[{"name": "mem0_search", "description": "search"}],
+        )
+        provider._prompt_block = "provider memory prompt"
+        provider._prefetch_result = "recalled memory"
+        mgr = MemoryManager(tools_only=True)
+        mgr.add_provider(provider)
+
+        assert mgr.build_system_prompt() == ""
+        assert mgr.prefetch_all("cron harness prompt") == ""
+        mgr.on_turn_start(1, "cron harness prompt")
+        mgr.queue_prefetch_all("cron harness prompt")
+        mgr.sync_all("cron harness prompt", "cron output")
+        mgr.on_session_end([{"role": "user", "content": "cron harness prompt"}])
+        assert mgr.on_pre_compress([]) == ""
+        mgr.on_memory_write("add", "memory", "implicit bridge write")
+        mgr.flush_pending(timeout=1)
+
+        assert provider.prefetch_queries == []
+        assert provider.queued_prefetches == []
+        assert provider.synced_turns == []
+        assert provider.turn_starts == []
+        assert provider.session_end_called is False
+        assert provider.pre_compress_called is False
+        assert provider.memory_writes == []
+        assert mgr.has_tool("mem0_search")
+        assert json.loads(mgr.handle_tool_call("mem0_search", {"query": "fact"})) == {
+            "handled": "mem0_search",
+            "args": {"query": "fact"},
+        }
+
     def test_get_provider_by_name(self):
         mgr = MemoryManager()
         p = FakeMemoryProvider("test1")

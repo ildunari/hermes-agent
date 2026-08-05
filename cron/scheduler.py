@@ -162,26 +162,19 @@ class CronPromptInjectionBlocked(Exception):
     """
 
 
-def _cron_job_needs_memory_provider(job: dict) -> bool:
-    """Return True when a cron job explicitly needs memory-provider tools.
+def _cron_job_needs_memory_provider(
+    job: dict,
+    disabled_toolsets: Optional[list[str]] = None,
+) -> bool:
+    """Return whether a job explicitly authorizes provider-memory tools.
 
-    Cron normally skips memory so scheduler prompts do not pollute the compact
-    built-in MEMORY.md / USER.md hot cache. mem0-first/logbook jobs are different:
-    they explicitly need provider tools such as mem0_search, mem0_conclude, and
-    mem0_add_document, so blocking all memory at agent construction makes those
-    jobs false-success no-ops.
+    Names, prompts, and attached skills are intentionally ignored: merely
+    discussing Mem0 must never opt an automation into reading or writing user
+    memory. The job must explicitly enable ``memory`` and the denylist wins.
     """
-    enabled_toolsets = job.get("enabled_toolsets") or []
-    if "memory" in enabled_toolsets:
-        return True
-    haystack_parts = [
-        str(job.get("name") or ""),
-        str(job.get("prompt") or ""),
-        str(job.get("skill") or ""),
-        " ".join(str(s) for s in (job.get("skills") or [])),
-    ]
-    haystack = "\n".join(haystack_parts).lower()
-    return "mem0" in haystack or "memory harvest" in haystack
+    enabled = {str(value).strip().lower() for value in (job.get("enabled_toolsets") or [])}
+    disabled = {str(value).strip().lower() for value in (disabled_toolsets or [])}
+    return "memory" in enabled and "memory" not in disabled
 
 
 def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
@@ -3595,6 +3588,12 @@ def run_job(
                 job_id, _mcp_exc,
             )
 
+        _cron_enabled_toolsets = _resolve_cron_enabled_toolsets(job, _cfg)
+        _cron_disabled_toolsets = _resolve_cron_disabled_toolsets(_cfg)
+        _memory_provider_tools_only = _cron_job_needs_memory_provider(
+            job,
+            _cron_disabled_toolsets,
+        )
         agent = AIAgent(
             model=model,
             api_key=runtime.get("api_key"),
@@ -3614,8 +3613,8 @@ def run_job(
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
             openrouter_min_coding_score=(_cfg.get("openrouter") or {}).get("min_coding_score"),
-            enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
-            disabled_toolsets=_resolve_cron_disabled_toolsets(_cfg),
+            enabled_toolsets=_cron_enabled_toolsets,
+            disabled_toolsets=_cron_disabled_toolsets,
             quiet_mode=True,
             # Cron jobs should always inherit the user's SOUL.md identity from
             # HERMES_HOME. When a workdir is configured, also inject project
@@ -3623,7 +3622,11 @@ def run_job(
             # Without a workdir, keep cwd context discovery disabled.
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
-            skip_memory=True,  # Cron system prompts would corrupt user representations
+            # Cron always suppresses passive memory recall/capture. A job that
+            # explicitly enables non-denied memory gets only callable provider
+            # tools such as mem0_search and mem0_conclude.
+            skip_memory=True,
+            memory_provider_tools_only=_memory_provider_tools_only,
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,

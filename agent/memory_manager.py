@@ -407,10 +407,16 @@ class MemoryManager:
         recall_policy_config: Optional[Dict[str, Any]] = None,
         *,
         external_prefetch_timeout: Optional[float] = None,
+        tools_only: bool = False,
     ) -> None:
         self._providers: List[MemoryProvider] = []
         self._tool_to_provider: Dict[str, MemoryProvider] = {}
         self._has_external: bool = False  # True once a non-builtin provider is added
+        # Tool-only managers initialize and route provider tools but suppress
+        # passive recall, prompt injection, lifecycle hooks, and automatic
+        # writes. Isolated maintenance agents can therefore call mem0_* tools
+        # deliberately without storing their own harness prompt or output.
+        self._tools_only = bool(tools_only)
         self._recall_policy = MemoryRecallPolicy(
             MemoryRecallConfig.from_mapping(recall_policy_config or {})
         )
@@ -588,6 +594,8 @@ class MemoryManager:
         Returns combined text, or empty string if no providers contribute.
         Each non-empty block is labeled with the provider name.
         """
+        if self._tools_only:
+            return ""
         blocks = []
         for provider in self._providers:
             try:
@@ -629,6 +637,8 @@ class MemoryManager:
         through a skipped/trivial turn, it can become stale and surface later in
         the wrong topic.
         """
+        if self._tools_only:
+            return ""
         providers = list(self._providers)
         if not providers:
             return ""
@@ -766,6 +776,8 @@ class MemoryManager:
         wedged provider can never block the caller. See ``sync_all`` for
         the full rationale (agent stuck "running" minutes after a turn).
         """
+        if self._tools_only:
+            return
         providers = list(self._providers)
         if not providers:
             return
@@ -919,6 +931,8 @@ class MemoryManager:
         before turn N+1; provider implementations don't need their own
         ordering guarantees.
         """
+        if self._tools_only:
+            return
         providers = list(self._providers)
         if not providers:
             return
@@ -1112,6 +1126,8 @@ class MemoryManager:
 
         kwargs may include: remaining_tokens, model, platform, tool_count.
         """
+        if self._tools_only:
+            return
         try:
             self._recall_policy.on_turn_start(turn_number, message)
         except Exception as e:
@@ -1129,6 +1145,8 @@ class MemoryManager:
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Notify all providers of session end."""
+        if self._tools_only:
+            return
         for provider in self._providers:
             try:
                 provider.on_session_end(messages)
@@ -1167,7 +1185,7 @@ class MemoryManager:
         ``_submit_background`` degrades to inline execution — the pre-#16454
         synchronous behavior, slow but correct.
         """
-        if not self._providers:
+        if self._tools_only or not self._providers:
             return
         snapshot = list(messages or [])
 
@@ -1212,7 +1230,7 @@ class MemoryManager:
         transcript was truncated; providers caching per-turn document
         state should invalidate.
         """
-        if not new_session_id:
+        if self._tools_only or not new_session_id:
             return
         self._recall_policy.reset()
         self._session_id = str(new_session_id)
@@ -1244,6 +1262,8 @@ class MemoryManager:
         Returns combined text from providers to include in the compression
         summary prompt. Empty string if no provider contributes.
         """
+        if self._tools_only:
+            return ""
         parts = []
         for provider in self._providers:
             try:
@@ -1294,6 +1314,8 @@ class MemoryManager:
 
         Skips the builtin provider itself (it's the source of the write).
         """
+        if self._tools_only:
+            return
         for provider in self._providers:
             if provider.name == "builtin":
                 continue
@@ -1360,7 +1382,7 @@ class MemoryManager:
         session/task/tool-call provenance the manager does not) invoked once per
         mirrored op.
         """
-        if not self._memory_tool_result_succeeded(tool_result):
+        if self._tools_only or not self._memory_tool_result_succeeded(tool_result):
             return
 
         target = str(tool_args.get("target") or "memory")
@@ -1397,6 +1419,8 @@ class MemoryManager:
     def on_delegation(self, task: str, result: str, *,
                       child_session_id: str = "", **kwargs) -> None:
         """Notify all providers that a subagent completed."""
+        if self._tools_only:
+            return
         for provider in self._providers:
             try:
                 provider.on_delegation(
