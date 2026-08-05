@@ -1000,6 +1000,14 @@ class ProactivePipeline:
             composed = finalize_proactive_output(self.compose(request))
         except Exception:
             composed = ComposeResult(False, "compose_error")
+        if not composed.allowed and operator_gate_bypass and candidate_override is not None:
+            # Operator smokes are audited transport diagnostics; a model veto or
+            # compose failure must not make the smoke nondeterministic.  Fall
+            # back to fixed text derived from the operator-supplied candidate.
+            composed = ComposeResult(
+                True, "operator_smoke_compose_fallback",
+                "Hermes operator smoke: " + candidate.concrete_item,
+            )
         if not composed.allowed:
             _record_terminal(
                 store, send_id=send_id, interest_id=interest.interest_id if interest else None,
