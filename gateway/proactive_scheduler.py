@@ -511,7 +511,11 @@ class ProactiveMode(str, Enum):
     LIVE = "live"
 
 
-_EXACT_ALLOWLIST = frozenset({("poke", "kosta-owner", "owner"), ("guest", "stephen-lucier", "guest")})
+_EXACT_ALLOWLIST = frozenset({
+    ("poke", "kosta-owner", "owner"),
+    ("guest", "stephen-lucier", "guest"),
+    ("guest", "mom", "guest"),
+})
 
 
 @dataclass(frozen=True)
@@ -548,8 +552,11 @@ class ProactiveConfig:
             raise ValueError("live mode requires enabled=true")
         if self.transport_owner_profile != "poke":
             raise ValueError("Poke must own proactive transport")
-        if self.enabled and self.mode in {ProactiveMode.OBSERVE, ProactiveMode.LIVE} and frozenset(self.allowed_contacts) != _EXACT_ALLOWLIST:
-            raise ValueError("proactive allowlist must contain exactly Kosta owner and Stephen")
+        allowed = frozenset(self.allowed_contacts)
+        if self.enabled and self.mode in {ProactiveMode.OBSERVE, ProactiveMode.LIVE} and (
+            not allowed or not allowed <= _EXACT_ALLOWLIST
+        ):
+            raise ValueError("proactive allowlist must be drawn from the approved contact set")
         if self.min_gap_hours < 48:
             raise ValueError("min_gap_hours cannot be below 48")
         if self.weekly_interest_cap > self.weekly_total_cap:

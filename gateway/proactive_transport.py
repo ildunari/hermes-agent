@@ -10,7 +10,11 @@ from gateway.proactive_scheduler import ContactRoute, ProactiveOwnershipRegistry
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED = frozenset({("poke", "kosta-owner", "owner"), ("guest", "stephen-lucier", "guest")})
+_ALLOWED = frozenset({
+    ("poke", "kosta-owner", "owner"),
+    ("guest", "stephen-lucier", "guest"),
+    ("guest", "mom", "guest"),
+})
 
 
 @dataclass(frozen=True)
@@ -73,7 +77,7 @@ class BlueBubblesProactiveDelivery:
         authenticated = await resolver(route.chat_id, expected)
         if not authenticated:
             self.ownership_registry.open_circuit("participant_auth_failed", now=now)
-            return ProactiveTransportResult("failed", False, retryable=False, error_class="route_auth_failed")
+            return None, ProactiveTransportResult("failed", False, retryable=False, error_class="route_auth_failed")
         guid, fingerprint = authenticated
         if self.scheduler is None or not self.scheduler.bind_route_fingerprint(route, fingerprint):
             self.ownership_registry.open_circuit("route_fingerprint_mismatch", now=now)

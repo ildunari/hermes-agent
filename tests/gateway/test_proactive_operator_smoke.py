@@ -86,7 +86,7 @@ def test_command_arms_tagged_observe_slot_for_bound_exact_dm(tmp_path: Path):
 
 
 def test_command_refuses_wrong_contact_and_missing_confirmation(tmp_path: Path):
-    with pytest.raises(ValueError, match="exact fixed contact"):
+    with pytest.raises(ValueError, match="fixed contacts"):
         arm_operator_smoke(
             profile_home=tmp_path,
             profile="poke",

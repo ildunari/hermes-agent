@@ -24,7 +24,7 @@ from gateway.proactive_scheduler import (
     request_proactive_wake,
 )
 
-_EXACT_CONTACT = {"poke": "kosta-owner", "guest": "stephen-lucier"}
+_EXACT_CONTACT = {"poke": {"kosta-owner"}, "guest": {"stephen-lucier", "mom"}}
 
 
 def _operator_candidate(now: float) -> dict[str, Any]:
@@ -48,9 +48,9 @@ def arm_operator_smoke(
 ) -> dict[str, Any]:
     """Create one immediate tagged slot for the profile's fixed existing DM."""
     resolved_profile = str(profile).strip()
-    expected_contact = _EXACT_CONTACT.get(resolved_profile)
-    if expected_contact is None or contact_id != expected_contact:
-        raise ValueError("operator smoke requires the profile's exact fixed contact")
+    expected_contacts = _EXACT_CONTACT.get(resolved_profile) or set()
+    if contact_id not in expected_contacts:
+        raise ValueError("operator smoke requires one of the profile's fixed contacts")
     if not confirmed:
         raise PermissionError("explicit --confirm-arm is required")
     home = Path(profile_home).expanduser().resolve()
