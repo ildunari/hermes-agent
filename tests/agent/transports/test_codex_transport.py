@@ -75,6 +75,21 @@ class TestCodexBuildKwargs:
         )
         assert kw1["prompt_cache_key"] == kw2["prompt_cache_key"]
 
+    def test_cache_key_differs_across_unrelated_sessions(self, transport):
+        """#78941: two unrelated sessions (different users/conversations)
+        sharing the same static prefix must NOT collapse onto the same
+        prompt_cache_key — session_id scopes the hash unless it is a cron
+        per-fire id, which is normalized to its stable job prefix instead."""
+        messages = [{"role": "user", "content": "Hi"}]
+        kw1 = transport.build_kwargs(
+            model="gpt-5.4", messages=messages, tools=[],
+            session_id="session_alice_1",
+        )
+        kw2 = transport.build_kwargs(
+            model="gpt-5.4", messages=messages, tools=[],
+            session_id="session_bob_1",
+        )
+        assert kw1["prompt_cache_key"] != kw2["prompt_cache_key"]
 
     def test_github_responses_drops_message_item_id_end_to_end(self, transport):
         # #32716: Copilot binds codex_message_items ids to a backend
@@ -373,16 +388,24 @@ class TestCodexBuildKwargs:
             max_tokens=4096,
         )
         assert kw.get("max_output_tokens") == 4096
-    def test_max_tokens(self, transport):
+
+    def test_xai_top_level_override_also_governs_extra_body(self, transport):
+        """A caller's top-level request_overrides={"prompt_cache_key": ...}
+        must win in extra_body.prompt_cache_key too -- the field xAI actually
+        reads -- instead of being silently outrun by the auto-derived
+        content-hash cache_key (#78941)."""
         messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
-            model="gpt-5.4", messages=messages, tools=[],
-            max_tokens=4096,
+            model="grok-4.3", messages=messages, tools=[],
+            session_id="conv-xai-1",
+            is_xai_responses=True,
+            request_overrides={"prompt_cache_key": "caller-top-level"},
         )
-        assert kw.get("max_output_tokens") == 4096
+        assert kw["prompt_cache_key"] == "caller-top-level"
+        assert kw["extra_body"]["prompt_cache_key"] == "caller-top-level"
 
-
-
+    def test_codex_backend_uses_raw_session_and_content_cache_headers(self, transport):
+        messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
             model="gpt-5.4",
             messages=messages,
@@ -400,7 +423,7 @@ class TestCodexBuildKwargs:
         assert headers.get("x-client-request-id") == kw["prompt_cache_key"]
         assert headers.get("x-client-request-id") != "conv-codex-1"
 
-    def test_codex_backend_hashes_overlength_cache_routing_headers(self, transport):
+    def test_codex_backend_preserves_overlength_session_header(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
         long_session_id = "paperclip:company:" + "a" * 80
 
@@ -413,67 +436,63 @@ class TestCodexBuildKwargs:
         )
 
         headers = kw["extra_headers"]
-        cache_scope = headers["session_id"]
-        assert cache_scope.startswith("pck_")
-        assert len(cache_scope) <= 64
-        assert cache_scope != long_session_id
+        assert headers["session_id"] == long_session_id
         assert kw["prompt_cache_key"].startswith("pck_")
         assert len(kw["prompt_cache_key"]) <= 64
         assert headers["x-client-request-id"] == kw["prompt_cache_key"]
-        kw = transport.build_kwargs(
-            model="gpt-5.4",
-            messages=messages,
-            tools=[],
-            session_id="conv-codex-1",
-            is_codex_backend=True,
-        )
-
-        headers = kw.get("extra_headers", {})
-        assert headers.get("session_id") == "conv-codex-1"
-        assert headers.get("x-client-request-id") == "conv-codex-1"
-
-    def test_codex_backend_hashes_overlength_cache_routing_headers(self, transport):
-        messages = [{"role": "user", "content": "Hi"}]
-        long_session_id = "paperclip:company:" + "a" * 80
-
-        kw = transport.build_kwargs(
-            model="gpt-5.4",
-            messages=messages,
-            tools=[],
-            session_id=long_session_id,
-            is_codex_backend=True,
-        )
-
-        headers = kw["extra_headers"]
-        cache_scope = headers["session_id"]
-        assert cache_scope == headers["x-client-request-id"]
-        assert cache_scope.startswith("pck_")
-        assert len(cache_scope) <= 64
-        assert cache_scope != long_session_id
-        assert kw["prompt_cache_key"].startswith("pck_")
-        assert len(kw["prompt_cache_key"]) <= 64
 
     @pytest.mark.parametrize("length", [64, 65])
     def test_codex_cache_scope_boundary(self, transport, length):
         session_id = "s" * length
-        scope = transport.build_kwargs(
+        kw = transport.build_kwargs(
             model="gpt-5.4",
             messages=[{"role": "user", "content": "Hi"}],
             tools=[],
             session_id=session_id,
             is_codex_backend=True,
             request_overrides={"extra_headers": {"x-test": "1"}},
+        )
+        headers = kw["extra_headers"]
+
+        assert headers["x-test"] == "1"
+        # session_id header carries the raw physical id untouched regardless
+        # of length (#57012); x-client-request-id mirrors the body's
+        # effective (already-bounded) prompt_cache_key.
+        assert headers["session_id"] == session_id
+        assert headers["x-client-request-id"] == kw["prompt_cache_key"]
+        assert len(headers["x-client-request-id"]) <= 64
+
+    def test_codex_cache_scope_headers_normalize_cron_session_id(self, transport):
+        """x-client-request-id shares a cache scope across cron re-fires of the
+        same job (cron per-fire timestamp stripped, same as prompt_cache_key),
+        while session_id stays the raw per-fire physical id (#57012)."""
+        first_run = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            session_id="cron_job42_20260801_090000",
+            is_codex_backend=True,
+        )["extra_headers"]
+        second_run = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            session_id="cron_job42_20260802_090000",
+            is_codex_backend=True,
+        )["extra_headers"]
+        other_job = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            session_id="cron_job99_20260801_090000",
+            is_codex_backend=True,
         )["extra_headers"]
 
-        assert scope["x-test"] == "1"
-        assert len(scope["session_id"]) <= 64
-        assert scope["x-client-request-id"].startswith("pck_")
-        if length == 64:
-            assert scope["session_id"] == session_id
-        else:
-            assert scope["session_id"].startswith("pck_")
-            assert scope["session_id"] != session_id
-
+        assert first_run["session_id"] == "cron_job42_20260801_090000"
+        assert second_run["session_id"] == "cron_job42_20260802_090000"
+        assert first_run["x-client-request-id"].startswith("pck_")
+        assert first_run["x-client-request-id"] == second_run["x-client-request-id"]
+        assert first_run["x-client-request-id"] != other_job["x-client-request-id"]
 
 
 
@@ -595,103 +614,16 @@ class TestCodexBuildKwargs:
             reasoning_config={"enabled": True, "effort": effort},
         )
         assert kw.get("reasoning") == {"effort": "high"}
-    def test_codex_backend_preserves_caller_extra_headers(self, transport):
-        messages = [{"role": "user", "content": "Hi"}]
 
-        kw = transport.build_kwargs(
-            model="gpt-5.4",
-            messages=messages,
-            tools=[],
-            session_id="conv-codex-1",
-            is_codex_backend=True,
-            request_overrides={"extra_headers": {"x-test": "1"}},
-        )
-
-        headers = kw.get("extra_headers", {})
-        assert headers.get("x-test") == "1"
-        assert headers.get("session_id") == "conv-codex-1"
-        assert headers.get("x-client-request-id") == "conv-codex-1"
-
-    def test_non_codex_responses_preserves_caller_extra_headers(self, transport):
-        messages = [{"role": "user", "content": "Hi"}]
-
-        kw = transport.build_kwargs(
-            model="gpt-5.4",
-            messages=messages,
-            tools=[],
-            is_codex_backend=False,
-            request_overrides={"extra_headers": {"x-test": "1"}},
-        )
-
-        assert kw["extra_headers"] == {"x-test": "1"}
-
-    def test_xai_headers(self, transport):
-        messages = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="grok-3", messages=messages, tools=[],
-            session_id="conv-123",
-            is_xai_responses=True,
-        )
-        assert kw.get("extra_headers", {}).get("x-grok-conv-id") == "conv-123"
-
-    def test_xai_headers_preserve_request_override_headers(self, transport):
-        messages = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="grok-3", messages=messages, tools=[],
-            session_id="conv-123",
-            is_xai_responses=True,
-            request_overrides={"extra_headers": {"X-Test": "1", "X-Trace": "abc"}},
-        )
-        assert kw.get("extra_headers") == {
-            "X-Test": "1",
-            "X-Trace": "abc",
-            "x-grok-conv-id": "conv-123",
-        }
-
-    def test_minimal_effort_clamped(self, transport):
-        messages = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="gpt-5.4", messages=messages, tools=[],
-            reasoning_config={"effort": "minimal"},
-        )
-        # "minimal" should be clamped to "low"
-        assert kw.get("reasoning", {}).get("effort") == "low"
-
-    def test_xai_reasoning_effort_passed(self, transport):
-        messages = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="grok-4.3", messages=messages, tools=[],
-            is_xai_responses=True,
-            reasoning_config={"effort": "high"},
-        )
-        # xAI Responses receives reasoning.effort on the allowlisted models.
-        assert kw.get("reasoning") == {"effort": "high"}
-        # As of May 2026 (post-revert of PR #26644) we DO request
-        # reasoning.encrypted_content back from xAI so we can replay it
-        # across turns for cross-turn coherence — xAI explicitly relies
-        # on this for their partnership integration.  See
-        # tests/run_agent/test_codex_xai_oauth_recovery.py for the
-        # full history.
-        assert "reasoning.encrypted_content" in kw.get("include", [])
-
-    @pytest.mark.parametrize("effort", ["xhigh", "max", "ultra"])
-    def test_xai_stronger_generic_efforts_clamp_to_high(self, transport, effort):
-        kw = transport.build_kwargs(
-            model="grok-4.3",
-            messages=[{"role": "user", "content": "Hi"}],
-            tools=[],
-            is_xai_responses=True,
-            reasoning_config={"enabled": True, "effort": effort},
-        )
-        assert kw.get("reasoning") == {"effort": "high"}
-
-    def test_xai_injects_native_web_search_when_client_web_search_present(self, transport):
-        """xAI path swaps a client-side ``web_search`` function for xAI's
-        native server-side ``web_search`` built-in so grok server-side search
-        runs to completion (otherwise the turn stalls as
-        reasoning-with-no-answer -> false 'incomplete' -> 3 retries -> fail).
+    def test_xai_injects_native_web_search_when_client_web_search_present(self, transport, monkeypatch):
+        """When the active/configured search backend is xAI, swap client
+        ``web_search`` for Grok's native built-in so server-side search
+        completes (otherwise the turn stalls as incomplete → 3 retries).
         Non-conflicting client tools are preserved.
         """
+        import agent.transports.codex as codex_mod
+
+        monkeypatch.setattr(codex_mod, "_xai_prefers_native_web_search", lambda: True)
         messages = [{"role": "user", "content": "Find current prices."}]
         kw = transport.build_kwargs(
             model="grok-composer-2.5-fast", messages=messages,
@@ -712,6 +644,71 @@ class TestCodexBuildKwargs:
         # Non-conflicting client-side tools are preserved.
         names = [t.get("name") for t in kw.get("tools", []) if t.get("type") == "function"]
         assert "read_file" in names
+        assert "web_search" not in names
+        assert "hermes_web_search" not in names
+
+    def test_xai_renames_client_web_search_when_firecrawl_configured(self, transport, monkeypatch):
+        """Configured Firecrawl (or any non-xai backend) must keep Hermes
+        dispatch — rename the wire tool so Grok cannot hijack ``web_search``.
+        """
+        import agent.transports.codex as codex_mod
+
+        monkeypatch.setattr(codex_mod, "_xai_prefers_native_web_search", lambda: False)
+        messages = [{"role": "user", "content": "Find current prices."}]
+        kw = transport.build_kwargs(
+            model="grok-4.5", messages=messages,
+            tools=[
+                {"type": "function", "function": {
+                    "name": "read_file", "description": "Read a file.",
+                    "parameters": {"type": "object",
+                                   "properties": {"path": {"type": "string"}}}}},
+                {"type": "function", "function": {
+                    "name": "web_search", "description": "Search the web.",
+                    "parameters": {"type": "object",
+                                   "properties": {"query": {"type": "string"}}}}},
+            ],
+            is_xai_responses=True,
+        )
+        tools = kw.get("tools", [])
+        assert not any(t.get("type") == "web_search" for t in tools), tools
+        names = [t.get("name") for t in tools if t.get("type") == "function"]
+        assert "read_file" in names
+        assert "hermes_web_search" in names
+        assert "web_search" not in names
+
+    def test_xai_normalize_maps_client_web_search_alias_back(self, transport, monkeypatch):
+        """Alias used on the wire must become ``web_search`` for Hermes dispatch."""
+        import agent.transports.codex as codex_mod
+
+        msg = SimpleNamespace(
+            content=None,
+            reasoning=None,
+            tool_calls=[
+                SimpleNamespace(
+                    id="call_1",
+                    call_id="call_1",
+                    response_item_id="fc_1",
+                    function=SimpleNamespace(
+                        name=codex_mod._XAI_CLIENT_WEB_SEARCH_ALIAS,
+                        arguments='{"query":"hermes"}',
+                    ),
+                )
+            ],
+            codex_reasoning_items=None,
+            codex_message_items=None,
+            reasoning_details=None,
+        )
+        response = SimpleNamespace(output=[], status="completed")
+
+        monkeypatch.setattr(
+            "agent.codex_responses_adapter._normalize_codex_response",
+            lambda resp, issuer_kind=None: (msg, "tool_calls"),
+        )
+        normalized = transport.normalize_response(response)
+
+        assert normalized.tool_calls is not None
+        assert len(normalized.tool_calls) == 1
+        assert normalized.tool_calls[0].name == "web_search"
 
     def test_xai_does_not_inject_native_web_search_without_client_web_search(self, transport):
         """The native ``web_search`` built-in is a 1:1 swap for an
@@ -755,8 +752,6 @@ class TestCodexBuildKwargs:
             for t in tools
         )
 
-
-
     # --- Grok reasoning-effort capability allowlist ---
     # api.x.ai 400s with "Model X does not support parameter reasoningEffort"
     # on grok-4 / grok-4-fast / grok-3 / grok-code-fast / grok-4.20-0309-*.
@@ -764,10 +759,6 @@ class TestCodexBuildKwargs:
     # must omit the `reasoning` key for them.  As of May 2026 we DO request
     # ``reasoning.encrypted_content`` back from xAI on every model —
     # see test_xai_reasoning_effort_passed for the rationale.
-
-
-
-
 
     def test_xai_grok_4_20_0309_variants_omit_reasoning_effort(self, transport):
         """grok-4.20-0309-(non-)reasoning reject the effort dial.
@@ -803,16 +794,65 @@ class TestCodexBuildKwargs:
             reasoning_config={"effort": "high"},
         )
         assert "reasoning" not in kw
-    def test_xai_grok_code_fast_omits_reasoning_effort(self, transport):
-        """grok-code-fast-1 rejects reasoning.effort."""
-        messages = [{"role": "user", "content": "Hi"}]
-        kw = transport.build_kwargs(
-            model="grok-code-fast-1", messages=messages, tools=[],
-            is_xai_responses=True,
-            reasoning_config={"effort": "high"},
-        )
-        assert "reasoning" not in kw
 
+
+class TestXaiWebSearchBackendPreference:
+    """``_xai_prefers_native_web_search`` must honor web backend config."""
+
+    def test_explicit_firecrawl_prefers_client(self, monkeypatch):
+        import agent.transports.codex as codex_mod
+
+        monkeypatch.setattr(
+            "agent.web_search_registry.get_active_search_provider",
+            lambda: SimpleNamespace(name="firecrawl"),
+        )
+        assert codex_mod._xai_prefers_native_web_search() is False
+
+    def test_explicit_search_backend_xai_prefers_native(self, monkeypatch):
+        import agent.transports.codex as codex_mod
+
+        monkeypatch.setattr(
+            "agent.web_search_registry.get_active_search_provider",
+            lambda: SimpleNamespace(name="xai"),
+        )
+        assert codex_mod._xai_prefers_native_web_search() is True
+
+    def test_resolved_non_xai_provider_prefers_client(self, monkeypatch):
+        import agent.transports.codex as codex_mod
+
+        monkeypatch.setattr(
+            "agent.web_search_registry.get_active_search_provider",
+            lambda: SimpleNamespace(name="firecrawl"),
+        )
+        assert codex_mod._xai_prefers_native_web_search() is False
+
+    def test_no_provider_legacy_fallback_xai(self, monkeypatch):
+        """When no provider is registered, fall back to _get_search_backend."""
+        import agent.transports.codex as codex_mod
+
+        monkeypatch.setattr(
+            "agent.web_search_registry.get_active_search_provider",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "tools.web_tools._get_search_backend",
+            lambda: "xai",
+        )
+        assert codex_mod._xai_prefers_native_web_search() is True
+
+    def test_no_provider_legacy_fallback_non_xai(self, monkeypatch):
+        """When no provider is registered and backend isn't xai, keep client."""
+        import agent.transports.codex as codex_mod
+
+        monkeypatch.setattr(
+            "agent.web_search_registry.get_active_search_provider",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "tools.web_tools._get_search_backend",
+            lambda: "firecrawl",
+        )
+        assert codex_mod._xai_prefers_native_web_search() is False
 
 
 class TestCodexValidateResponse:

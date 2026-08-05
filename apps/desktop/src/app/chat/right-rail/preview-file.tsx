@@ -1,3 +1,4 @@
+import { useStore } from '@nanostores/react'
 import DOMPurify from 'dompurify'
 import mammoth from 'mammoth/mammoth.browser'
 import type * as React from 'react'
@@ -25,6 +26,7 @@ import { Tip } from '@/components/ui/tooltip'
 import { translateNow, useI18n } from '@/i18n'
 import {
   desktopFileDiff,
+  desktopFsCacheKey,
   desktopGitRoot,
   isDesktopFsRemoteMode,
   readDesktopFileDataUrl,
@@ -37,7 +39,7 @@ import { mediaExternalUrl, mediaStreamUrl } from '@/lib/media'
 import { cn } from '@/lib/utils'
 import type { PreviewTarget } from '@/store/preview'
 import { setPreviewDirty } from '@/store/preview-edit'
-import { $currentCwd } from '@/store/session'
+import { $connection, $currentCwd } from '@/store/session'
 import { notifyWorkspaceChanged } from '@/store/workspace-events'
 
 const SHIKI_THEME = { dark: 'github-dark-default', light: 'github-light-default' } as const
@@ -682,6 +684,8 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
   // hover flag (no state — only the keydown handler reads it).
   const readViewRef = useRef<HTMLDivElement>(null)
   const hoverRef = useRef(false)
+  const connection = useStore($connection)
+  const fsCacheKey = desktopFsCacheKey(connection)
   const filePath = filePathForTarget(target)
   const isImage = target.previewKind === 'image'
   const isDocx = target.previewKind === 'docx'
@@ -804,7 +808,20 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
     return () => {
       active = false
     }
-  }, [blockedByTarget, filePath, forcePreview, isDocx, isImage, isPdf, isText, reloadKey, selfReload, target.dataUrl, target.language])
+  }, [
+    blockedByTarget,
+    filePath,
+    forcePreview,
+    fsCacheKey,
+    isDocx,
+    isImage,
+    isPdf,
+    isText,
+    reloadKey,
+    selfReload,
+    target.dataUrl,
+    target.language
+  ])
 
   // Editing is only offered for whole, readable text — never images, binaries,
   // or files we only loaded the first 512 KB of (saving would drop the tail).
