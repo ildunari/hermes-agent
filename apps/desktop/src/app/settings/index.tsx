@@ -33,7 +33,6 @@ import { SKILLS_ROUTE } from '../routes'
 import { AboutSettings } from './about-settings'
 import { AppearanceSettings } from './appearance-settings'
 import { BillingSettings } from './billing'
-import { BrowserSettings } from './browser-settings'
 import { ConfigSettings } from './config-settings'
 import { SECTIONS } from './constants'
 import { GatewaySettings } from './gateway-settings'
@@ -52,7 +51,6 @@ const SETTINGS_VIEWS: readonly SettingsViewId[] = [
   'keybinds',
   'keys',
   'notifications',
-  'browser',
   'billing',
   'plugins',
   'sessions',
@@ -162,13 +160,6 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         id: 'notifications',
         label: t.settings.nav.notifications,
         onSelect: () => setActiveView('notifications')
-      },
-      {
-        active: activeView === 'browser',
-        icon: Globe,
-        id: 'browser',
-        label: t.settings.nav.browser,
-        onSelect: () => setActiveView('browser')
       },
       {
         active: activeView === 'billing',
@@ -335,8 +326,6 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
             <KeysSettings view={keysView} />
           ) : activeView === 'notifications' ? (
             <NotificationsSettings />
-          ) : activeView === 'browser' ? (
-            <BrowserSettings />
           ) : activeView === 'billing' ? (
             <BillingSettings />
           ) : activeView === 'plugins' ? (

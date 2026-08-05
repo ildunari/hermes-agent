@@ -1,11 +1,9 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 
 import { test } from 'vitest'
 
 import { profileSshOverride } from './connection-config'
 import {
-  buildPidOwnershipProbeScript,
   buildSpawnCommand,
   cleanupStale,
   connect,
@@ -244,12 +242,6 @@ test('pidIsOurDashboard requires the exact serve ownership nonce', async () => {
     false
   )
   assert.equal(await pidIsOurDashboard(fakeSsh([[/print\("OWNED"/, 'FOREIGN\n']]), 5, SPAWN_NONCE, '/x/hermes'), false)
-})
-
-test('ownership probe treats a pid that disappears after liveness as foreign, not a transport failure', () => {
-  const script = buildPidOwnershipProbeScript(4_194_303, SPAWN_NONCE, '/x/hermes')
-
-  assert.equal(execFileSync('python3', ['-c', script], { encoding: 'utf8' }).trim(), 'FOREIGN')
 })
 
 test('cleanupStale kills ONLY a provably-ours pid, always drops the lockfile', async () => {

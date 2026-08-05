@@ -865,18 +865,11 @@ install_node() {
         if pkg install -y nodejs >/dev/null; then
             local installed_ver
             installed_ver=$(node --version 2>/dev/null)
-            if node_satisfies_build "$installed_ver"; then
-                log_success "Node.js $installed_ver installed via pkg"
-                HAS_NODE=true
-            else
-                log_warn "Termux pkg supplied unsupported Node.js $installed_ver; browser automation requires >=24"
-                HAS_NODE=false
-                return 1
-            fi
+            log_success "Node.js $installed_ver installed via pkg"
+            HAS_NODE=true
         else
             log_warn "Failed to install Node.js via pkg"
             HAS_NODE=false
-            return 1
         fi
         return 0
     fi

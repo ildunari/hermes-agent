@@ -133,26 +133,16 @@ def _browser_dialog_check() -> bool:
     return _browser_cdp_check()
 
 
-def _dispatch_browser_dialog(args: Dict[str, Any], task_id: Optional[str]) -> Any:
-    from tools.browser_tool import _dispatch_authenticated_tool  # type: ignore[import-not-found]
-
-    return _dispatch_authenticated_tool(
-        "browser_dialog",
-        task_id,
-        lambda: browser_dialog(
-            action=args.get("action", ""),
-            prompt_text=args.get("prompt_text"),
-            dialog_id=args.get("dialog_id"),
-            task_id=task_id,
-        ),
-    )
-
-
 registry.register(
     name="browser_dialog",
     toolset="browser-cdp",
     schema=BROWSER_DIALOG_SCHEMA,
-    handler=lambda args, **kw: _dispatch_browser_dialog(args, kw.get("task_id")),
+    handler=lambda args, **kw: browser_dialog(
+        action=args.get("action", ""),
+        prompt_text=args.get("prompt_text"),
+        dialog_id=args.get("dialog_id"),
+        task_id=kw.get("task_id"),
+    ),
     check_fn=_browser_dialog_check,
     emoji="💬",
 )

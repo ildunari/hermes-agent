@@ -114,53 +114,6 @@ def _resolve_cdp_endpoint() -> str:
         return ""
 
 
-def _resolve_task_cdp_endpoint(task_id: str) -> str:
-    """Prefer the exact task's role-scoped in-app endpoint over global CDP."""
-
-    try:
-        from tools.browser_tool import resolve_in_app_browser_cdp_url  # type: ignore[import-not-found]
-
-        endpoint = resolve_in_app_browser_cdp_url(task_id)
-        if endpoint:
-            return endpoint
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("browser_cdp: failed to resolve in-app task endpoint: %s", exc)
-    return _resolve_cdp_endpoint()
-
-
-def _authenticated_scope(task_id: str):
-    """Resolve the exact in-app scope, failing closed on partial identity."""
-
-    from tools import browser_tool as bt  # type: ignore[import-not-found]
-
-    session_key = bt._last_session_key(task_id)  # type: ignore[attr-defined]
-    scope = bt.authenticated_browser_scope_for_session(session_key)  # type: ignore[attr-defined]
-    if scope is None and bt._is_in_app_session(session_key):  # type: ignore[attr-defined]
-        from tools.authenticated_browser_projection import AuthenticatedBrowserProjectionError
-
-        raise AuthenticatedBrowserProjectionError(
-            "AUTHENTICATED_SCOPE_INVALID",
-            "authenticated browser binding identity is unavailable",
-        )
-    return scope
-
-
-def _projection_error(exc: Exception) -> str:
-    from tools.authenticated_browser_projection import PROJECTOR_VERSION
-
-    return json.dumps(
-        {
-            "success": False,
-            "error": getattr(exc, "code", "OUTPUT_PROJECTION_FAILED"),
-            "message": getattr(
-                exc, "message", "Authenticated browser output was withheld"
-            ),
-            "projector_version": PROJECTOR_VERSION,
-        },
-        ensure_ascii=False,
-    )
-
-
 def _private_page_guard_error(blocked_url: str, method: str) -> str:
     return tool_error(
         "Blocked: page URL targets a private or internal address "
@@ -334,7 +287,6 @@ def _browser_cdp_via_supervisor(
     method: str,
     params: Optional[Dict[str, Any]],
     timeout: float,
-    authenticated_scope=None,
 ) -> str:
     """Route a CDP call through the live supervisor session for an OOPIF frame.
 
@@ -424,40 +376,18 @@ def _browser_cdp_via_supervisor(
             )
         result_msg = fut.result(timeout=timeout + 2)
     except Exception as exc:
-        if authenticated_scope is not None:
-            return json.dumps({
-                "success": False,
-                "error": "CDP_OPERATION_FAILED",
-                "message": "Authenticated CDP operation failed before projection",
-                "method": method,
-            }, ensure_ascii=False)
         return tool_error(
             f"CDP call via supervisor failed: {type(exc).__name__}: {exc}",
             cdp_docs=CDP_DOCS_URL,
         )
 
-    raw_result = result_msg.get("result", {})
-    if authenticated_scope is not None:
-        try:
-            from tools.authenticated_browser_projection import project_cdp_result
-
-            raw_result = project_cdp_result(authenticated_scope, method, raw_result)
-        except Exception as exc:
-            return _projection_error(exc)
     payload: Dict[str, Any] = {
         "success": True,
         "method": method,
-        "result": raw_result,
+        "frame_id": frame_id,
+        "session_id": child_sid,
+        "result": result_msg.get("result", {}),
     }
-    if authenticated_scope is not None:
-        from tools.authenticated_browser_projection import PROJECTOR_VERSION, correlation_digest
-
-        payload["frame_id"] = f"@id:{correlation_digest(authenticated_scope, frame_id)}"
-        payload["session_id"] = f"@id:{correlation_digest(authenticated_scope, child_sid)}"
-        payload["projector_version"] = PROJECTOR_VERSION
-    else:
-        payload["frame_id"] = frame_id
-        payload["session_id"] = child_sid
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -496,44 +426,6 @@ def browser_cdp(
     """
     effective_task_id = task_id or "default"
 
-    if not method or not isinstance(method, str):
-        return tool_error(
-            "'method' is required (e.g. 'Target.getTargets')",
-            cdp_docs=CDP_DOCS_URL,
-        )
-    call_params: Dict[str, Any] = params or {}
-    if not isinstance(call_params, dict):
-        return tool_error(
-            f"'params' must be an object/dict, got {type(call_params).__name__}"
-        )
-
-    try:
-        authenticated_scope = _authenticated_scope(effective_task_id)
-    except Exception as exc:
-        return _projection_error(exc)
-    if authenticated_scope is not None:
-        try:
-            from tools.authenticated_browser_projection import (
-                AuthenticatedBrowserProjectionError,
-                contains_url_reference,
-                require_cdp_projector,
-            )
-
-            if (
-                contains_url_reference(call_params)
-                or contains_url_reference(target_id)
-                or contains_url_reference(frame_id)
-            ):
-                raise AuthenticatedBrowserProjectionError(
-                    "URL_REFERENCE_INVALID",
-                    "URL references are not accepted by browser_cdp",
-                )
-            # Closed/versioned admission happens before endpoint resolution,
-            # supervisor lookup, debugger dispatch, or pixel capture.
-            require_cdp_projector(method)
-        except Exception as exc:
-            return _projection_error(exc)
-
     # --- Route iframe-scoped calls through the supervisor ---------------
     if frame_id:
         # Same private-page/SSRF boundary as the stateless path below —
@@ -541,7 +433,7 @@ def browser_cdp(
         blocked = _browser_cdp_private_guard(
             task_id=effective_task_id,
             method=method,
-            params=call_params,
+            params=params or {},
         )
         if blocked:
             return blocked
@@ -549,9 +441,14 @@ def browser_cdp(
             task_id=effective_task_id,
             frame_id=frame_id,
             method=method,
-            params=call_params,
+            params=params,
             timeout=timeout,
-            authenticated_scope=authenticated_scope,
+        )
+
+    if not method or not isinstance(method, str):
+        return tool_error(
+            "'method' is required (e.g. 'Target.getTargets')",
+            cdp_docs=CDP_DOCS_URL,
         )
 
     if not _WS_AVAILABLE:
@@ -560,7 +457,7 @@ def browser_cdp(
             "Install it with: pip install websockets"
         )
 
-    endpoint = _resolve_task_cdp_endpoint(effective_task_id)
+    endpoint = _resolve_cdp_endpoint()
     if not endpoint:
         return tool_error(
             "No CDP endpoint is available. Run '/browser connect' to attach "
@@ -576,6 +473,12 @@ def browser_cdp(
             "Expected ws://... or wss://... — the /browser connect "
             "resolver should have rewritten this. Check that a Chromium-family "
             "browser is actually listening on the debug port."
+        )
+
+    call_params: Dict[str, Any] = params or {}
+    if not isinstance(call_params, dict):
+        return tool_error(
+            f"'params' must be an object/dict, got {type(call_params).__name__}"
         )
 
     blocked = _browser_cdp_private_guard(
@@ -596,58 +499,35 @@ def browser_cdp(
         result = _run_async(
             _cdp_call(endpoint, method, call_params, target_id, safe_timeout)
         )
-    except Exception as exc:
-        if authenticated_scope is not None:
-            logger.warning(
-                "browser_cdp authenticated operation failed: %s", type(exc).__name__
-            )
-            return json.dumps({
-                "success": False,
-                "error": "CDP_OPERATION_FAILED",
-                "message": "Authenticated CDP operation failed before projection",
-                "method": method,
-            }, ensure_ascii=False)
-        if isinstance(exc, asyncio.TimeoutError):
-            return tool_error(
-                f"CDP call timed out after {safe_timeout}s: {exc}", method=method
-            )
-        if isinstance(exc, WebSocketException):
-            return tool_error(
-                f"WebSocket error talking to CDP at {endpoint}: {exc}. The "
-                "browser may have disconnected — try '/browser connect' again.",
-                method=method,
-            )
-        if isinstance(exc, (TimeoutError, RuntimeError)):
-            return tool_error(str(exc), method=method)
+    except asyncio.TimeoutError as exc:
+        return tool_error(
+            f"CDP call timed out after {safe_timeout}s: {exc}",
+            method=method,
+        )
+    except TimeoutError as exc:
+        return tool_error(str(exc), method=method)
+    except RuntimeError as exc:
+        return tool_error(str(exc), method=method)
+    except WebSocketException as exc:
+        return tool_error(
+            f"WebSocket error talking to CDP at {endpoint}: {exc}. The "
+            "browser may have disconnected — try '/browser connect' again.",
+            method=method,
+        )
+    except Exception as exc:  # pragma: no cover — unexpected
         logger.exception("browser_cdp unexpected error")
         return tool_error(
             f"Unexpected error: {type(exc).__name__}: {exc}",
             method=method,
         )
 
-    if authenticated_scope is not None:
-        try:
-            from tools.authenticated_browser_projection import project_cdp_result
-
-            result = project_cdp_result(authenticated_scope, method, result)
-        except Exception as exc:
-            return _projection_error(exc)
     payload: Dict[str, Any] = {
         "success": True,
         "method": method,
-        "result": result if authenticated_scope is not None else _redact_cdp_output(result),
+        "result": _redact_cdp_output(result),
     }
-    if authenticated_scope is not None:
-        from tools.authenticated_browser_projection import PROJECTOR_VERSION
-
-        payload["projector_version"] = PROJECTOR_VERSION
     if target_id:
-        if authenticated_scope is not None:
-            from tools.authenticated_browser_projection import correlation_digest
-
-            payload["target_id"] = f"@id:{correlation_digest(authenticated_scope, target_id)}"
-        else:
-            payload["target_id"] = target_id
+        payload["target_id"] = target_id
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -784,38 +664,21 @@ def _browser_cdp_check() -> bool:
     # Raw (no-I/O) gate: check_fns run during tool-schema assembly at every
     # startup; resolving the endpoint over HTTP here would block launch when
     # the configured endpoint is stale/unreachable.
-    if _get_cdp_override_raw():
-        return True
-    try:
-        from hermes_cli.config import load_config
-
-        config = load_config() or {}
-        browser = config.get("browser") if isinstance(config, dict) else None
-        in_app = browser.get("in_app") if isinstance(browser, dict) else None
-        return isinstance(in_app, dict) and in_app.get("enabled") is True
-    except Exception:
-        return False
-
-
-def _dispatch_browser_cdp(args: Dict[str, Any], task_id: Optional[str]) -> Any:
-    raw_result = browser_cdp(
-        method=args.get("method", ""),
-        params=args.get("params"),
-        target_id=args.get("target_id"),
-        frame_id=args.get("frame_id"),
-        timeout=args.get("timeout", 30.0),
-        task_id=task_id,
-    )
-    from tools.browser_tool import _authenticated_tool_egress  # type: ignore[import-not-found]
-
-    return _authenticated_tool_egress("browser_cdp", raw_result, task_id)
+    return bool(_get_cdp_override_raw())
 
 
 registry.register(
     name="browser_cdp",
     toolset="browser-cdp",
     schema=BROWSER_CDP_SCHEMA,
-    handler=lambda args, **kw: _dispatch_browser_cdp(args, kw.get("task_id")),
+    handler=lambda args, **kw: browser_cdp(
+        method=args.get("method", ""),
+        params=args.get("params"),
+        target_id=args.get("target_id"),
+        frame_id=args.get("frame_id"),
+        timeout=args.get("timeout", 30.0),
+        task_id=kw.get("task_id"),
+    ),
     check_fn=_browser_cdp_check,
     emoji="🧪",
 )

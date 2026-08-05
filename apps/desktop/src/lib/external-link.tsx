@@ -1,7 +1,6 @@
 import type { ComponentProps, ReactNode } from 'react'
 import { useEffect, useMemo, useState } from 'react'
 
-import { openExplicitBrowserIntent } from '@/app/browser/browser-intent-production'
 import { ArrowUpRight } from '@/lib/icons'
 
 import { resolveBrandIcon } from './brand-icon'
@@ -205,7 +204,6 @@ export function openExternalLink(href: string): void {
 interface ExternalLinkProps extends Omit<ComponentProps<'a'>, 'href' | 'target'> {
   href: string
   children?: ReactNode
-  inAppBrowser?: boolean
   showExternalIcon?: boolean
 }
 
@@ -233,8 +231,6 @@ export function ExternalLink({
   children,
   className,
   href,
-  inAppBrowser = false,
-  onAuxClick,
   onClick,
   showExternalIcon = false,
   ...rest
@@ -245,38 +241,19 @@ export function ExternalLink({
     <a
       className={cn('ref', className)}
       href={target}
-      onAuxClick={event => {
-        onAuxClick?.(event)
-
-        if (!inAppBrowser || event.defaultPrevented) {
-          return
-        }
-
-        event.preventDefault()
-        event.stopPropagation()
-
-        if (event.button === 1 && window.hermesDesktop) {
-          openExplicitBrowserIntent({ source: 'transcript-link', targetRef: target })
-        }
-      }}
       onClick={event => {
         event.stopPropagation()
         onClick?.(event)
 
-        if (event.defaultPrevented && !inAppBrowser) {
+        if (event.defaultPrevented) {
           return
         }
 
         event.preventDefault()
-
-        if (inAppBrowser && window.hermesDesktop) {
-          openExplicitBrowserIntent({ source: 'transcript-link', targetRef: target })
-        } else {
-          openExternalLink(target)
-        }
+        openExternalLink(target)
       }}
       rel="noopener noreferrer"
-      target={inAppBrowser ? undefined : '_blank'}
+      target="_blank"
       {...rest}
     >
       {children ?? urlSlugTitleLabel(target)}
@@ -289,7 +266,6 @@ interface PrettyLinkProps extends Omit<ComponentProps<'a'>, 'href' | 'target'> {
   href: string
   label?: string
   fallbackLabel?: string
-  inAppBrowser?: boolean
 }
 
 // Title resolution is a fallback, not an override. Both props carry authored
@@ -313,16 +289,9 @@ interface LinkifiedTextProps {
   text: string
   pretty?: boolean
   explicitOnly?: boolean
-  inAppBrowser?: boolean
 }
 
-export function LinkifiedText({
-  className,
-  explicitOnly = false,
-  inAppBrowser = false,
-  pretty = true,
-  text
-}: LinkifiedTextProps) {
+export function LinkifiedText({ className, explicitOnly = false, pretty = true, text }: LinkifiedTextProps) {
   const nodes: ReactNode[] = []
   let cursor = 0
 
@@ -337,9 +306,9 @@ export function LinkifiedText({
 
     nodes.push(
       pretty ? (
-        <PrettyLink href={url} inAppBrowser={inAppBrowser} key={`${url}-${index}`} />
+        <PrettyLink href={url} key={`${url}-${index}`} />
       ) : (
-        <ExternalLink href={url} inAppBrowser={inAppBrowser} key={`${url}-${index}`}>
+        <ExternalLink href={url} key={`${url}-${index}`}>
           {raw}
         </ExternalLink>
       )

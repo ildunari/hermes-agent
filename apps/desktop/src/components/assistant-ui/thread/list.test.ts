@@ -6,12 +6,12 @@ import {
   LIVE_TAIL_MIN_GROUPS,
   LIVE_TAIL_PARTS,
   liveTailStart,
-  messageGroupClassName,
-  turnTailClassName,
   type MessageGroup,
+  messageGroupClassName,
   messageRenderWeight,
   RENDER_WEIGHT_CHARS,
-  resolveThreadScrollTarget
+  resolveThreadScrollTarget,
+  turnTailClassName
 } from './list'
 
 // Signature rows are `${index}:${id}:${role}:${weight}` (see the useAuiState

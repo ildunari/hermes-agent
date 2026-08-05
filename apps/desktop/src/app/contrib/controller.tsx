@@ -61,8 +61,6 @@ import { $currentCwd, $selectedStoredSessionId, $sessions, $yoloActive, sessionM
 import { watchSessionPins } from '@/store/session-pin-sync'
 import { $statusbarVisible } from '@/store/statusbar-prefs'
 
-import { BROWSER_PANE_ID, BrowserPane } from '../browser/browser-pane'
-import { $browserPaneOpen, closeBrowserPane, openBrowserPane } from '../browser/browser-store'
 import type { SessionDragPayload } from '../chat/composer/inline-refs'
 import { watchRouteTiles } from '../chat/route-tile'
 import { startSessionDrag } from '../chat/session-drag'
@@ -169,20 +167,6 @@ registry.registerMany([
       uncloseable: true
     },
     render: renderWorkspacePane
-  },
-  {
-    id: BROWSER_PANE_ID,
-    area: 'panes',
-    title: 'browser',
-    data: {
-      placement: 'right',
-      collapsible: true,
-      dock: { pane: 'workspace', pos: 'right' },
-      width: 'clamp(24rem, 42vw, 52rem)',
-      minWidth: '22rem',
-      maxWidth: '70vw'
-    },
-    render: () => idle(<BrowserPane />)
   },
   {
     id: 'terminal',
@@ -350,7 +334,6 @@ const DEFAULT_TREE = split(
   [
     group(['sessions'], { id: 'grp-sessions' }),
     group(['workspace'], { id: 'grp-main' }),
-    group([BROWSER_PANE_ID], { id: 'grp-browser' }),
     split(
       'column',
       [
@@ -370,24 +353,20 @@ const DEFAULT_TREE = split(
       'spl-right'
     )
   ],
-  [1, 3.4, 2.4, 1.25],
+  [1, 3.4, 1.25],
   'spl-root'
 )
 
 const FOCUS_TREE = split(
   'row',
-  [group(['sessions']), group(['workspace', 'files', 'preview', 'review', 'terminal']), group([BROWSER_PANE_ID])],
-  [1, 4.6, 2.4]
+  [group(['sessions']), group(['workspace', 'files', 'preview', 'review', 'terminal'])],
+  [1, 4.6]
 )
 
 const TERMINAL_TREE = split(
   'column',
   [
-    split(
-      'row',
-      [group(['sessions']), group(['workspace']), group([BROWSER_PANE_ID]), group(['files', 'preview', 'review'])],
-      [1, 3.2, 2.4, 1.2]
-    ),
+    split('row', [group(['sessions']), group(['workspace']), group(['files', 'preview', 'review'])], [1, 3.2, 1.2]),
     group(['terminal'])
   ],
   [3, 1]
@@ -396,8 +375,8 @@ const TERMINAL_TREE = split(
 const QUAD_TREE = split(
   'column',
   [
-    split('row', [group(['sessions', 'files']), group(['workspace']), group([BROWSER_PANE_ID])], [1, 3, 2.2]),
-    split('row', [group(['terminal']), group(['preview', 'review', 'logs'])], [1.4, 1])
+    split('row', [group(['sessions', 'files']), group(['workspace'])], [1, 3]),
+    split('row', [group(['terminal']), group(['preview', 'review'])], [1.4, 1])
   ],
   [3, 1]
 )
@@ -525,22 +504,11 @@ $panesFlipped.listen(flipped => {
   }
 })
 
-// The sessions button still controls the left root side. The file-browser
-// button owns only the files pane: the browser has its own button and must not
-// disappear just because the neighboring file panel is closed.
+// POSITIONAL side toggles (titlebar buttons, ⌘B / ⌘J): $sidebarOpen ≙ the
+// LEFT side of the main zone, $fileBrowserOpen ≙ the RIGHT — everything on
+// that side hides together, whatever panes have been rearranged there.
 bindTreeSideVisibility('left', $sidebarOpen, setSidebarOpen)
-
-// The browser owns an app-global pane toggle. It is intentionally independent
-// of profile/workspace state; opening it docks beside chat through the same
-// layout-tree primitive used by preview and opens whichever root side owns it.
-bindPaneVisibility(BROWSER_PANE_ID, $browserPaneOpen, closeBrowserPane, openBrowserPane)
-
-$browserPaneOpen.listen(open => {
-  if (open) {
-    dockPaneBeside(BROWSER_PANE_ID, 'workspace')
-    revealTreePane(BROWSER_PANE_ID)
-  }
-})
+bindTreeSideVisibility('right', $fileBrowserOpen, setFileBrowserOpen)
 
 // Workspace-scoped surfaces: the file tree and git diff only mean something
 // inside a project. A detached chat (no cwd) hides them — their zones
@@ -561,12 +529,9 @@ const $hasWorkspace = computed($currentCwd, cwd => Boolean(cwd.trim()))
 // is about.
 bindPaneVisibility(
   'files',
-  computed([$fileBrowserOpen, $hasWorkspace], (open, workspace) => open && workspace),
+  computed([$hasWorkspace, $fileBrowserOpen], (workspace, open) => workspace && open),
   () => setFileBrowserOpen(false),
-  () => {
-    setFileBrowserOpen(true)
-    revealTreePane('files')
-  }
+  () => setFileBrowserOpen(true)
 )
 // ⌘G — the review sidebar appears/disappears (and comes to the front).
 bindPaneVisibility(
@@ -693,14 +658,17 @@ registry.register(
   })
 )
 
-// Sessions Close collapses its side while it lives in the default root column;
-// once dragged beside main, dismissal is the only close operation that can hide
-// it. Files is pane-scoped everywhere so its Close action cannot also hide the
-// independently controlled browser pane.
+// Sessions/files Close = collapse their SIDE (⌘B/⌘J truthful, titlebar button
+// flips back) — but only while the pane actually lives in that root side
+// column. Dragged next to main, a side collapse can't hide it (the collapse
+// skips main-bearing children), so Close falls back to dismissal there —
+// otherwise ⌘W/Close silently no-op.
 registerPaneCloser('sessions', () =>
   paneRootSide('sessions') === 'left' ? setSidebarOpen(false) : dismissTreePane('sessions')
 )
-registerPaneCloser('files', () => setFileBrowserOpen(false))
+registerPaneCloser('files', () =>
+  paneRootSide('files') === 'right' ? setFileBrowserOpen(false) : dismissTreePane('files')
+)
 
 // A preview target lands NEXT TO the file tree — position-aware: wherever
 // files currently lives (default rail, ⌘\-flipped, dragged into a stack), the
@@ -797,7 +765,7 @@ export function ContribController() {
               className="pointer-events-auto absolute z-10 flex w-max items-center gap-2 [-webkit-app-region:no-drag]"
               style={{
                 right:
-                  'max(calc(var(--workspace-right, 0px) + 0.5rem), calc(var(--titlebar-tools-right, 0.75rem) + 5 * (var(--titlebar-control-size, 1.25rem) + 0.25rem) + 0.5rem))'
+                  'max(calc(var(--workspace-right, 0px) + 0.5rem), calc(var(--titlebar-tools-right, 0.75rem) + 4 * (var(--titlebar-control-size, 1.25rem) + 0.25rem) + 0.5rem))'
               }}
             />
           </div>

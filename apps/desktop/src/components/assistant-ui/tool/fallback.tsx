@@ -265,7 +265,6 @@ function SearchResultsList({ hits }: { hits: SearchResultRow[] }) {
                 className={cn(SEARCH_HIT_TITLE_CLASS, 'block max-w-full')}
                 fallbackLabel={trimmedTitle || urlSlugTitleLabel(hit.url)}
                 href={hit.url}
-                inAppBrowser
                 label={trimmedTitle || undefined}
               />
             ) : (
@@ -280,7 +279,7 @@ function SearchResultsList({ hits }: { hits: SearchResultRow[] }) {
 }
 
 function LinkifiedText({ className, text }: { className?: string; text: string }) {
-  return <SharedLinkifiedText className={className} inAppBrowser pretty text={cleanVisibleText(text)} />
+  return <SharedLinkifiedText className={className} pretty text={cleanVisibleText(text)} />
 }
 
 function ToolTitle({
@@ -344,8 +343,6 @@ function ToolEntry({ part }: ToolEntryProps) {
   const { t } = useI18n()
   const copy = t.assistant.tool
   const statusCopy = t.statusStack
-  const sessionView = useSessionView()
-  const ownerRuntimeId = useStore(sessionView.$runtimeId)
   const messageId = useAuiState(s => s.message.id)
   const messageRunning = useAuiState(selectMessageRunning)
   const embedded = useContext(ToolEmbedContext)
@@ -391,22 +388,27 @@ function ToolEntry({ part }: ToolEntryProps) {
 
   // Surface a previewable artifact (HTML file / localhost URL) as a compact link
   // in the composer status stack rather than a bulky inline card. Uses the same
-  // detected target the old inline card did, keyed to the runtime that owns this
-  // rendered row. Idempotent + dedup'd, so re-renders don't churn.
+  // detected target the old inline card did. Idempotent + dedup'd, so re-renders
+  // don't churn.
   const previewTarget = view.previewTarget
+  // The session whose transcript this row is IN, which is not necessarily the
+  // primary one: a tool row inside a session tile must feed that tile's composer.
+  const { $cwd: $sessionCwd, $runtimeId: $sessionRuntimeId } = useSessionView()
 
   useEffect(() => {
     if (isPending || !previewTarget || !isPreviewableTarget(previewTarget)) {
       return
     }
 
-    if (ownerRuntimeId) {
-      // The view is already scoped to the primary chat or this specific tile.
-      // Read cwd at detection time; unlike the global active-session atoms, it
-      // cannot be retargeted by the user selecting another chat.
-      recordPreviewArtifact(ownerRuntimeId, previewTarget, sessionView.$cwd.get() || '')
+    // Read (don't subscribe) session/cwd: this only fires when a previewable
+    // target appears, and subscribing re-rendered every tool row on any session
+    // or cwd change.
+    const sessionId = $sessionRuntimeId.get()
+
+    if (sessionId) {
+      recordPreviewArtifact(sessionId, previewTarget, $sessionCwd.get() || '')
     }
-  }, [isPending, ownerRuntimeId, previewTarget, sessionView])
+  }, [$sessionCwd, $sessionRuntimeId, isPending, previewTarget])
 
   const detailSections = useMemo(() => {
     if (!view.detail) {

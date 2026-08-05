@@ -3,13 +3,7 @@ import { type ComponentProps, type MouseEvent, type ReactNode, useEffect, useSta
 import { useLocation, useNavigate } from 'react-router'
 
 import { toggleLayoutEditMode } from '@/components/pane-shell/edit-mode'
-import {
-  $collapsedTreeSides,
-  $layoutTree,
-  resetLayoutTree,
-  revealTreePane,
-  treeSideOfPane
-} from '@/components/pane-shell/tree/store'
+import { resetLayoutTree } from '@/components/pane-shell/tree/store'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
@@ -25,8 +19,6 @@ import {
   toggleSidebarOpen
 } from '@/store/layout'
 
-import { BROWSER_PANE_ID } from '../browser/browser-pane'
-import { $browserPaneOpen, closeBrowserPane, openBrowserPane } from '../browser/browser-store'
 import { appViewForPath, isOverlayView, SETTINGS_ROUTE } from '../routes'
 
 import { titlebarButtonClass } from './titlebar'
@@ -110,11 +102,6 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
   const hapticsMuted = useStore($hapticsMuted)
   const fileBrowserOpen = useStore($fileBrowserOpen)
   const sidebarOpen = useStore($sidebarOpen)
-  const browserPaneOpen = useStore($browserPaneOpen)
-  const collapsedTreeSides = useStore($collapsedTreeSides)
-  useStore($layoutTree)
-  const browserSide = treeSideOfPane(BROWSER_PANE_ID)
-  const browserPaneVisible = browserPaneOpen && (!browserSide || !collapsedTreeSides.has(browserSide))
 
   const toggleHaptics = () => {
     if (!hapticsMuted) {
@@ -128,10 +115,13 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     }
   }
 
-  // The left button controls the sessions side. The right-sidebar button is
-  // pane-scoped: it controls the file panel only, while the globe button below
-  // independently controls the browser pane.
+  // POSITIONAL toggles: each button shows/hides everything on its physical
+  // side of the main zone (the layout tree collapses the whole side), so they
+  // stay correct through flips and rearranges. $sidebarOpen ≙ left side,
+  // $fileBrowserOpen ≙ right side. Never an active highlight — plain
+  // show/hide affordances.
   const leftEdge = { open: sidebarOpen, toggle: toggleSidebarOpen }
+  const rightEdge = { open: fileBrowserOpen, toggle: toggleFileBrowserOpen }
 
   const leftToolbarTools: TitlebarTool[] = [
     {
@@ -161,16 +151,10 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     actionId: 'view.toggleRightSidebar',
     icon: <Codicon name="layout-sidebar-right" />,
     id: 'right-sidebar',
-    label: fileBrowserOpen ? t.titlebar.hideRightSidebar : t.titlebar.showRightSidebar,
+    label: rightEdge.open ? t.titlebar.hideRightSidebar : t.titlebar.showRightSidebar,
     onSelect: () => {
       triggerHaptic('tap')
-
-      if (fileBrowserOpen) {
-        toggleFileBrowserOpen()
-      } else {
-        toggleFileBrowserOpen()
-        revealTreePane('files')
-      }
+      rightEdge.toggle()
     }
   }
 
@@ -211,21 +195,6 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
       onSelect: () => {
         triggerHaptic('open')
         navigate(`${SETTINGS_ROUTE}?tab=keybinds`)
-      }
-    },
-    {
-      icon: <Codicon name="globe" />,
-      id: BROWSER_PANE_ID,
-      label: browserPaneVisible ? t.browserPane.hide : t.browserPane.show,
-      onSelect: () => {
-        triggerHaptic(browserPaneVisible ? 'tap' : 'open')
-
-        if (browserPaneVisible) {
-          closeBrowserPane()
-        } else {
-          openBrowserPane()
-          revealTreePane(BROWSER_PANE_ID)
-        }
       }
     },
     {

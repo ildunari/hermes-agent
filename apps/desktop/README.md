@@ -62,10 +62,7 @@ Want to hack on the app itself? Install workspace deps from the repo root once, 
 npm install          # from repo root — links apps/desktop, web, apps/shared
 cd apps/desktop
 npm run dev          # Vite renderer + Electron, which boots the Python backend
-npm run dev:browser  # Studio Vite + isolated live Browser Dev preview on the MacBook
 ```
-
-For the exact cross-machine start, stop, isolation, reload, and troubleshooting workflow, see [`docs/local/BROWSER_DEV_WORKFLOW.md`](../../docs/local/BROWSER_DEV_WORKFLOW.md).
 
 Point the app at a specific source checkout, or sandbox it away from your real config:
 

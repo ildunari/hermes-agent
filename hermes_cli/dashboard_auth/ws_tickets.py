@@ -59,17 +59,6 @@ class TicketInvalid(Exception):
     """Ticket missing, expired, or already consumed."""
 
 
-def _mint(info: Dict[str, Any]) -> str:
-    """Mint one 256-bit, 30-second, single-use credential for *info*."""
-
-    ticket = secrets.token_urlsafe(32)
-    stamped = {**info, "minted_at": int(time.time())}
-    with _lock:
-        _tickets[ticket] = (int(time.time()) + TTL_SECONDS, stamped)
-        _gc_expired_locked()
-    return ticket
-
-
 def mint_ticket(*, user_id: str, provider: str) -> str:
     """Generate a one-shot ticket bound to this user identity.
 
@@ -77,35 +66,25 @@ def mint_ticket(*, user_id: str, provider: str) -> str:
     seed). Stash returns the ``info`` dict to the caller on consume so the
     WS handler can carry the identity forward into its session log.
     """
+    ticket = secrets.token_urlsafe(32)
+    info = {
+        "user_id": user_id,
+        "provider": provider,
+        "minted_at": int(time.time()),
+    }
+    with _lock:
+        _tickets[ticket] = (int(time.time()) + TTL_SECONDS, info)
+        _gc_expired_locked()
+    return ticket
 
-    return _mint({"user_id": user_id, "provider": provider, "audience": "gateway"})
 
+def consume_ticket(ticket: str) -> Dict[str, Any]:
+    """Validate and consume. Raises :class:`TicketInvalid` on missing/expired/used.
 
-def mint_browser_ticket(
-    *, user_id: str, provider: str, profile: str, connection_id: str
-) -> str:
-    """Mint a browser-route-only ticket bound to its asserted association.
-
-    It uses the same process-local credential authority, entropy, TTL, and
-    consume-once store as ordinary WS tickets, but an explicit audience keeps
-    a normal chat ticket from authenticating the privileged browser route.
-    The verified credential identity is retained as separate claims so the
-    route derives the principal exactly as the independently-authenticated
-    chat route does; callers cannot inject an arbitrary principal string.
+    Single-use semantics: a successful consume immediately removes the
+    ticket from the store, so a second call with the same value raises
+    ``TicketInvalid("unknown ticket: …")``.
     """
-
-    return _mint(
-        {
-            "user_id": user_id,
-            "provider": provider,
-            "profile": profile,
-            "connection_id": connection_id,
-            "audience": "browser",
-        }
-    )
-
-
-def _consume(ticket: str, *, audience: str) -> Dict[str, Any]:
     now = int(time.time())
     with _lock:
         entry = _tickets.pop(ticket, None)
@@ -117,27 +96,13 @@ def _consume(ticket: str, *, audience: str) -> Dict[str, Any]:
         expires_at, info = entry
         if expires_at < now:
             raise TicketInvalid("expired")
-        if info.get("audience") != audience:
-            raise TicketInvalid("wrong ticket audience")
         return info
-
-
-def consume_ticket(ticket: str) -> Dict[str, Any]:
-    """Validate and consume a normal gateway ticket."""
-
-    return _consume(ticket, audience="gateway")
-
-
-def consume_browser_ticket(ticket: str) -> Dict[str, Any]:
-    """Validate and consume a dedicated browser ticket."""
-
-    return _consume(ticket, audience="browser")
 
 
 def _gc_expired_locked() -> None:
     """Drop expired tickets. Caller must hold ``_lock``."""
     now = int(time.time())
-    expired = [t for t, (exp, _) in _tickets.items() if exp <= now]
+    expired = [t for t, (exp, _) in _tickets.items() if exp < now]
     for t in expired:
         _tickets.pop(t, None)
 

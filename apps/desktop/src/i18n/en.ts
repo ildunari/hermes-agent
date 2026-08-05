@@ -45,154 +45,6 @@ export const en: Translations = {
     off: 'Off'
   },
 
-  browserPane: {
-    address: 'Browser address',
-    addressPlaceholder: 'Enter an HTTP(S) address',
-    back: 'Back',
-    closeTab: 'Close tab',
-    empty: 'Open a tab to start browsing.',
-    forward: 'Forward',
-    hide: 'Hide browser pane',
-    invalidAddress: 'Enter a valid HTTP(S) address',
-    label: 'Browser workspace',
-    newTab: 'New tab',
-    ready: 'Ready',
-    reload: 'Reload',
-    show: 'Show browser pane',
-    tabs: 'Browser tabs'
-  },
-
-  browserSupervision: {
-    activity: 'Recent control activity',
-    activityRetention:
-      'Kept for up to 7 days (maximum 5,000 events). Not an audit log and cannot undo actions on websites.',
-    activityTitle: 'Recent activity on this Mac',
-    activityUnavailable: "Recent activity isn't being saved.",
-    controlFailed: 'Control change failed. Try again.',
-    controllerLabel: 'Trusted browser controls',
-    generation: 'gen',
-    handBack: 'Hand back to agent',
-    operation: 'operation',
-    operations: { action: 'action', idle: 'idle', navigate: 'navigate', snapshot: 'snapshot' },
-    owner: 'owner',
-    pause: 'Pause agent control',
-    profile: 'profile',
-    reasons: { handBack: 'hand back', pause: 'pause', stop: 'stop', takeover: 'takeover' },
-    session: 'session',
-    states: { agent: 'Agent control', handingBack: 'Handing back', localTakeover: 'Local control', paused: 'Paused' },
-    stopAndClose: 'Stop and close',
-    tab: 'tab',
-    takeControl: 'Take local control',
-    title: 'Browser control'
-  },
-
-  browserAnnotations: {
-    actionResolve: 'Resolve',
-    empty: 'No annotations on this page.',
-    error: 'Annotations are unavailable.',
-    exportLabel: 'Export labeled screenshot',
-    health: {
-      ambiguous: 'Ambiguous',
-      resolved: 'Attached',
-      shifted: 'Shifted',
-      stale: 'Stale',
-      unsupported: 'Unsupported'
-    },
-    kinds: {
-      'agent-marker': 'Agent marker',
-      comment: 'Comment',
-      drawing: 'Drawing',
-      element: 'Element',
-      region: 'Region',
-      text: 'Text'
-    },
-    panelLabel: 'Page annotations',
-    hideLabel: 'Hide annotations',
-    resizeLabel: 'Resize annotations panel',
-    showLabel: 'Show annotations',
-    refreshLabel: 'Refresh annotations',
-    stale: 'The page changed. Refresh before acting.',
-    statuses: { dismissed: 'Dismissed', open: 'Open', resolved: 'Resolved' },
-    subtitle: 'Trusted side panel',
-    title: 'Annotations'
-  },
-
-  browserConsent: {
-    allowOnce: 'Allow once',
-    browserGeneration: 'Browser generation',
-    captureScope: 'Capture scope',
-    classification: 'Navigation classification',
-    classificationOrdinary: 'Ordinary for this task',
-    classificationSensitive: 'Sensitive',
-    classificationUnknown: 'Unclassified — treated as sensitive',
-    categories: {
-      destructiveAction: 'Hermes is about to perform an action that may change data or trigger a website effect.',
-      download: 'A website wants to download a file. You will choose the save location next.',
-      externalHandler: 'A website wants to open another application through an external link handler.',
-      navigation: 'Hermes wants to navigate this task to a different site.',
-      outboundPixels: 'Hermes wants to share the current viewport pixels with the named recipient.',
-      permission: 'A website is requesting a browser permission.',
-      uploadAssignment: 'Hermes wants to assign a staged local file to this website.',
-      websiteSubmission: 'Hermes is about to submit information or trigger an externally visible website action.'
-    },
-    deny: 'Deny',
-    detail: 'Request detail',
-    expires: 'This request expires automatically.',
-    filename: 'File',
-    memoryOnlyRetention: 'Memory only for this one analysis; Hermes does not retain the raw pixels.',
-    navigationGateWarning:
-      'This navigation decision does not approve uploads, downloads, permissions, destructive actions, popups, external handlers, or pixel capture.',
-    operation: 'Operation',
-    permission: 'Permission',
-    pixelWarning:
-      'Pixels can contain passwords, QR codes, credentials, personal data, or other secrets. Hermes cannot reliably redact or sanitize them before they are sent.',
-    policyReasons: 'Policy reasons',
-    policySource: 'Policy source',
-    purpose: 'Purpose',
-    recipient: 'Recipient',
-    retention: 'Retention',
-    scheme: 'External link scheme',
-    scopeWarning: 'Approval applies only to the exact task, tab, site, operation, and browser generation shown here.',
-    site: 'Site',
-    tab: 'Tab',
-    task: 'Task',
-    taskGeneration: 'Task generation',
-    profile: 'Profile',
-    title: 'Browser approval required',
-    treatOrdinary: 'Treat as ordinary for this task',
-    viewportDocumentScope: documentGeneration =>
-      `Current viewport of document generation ${documentGeneration} (not the full page)`
-  },
-
-  browserUpload: {
-    bytes: 'bytes',
-    cancel: 'Cancel',
-    empty: '(empty)',
-    finish: 'Finish',
-    next: 'Next',
-    none: 'none',
-    select: 'Select',
-    skip: 'Skip',
-    sourceStagingWarning:
-      'Selecting this source permits temporary staging on this Mac only. Assignment to the website requires a separate approval. Submission or another destructive website effect requires its own later approval.',
-    sourceTitle: 'Select Studio upload source',
-    consent: {
-      accept: 'Page accept declaration',
-      aggregate: 'Aggregate size',
-      destination: 'Destination',
-      files: 'Files',
-      form: 'Form',
-      immediate: 'The page may submit immediately after assignment',
-      input: 'Input',
-      mode: 'Chooser mode',
-      rename: 'Staging rename',
-      sourceLabel: 'Source',
-      source: 'Mac Studio session artifact/attachment',
-      warning:
-        'Code running in the approved page origin can read and retransmit the assigned file. Assignment does not approve submission or any other destructive website effect; that requires its own later approval.'
-    }
-  },
-
   fileMenu: {
     revealFinder: 'Reveal in Finder',
     revealExplorer: 'Reveal in File Explorer',
@@ -269,13 +121,6 @@ export const en: Translations = {
     details: 'Details',
     copyDetail: 'Copy detail',
     copyDetailFailed: 'Could not copy notification detail',
-    browserIntentBlockedMessage:
-      'Hermes kept this link closed because it needs a current, trusted browser intent or grant.',
-    browserIntentBlockedTitle: 'Link not opened',
-    browserIntentOfferMessage: 'This link is available here and will stay closed until you choose it directly.',
-    browserIntentOfferTitle: 'Link ready to open',
-    browserResourceFailedMessage: 'Hermes could not securely open this resource. The empty browser tab was closed.',
-    browserResourceFailedTitle: 'Resource not opened',
     backendOutOfDateTitle: 'Backend out of date',
     backendOutOfDateMessage:
       'Your Hermes backend is older than this desktop build and may not work correctly. Update to align them.',
@@ -505,60 +350,7 @@ export const en: Translations = {
       about: 'About',
       billing: 'Billing',
       notifications: 'Notifications',
-      plugins: 'Plugins',
-      browser: 'Browser'
-    },
-    browser: {
-      title: 'Browser',
-      intro: profile =>
-        `Device-local browsing state for the active “${profile}” profile. It is never synced to another Desktop.`,
-      restoreTitle: 'Restore tabs after restart',
-      restoreDescription:
-        'Save safe HTTP(S) tab addresses locally. Forms, page contents, private tabs, credentials, and agent control are never restored.',
-      historyTitle: 'Browsing history',
-      historyEmpty: 'No local browsing history for this profile.',
-      clearSite: 'Clear site data',
-      clearSiteConfirm: origin => `Clear cookies, storage, service workers, and permissions for ${origin}?`,
-      clearHistory: 'Clear history',
-      clearAllData: 'Clear all browsing data',
-      clearAllDataDescription:
-        'Clears site storage, cookies, cache, HTTP authentication, local history, permissions, and transfer records for this profile.',
-      clearAllDataConfirm: 'Clear all local browsing data for this profile? Open browser automation will be stopped.',
-      workspaceTitle: 'Browser workspaces',
-      workspaceDescription:
-        'Reset saved tabs and activity without signing out of websites. History is a separate choice.',
-      resetWorkspace: 'Reset saved tabs',
-      resetWorkspaceAndHistory: 'Reset tabs and history',
-      resetConfirm: 'Reset this browser workspace?',
-      degradedTitle: 'Browser metadata is unavailable',
-      degradedDescription:
-        'Hermes did not restore or navigate any saved tabs. Retry, preserve the damaged database and reset metadata, or clear all browsing data.',
-      retry: 'Retry',
-      resetMetadata: 'Reset metadata',
-      resetMetadataConfirm: 'Preserve the damaged database for repair and start with empty browser metadata?',
-      exportMetadata: 'Export damaged metadata',
-      clearBrowsingData: 'Clear browsing data',
-      actionFailed: 'The browser data action could not be completed.',
-      partialFailure: scopes => `Some browser data was changed, but these scopes failed: ${scopes}.`,
-      siteDataScope: 'site storage',
-      metadataScope: 'local metadata',
-      permissionsScope: 'permissions',
-      activityScope: 'activity',
-      workspaceScope: 'workspace state',
-      originMetadataOnly: 'Origin appears in permissions or transfer records.',
-      permissionsTitle: 'Site permissions',
-      permissionsDescription:
-        'Durable decisions apply only to exact origins during human browsing. Agent tasks still require one-shot consent.',
-      permissionOrigin: 'Exact site origin',
-      permissionName: 'Permission name',
-      permissionsEmpty: 'No durable site permission decisions.',
-      allow: 'Allow',
-      deny: 'Deny',
-      allowed: 'Allowed',
-      denied: 'Denied',
-      removePermission: 'Remove',
-      loading: 'Loading browser settings',
-      redacted: 'Sensitive address redacted'
+      plugins: 'Plugins'
     },
     plugins: {
       title: 'Desktop plugins',
@@ -1815,8 +1607,7 @@ export const en: Translations = {
     deleteTitle: 'Delete profile?',
     deleteDescPrefix: 'This will delete ',
     deleteDescMid: ' and remove its ',
-    deleteDescSuffix:
-      ' directory, local browser workspace, website sign-ins and site data, recent activity, and annotation bundles. Desktop uninstall choices are separate. This cannot be undone.',
+    deleteDescSuffix: ' directory. This cannot be undone.',
     deleting: 'Deleting...',
     createDesc: 'Profiles are independent Hermes environments: separate config, skills, and SOUL.md.',
     nameLabel: 'Name',

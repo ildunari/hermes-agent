@@ -19,11 +19,8 @@ from hermes_cli.config import (
     recommended_update_command_for_method,
 )
 from hermes_cli.env_loader import load_hermes_dotenv
-from hermes_constants import (
-    agent_browser_runnable,
-    display_hermes_home,
-    node_version_supported,
-)
+from hermes_constants import display_hermes_home
+from hermes_constants import agent_browser_runnable
 
 PROJECT_ROOT = get_project_root()
 HERMES_HOME = get_hermes_home()
@@ -114,7 +111,7 @@ def _termux_browser_setup_steps(node_installed: bool) -> list[str]:
     if not node_installed:
         steps.append(f"{step}) pkg install nodejs")
         step += 1
-    steps.append(f"{step}) npm install -g agent-browser@0.32.0")
+    steps.append(f"{step}) npm install -g agent-browser")
     steps.append(f"{step + 1}) agent-browser install")
     return steps
 
@@ -131,29 +128,6 @@ def _termux_install_all_fallback_notes() -> list[str]:
 def _has_provider_env_config(content: str) -> bool:
     """Return True when ~/.hermes/.env contains provider auth/base URL settings."""
     return any(key in content for key in _PROVIDER_ENV_HINTS)
-
-
-def browser_runtime_status(
-    project_root: Path | None = None,
-    *,
-    node_path: str | None = None,
-    path_agent_browser: str | None = None,
-) -> tuple[bool, str | None, bool]:
-    """Return supported-Node and exact local/PATH agent-browser readiness."""
-    resolved_project_root = PROJECT_ROOT if project_root is None else project_root
-    if node_path is None:
-        node_path = _safe_which("node")
-    node_ok = node_version_supported(node_path)
-    if path_agent_browser is None:
-        path_agent_browser = shutil.which("agent-browser")
-
-    local = resolved_project_root / "node_modules" / ".bin" / "agent-browser"
-    if sys.platform == "win32" and local.with_suffix(".cmd").exists():
-        local = local.with_suffix(".cmd")
-    for candidate in (str(local), path_agent_browser):
-        if candidate and node_ok and agent_browser_runnable(candidate):
-            return True, candidate, True
-    return node_ok, path_agent_browser or (str(local) if local.exists() else None), False
 
 
 def _honcho_is_configured_for_doctor() -> bool:
@@ -1909,26 +1883,55 @@ def run_doctor(args):
             check_info("Vercel persistence: ephemeral filesystem")
 
     # Node.js + agent-browser (for browser automation tools)
-    _node_path = _safe_which("node")
-    if _node_path:
-        _node_ok, _browser_candidate, agent_browser_ok = browser_runtime_status(
-            PROJECT_ROOT,
-            node_path=_node_path
+    if _safe_which("node"):
+        check_ok("Node.js")
+        # Check if agent-browser is installed
+        agent_browser_path = PROJECT_ROOT / "node_modules" / "agent-browser"
+        agent_browser_ok = False
+        _which_ab = shutil.which("agent-browser")
+        # `hermes acp --setup-browser` installs agent-browser into the
+        # Hermes-managed node prefix, which isn't necessarily on PATH. Mirror
+        # dep_ensure._has_hermes_agent_browser() so doctor and dep_ensure agree
+        # on what "installed" means; otherwise doctor false-negatives (#53192).
+        # Resolve with PATHEXT-aware ``shutil.which`` (not a bare is_file())
+        # so Windows picks the executable ``.cmd`` shim — the same class of
+        # miss fixed for _has_agent_browser() in #73932.
+        def _which_in(directory) -> str | None:
+            try:
+                if not directory.is_dir():
+                    return None
+                return shutil.which("agent-browser", path=str(directory))
+            except Exception:
+                return None
+
+        _managed_ab = (
+            _which_in(HERMES_HOME / "node" / "bin")
+            or _which_in(HERMES_HOME / "node")
         )
-        if _node_ok:
-            check_ok("Node.js >=24")
-        else:
-            check_warn("Node.js is unsupported", "(need >=24 for browser automation)")
-        if agent_browser_ok:
+        _legacy_ab = _which_in(HERMES_HOME / "node_modules" / ".bin")
+        if agent_browser_path.exists():
+            check_ok("agent-browser (Node.js)", "(browser automation)")
+            agent_browser_ok = True
+        elif _which_ab and agent_browser_runnable(_which_ab):
             check_ok("agent-browser", "(browser automation)")
-        elif _browser_candidate:
+            agent_browser_ok = True
+        elif _managed_ab and agent_browser_runnable(_managed_ab):
+            check_ok("agent-browser", "(browser automation)")
+            agent_browser_ok = True
+        elif _legacy_ab and agent_browser_runnable(_legacy_ab):
+            check_ok("agent-browser", "(browser automation)")
+            agent_browser_ok = True
+        elif _which_ab:
+            # Found on PATH but won't run — almost always a dangling global
+            # symlink left behind by agent-browser's npm postinstall after a
+            # `hermes update` wiped node_modules (issue #48521).
             check_warn(
-                "agent-browser found but not exact/runnable",
-                f"(expected agent-browser 0.32.0 at {_browser_candidate}; run: npm install)",
+                "agent-browser found but not runnable",
+                f"(broken symlink at {_which_ab}? run: npm install)",
             )
         elif _is_termux():
             check_info("agent-browser is not installed (expected in the tested Termux path)")
-            check_info("Install it manually later with: npm install -g agent-browser@0.32.0 && agent-browser install")
+            check_info("Install it manually later with: npm install -g agent-browser && agent-browser install")
             check_info("Termux browser setup:")
             for step in _termux_browser_setup_steps(node_installed=True):
                 check_info(step)

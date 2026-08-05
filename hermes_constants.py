@@ -5,7 +5,6 @@ without risk of circular imports.
 """
 
 import os
-import re
 import shutil
 import stat
 import sys
@@ -318,47 +317,9 @@ def _candidate_node_command_names(command: str) -> list[str]:
     return [f"{base}.cmd", f"{base}.exe", base]
 
 
-_HERMES_NODE_TARGET_MAJOR = max(
-    24, int(os.environ.get("HERMES_NODE_TARGET_MAJOR", "24"))
-)
+_HERMES_NODE_TARGET_MAJOR = int(os.environ.get("HERMES_NODE_TARGET_MAJOR", "22"))
 _managed_node_heal_attempted = False
 _NODE_BOOTSTRAP_SCRIPT = Path(__file__).resolve().parent / "scripts" / "lib" / "node-bootstrap.sh"
-
-# One shipping selector for every agent-browser executable/install fallback.
-AGENT_BROWSER_VERSION = "0.32.0"
-AGENT_BROWSER_PACKAGE = f"agent-browser@{AGENT_BROWSER_VERSION}"
-AGENT_BROWSER_NPX_FALLBACK = f"npx -y {AGENT_BROWSER_PACKAGE}"
-
-
-def node_version_supported(path: str | None) -> bool:
-    """Return whether *path* is a runnable Node satisfying Hermes's floor."""
-    if not path:
-        return False
-    candidate = Path(path)
-    if not candidate.is_file() or (
-        sys.platform != "win32" and not os.access(path, os.X_OK)
-    ):
-        return False
-
-    import subprocess
-
-    try:
-        from hermes_cli._subprocess_compat import windows_hide_flags
-
-        result = subprocess.run(
-            [path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            creationflags=windows_hide_flags(),
-        )
-        output = result.stdout
-        if isinstance(output, bytes):
-            output = output.decode("utf-8", errors="replace")
-        major = int(output.strip().removeprefix("v").split(".", 1)[0])
-    except (AttributeError, OSError, subprocess.SubprocessError, TypeError, ValueError):
-        return False
-    return result.returncode == 0 and major >= _HERMES_NODE_TARGET_MAJOR
 
 
 def node_tool_runnable(path: str | None) -> bool:
@@ -381,11 +342,6 @@ def node_tool_runnable(path: str | None) -> bool:
         if not candidate.is_file():
             return False
     elif not os.path.exists(path) or not os.access(path, os.X_OK):
-        return False
-
-    node_name = "node.exe" if sys.platform == "win32" else "node"
-    node_path = candidate if candidate.name.lower() in {"node", "node.exe"} else candidate.parent / node_name
-    if not node_version_supported(str(node_path)):
         return False
 
     import subprocess
@@ -557,7 +513,7 @@ def bootstrap_hermes_managed_node() -> str | None:
 
 
 def heal_hermes_managed_node() -> bool:
-    """Install or redownload a supported Hermes-managed Node.
+    """Redownload Hermes-managed Node when the tree exists but is broken.
 
     Runs at most once per process. POSIX installs shell out to
     ``heal_managed_node`` in ``scripts/lib/node-bootstrap.sh``; Windows
@@ -565,6 +521,8 @@ def heal_hermes_managed_node() -> bool:
     """
     global _managed_node_heal_attempted
     if _managed_node_heal_attempted:
+        return False
+    if not hermes_managed_node_tree_present():
         return False
     _managed_node_heal_attempted = True
 
@@ -590,13 +548,7 @@ def heal_hermes_managed_node() -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    if result.returncode != 0:
-        return False
-    node_name = "node.exe" if sys.platform == "win32" else "node"
-    return any(
-        node_version_supported(str(directory / node_name))
-        for directory in iter_hermes_node_dirs()
-    )
+    return result.returncode == 0
 
 
 def _managed_node_tree_outdated(home: Path | None = None) -> bool:
@@ -715,27 +667,11 @@ def find_node_executable(command: str) -> str | None:
 
 
 def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:
-    """Return *env* with a supported Hermes-managed Node prepended to PATH."""
+    """Return *env* with Hermes-managed Node directories prepended to PATH."""
     merged = dict(os.environ if env is None else env)
     existing = merged.get("PATH", "")
     parts = [p for p in existing.split(os.pathsep) if p]
-    node_name = "node.exe" if sys.platform == "win32" else "node"
-    managed = [
-        str(path)
-        for path in iter_hermes_node_dirs()
-        if path.is_dir() and node_version_supported(str(path / node_name))
-    ]
-    if not managed and hermes_managed_node_tree_present() and heal_hermes_managed_node():
-        managed = [
-            str(path)
-            for path in iter_hermes_node_dirs()
-            if path.is_dir() and node_version_supported(str(path / node_name))
-        ]
-    if not managed:
-        # Fall back to presence: a managed tree we cannot version-probe is
-        # still better on PATH than leaving npm's child scripts with no node
-        # at all (the stripped-PATH updater chain scenario).
-        managed = [str(path) for path in iter_hermes_node_dirs() if path.is_dir()]
+    managed = [str(path) for path in iter_hermes_node_dirs() if path.is_dir()]
     for entry in reversed(managed):
         if entry not in parts:
             parts.insert(0, entry)
@@ -769,29 +705,10 @@ def agent_browser_runnable(path: str | None) -> bool:
         return False
     # The npx fallback is a two-token command string, not a filesystem path.
     if " " in path and path.split()[0].endswith("npx"):
-        return AGENT_BROWSER_PACKAGE in path
+        return True
     # exists() follows symlinks — a dangling link returns False here, so we
     # never even spawn a subprocess for the broken-link case.
     if not os.path.exists(path) or not os.access(path, os.X_OK):
-        return False
-    candidate = Path(path)
-    managed_root = get_hermes_home() / "node"
-    try:
-        is_managed = candidate.resolve().is_relative_to(managed_root.resolve())
-    except OSError:
-        is_managed = False
-    if is_managed:
-        managed_node = candidate.parent / ("node.exe" if sys.platform == "win32" else "node")
-        if not node_version_supported(str(managed_node)) and not heal_hermes_managed_node():
-            return False
-        node_path = str(managed_node)
-    else:
-        node_path = shutil.which("node")
-        if not node_version_supported(node_path):
-            if not heal_hermes_managed_node():
-                return False
-            node_path = find_hermes_node_executable("node")
-    if not node_version_supported(node_path):
         return False
     import subprocess
 
@@ -801,22 +718,13 @@ def agent_browser_runnable(path: str | None) -> bool:
         result = subprocess.run(
             [path, "--version"],
             capture_output=True,
-            text=True,
             timeout=10,
             env=with_hermes_node_path(),
             creationflags=windows_hide_flags(),
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return False
-    output = result.stdout
-    if isinstance(output, bytes):
-        output = output.decode("utf-8", errors="replace")
-    match = re.search(r"(?:agent-browser\s+)?(\d+\.\d+\.\d+)", output or "")
-    return (
-        result.returncode == 0
-        and match is not None
-        and match.group(1) == AGENT_BROWSER_VERSION
-    )
+    return result.returncode == 0
 
 
 def _legacy_path_has_content(path: Path) -> bool:

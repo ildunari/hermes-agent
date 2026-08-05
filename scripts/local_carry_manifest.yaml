@@ -136,7 +136,7 @@ checks:
     description: launchd domain dedupe and readiness polling
   - id: desktop-browser-api-backend
     path: hermes_cli/web_server.py
-    needles: [DASHBOARD_HEALTH_MARKER, _browser_resource_grant_authority, '/api/browser/grants/artifact', '/api/ws/browser', _browser_annotation_rpc]
+    needles: []  # RETIRED 2026-08-05: replaced by upstream native in-app browser
     description: Desktop browser grants, upload/preview delivery, annotation RPC, and dedicated browser transport routes survive upstream router refactors
   - id: dashboard-restart-health-contract
     path: hermes_cli/web_server.py
@@ -148,11 +148,11 @@ checks:
     description: restart probes can drain in-memory Desktop/TUI turns without filesystem or process probes
   - id: desktop-browser-default
     path: hermes_cli/config_defaults.py
-    needles: ['"in_app": {"enabled": False}']
+    needles: []  # RETIRED 2026-08-05: replaced by upstream native in-app browser
     description: resolved config keeps the Desktop in-app transport independently disabled by default without changing browser tools
   - id: desktop-browser-setup-default
     path: cli.py
-    needles: ['"in_app": {"enabled": False}']
+    needles: []  # RETIRED 2026-08-05: replaced by upstream native in-app browser
     description: setup-generated config preserves the same independent Desktop browser default
   - id: gateway-identity-restamp
     path: gateway/shutdown_watchdog.py
@@ -221,9 +221,9 @@ checks:
 
 features:
   - id: desktop.browser-workspace
-    title: Profile-independent in-app browser workspace (chat left, browser right)
+    title: RETIRED 2026-08-05 — replaced by upstream native in-app browser (#77705, #79482); entry retained to own deleted paths in this revert commit, delete next commit
     owner: kosta
-    class: keep-core
+    class: upstream-replaced
     owner_paths:
       - apps/desktop/electron/browser-activity-repository.test.ts
       - apps/desktop/electron/browser-activity-repository.ts
@@ -386,16 +386,8 @@ features:
       - tools/browser_supervisor.py
       - tools/browser_tool.py
     tests:
-      - apps/desktop/electron/browser-guest-security.test.ts
-      - apps/desktop/electron/remote-lifecycle.test.ts
-      - apps/desktop/scripts/browser-dev-connection.test.mjs
-      - apps/desktop/src/app/browser/browser-annotations-layout.test.ts
-      - apps/desktop/src/components/assistant-ui/tool/fallback-preview-status.test.tsx
-    checks:
-      - id: browser-guest-security-contract
-        path: apps/desktop/electron/browser-guest-security.ts
-        needles: [AUTOMATION_DEBUGGER_METHODS]
-        description: hardened CDP method allowlist for agent-driven guests
+      - tests/tools/test_browser_cleanup.py
+      - tests/tools/test_browser_hardening.py
   - id: update.futureproof-system
     title: Recoverable, resource-bounded slim update system
     owner: kosta

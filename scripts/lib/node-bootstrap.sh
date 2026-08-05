@@ -18,13 +18,13 @@
 #   if [ "$HERMES_NODE_AVAILABLE" = true ]; then ...; fi
 #
 # Env inputs (set before sourcing to override defaults):
-#   HERMES_NODE_MIN_VERSION   (default: 24)   — accepted on PATH
-#   HERMES_NODE_TARGET_MAJOR  (default: 24)   — installed when we install
+#   HERMES_NODE_MIN_VERSION   (default: 20)   — accepted on PATH
+#   HERMES_NODE_TARGET_MAJOR  (default: 22)   — installed when we install
 #   HERMES_HOME               (default: $HOME/.hermes)
 # ============================================================================
 
-HERMES_NODE_MIN_VERSION="${HERMES_NODE_MIN_VERSION:-24}"
-HERMES_NODE_TARGET_MAJOR="${HERMES_NODE_TARGET_MAJOR:-24}"
+HERMES_NODE_MIN_VERSION="${HERMES_NODE_MIN_VERSION:-20}"
+HERMES_NODE_TARGET_MAJOR="${HERMES_NODE_TARGET_MAJOR:-22}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_NODE_AVAILABLE=false
 
@@ -364,21 +364,6 @@ _nb_managed_node_outdated() {
 }
 
 _nb_managed_node_needs_heal() {
-    local managed_node=""
-    for managed_node in \
-        "$HERMES_HOME/node/bin/node" \
-        "$HERMES_HOME/node/node.exe" \
-        "$HERMES_HOME/node/node"; do
-        if [ -x "$managed_node" ] || [ -f "$managed_node" ]; then
-            local major
-            major=$("$managed_node" --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)
-            if ! [[ "$major" =~ ^[0-9]+$ ]] || [ "$major" -lt "$HERMES_NODE_MIN_VERSION" ]; then
-                return 0
-            fi
-            break
-        fi
-    done
-
     local tool
     for tool in node npm npx; do
         if _nb_managed_tool_broken "$tool"; then
@@ -388,19 +373,16 @@ _nb_managed_node_needs_heal() {
     _nb_managed_node_outdated
 }
 
-# Install or redownload the pinned nodejs.org tarball when the managed tree is
-# absent, below the supported floor, or has a broken node/npm/npx probe. Used
-# by hermes_constants.find_hermes_node_executable() and safe on install reruns.
+# Redownload the pinned nodejs.org tarball when a managed tree exists but
+# node/npm/npx fail a --version probe. No-op when the tree is healthy or
+# absent. Used by hermes_constants.find_hermes_node_executable() and safe
+# to call from install reruns.
 heal_managed_node() {
-    if [ ! -d "$HERMES_HOME/node" ]; then
-        _nb_log "Hermes-managed Node is absent — installing to $HERMES_HOME/node/..."
-        _nb_install_bundled_node
-        return $?
-    fi
+    [ -d "$HERMES_HOME/node" ] || return 1
     if ! _nb_managed_node_needs_heal; then
         return 0
     fi
-    _nb_log "Hermes-managed Node is broken or outdated — redownloading to $HERMES_HOME/node/..."
+    _nb_log "Hermes-managed Node is broken — redownloading to $HERMES_HOME/node/..."
     _nb_install_bundled_node
 }
 

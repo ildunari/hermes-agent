@@ -52,7 +52,7 @@ export function UrlEmbed({ descriptor }: { descriptor: EmbedDescriptor }) {
   // it a plain link; otherwise the placeholder shows until "Load" (this embed)
   // or "Always allow" / global `always` permits the fetch.
   if (mode === 'off') {
-    return <PrettyLink className="wrap-anywhere" href={descriptor.sourceUrl} inAppBrowser />
+    return <PrettyLink className="wrap-anywhere" href={descriptor.sourceUrl} />
   }
 
   const consented = mode === 'always' || loaded || allowed.includes(descriptor.provider)

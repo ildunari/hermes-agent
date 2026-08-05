@@ -45,47 +45,6 @@ export const ja = defineLocale({
     off: 'オフ'
   },
 
-  browserPane: {
-    address: 'ブラウザーアドレス',
-    addressPlaceholder: 'HTTP(S) アドレスを入力',
-    back: '戻る',
-    closeTab: 'タブを閉じる',
-    empty: 'タブを開いてブラウジングを開始します。',
-    forward: '進む',
-    hide: 'ブラウザーペインを隠す',
-    invalidAddress: '有効な HTTP(S) アドレスを入力してください',
-    label: 'ブラウザーワークスペース',
-    newTab: '新しいタブ',
-    ready: '準備完了',
-    reload: '再読み込み',
-    show: 'ブラウザーペインを表示',
-    tabs: 'ブラウザータブ'
-  },
-
-  browserSupervision: {
-    activity: '最近の操作履歴',
-    activityRetention:
-      '最長7日間（最大5,000件）保持されます。監査ログではなく、ウェブサイト上の操作を元に戻すことはできません。',
-    activityTitle: 'このMac上の最近のアクティビティ',
-    activityUnavailable: '最近のアクティビティは保存されていません。',
-    controlFailed: '操作の変更に失敗しました。もう一度お試しください。',
-    controllerLabel: '信頼済みブラウザー操作',
-    generation: '世代',
-    handBack: 'エージェントに戻す',
-    operation: '操作',
-    operations: { action: 'アクション', idle: '待機', navigate: '移動', snapshot: 'スナップショット' },
-    owner: '所有者',
-    pause: 'エージェント操作を一時停止',
-    profile: 'プロファイル',
-    reasons: { handBack: '引き渡し', pause: '一時停止', stop: '停止', takeover: '引き継ぎ' },
-    session: 'セッション',
-    states: { agent: 'エージェント操作', handingBack: '引き渡し中', localTakeover: 'ローカル操作', paused: '一時停止' },
-    stopAndClose: '停止して閉じる',
-    tab: 'タブ',
-    takeControl: 'ローカル操作に切り替え',
-    title: 'ブラウザー操作'
-  },
-
   fileMenu: {
     revealFinder: 'Finder で表示',
     revealExplorer: 'エクスプローラーで表示',
@@ -163,13 +122,6 @@ export const ja = defineLocale({
     details: '詳細',
     copyDetail: '詳細をコピー',
     copyDetailFailed: '通知の詳細をコピーできませんでした',
-    browserIntentBlockedMessage:
-      '現在の信頼できるブラウザー操作または許可が必要なため、Hermes はこのリンクを開きませんでした。',
-    browserIntentBlockedTitle: 'リンクは開かれませんでした',
-    browserIntentOfferMessage: 'このリンクはここから利用でき、直接選択するまで開かれません。',
-    browserIntentOfferTitle: 'リンクを開く準備ができました',
-    browserResourceFailedMessage: 'Hermes はこのリソースを安全に開けませんでした。空のブラウザータブを閉じました。',
-    browserResourceFailedTitle: 'リソースを開けませんでした',
     backendOutOfDateTitle: 'バックエンドが古いです',
     backendOutOfDateMessage:
       'Hermes バックエンドがこのデスクトップビルドより古く、正常に動作しない場合があります。更新して揃えてください。',
@@ -263,114 +215,6 @@ export const ja = defineLocale({
     noResults: '言語が見つかりません'
   },
 
-  browserAnnotations: {
-    actionResolve: '解決済みにする',
-    empty: 'このページに注釈はありません。',
-    error: '注釈を利用できません。',
-    exportLabel: 'ラベル付きスクリーンショットを書き出す',
-    health: {
-      ambiguous: '候補が複数あります',
-      resolved: '接続済み',
-      shifted: '位置が移動しました',
-      stale: '古くなっています',
-      unsupported: '未対応'
-    },
-    kinds: {
-      'agent-marker': 'エージェントマーカー',
-      comment: 'コメント',
-      drawing: '描画',
-      element: '要素',
-      region: '領域',
-      text: 'テキスト'
-    },
-    panelLabel: 'ページの注釈',
-    hideLabel: '注釈を非表示',
-    resizeLabel: '注釈パネルの幅を変更',
-    showLabel: '注釈を表示',
-    refreshLabel: '注釈を更新',
-    stale: 'ページが変更されました。操作する前に更新してください。',
-    statuses: { dismissed: '非表示', open: '未解決', resolved: '解決済み' },
-    subtitle: '信頼されたサイドパネル',
-    title: '注釈'
-  },
-
-  browserConsent: {
-    allowOnce: '今回のみ許可',
-    browserGeneration: 'ブラウザ世代',
-    captureScope: 'キャプチャ範囲',
-    classification: 'ナビゲーション分類',
-    classificationOrdinary: 'このタスクでは通常扱い',
-    classificationSensitive: 'センシティブ',
-    classificationUnknown: '未分類 — センシティブとして扱います',
-    categories: {
-      destructiveAction:
-        'Hermes がデータを変更したり、サイト上の効果を発生させる可能性のある操作を実行しようとしています。',
-      download: 'ウェブサイトがファイルをダウンロードしようとしています。次に保存先を選択します。',
-      externalHandler: 'ウェブサイトが外部リンクハンドラーで別のアプリを開こうとしています。',
-      navigation: 'Hermes がこのタスクを別のサイトへ移動しようとしています。',
-      outboundPixels: 'Hermes が現在の画面画像を指定された受信者と共有しようとしています。',
-      permission: 'ウェブサイトがブラウザの権限を要求しています。',
-      uploadAssignment: 'Hermes が準備済みのローカルファイルをこのサイトに割り当てようとしています。',
-      websiteSubmission: 'Hermes が情報の送信または外部から見えるサイト操作を実行しようとしています。'
-    },
-    deny: '拒否',
-    detail: '要求の詳細',
-    expires: 'この要求は自動的に期限切れになります。',
-    filename: 'ファイル',
-    memoryOnlyRetention: 'この1回の解析中のみメモリに保持し、Hermes は生の画像を保存しません。',
-    navigationGateWarning:
-      'この判断は、アップロード、ダウンロード、権限、破壊的操作、ポップアップ、外部ハンドラー、画像取得を承認しません。',
-    operation: '操作',
-    permission: '権限',
-    pixelWarning:
-      '画像にはパスワード、QR コード、認証情報、個人データ、その他の秘密が含まれる可能性があります。Hermes は送信前にそれらを確実に墨消しまたは除去できません。',
-    policyReasons: 'ポリシー理由',
-    policySource: 'ポリシー情報源',
-    purpose: '目的',
-    recipient: '受信者',
-    retention: '保持',
-    scheme: '外部リンクのスキーム',
-    scopeWarning: '許可は、ここに示された正確なタスク、タブ、サイト、操作、ブラウザ世代にのみ適用されます。',
-    site: 'サイト',
-    tab: 'タブ',
-    task: 'タスク',
-    taskGeneration: 'タスク世代',
-    profile: 'プロファイル',
-    title: 'ブラウザの承認が必要です',
-    treatOrdinary: 'このタスクでは通常として扱う',
-    viewportDocumentScope: documentGeneration =>
-      `ドキュメント世代 ${documentGeneration} の現在のビューポート（ページ全体ではありません）`
-  },
-
-  browserUpload: {
-    bytes: 'バイト',
-    cancel: 'キャンセル',
-    empty: '（空）',
-    finish: '完了',
-    next: '次へ',
-    none: 'なし',
-    select: '選択',
-    skip: 'スキップ',
-    sourceStagingWarning:
-      'この選択で許可されるのは、この Mac 上での一時的なステージングだけです。ウェブサイトへの割り当てには別の承認が必要です。送信やその他の破壊的なサイト操作には、その後に個別の承認が必要です。',
-    sourceTitle: 'Studio のアップロード元を選択',
-    consent: {
-      accept: 'ページの accept 宣言',
-      aggregate: '合計サイズ',
-      destination: '送信先',
-      files: 'ファイル',
-      form: 'フォーム',
-      immediate: '割り当て直後にページが送信する可能性があります',
-      input: '入力',
-      mode: '選択モード',
-      rename: 'ステージング時の名前変更',
-      sourceLabel: '元',
-      source: 'Mac Studio のセッション成果物／添付',
-      warning:
-        '承認したページオリジンのコードは、割り当てたファイルを読み取り、再送信できます。割り当ては送信やその他の破壊的なサイト操作を承認しません。それらには、その後に個別の承認が必要です。'
-    }
-  },
-
   settings: {
     closeSettings: '設定を閉じる',
     exportConfig: '設定を書き出す',
@@ -393,61 +237,7 @@ export const ja = defineLocale({
       archivedChats: 'アーカイブ済みチャット',
       about: '情報',
       billing: '請求',
-      notifications: '通知',
-      browser: 'ブラウザ'
-    },
-    browser: {
-      title: 'ブラウザ',
-      intro: profile =>
-        `アクティブな「${profile}」プロファイルの端末内ブラウザデータです。別の Desktop には同期されません。`,
-      restoreTitle: '再起動後にタブを復元',
-      restoreDescription:
-        '安全な HTTP(S) アドレスのみ端末に保存します。フォーム、ページ内容、プライベートタブ、認証情報、エージェント制御は復元されません。',
-      historyTitle: '閲覧履歴',
-      historyEmpty: 'このプロファイルには端末内の閲覧履歴がありません。',
-      clearSite: 'サイトデータを消去',
-      clearSiteConfirm: origin => `${origin} の Cookie、ストレージ、Service Worker、権限を消去しますか？`,
-      clearHistory: '履歴を消去',
-      clearAllData: 'すべての閲覧データを消去',
-      clearAllDataDescription:
-        'このプロファイルのサイトストレージ、Cookie、キャッシュ、HTTP 認証、履歴、権限、転送記録を消去します。',
-      clearAllDataConfirm:
-        'このプロファイルの端末内閲覧データをすべて消去しますか？実行中のブラウザ自動操作は停止します。',
-      workspaceTitle: 'ブラウザワークスペース',
-      workspaceDescription:
-        'Web サイトからログアウトせずに保存済みタブとアクティビティをリセットします。履歴は別に選択できます。',
-      resetWorkspace: '保存済みタブをリセット',
-      resetWorkspaceAndHistory: 'タブと履歴をリセット',
-      resetConfirm: 'このブラウザワークスペースをリセットしますか？',
-      degradedTitle: 'ブラウザメタデータを利用できません',
-      degradedDescription:
-        '保存済みタブの復元や移動は行われていません。再試行、破損 DB を保持してメタデータをリセット、または閲覧データを消去できます。',
-      retry: '再試行',
-      resetMetadata: 'メタデータをリセット',
-      resetMetadataConfirm: '破損 DB を修復用に保持し、空のブラウザメタデータで開始しますか？',
-      exportMetadata: '破損メタデータを書き出す',
-      clearBrowsingData: '閲覧データを消去',
-      actionFailed: 'ブラウザデータの操作を完了できませんでした。',
-      partialFailure: scopes => `一部のブラウザデータは変更されましたが、次の範囲で失敗しました：${scopes}。`,
-      siteDataScope: 'サイトストレージ',
-      metadataScope: 'ローカルメタデータ',
-      permissionsScope: '権限',
-      activityScope: 'アクティビティ',
-      workspaceScope: 'ワークスペース状態',
-      originMetadataOnly: 'このオリジンは権限または転送記録に含まれています。',
-      permissionsTitle: 'サイトの権限',
-      permissionsDescription:
-        '永続的な決定は、人が閲覧する際の完全一致オリジンにのみ適用されます。エージェントタスクには引き続き1回限りの同意が必要です。',
-      permissionOrigin: '完全一致のサイトオリジン',
-      permissionName: '権限名',
-      permissionsEmpty: '永続的なサイト権限の決定はありません。',
-      allow: '許可',
-      deny: '拒否',
-      allowed: '許可済み',
-      denied: '拒否済み',
-      removePermission: '削除',
-      loading: 'ブラウザ設定を読み込み中',
-      redacted: '機密アドレスは非表示です'
+      notifications: '通知'
     },
     notifications: {
       title: '通知',
@@ -1655,8 +1445,7 @@ export const ja = defineLocale({
     deleteTitle: 'プロファイルを削除しますか？',
     deleteDescPrefix: 'これにより ',
     deleteDescMid: ' が削除され、その ',
-    deleteDescSuffix:
-      ' ディレクトリ、ローカルブラウザワークスペース、Web サイトへのサインインとサイトデータ、最近のアクティビティ、注釈バンドルが削除されます。Desktop のアンインストールは別の操作です。この操作は元に戻せません。',
+    deleteDescSuffix: ' ディレクトリが削除されます。この操作は元に戻せません。',
     deleting: '削除中...',
     createDesc: 'プロファイルは独立した Hermes 環境です：設定、スキル、SOUL.md が別々になります。',
     nameLabel: '名前',

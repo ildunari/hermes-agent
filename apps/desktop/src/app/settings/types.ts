@@ -7,7 +7,6 @@ import type { EnvVarInfo } from '@/types/hermes'
 export type SettingsView =
   | 'about'
   | 'billing'
-  | 'browser'
   | 'gateway'
   | 'keybinds'
   | 'keys'

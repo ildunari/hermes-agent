@@ -2,7 +2,6 @@ import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 import type { NavigateFunction } from 'react-router'
 
-import { deleteBrowserSessionActivity } from '@/app/browser/browser-supervision'
 import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { deleteSession, getSessionMessages, setSessionArchived } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -1338,7 +1337,6 @@ export function useSessionActions({
         }
 
         await deleteSession(storedSessionId, removed?.profile)
-        await deleteBrowserSessionActivity(removed?.profile ?? 'default', storedSessionId)
         clearQueuedPrompts(storedSessionId)
 
         if (closingRuntimeId) {

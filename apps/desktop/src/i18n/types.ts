@@ -91,135 +91,6 @@ export interface Translations {
     off: string
   }
 
-  browserPane: {
-    address: string
-    addressPlaceholder: string
-    back: string
-    closeTab: string
-    empty: string
-    forward: string
-    hide: string
-    invalidAddress: string
-    label: string
-    newTab: string
-    ready: string
-    reload: string
-    show: string
-    tabs: string
-  }
-
-  browserSupervision: {
-    activity: string
-    activityRetention: string
-    activityTitle: string
-    activityUnavailable: string
-    controlFailed: string
-    controllerLabel: string
-    generation: string
-    handBack: string
-    operation: string
-    operations: Record<'action' | 'idle' | 'navigate' | 'snapshot', string>
-    owner: string
-    pause: string
-    profile: string
-    reasons: Record<'handBack' | 'pause' | 'stop' | 'takeover', string>
-    session: string
-    states: Record<'agent' | 'handingBack' | 'localTakeover' | 'paused', string>
-    stopAndClose: string
-    tab: string
-    takeControl: string
-    title: string
-  }
-
-  browserAnnotations: {
-    actionResolve: string
-    empty: string
-    error: string
-    exportLabel: string
-    health: Record<'ambiguous' | 'resolved' | 'shifted' | 'stale' | 'unsupported', string>
-    kinds: Record<'agent-marker' | 'comment' | 'drawing' | 'element' | 'region' | 'text', string>
-    panelLabel: string
-    hideLabel: string
-    resizeLabel: string
-    showLabel: string
-    refreshLabel: string
-    stale: string
-    statuses: Record<'dismissed' | 'open' | 'resolved', string>
-    subtitle: string
-    title: string
-  }
-
-  browserConsent: {
-    allowOnce: string
-    browserGeneration: string
-    captureScope: string
-    classification: string
-    classificationOrdinary: string
-    classificationSensitive: string
-    classificationUnknown: string
-    categories: {
-      destructiveAction: string
-      download: string
-      externalHandler: string
-      navigation: string
-      outboundPixels: string
-      permission: string
-      uploadAssignment: string
-      websiteSubmission: string
-    }
-    deny: string
-    detail: string
-    expires: string
-    filename: string
-    memoryOnlyRetention: string
-    navigationGateWarning: string
-    operation: string
-    permission: string
-    pixelWarning: string
-    policyReasons: string
-    policySource: string
-    purpose: string
-    recipient: string
-    retention: string
-    scheme: string
-    scopeWarning: string
-    site: string
-    tab: string
-    task: string
-    taskGeneration: string
-    profile: string
-    title: string
-    treatOrdinary: string
-    viewportDocumentScope: (documentGeneration: number) => string
-  }
-
-  browserUpload: {
-    bytes: string
-    cancel: string
-    empty: string
-    finish: string
-    next: string
-    none: string
-    select: string
-    skip: string
-    sourceStagingWarning: string
-    sourceTitle: string
-    consent: {
-      accept: string
-      aggregate: string
-      destination: string
-      files: string
-      form: string
-      immediate: string
-      input: string
-      mode: string
-      rename: string
-      sourceLabel: string
-      source: string
-      warning: string
-    }
-  }
-
   fileMenu: {
     revealFinder: string
     revealExplorer: string
@@ -293,12 +164,6 @@ export interface Translations {
     details: string
     copyDetail: string
     copyDetailFailed: string
-    browserIntentBlockedMessage: string
-    browserIntentBlockedTitle: string
-    browserIntentOfferMessage: string
-    browserIntentOfferTitle: string
-    browserResourceFailedMessage: string
-    browserResourceFailedTitle: string
     backendOutOfDateTitle: string
     backendOutOfDateMessage: string
     installMethodUnsupportedTitle: string
@@ -438,53 +303,6 @@ export interface Translations {
       billing: string
       notifications: string
       plugins: string
-      browser: string
-    }
-    browser: {
-      title: string
-      intro: (profile: string) => string
-      restoreTitle: string
-      restoreDescription: string
-      historyTitle: string
-      historyEmpty: string
-      clearSite: string
-      clearSiteConfirm: (origin: string) => string
-      clearHistory: string
-      clearAllData: string
-      clearAllDataDescription: string
-      clearAllDataConfirm: string
-      workspaceTitle: string
-      workspaceDescription: string
-      resetWorkspace: string
-      resetWorkspaceAndHistory: string
-      resetConfirm: string
-      degradedTitle: string
-      degradedDescription: string
-      retry: string
-      resetMetadata: string
-      resetMetadataConfirm: string
-      exportMetadata: string
-      clearBrowsingData: string
-      actionFailed: string
-      partialFailure: (scopes: string) => string
-      siteDataScope: string
-      metadataScope: string
-      permissionsScope: string
-      activityScope: string
-      workspaceScope: string
-      originMetadataOnly: string
-      permissionsTitle: string
-      permissionsDescription: string
-      permissionOrigin: string
-      permissionName: string
-      permissionsEmpty: string
-      allow: string
-      deny: string
-      allowed: string
-      denied: string
-      removePermission: string
-      loading: string
-      redacted: string
     }
     plugins: {
       title: string

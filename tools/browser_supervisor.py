@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _redact_cdp_error_text(exc: object, task_id: Optional[str] = None) -> str:
+def _redact_cdp_error_text(exc: object) -> str:
     """Redact any CDP endpoint credentials from an error's string form.
 
     ``websockets`` bakes the raw target URL into its exception messages
@@ -46,20 +46,10 @@ def _redact_cdp_error_text(exc: object, task_id: Optional[str] = None) -> str:
     ``self.cdp_url`` — including a ``?token=`` query credential or
     ``user:pass@`` userinfo). Every supervisor egress point that turns such an
     exception into log text or a re-raised message MUST route through here so
-    those credentials never reach Hermes logs or tracebacks. Authenticated
-    in-app tasks use ABP's content-free diagnostic; ordinary sessions retain
-    the existing CDP URL redactor. Falls back to a fixed sentinel if projection
-    or redaction itself raises, erring toward masking.
+    those credentials never reach Hermes logs or tracebacks. Falls back to a
+    fixed sentinel if redaction itself raises, erring toward masking.
     """
     try:
-        if task_id:
-            from tools.browser_tool import authenticated_browser_scope_for_task
-
-            scope = authenticated_browser_scope_for_task(task_id)
-            if scope is not None:
-                from tools.authenticated_browser_projection import project_diagnostic
-
-                return project_diagnostic(scope, str(exc), "CDP_SUPERVISOR_ERROR")
         from agent.redact import redact_cdp_url
 
         return redact_cdp_url(str(exc))
@@ -399,7 +389,7 @@ class CDPSupervisor:
             # via the message OR the traceback chain. Type is not load-bearing:
             # the sole caller (_ensure_cdp_supervisor) only logs it.
             raise RuntimeError(
-                f"CDP supervisor failed to start: {_redact_cdp_error_text(err, self.task_id)}"
+                f"CDP supervisor failed to start: {_redact_cdp_error_text(err)}"
             ) from None
 
     def stop(self, timeout: float = 5.0) -> None:
@@ -632,11 +622,7 @@ class CDPSupervisor:
                 self._start_error = e
                 self._ready_event.set()
             else:
-                logger.warning(
-                    "CDP supervisor %s crashed: %s",
-                    self.task_id,
-                    _redact_cdp_error_text(e, self.task_id),
-                )
+                logger.warning("CDP supervisor %s crashed: %s", self.task_id, e)
         finally:
             # Flush any remaining tasks before closing the loop so we don't
             # emit "Task was destroyed but it is pending" warnings.
@@ -683,7 +669,7 @@ class CDPSupervisor:
                     return
                 logger.warning(
                     "CDP supervisor %s: connect failed (attempt %s): %s",
-                    self.task_id, attempt, _redact_cdp_error_text(e, self.task_id),
+                    self.task_id, attempt, _redact_cdp_error_text(e),
                 )
                 await asyncio.sleep(min(backoff, 10.0))
                 backoff = min(backoff * 2, 10.0)
@@ -720,7 +706,7 @@ class CDPSupervisor:
                     "CDP supervisor %s: session dropped after %.1fs: %s",
                     self.task_id,
                     time.time() - last_success_at,
-                    _redact_cdp_error_text(e, self.task_id),
+                    _redact_cdp_error_text(e),
                 )
             finally:
                 with self._state_lock:
@@ -805,8 +791,7 @@ class CDPSupervisor:
         except Exception as e:
             logger.debug(
                 "dialog bridge: addScriptToEvaluateOnNewDocument failed on sid=%s: %s",
-                (session_id or "")[:16],
-                _redact_cdp_error_text(e, self.task_id),
+                (session_id or "")[:16], e,
             )
         try:
             await self._cdp(
@@ -826,8 +811,7 @@ class CDPSupervisor:
         except Exception as e:
             logger.debug(
                 "dialog bridge: Fetch.enable failed on sid=%s: %s",
-                (session_id or "")[:16],
-                _redact_cdp_error_text(e, self.task_id),
+                (session_id or "")[:16], e,
             )
         # Also try to inject into the already-loaded document so existing
         # pages pick up the override on reconnect. Best-effort.
@@ -891,7 +875,7 @@ class CDPSupervisor:
                 elif "method" in msg:
                     await self._on_event(msg["method"], msg.get("params", {}), msg.get("sessionId"))
         except Exception as e:
-            logger.debug("CDP read loop exited: %s", _redact_cdp_error_text(e, self.task_id))
+            logger.debug("CDP read loop exited: %s", e)
 
     # ── Event dispatch ──────────────────────────────────────────────────────
 
@@ -980,11 +964,7 @@ class CDPSupervisor:
                 timeout=5.0,
             )
         except Exception as e:
-            logger.debug(
-                "auto-handle CDP call failed for %s: %s",
-                dialog.id,
-                _redact_cdp_error_text(e, self.task_id),
-            )
+            logger.debug("auto-handle CDP call failed for %s: %s", dialog.id, e)
 
     async def _dialog_timeout_expired(self, dialog_id: str) -> None:
         with self._state_lock:
@@ -1016,11 +996,7 @@ class CDPSupervisor:
                     timeout=5.0,
                 )
         except Exception as e:
-            logger.debug(
-                "auto-dismiss failed for %s: %s",
-                dialog_id,
-                _redact_cdp_error_text(e, self.task_id),
-            )
+            logger.debug("auto-dismiss failed for %s: %s", dialog_id, e)
 
     def _archive_dialog_locked(self, dialog: PendingDialog, closed_by: str) -> None:
         """Move a pending dialog to the recent_dialogs ring buffer. Must hold state_lock."""
@@ -1218,11 +1194,7 @@ class CDPSupervisor:
                 timeout=5.0,
             )
         except Exception as e:
-            logger.debug(
-                "bridge fulfill failed for %s: %s",
-                dialog.id,
-                _redact_cdp_error_text(e, self.task_id),
-            )
+            logger.debug("bridge fulfill failed for %s: %s", dialog.id, e)
 
     # ── Frame / target tracking ─────────────────────────────────────────────
 
@@ -1343,11 +1315,7 @@ class CDPSupervisor:
                 timeout=3.0,
             )
         except Exception as e:
-            logger.debug(
-                "child session %s setup failed: %s",
-                sid[:16],
-                _redact_cdp_error_text(e, self.task_id),
-            )
+            logger.debug("child session %s setup failed: %s", sid[:16], e)
         # Install the dialog bridge on the child so iframe dialogs are captured.
         await self._install_dialog_bridge(sid)
 

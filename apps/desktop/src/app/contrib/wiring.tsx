@@ -69,7 +69,6 @@ import { armWakeWord } from '@/store/wake-word'
 import { isSecondaryWindow } from '@/store/windows'
 import { useSkinCommand } from '@/themes/use-skin-command'
 
-import { BrowserWebviewLayer } from '../browser/browser-webviews'
 import { closeWorkspaceTab } from '../chat/close-tab'
 import { requestComposerInsert } from '../chat/composer/focus'
 import { useComposerActions } from '../chat/hooks/use-composer-actions'
@@ -974,7 +973,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   // Pane-registered tools (preview's monitor/devtools cluster) anchor flush
   // against the static system cluster — in the tree layout the titlebar band
   // sits ABOVE the grid, so AppShell's pane-width anchoring doesn't apply.
-  const SYSTEM_TOOL_COUNT = 5
+  const SYSTEM_TOOL_COUNT = 4
   const paneToolCount = rightTitlebarTools.filter(tool => !tool.hidden).length
   const systemToolsWidth = `calc(${SYSTEM_TOOL_COUNT} * (var(--titlebar-control-size) + 0.25rem))`
 
@@ -1003,9 +1002,6 @@ export function ContribWiring({ children }: { children: ReactNode }) {
           tools={rightTitlebarTools}
         />
         {children}
-        {/* Window-lifetime browser guests stay mounted while tabs, routes, and
-            pane visibility change; BrowserPane only supplies their viewport. */}
-        <BrowserWebviewLayer />
       </div>
 
       {/* The full real overlay set (mirrors DesktopController's `overlays`). */}

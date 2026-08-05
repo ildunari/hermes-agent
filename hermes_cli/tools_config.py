@@ -1634,23 +1634,14 @@ def _run_post_setup(post_setup_key: str):
     from hermes_constants import find_node_executable
 
     if post_setup_key in {"agent_browser", "browserbase"}:
-        from hermes_constants import (
-            AGENT_BROWSER_PACKAGE,
-            agent_browser_runnable,
-            find_node_executable,
-            node_version_supported,
-        )
-
-        local_ab = PROJECT_ROOT / "node_modules" / ".bin" / "agent-browser"
-        if sys.platform == "win32" and local_ab.with_suffix(".cmd").exists():
-            local_ab = local_ab.with_suffix(".cmd")
-        node_bin = find_node_executable("node")
-        node_ok = node_version_supported(node_bin)
-        npm_bin = find_node_executable("npm") if node_ok else None
-        npx_bin = find_node_executable("npx") if node_ok else None
-        local_ab_ok = node_ok and agent_browser_runnable(str(local_ab))
+        node_modules = PROJECT_ROOT / "node_modules" / "agent-browser"
+        # Managed Node first — $HERMES_HOME/node is not on PATH, so a bare
+        # which() reports "no npm" on installs whose only Node is the one
+        # Hermes installed for exactly this toolchain.
+        npm_bin = find_node_executable("npm")
+        npx_bin = find_node_executable("npx")
         # Step 1: install the agent-browser npm package into node_modules/
-        if not local_ab_ok and npm_bin:
+        if not node_modules.exists() and npm_bin:
             _print_info("    Installing Node.js dependencies for browser tools...")
             import subprocess
             # Use the resolved npm_bin absolute path so subprocess.Popen can
@@ -1667,21 +1658,17 @@ def _run_post_setup(post_setup_key: str):
             )
             if result.returncode == 0:
                 _print_success("    Node.js dependencies installed")
-                local_ab_ok = agent_browser_runnable(str(local_ab))
             else:
                 from hermes_constants import display_hermes_home
                 _print_warning(f"    npm install failed - run manually: cd {display_hermes_home()}/hermes-agent && npm install --workspaces=false")
                 if result.stderr:
                     _print_info(f"      {result.stderr.strip()[:200]}")
-        elif not node_ok:
-            _print_warning(
-                "    Supported Node.js not found - browser tools require Node.js >=24"
-            )
-            return
-        elif not npx_bin:
-            _print_warning(
-                f"    Neither local {AGENT_BROWSER_PACKAGE} nor npx is runnable"
-            )
+        elif node_modules.exists():
+            # Distinct message for the re-run case so the GUI action log tells
+            # the truth ("nothing to do") instead of implying a fresh install.
+            _print_success("    agent-browser already installed, nothing to do")
+        else:
+            _print_warning("    Node.js not found - browser tools require: npm install (in hermes-agent directory)")
             return
 
         # Step 2: only the local browser provider actually needs Chromium on
@@ -1722,9 +1709,9 @@ def _run_post_setup(post_setup_key: str):
             )
             return
 
-        if not local_ab_ok and not npx_bin:
+        if not npx_bin:
             _print_warning(
-                "    npx not found - install Chromium manually: npx -y agent-browser@0.32.0 install --with-deps"
+                "    npx not found - install Chromium manually: npx agent-browser install --with-deps"
             )
             return
 
@@ -1733,10 +1720,15 @@ def _run_post_setup(post_setup_key: str):
         # Prefer the bundled agent-browser install subcommand so the
         # version of Chromium matches the CLI. Fall back to npx shim on
         # setups where the local bin stub isn't present.
+        local_ab = PROJECT_ROOT / "node_modules" / ".bin" / "agent-browser"
+        if sys.platform == "win32":
+            local_ab_win = local_ab.with_suffix(".cmd")
+            if local_ab_win.exists():
+                local_ab = local_ab_win
         install_cmd = (
             [str(local_ab), "install", "--with-deps"]
-            if local_ab_ok
-            else [npx_bin, "-y", "agent-browser@0.32.0", "install", "--with-deps"]
+            if local_ab.exists()
+            else [npx_bin, "-y", "agent-browser", "install", "--with-deps"]
         )
         try:
             result = subprocess.run(
@@ -1755,13 +1747,13 @@ def _run_post_setup(post_setup_key: str):
                 tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
                 for line in tail:
                     _print_info(f"      {line[:200]}")
-                _print_info("    Run manually: npx -y agent-browser@0.32.0 install --with-deps")
+                _print_info("    Run manually: npx agent-browser install --with-deps")
         except subprocess.TimeoutExpired:
             _print_warning("    Chromium install timed out (>10min)")
-            _print_info("    Run manually: npx -y agent-browser@0.32.0 install --with-deps")
+            _print_info("    Run manually: npx agent-browser install --with-deps")
         except Exception as exc:
             _print_warning(f"    Chromium install failed: {exc}")
-            _print_info("    Run manually: npx -y agent-browser@0.32.0 install --with-deps")
+            _print_info("    Run manually: npx agent-browser install --with-deps")
 
     elif post_setup_key == "camofox":
         camofox_dir = PROJECT_ROOT / "node_modules" / "@askjo" / "camofox-browser"

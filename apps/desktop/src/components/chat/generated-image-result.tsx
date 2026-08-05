@@ -2,11 +2,6 @@
 
 import { type FC, useEffect, useState } from 'react'
 
-import {
-  captureBrowserIntentScope,
-  openExplicitBrowserIntent,
-  openExplicitBrowserResourceIntent
-} from '@/app/browser/browser-intent-production'
 import { DiffusionCanvas } from '@/components/chat/image-generation-placeholder'
 import { ImageActionButton, ImageLightbox } from '@/components/chat/zoomable-image'
 import { useImageDownload } from '@/hooks/use-image-download'
@@ -14,7 +9,6 @@ import { useI18n } from '@/i18n'
 import { generatedImageFromResult } from '@/lib/generated-images'
 import { filePathFromMediaPath, gatewayMediaDataUrl, isRemoteGateway, mediaExternalUrl, mediaName } from '@/lib/media'
 import { cn } from '@/lib/utils'
-import { notifyError } from '@/store/notifications'
 
 // Aspect hint from the tool args sizes the frame *before* the image loads, so
 // the placeholder and the resolved image occupy the same box — no layout shift.
@@ -52,23 +46,6 @@ async function resolveImageSrc(path: string): Promise<string> {
   }
 
   return window.hermesDesktop.readFileDataUrl(filePathFromMediaPath(path))
-}
-
-export async function openFailedGeneratedImage(image: string): Promise<void> {
-  const scopeSnapshot = captureBrowserIntentScope()
-
-  if (isInlineSrc(image)) {
-    openExplicitBrowserIntent({ scopeSnapshot, source: 'transcript-link', targetRef: image })
-
-    return
-  }
-
-  openExplicitBrowserResourceIntent({
-    kind: 'artifact',
-    scopeSnapshot,
-    sourceSessionId: scopeSnapshot.workspaceId,
-    target: filePathFromMediaPath(image)
-  })
 }
 
 export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({ aspectRatio, result }) => {
@@ -118,17 +95,16 @@ export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({
 
   if (failed && image) {
     return (
-      <button
-        className="mt-2 ref inline-block font-semibold wrap-anywhere"
-        onClick={() => {
-          void openFailedGeneratedImage(image).catch(error => {
-            notifyError(error, copy.openImage)
-          })
+      <a
+        className="mt-2 ref inline-block wrap-anywhere"
+        href="#"
+        onClick={event => {
+          event.preventDefault()
+          void window.hermesDesktop?.openExternal(mediaExternalUrl(image))
         }}
-        type="button"
       >
         {copy.openImage}: {mediaName(image)}
-      </button>
+      </a>
     )
   }
 

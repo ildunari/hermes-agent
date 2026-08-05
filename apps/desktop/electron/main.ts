@@ -49,29 +49,6 @@ import { shouldLatchBackendStartFailure, shouldLatchRemoteReauthFailure } from '
 import { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } from './bootstrap-platform'
 import { decideBootstrapRepair } from './bootstrap-repair-guard'
 import { runBootstrap } from './bootstrap-runner'
-import { BrowserActivityRepositoryManager } from './browser-activity-repository'
-import { renderAnnotationScreenshotLabels } from './browser-annotation-screenshot'
-import { BrowserCheckpointCache } from './browser-checkpoint-cache'
-import { appendDesktopAssociation, BrowserDarkClient, DesktopConnectionAssociation } from './browser-dark-client'
-import { browserDataClearPlan } from './browser-data-semantics'
-import {
-  BROWSER_PARTITION,
-  type BrowserPendingUploadChooser,
-  createBrowserGuestSecurityController
-} from './browser-guest-security'
-import {
-  ARTIFACT_SCHEME,
-  BrowserResourceDeliveryController,
-  type GatewayResourceGrant
-} from './browser-resource-delivery'
-import { BrowserResourceGrantRegistry, type BrowserResourceGrantScope } from './browser-resource-grants'
-import { runBrowserSiteDataClear } from './browser-site-data-clear'
-import { repairBrowserProfileMetadata } from './browser-state-repair'
-import { BrowserStateRepositoryManager } from './browser-state-repository'
-import { buildBrowserUploadConsentDetail } from './browser-upload-consent'
-import { BROWSER_UPLOAD_MAIN_COPY } from './browser-upload-copy'
-import { browserUploadDeliveryHeaders, importBrowserUpload } from './browser-upload-production'
-import { BrowserUploadStagingAuthority } from './browser-upload-staging'
 import { applyConnectionChange, resolveTerminalConnection } from './connection-apply'
 import {
   authModeFromStatus,
@@ -295,221 +272,6 @@ const APP_ROOT = app.getAppPath()
 // ESM loader is broken on Electron 40's Node (ERR_INVALID_RETURN_PROPERTY_VALUE).
 // Dev (`npm run dev`) and prod both load the esbuild output from dist/.
 const PRELOAD_PATH = path.join(APP_ROOT, 'dist', 'electron-preload.js')
-const browserCheckpoints = new BrowserCheckpointCache()
-const browserResourceGrants = new BrowserResourceGrantRegistry()
-const browserUploadStaging = new BrowserUploadStagingAuthority({
-  clearAssignedInput: (_handle, binding) => browserGuestSecurity.clearAssignedUpload(binding),
-  root: path.join(app.getPath('temp'), 'hermes-browser-upload-v1', 'desktop-instance')
-})
-const browserUploadStagingReady = browserUploadStaging.initialize()
-let browserResourceDelivery: BrowserResourceDeliveryController | null = null
-let browserResourceRevocationInFlight: Promise<void> | null = null
-let browserResourcesRevokedForQuit = false
-
-app.on('before-quit', event => {
-  if (browserResourcesRevokedForQuit) {
-    return
-  }
-
-  event.preventDefault()
-  browserResourceGrants.revokeAll()
-  browserResourceRevocationInFlight ??= Promise.all([
-    Promise.resolve(browserResourceDelivery?.revokeAll()),
-    browserUploadStaging.shutdown()
-  ])
-    .then(() => undefined)
-    .catch(error => {
-      process.exitCode = 1
-      console.error('[browser-resource] quit cleanup failed:', error)
-      dialog.showErrorBox(
-        'Hermes cleanup failed',
-        'Hermes could not clear all staged browser uploads before quitting. The next startup will retry cleanup.'
-      )
-    })
-    .then(() => {
-      browserResourcesRevokedForQuit = true
-      app.quit()
-    })
-})
-
-app.on('child-process-gone', (_event, details) => {
-  if (details.reason === 'oom' || details.reason === 'memory-eviction') {
-    browserCheckpoints.handleMemoryPressure()
-  }
-})
-
-const browserGuestSecurity = createBrowserGuestSecurityController({
-  app,
-  buildUploadConsent: buildBrowserUploadConsentDetail,
-  handleUploadChooser: chooser => handleBrowserUploadChooser(chooser),
-  invalidateAssignedUploads: scope => {
-    void browserUploadStaging.revokeWhere(
-      binding =>
-        binding.profile === scope.profile &&
-        binding.tabId === scope.tabId &&
-        binding.guestGeneration === scope.guestGeneration &&
-        (scope.documentGeneration === undefined ||
-          binding.documentGeneration === String(scope.documentGeneration)) &&
-        (scope.frameId === undefined || binding.frameId === scope.frameId) &&
-        (scope.taskId === undefined || binding.taskId === scope.taskId) &&
-        (scope.taskGeneration === undefined || binding.taskGeneration === String(scope.taskGeneration))
-    )
-  },
-  notifyUploadExpired: chooser => {
-    const host = BrowserWindow.getAllWindows().find(window => window.webContents.id === chooser.hostId)
-
-    if (!host || host.isDestroyed()) {
-      return
-    }
-
-    const locale = app.getLocale().toLowerCase()
-    const copy = locale.startsWith('ja')
-      ? '割り当てたアップロードは30分後に期限切れとなり、消去されました。'
-      : locale.startsWith('zh-tw') || locale.startsWith('zh-hk') || locale.includes('hant')
-        ? '已指派的上傳內容在 30 分鐘後到期並已清除。'
-        : locale.startsWith('zh')
-          ? '已分配的上传内容在 30 分钟后过期并已清除。'
-          : 'The assigned upload expired after 30 minutes and was cleared.'
-
-    void dialog.showMessageBox(host, { type: 'warning', message: copy })
-  },
-  ipcMain,
-  authorizeResourceRequest: (partition, webContentsId, url, admitArtifact) =>
-    browserResourceDelivery?.isAuthorizedRequest(partition, webContentsId, url, admitArtifact) === true,
-  installResourceSession: (browserSession, partition) =>
-    browserResourceDelivery?.installSession(browserSession, partition),
-  notifyRetired: ({ hostId, ...event }) => {
-    const host = BrowserWindow.getAllWindows().find(window => window.webContents.id === hostId)
-
-    void browserResourceDelivery?.revokeWhere({
-      guestGeneration: event.guestGeneration,
-      hostId,
-      tabId: event.tabId
-    })
-    void browserUploadStaging.revokeWhere(
-      binding => binding.guestGeneration === event.guestGeneration && binding.tabId === event.tabId
-    )
-    browserCheckpoints.evictTabAcrossProfiles(event.tabId)
-    host?.webContents.send('hermes:browser-guest:retired', event)
-  },
-  notifyFreshSnapshot: ({ hostId, ...event }) => {
-    const host = BrowserWindow.getAllWindows().find(window => window.webContents.id === hostId)
-
-    host?.webContents.send('hermes:browser-guest:fresh-snapshot', event)
-  },
-  notifyConsentResolved: ({ hostId, ...event }) => {
-    const host = BrowserWindow.getAllWindows().find(window => window.webContents.id === hostId)
-
-    host?.webContents.send('hermes:browser-consent:resolved', event)
-  },
-  presentConsent: (hostId, prompt) => {
-    const host = BrowserWindow.getAllWindows().find(window => window.webContents.id === hostId)
-
-    if (!host || host.isDestroyed()) {
-      throw new Error('trusted-browser-host-missing')
-    }
-
-    host.webContents.send('hermes:browser-consent:requested', prompt)
-  },
-  chooseDownloadDestination: async (hostId, prompt) => {
-    const host = BrowserWindow.getAllWindows().find(window => window.webContents.id === hostId)
-
-    if (!host || host.isDestroyed()) {
-      return null
-    }
-
-    const result = await dialog.showSaveDialog(host, {
-      defaultPath: prompt.filename ?? 'download'
-    })
-
-    return result.canceled ? null : (result.filePath ?? null)
-  },
-  durablePermissionDecision: (_profile, origin, permission) =>
-    browserStateRepository()?.permission(origin, permission)?.decision ?? null,
-  recordTransfer: (_profile, input) => {
-    browserStateRepository()?.appendTransfer(input)
-  },
-  launchExternal: target => shell.openExternal(target),
-  saveAnnotationScreenshot: async (hostId, png, viewport, markers) => {
-    const host = BrowserWindow.getAllWindows().find(window => window.webContents.id === hostId)
-
-    if (!host || host.isDestroyed()) {
-      throw new Error('trusted-browser-host-missing')
-    }
-
-    const image = nativeImage.createFromBuffer(png)
-
-    if (image.isEmpty()) {
-      throw new Error('browser-annotation-image-invalid')
-    }
-
-    const size = image.getSize()
-    const labeled = renderAnnotationScreenshotLabels(
-      { data: image.toBitmap(), height: size.height, width: size.width },
-      viewport,
-      markers
-    )
-
-    if (!labeled) {
-      throw new Error('browser-annotation-image-invalid')
-    }
-
-    const output = nativeImage.createFromBitmap(labeled, size).toPNG()
-    labeled.fill(0)
-
-    if (output.byteLength === 0) {
-      throw new Error('browser-annotation-image-invalid')
-    }
-
-    try {
-      const result = await dialog.showSaveDialog(host, {
-        defaultPath: 'hermes-annotations.png',
-        filters: [{ extensions: ['png'], name: 'PNG image' }]
-      })
-
-      if (result.canceled || !result.filePath) {
-        return 'canceled'
-      }
-
-      await fs.promises.writeFile(result.filePath, output)
-
-      return 'saved'
-    } finally {
-      output.fill(0)
-    }
-  },
-  sessionFromPartition: partition => session.fromPartition(partition)
-})
-
-browserGuestSecurity.install()
-
-browserResourceDelivery = new BrowserResourceDeliveryController({
-  fetch: (url, init) => electronNet.fetch(url, init as any),
-  mintGateway: mintGatewayBrowserResource,
-  registry: browserResourceGrants
-})
-
-ipcMain.handle('hermes:browser-resource:mint', async (event, request) => {
-  const binding = await browserGuestSecurity.resourceBinding(event, {
-    generation: request?.generation,
-    tabId: request?.tabId
-  })
-
-  if (!binding || !browserResourceDelivery) {
-    return { error: 'browser-resource-guest-stale', ok: false }
-  }
-
-  try {
-    const grant = await browserResourceDelivery.mint(binding, request)
-
-    return { guestUrl: grant.guestUrl, kind: grant.kind, localRef: grant.localRef, ok: true }
-  } catch (error) {
-    return {
-      error: error instanceof Error ? error.message : 'browser-resource-unavailable',
-      ok: false
-    }
-  }
-})
 
 // Remote displays (SSH X11 forwarding, VNC, RDP) make Chromium's GPU
 // compositor flicker — accelerated layers can't be presented cleanly over the
@@ -823,255 +585,6 @@ function resolveHermesHome() {
 }
 
 const HERMES_HOME = resolveHermesHome()
-// One association identifies this running Desktop instance to both the chat
-// and browser sockets. It is intentionally never persisted or exposed to page
-// content. Browser metadata is likewise app-global: the repository managers
-// are rooted at the normal Hermes home and use one stable scope under
-// HERMES_HOME/browser, independent of the selected chat profile.
-const desktopConnectionAssociation = new DesktopConnectionAssociation()
-const BROWSER_APP_SCOPE = 'desktop'
-const browserActivity = new BrowserActivityRepositoryManager(HERMES_HOME)
-const browserState = new BrowserStateRepositoryManager(HERMES_HOME)
-
-function browserActivityRepository() {
-  try {
-    return browserActivity.forProfile(BROWSER_APP_SCOPE)
-  } catch {
-    return null
-  }
-}
-
-function browserStateRepository() {
-  try {
-    return browserState.forProfile(BROWSER_APP_SCOPE)
-  } catch {
-    return null
-  }
-}
-
-async function clearBrowserSiteData(
-  profile: string,
-  origin?: string
-): Promise<{ ok: boolean; permissions: boolean; siteData: boolean }> {
-  const plan = browserDataClearPlan(origin)
-
-  if (!plan) {
-    return { ok: false, permissions: false, siteData: false }
-  }
-
-  browserGuestSecurity.retireAutomationProfile(profile)
-  let siteData = false
-
-  try {
-    const browserSession = session.fromPartition(BROWSER_PARTITION)
-    siteData = await runBrowserSiteDataClear(
-      async () => {
-        await browserSession.closeAllConnections()
-        await browserSession.clearStorageData({
-          ...(plan.origin ? { origin: plan.origin } : {}),
-          storages: [...plan.storages]
-        })
-      },
-      async () => {
-        if (plan.clearAuthCache) {
-          await browserSession.clearAuthCache()
-        }
-
-        if (plan.clearHttpCache) {
-          await browserSession.clearCache()
-        }
-
-        await browserSession.clearHostResolverCache()
-        browserSession.flushStorageData()
-      }
-    )
-  } catch {
-    // Permission metadata remains an independent scope.
-  }
-
-  const permissions = browserStateRepository()?.clearPermissions(origin) ?? false
-
-  return { ok: siteData && permissions, permissions, siteData }
-}
-
-ipcMain.handle('hermes:browser-activity:append', (_event, request) => {
-  const repository = browserActivityRepository()
-
-  return repository ? repository.append(request?.event) : { error: 'invalid', ok: false }
-})
-ipcMain.handle('hermes:browser-activity:list', (_event, request) => {
-  const repository = browserActivityRepository()
-
-  if (!repository) {
-    return { degraded: true, rows: [] }
-  }
-
-  return {
-    degraded: repository.degraded || !repository.open(),
-    rows: repository.list(request?.limit, request?.workspaceId)
-  }
-})
-ipcMain.handle('hermes:browser-activity:clear', (_event, request) => {
-  const repository = browserActivityRepository()
-
-  if (!repository) {
-    return { ok: false }
-  }
-
-  const ok = repository.clear(request?.workspaceId)
-
-  if (ok) {
-    browserCheckpoints.evictAll()
-  }
-
-  return { ok }
-})
-ipcMain.handle('hermes:browser-activity:delete-session', (_event, request) => ({
-  ok: Boolean(browserActivityRepository()?.deleteSession(request?.sessionId))
-}))
-ipcMain.handle('hermes:browser-state:snapshot', () => {
-  const repository = browserStateRepository()
-
-  return repository
-    ? { ...repository.snapshot(), restoreEnabled: repository.restoreEnabled() }
-    : { degraded: true, descriptors: [], epoch: '', restoreEnabled: false, selectedRestoreId: null }
-})
-ipcMain.handle('hermes:browser-state:upsert', (_event, request) =>
-  browserStateRepository()?.upsert(request?.descriptor, request?.epoch) ?? { ok: false }
-)
-ipcMain.handle('hermes:browser-state:remove', (_event, request) => ({
-  ok: Boolean(browserStateRepository()?.remove(request?.restoreId, request?.epoch))
-}))
-ipcMain.handle('hermes:browser-state:select', (_event, request) => ({
-  ok: Boolean(
-    browserStateRepository()?.select(request?.workspaceId, request?.restoreId ?? null, request?.epoch)
-  )
-}))
-ipcMain.handle('hermes:browser-state:history', (_event, request) => {
-  const repository = browserStateRepository()
-
-  return {
-    degraded: !repository || repository.degraded,
-    rows: repository?.history(request?.limit) ?? []
-  }
-})
-ipcMain.handle('hermes:browser-state:origins', () => {
-  const repository = browserStateRepository()
-
-  return { degraded: !repository || repository.degraded, rows: repository?.origins() ?? [] }
-})
-ipcMain.handle('hermes:browser-state:set-restore-enabled', (_event, request) => ({
-  ok: Boolean(browserStateRepository()?.setRestoreEnabled(request?.enabled))
-}))
-ipcMain.handle('hermes:browser-state:set-permission', (_event, request) => ({
-  ok: Boolean(
-    browserStateRepository()?.setPermission(
-      request?.origin,
-      request?.permission,
-      request?.decision,
-      request?.persistence
-    )
-  )
-}))
-ipcMain.handle('hermes:browser-state:permissions', (_event, request) => {
-  const repository = browserStateRepository()
-
-  return {
-    degraded: !repository || repository.degraded,
-    rows: repository?.permissions(request?.limit) ?? []
-  }
-})
-ipcMain.handle('hermes:browser-state:remove-permission', (_event, request) => ({
-  ok: Boolean(browserStateRepository()?.removePermission(request?.origin, request?.permission))
-}))
-ipcMain.handle('hermes:browser-state:clear-metadata', (_event, request) => ({
-  ok: Boolean(
-    browserStateRepository()?.clearBrowsingMetadata({
-      history: request?.history === true,
-      permissions: request?.permissions === true,
-      transfers: request?.transfers === true
-    })
-  )
-}))
-ipcMain.handle('hermes:browser-state:repair', (_event, request) => {
-  if (!['reset-metadata', 'retry'].includes(request?.mode)) {
-    return { activity: false, epoch: '', metadata: false, ok: false, restoreEnabled: false }
-  }
-
-  return repairBrowserProfileMetadata(
-    BROWSER_APP_SCOPE,
-    request.mode,
-    browserState,
-    browserActivity
-  )
-})
-ipcMain.handle('hermes:browser-state:export-quarantined-metadata', async () => {
-  const repository = browserStateRepository()
-
-  if (!repository) {
-    return { ok: false }
-  }
-
-  const options = {
-    defaultPath: `hermes-browser-metadata-${Date.now()}.sqlite3`,
-    filters: [{ extensions: ['sqlite3'], name: 'SQLite database' }],
-    title: 'Export damaged browser metadata'
-  }
-  const selected = mainWindow
-    ? await dialog.showSaveDialog(mainWindow, options)
-    : await dialog.showSaveDialog(options)
-
-  if (selected.canceled || !selected.filePath) {
-    return { canceled: true, ok: false }
-  }
-
-  return { ok: repository.exportQuarantinedMetadata(selected.filePath) }
-})
-ipcMain.handle('hermes:browser-state:clear-browsing-data', async (_event, request) => {
-  const profile = typeof request?.profile === 'string' && request.profile ? request.profile : BROWSER_APP_SCOPE
-  const site = await clearBrowserSiteData(profile)
-  const metadata =
-    browserStateRepository()?.clearBrowsingMetadata({
-      history: true,
-      permissions: true,
-      transfers: true
-    }) ?? false
-
-  return {
-    metadata,
-    ok: site.ok && metadata,
-    permissions: site.permissions,
-    siteData: site.siteData
-  }
-})
-ipcMain.handle('hermes:browser-state:reset-workspace', (_event, request) => {
-  const repository = browserStateRepository()
-
-  if (!repository || typeof request?.workspaceId !== 'string') {
-    return { activity: false, ok: false, state: false }
-  }
-
-  const profile = typeof request?.profile === 'string' && request.profile ? request.profile : BROWSER_APP_SCOPE
-  browserGuestSecurity.retireWorkspaceGuests(profile, request.workspaceId)
-  void browserResourceDelivery?.revokeWhere({ profile })
-  browserResourceGrants.revokeWhere({ profile })
-  browserCheckpoints.evictAll()
-  const state = repository.resetWorkspace(request.workspaceId, request?.includeHistory === true)
-  const activity = browserActivityRepository()?.clear(request.workspaceId) ?? false
-
-  return {
-    activity,
-    epoch: state.epoch,
-    ok: state.ok && activity,
-    restoreEnabled: repository.restoreEnabled(),
-    state: state.ok
-  }
-})
-ipcMain.handle('hermes:browser-state:clear-site-data', async (_event, request) => {
-  const profile = typeof request?.profile === 'string' && request.profile ? request.profile : BROWSER_APP_SCOPE
-
-  return clearBrowserSiteData(profile, request?.origin)
-})
 
 function pathWithHermesManagedNode(...entries) {
   const managed = hermesManagedNodePathEntries(HERMES_HOME).filter(directoryExists)
@@ -1513,15 +1026,6 @@ const STREAMABLE_MEDIA_EXTS = new Set([
 ])
 
 protocol.registerSchemesAsPrivileged([
-  {
-    scheme: ARTIFACT_SCHEME,
-    privileges: {
-      secure: true,
-      standard: true,
-      stream: true,
-      supportFetchAPI: true
-    }
-  },
   {
     scheme: MEDIA_PROTOCOL,
     privileges: {
@@ -5775,14 +5279,6 @@ function sendPowerResume() {
   webContents.send('hermes:power-resume')
 }
 
-function revalidateAfterPowerResume() {
-  sendPowerResume()
-  void browserDarkClient.revalidate().catch(error => {
-    browserDarkConnectionKey = ''
-    rememberLog(`[browser transport] wake revalidation failed: ${error?.message || error}`)
-  })
-}
-
 let powerResumeRegistered = false
 
 // Mirror of powerMonitor's AC/battery state, broadcast to every window so
@@ -5820,8 +5316,8 @@ function registerPowerResumeListeners() {
   try {
     // 'resume' covers sleep/wake; 'unlock-screen' covers lock/unlock without a
     // full suspend. Either can drop an idle socket.
-    powerMonitor.on('resume', revalidateAfterPowerResume)
-    powerMonitor.on('unlock-screen', revalidateAfterPowerResume)
+    powerMonitor.on('resume', sendPowerResume)
+    powerMonitor.on('unlock-screen', sendPowerResume)
     powerMonitor.on('on-battery', () => broadcastBatteryState(true))
     powerMonitor.on('on-ac', () => broadcastBatteryState(false))
     onBatteryPower = powerMonitor.isOnBatteryPower()
@@ -6968,311 +6464,6 @@ async function mintGatewayWsTicket(baseUrl) {
   return ticket
 }
 
-async function mintBrowserWsTicket(connection, profile, connectionId) {
-  const url = `${connection.baseUrl}/api/auth/browser-ticket`
-  const options = {
-    method: 'POST',
-    timeoutMs: 8_000,
-    body: { profile, connection_id: connectionId }
-  }
-  const body = (connection.authMode === 'oauth'
-    ? await fetchJsonViaOauthSession(url, options)
-    : await fetchJson(url, connection.token, options)) as any
-  const ticket = body?.ticket
-
-  if (!ticket || typeof ticket !== 'string') {
-    throw new Error('Gateway did not return a browser WebSocket ticket.')
-  }
-
-  return ticket
-}
-
-async function handleBrowserUploadChooser(chooser: Readonly<BrowserPendingUploadChooser>) {
-  await browserUploadStagingReady
-
-  if (chooser.signal.aborted) {
-    return
-  }
-
-  const status = browserDarkClient.status
-
-  if (
-    status.state !== 'ready' ||
-    status.profile !== chooser.profile ||
-    !status.sid ||
-    !status.transportId ||
-    !status.capabilityGeneration ||
-    !status.bindingGeneration
-  ) {
-    return
-  }
-
-  const connection = await ensureBackend(chooser.profile)
-  const scope = {
-    connection_id: desktopConnectionAssociation.connectionId,
-    transport_id: status.transportId,
-    browser_sid: status.sid,
-    capability_generation: String(status.capabilityGeneration),
-    task_id: chooser.taskId,
-    task_generation: String(chooser.taskGeneration),
-    tab_id: chooser.tabId,
-    tab_incarnation: chooser.tabId,
-    binding_generation: String(status.bindingGeneration),
-    document_generation: String(chooser.documentGeneration),
-    frame_id: chooser.frameId,
-    origin: chooser.origin,
-    chooser_id: chooser.chooserId,
-    backend_node_id: String(chooser.backendNodeId),
-    form_fingerprint: chooser.formFingerprint,
-    chooser_mode: chooser.mode,
-    source_session_id: chooser.taskId
-  }
-  const requestJson = (requestPath: string, body: Record<string, unknown>) => {
-    const url = `${connection.baseUrl}${requestPath}`
-    const options = { body, method: 'POST', timeoutMs: 8_000 }
-
-    return connection.authMode === 'oauth'
-      ? fetchJsonViaOauthSession(url, options)
-      : fetchJson(url, connection.token, options)
-  }
-  const host = BrowserWindow.getAllWindows().find(window => window.webContents.id === chooser.hostId)
-
-  if (!host || host.isDestroyed()) {
-    return
-  }
-
-  const rawLocale = app.getLocale().toLowerCase()
-  const locale = rawLocale.startsWith('ja')
-    ? 'ja'
-    : rawLocale.startsWith('zh-tw') || rawLocale.startsWith('zh-hk') || rawLocale.includes('hant')
-      ? 'zh-hant'
-      : rawLocale.startsWith('zh')
-        ? 'zh'
-        : 'en'
-  const pickerCopy = BROWSER_UPLOAD_MAIN_COPY[locale]
-
-  await importBrowserUpload(chooser, {
-    assign: (chooserId, assignment) => browserGuestSecurity.assignPendingUpload(chooserId, assignment),
-    bytes: (ticket, ticketScope, signal) =>
-      browserUploadTicketBytes(connection, chooser.profile, ticketScope, ticket, signal),
-    choose: async (candidate, selectedCount) => {
-      const multiple = chooser.mode === 'selectMultiple'
-      const result = await dialog.showMessageBox(host, {
-        type: 'question',
-        title: pickerCopy.sourceTitle,
-        message: candidate.displayName,
-        detail: `${candidate.mimeType} — ${candidate.size} ${pickerCopy.bytes}\n${chooser.origin}\n\n${pickerCopy.sourceStagingWarning}`,
-        buttons: multiple
-          ? [
-              pickerCopy.select,
-              pickerCopy.skip,
-              ...(selectedCount ? [pickerCopy.finish, pickerCopy.cancel] : [pickerCopy.cancel])
-            ]
-          : [pickerCopy.select, pickerCopy.next, pickerCopy.cancel],
-        defaultId: 2,
-        cancelId: multiple && selectedCount ? 3 : 2,
-        noLink: true
-      })
-
-      return result.response === 0 ||
-        result.response === 1 ||
-        result.response === 2 ||
-        result.response === 3
-        ? result.response
-        : multiple && selectedCount
-          ? 3
-          : 2
-    },
-    consume: (handle, binding) => browserUploadStaging.consume(handle, binding),
-    requestJson,
-    retire: handle => browserUploadStaging.retire(handle),
-    scope,
-    stage: (binding, sources) => browserUploadStaging.stage(binding, sources)
-  })
-}
-
-async function* browserUploadTicketBytes(
-  connection: any,
-  profile: string,
-  scope: Record<string, string>,
-  ticket: any,
-  signal: AbortSignal
-): AsyncGenerator<Uint8Array> {
-  const headers = browserUploadDeliveryHeaders(
-    profile,
-    scope,
-    ticket,
-    connection.authMode !== 'oauth' ? connection.token : undefined
-  )
-  const oauthSession = connection.authMode === 'oauth' ? getOauthSession() : null
-  const fetcher = oauthSession
-    ? oauthSession.fetch.bind(oauthSession)
-    : connection.authMode === 'oauth'
-      ? null
-      : electronNet.fetch
-
-  if (!fetcher) {
-    throw new Error('browser-upload-auth-unavailable')
-  }
-
-  const response = await fetcher(
-    `${connection.baseUrl}/api/browser/upload-sources/${ticket.opaqueRef}`,
-    {
-      headers,
-      redirect: 'error',
-      signal
-    } as any
-  )
-
-  if (
-    !response.ok ||
-    response.headers.get('content-length') !== String(ticket.size) ||
-    response.headers.get('x-hermes-upload-sha256') !== ticket.sha256 ||
-    !response.body
-  ) {
-    throw new Error('browser-upload-source-invalid')
-  }
-
-  const reader = response.body.getReader()
-
-  try {
-    while (true) {
-      const next = await reader.read()
-
-      if (next.done) {
-        break
-      }
-
-      if (next.value.byteLength > 1024 * 1024) {
-        throw new Error('browser-upload-chunk-too-large')
-      }
-
-      yield next.value
-    }
-  } finally {
-    await reader.cancel().catch(() => undefined)
-  }
-}
-
-async function mintGatewayBrowserResource(
-  kind: 'artifact' | 'preview',
-  target: string,
-  provisional: BrowserResourceGrantScope
-): Promise<GatewayResourceGrant> {
-  const connection = await ensureBackend(provisional.profile)
-  const connectionId = desktopConnectionAssociation.connectionId
-  const scope = {
-    connection_id: connectionId,
-    guest_generation: provisional.guestGeneration,
-    source_session_id: provisional.sourceSessionId,
-    tab_id: provisional.tabId
-  }
-  const request = (requestPath: string, body: Record<string, unknown>) => {
-    const url = `${connection.baseUrl}${requestPath}`
-    const options = { body, method: 'POST', timeoutMs: 8_000 }
-
-    return connection.authMode === 'oauth'
-      ? fetchJsonViaOauthSession(url, options)
-      : fetchJson(url, connection.token, options)
-  }
-  const body = (await request(`/api/browser/grants/${kind}`, {
-    profile: provisional.profile,
-    scope,
-    ...(kind === 'artifact' ? { path: target } : { upstream_url: target })
-  })) as any
-  const gatewayOrigin = new URL(connection.baseUrl).origin
-  const revoke = async () => {
-    await request('/api/browser/grants/revoke', { profile: provisional.profile, scope })
-  }
-  const common = {
-    connectionId,
-    deliveryCredential: body?.deliveryCredential,
-    expiresInSeconds: body?.expiresInSeconds,
-    gatewayOrigin,
-    opaqueRef: body?.opaqueRef,
-    recipient: body?.recipient,
-    revoke
-  }
-
-  return kind === 'artifact'
-    ? {
-        ...common,
-        displayName: body?.displayName,
-        kind,
-        mimeType: body?.mimeType,
-        size: body?.size
-      }
-    : { ...common, kind, proxyPath: body?.proxyPath }
-}
-
-const browserDarkClient = new BrowserDarkClient({
-  association: desktopConnectionAssociation,
-  mintTicket: mintBrowserWsTicket,
-  // Browser is a normal app-global Desktop capability. It is never gated by
-  // a profile config flag or a special client identity.
-  localEnabled: () => true,
-  dispatchCdp: request => browserGuestSecurity.dispatchAutomationCommand(request),
-  onLifecycleInvalidated: () => {
-    browserGuestSecurity.invalidatePixelGrants()
-    browserGuestSecurity.invalidateUploadChoosers()
-    browserGuestSecurity.invalidateAssignedUploads()
-    void browserResourceDelivery?.revokeAll()
-    browserResourceGrants.revokeAll()
-    void browserUploadStaging.revokeWhere(() => true)
-  },
-  log: message => rememberLog(`[browser transport] ${message}`)
-})
-
-browserGuestSecurity.setFrameSink(frame => {
-  browserDarkClient.forwardCdpEvent(frame)
-})
-browserGuestSecurity.setTaskLifecycleSink(frame => {
-  const binding = {
-    guestGeneration: frame.guestGeneration,
-    profile: frame.profile,
-    tabId: frame.tabId,
-    taskGeneration: frame.taskGeneration,
-    taskId: frame.taskId
-  }
-
-  if (frame.type === 'bind') {
-    browserDarkClient.bindTask(binding)
-  } else {
-    browserDarkClient.unbindTask(binding)
-    void browserUploadStaging.revokeWhere(
-      candidate =>
-        candidate.profile === frame.profile &&
-        candidate.taskId === frame.taskId &&
-        candidate.guestGeneration === frame.guestGeneration
-    )
-  }
-})
-
-let browserDarkConnectionKey = ''
-
-function scheduleBrowserDarkClient(connection, profile) {
-  const selectedProfile = browserConnectionProfile(profile)
-  const key = `${connection.baseUrl}|${selectedProfile}`
-
-  if (browserDarkConnectionKey === key && browserDarkClient.status.state !== 'disconnected') {
-    return
-  }
-
-  browserDarkConnectionKey = key
-  const previousProfile = browserDarkClient.status.profile
-
-  if (previousProfile && previousProfile !== selectedProfile) {
-    browserGuestSecurity.retireAutomationProfile(previousProfile)
-    void browserResourceDelivery?.revokeWhere({ profile: previousProfile })
-    browserResourceGrants.revokeWhere({ profile: previousProfile })
-  }
-
-  void browserDarkClient.connect(connection, selectedProfile).catch(error => {
-    browserDarkConnectionKey = ''
-    rememberLog(`[browser transport] ${error?.message || error}`)
-  })
-}
-
 // Build a fresh WS URL for the *current* connection. Critical for reconnects:
 // OAuth WS tickets are single-use with a ~30s TTL, so the ticket baked into
 // the cached connection's wsUrl is stale on the second connect. The renderer
@@ -7291,20 +6482,11 @@ async function freshGatewayWsUrl(profile) {
   if (connection.authMode === 'oauth') {
     const ticket = await mintGatewayWsTicket(connection.baseUrl)
 
-    return appendDesktopAssociation(
-      buildGatewayWsUrlWithTicket(connection.baseUrl, ticket),
-      desktopConnectionAssociation.connectionId,
-      browserConnectionProfile(profile)
-    )
+    return buildGatewayWsUrlWithTicket(connection.baseUrl, ticket)
   }
 
-  // Local/token: refresh the association assertion even when reusing the
-  // long-lived credential URL.
-  return appendDesktopAssociation(
-    connection.wsUrl,
-    desktopConnectionAssociation.connectionId,
-    browserConnectionProfile(profile)
-  )
+  // Local/token: the cached wsUrl already carries the (long-lived) token.
+  return connection.wsUrl
 }
 
 // --- Hermes Cloud discovery + silent per-agent sign-in (cloud-auto-discovery
@@ -8080,11 +7262,7 @@ async function buildRemoteConnection(
       remoteKind,
       // No static token in OAuth mode; REST is cookie-authed via the partition.
       token: null,
-      wsUrl: appendDesktopAssociation(
-        buildGatewayWsUrlWithTicket(baseUrl, ticket),
-        desktopConnectionAssociation.connectionId,
-        browserConnectionProfile(profile)
-      )
+      wsUrl: buildGatewayWsUrlWithTicket(baseUrl, ticket)
     }
   }
 
@@ -8104,11 +7282,7 @@ async function buildRemoteConnection(
     remoteIdentity,
     remoteKind,
     token,
-    wsUrl: appendDesktopAssociation(
-      buildGatewayWsUrl(baseUrl, token),
-      desktopConnectionAssociation.connectionId,
-      browserConnectionProfile(profile)
-    )
+    wsUrl: buildGatewayWsUrl(baseUrl, token)
   }
 }
 
@@ -8791,8 +7965,6 @@ function resetHermesConnection({ soft = false } = {}) {
   backendStartFailure = null
   remoteReauthFailure = null
   remoteLiveness.clear()
-  browserDarkConnectionKey = ''
-  browserDarkClient.disconnect()
   const hermesProcess = backendConnectionState.invalidate()
   stopBackendChild(hermesProcess)
 
@@ -8874,35 +8046,6 @@ async function waitForBackendExit(child, timeoutMs = 5000) {
 // that defers to active_profile / default).
 function primaryProfileKey() {
   return readActiveDesktopProfile() || 'default'
-}
-
-// This selects the backend route for the browser transport; it does not gate
-// whether the browser exists. An explicit connection profile wins, followed by
-// Desktop's setting and the normal HERMES_HOME sticky profile.
-function browserConnectionProfile(profile = null) {
-  const explicit = typeof profile === 'string' ? profile.trim() : ''
-
-  if (explicit) {
-    return explicit
-  }
-
-  const desktopProfile = readActiveDesktopProfile()
-
-  if (desktopProfile) {
-    return desktopProfile
-  }
-
-  try {
-    const sticky = fs.readFileSync(path.join(HERMES_HOME, 'active_profile'), 'utf8').trim()
-
-    if (sticky && PROFILE_NAME_RE.test(sticky)) {
-      return sticky
-    }
-  } catch {
-    // Missing active_profile is the normal default-profile case.
-  }
-
-  return 'default'
 }
 
 // Options describing the current connection setup for `resolveProfileBackendRoute`.
@@ -9184,11 +8327,7 @@ async function spawnPoolBackend(profile, entry) {
     authMode: 'token',
     token: authToken,
     profile,
-    wsUrl: appendDesktopAssociation(
-      wsUrl,
-      desktopConnectionAssociation.connectionId,
-      profile
-    ),
+    wsUrl,
     logs: hermesLog.slice(-80),
     ...getWindowState()
   }
@@ -9537,11 +8676,7 @@ async function startHermes() {
       source: 'local',
       authMode: 'token',
       token: authToken,
-      wsUrl: appendDesktopAssociation(
-        wsUrl,
-        desktopConnectionAssociation.connectionId,
-        browserConnectionProfile()
-      ),
+      wsUrl,
       logs: hermesLog.slice(-80),
       ...getWindowState()
     }
@@ -9684,8 +8819,6 @@ function spawnSecondaryWindow({
     backgroundColor: getWindowBackgroundColor(),
     webPreferences: chatWindowWebPreferences(PRELOAD_PATH)
   })
-
-  browserGuestSecurity.registerHost(win.webContents)
 
   if (IS_MAC) {
     win.setWindowButtonPosition?.(WINDOW_BUTTON_POSITION)
@@ -10196,8 +9329,6 @@ function createWindow() {
     webPreferences: chatWindowWebPreferences(PRELOAD_PATH)
   })
 
-  browserGuestSecurity.registerHost(mainWindow.webContents)
-
   if (IS_MAC) {
     mainWindow.setWindowButtonPosition?.(WINDOW_BUTTON_POSITION)
 
@@ -10394,12 +9525,7 @@ function createWindow() {
   })
 }
 
-ipcMain.handle('hermes:connection', async (_event, profile) => {
-  const connection = await ensureBackend(profile)
-  scheduleBrowserDarkClient(connection, profile)
-
-  return connection
-})
+ipcMain.handle('hermes:connection', async (_event, profile) => ensureBackend(profile))
 // Reconnect-after-wake recovery. A REMOTE primary backend has no child process,
 // so the 'exit'/'error' handlers that would clear a dead connection promise never
 // fire — once the remote becomes unreachable across a sleep/wake the renderer
@@ -12743,8 +11869,7 @@ app.on('open-url', (event, url) => {
   handleDeepLink(url)
 })
 
-app.whenReady().then(async () => {
-  await browserUploadStagingReady
+app.whenReady().then(() => {
   const systemCa = installWindowsSystemCaTrust(tls)
 
   if (systemCa.applied) {
@@ -12879,12 +12004,6 @@ app.on('before-quit', event => {
   if (heldQuitForActiveWork(event)) {
     return
   }
-
-  browserCheckpoints.evictAll()
-  browserActivity.close()
-  browserState.close()
-  browserDarkConnectionKey = ''
-  browserDarkClient.disconnect()
 
   if ((sshConnections.size > 0 || sshBootstrapCoordinator.promises().length > 0) && !sshQuitTeardownDone) {
     event.preventDefault()
