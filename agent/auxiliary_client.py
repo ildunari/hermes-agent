@@ -1220,37 +1220,6 @@ class _CodexCompletionsAdapter:
             "store": False,
         }
 
-        # Prompt-cache routing parity with the main-agent Codex transport
-        # (agent/transports/codex.py::build_kwargs). Without a cache key the
-        # Codex backend treats every auxiliary call as cache-cold — MoA
-        # aggregator/reference calls through this path recorded 0 cached
-        # input tokens while the identical direct-model run reused hundreds
-        # of thousands. Content-address the key from the static prefix
-        # (instructions + tool names) so repeated calls sharing a system
-        # prompt and toolset land on the same warm cache shard, and mirror
-        # it into the x-client-request-id header the Codex backend uses for
-        # cache-scope routing.
-        # Guard the same way the main transport does: xAI Responses takes the
-        # key in extra_body (not top-level) and GitHub/Copilot Responses opts
-        # out of cache-key routing entirely — for those hosts, skip both the
-        # top-level prompt_cache_key and the x-client-request-id header here so
-        # the host-skip guard below is not defeated by an unconditional set.
-        try:
-            from agent.transports.codex import _content_cache_key as _codex_pck
-            from utils import base_url_host_matches
-
-            _host_src = str(getattr(self._client, "base_url", "") or "")
-            _is_xai = base_url_host_matches(_host_src, "x.ai") or base_url_host_matches(_host_src, "api.x.ai")
-            _is_github = base_url_host_matches(_host_src, "githubcopilot.com")
-            _aux_cache_key = None if (_is_xai or _is_github) else _codex_pck(instructions, kwargs.get("tools"))
-        except Exception:
-            _aux_cache_key = None
-        if _aux_cache_key:
-            resp_kwargs["prompt_cache_key"] = _aux_cache_key
-            resp_kwargs["extra_headers"] = {
-                "x-client-request-id": _aux_cache_key,
-            }
-
         # Preserve the chat.completions timeout contract. This adapter is used
         # by auxiliary calls such as context compression; if the timeout is not
         # forwarded and enforced, a Codex Responses stream can sit behind a

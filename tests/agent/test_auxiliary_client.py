@@ -3094,42 +3094,6 @@ class TestCodexAdapterReasoningTranslation:
         assert captured.get("reasoning") == {"effort": "medium", "summary": "auto"}
         assert captured.get("include") == ["reasoning.encrypted_content"]
 
-    def test_prompt_cache_key_content_addressed_from_instructions(self):
-        """The auxiliary Codex adapter must send prompt_cache_key +
-        x-client-request-id derived from the static prefix, matching
-        agent/transports/codex.py. Without it every auxiliary call (incl.
-        MoA reference/aggregator calls) is cache-cold on the Codex backend."""
-        adapter, captured = self._build_adapter()
-        adapter.create(
-            messages=[
-                {"role": "system", "content": "stable system prompt"},
-                {"role": "user", "content": "hi"},
-            ],
-        )
-        pck = captured.get("prompt_cache_key")
-        assert isinstance(pck, str) and pck.startswith("pck_")
-        assert captured.get("extra_headers", {}).get("x-client-request-id") == pck
-
-        # Same static prefix → same key (stable across calls).
-        adapter2, captured2 = self._build_adapter()
-        adapter2.create(
-            messages=[
-                {"role": "system", "content": "stable system prompt"},
-                {"role": "user", "content": "different user text"},
-            ],
-        )
-        assert captured2.get("prompt_cache_key") == pck
-
-        # Different static prefix → different key.
-        adapter3, captured3 = self._build_adapter()
-        adapter3.create(
-            messages=[
-                {"role": "system", "content": "another system prompt"},
-                {"role": "user", "content": "hi"},
-            ],
-        )
-        assert captured3.get("prompt_cache_key") != pck
-
     def test_reasoning_effort_empty_string_falls_back_to_medium(self):
         """Empty-string effort (e.g. ``effort: ""`` in YAML) is falsy in
         the main-agent path's truthy check; mirror that here so the same
