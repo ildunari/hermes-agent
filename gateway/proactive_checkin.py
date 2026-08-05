@@ -270,12 +270,26 @@ def run_proactive_child_turn(
         dict(message) for message in session_db.get_messages(parent_session_id)
         if message.get("role") in {"user", "assistant", "tool"}
     )
+    generation_history = list(assistant_first_parent_history(list(history)))
+    if suffix:
+        # The purpose must be the freshest thing the model reads. Leaving it
+        # only in the system suffix lets the stale final user message win:
+        # the model replies to it (e.g. an old screenshot question) instead
+        # of composing the proactive share. Fold the purpose into the last
+        # user turn so alternation is preserved and the instruction is last.
+        tail = dict(generation_history[-1])
+        tail["content"] = (
+            str(tail.get("content") or "")
+            + "\n\n[The conversation above is context only — do not reply to it.]\n"
+            + suffix
+        )
+        generation_history[-1] = tail
     request = ProactiveTurnRequest(
         parent_session_id=parent_session_id,
         cache_system_prompt=stable_prompt,
         execution_system_prompt=execution_prompt,
         parent_history=history,
-        generation_history=tuple(assistant_first_parent_history(list(history))),
+        generation_history=tuple(generation_history),
         kind=kind,
     )
     generated = generate(request)
