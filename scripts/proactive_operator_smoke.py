@@ -45,6 +45,7 @@ def arm_operator_smoke(
     contact_id: str,
     confirmed: bool,
     now: float | None = None,
+    real_candidate: bool = False,
 ) -> dict[str, Any]:
     """Create one immediate tagged slot for the profile's fixed existing DM."""
     resolved_profile = str(profile).strip()
@@ -81,7 +82,7 @@ def arm_operator_smoke(
     slot_id = scheduler.arm_operator_smoke(
         route,
         route_commitment=commitment,
-        candidate_override=_operator_candidate(timestamp),
+        candidate_override=None if real_candidate else _operator_candidate(timestamp),
         replace_armed_slot=True,
         now=timestamp,
     )
@@ -93,6 +94,7 @@ def arm_operator_smoke(
         "contact_id": contact_id,
         "mode": config.mode.value,
         "operator_smoke": True,
+        "real_candidate": bool(real_candidate),
     }
 
 
@@ -156,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile-home", required=True)
     parser.add_argument("--contact-id", required=True)
     parser.add_argument("--confirm-arm", action="store_true")
+    parser.add_argument("--real-candidate", action="store_true")
     parser.add_argument("--timeout-seconds", type=float, default=180.0)
     args = parser.parse_args(argv)
     result = arm_operator_smoke(
@@ -163,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         profile=args.profile,
         contact_id=args.contact_id,
         confirmed=args.confirm_arm,
+        real_candidate=args.real_candidate,
     )
     terminal = wait_for_operator_smoke(
         profile_home=args.profile_home,
