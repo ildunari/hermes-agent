@@ -134,10 +134,6 @@ checks:
     path: hermes_cli/restart_surfaces.py
     needles: [_resolve_loaded_service, restarted_services, _wait_for_scope_health]
     description: launchd domain dedupe and readiness polling
-  - id: desktop-browser-api-backend
-    path: hermes_cli/web_server.py
-    needles: []  # RETIRED 2026-08-05: replaced by upstream native in-app browser
-    description: Desktop browser grants, upload/preview delivery, annotation RPC, and dedicated browser transport routes survive upstream router refactors
   - id: dashboard-restart-health-contract
     path: hermes_cli/web_server.py
     needles: ['@app.get("/health")', 'async def get_api_health', active_turn_snapshot, hermes-dashboard-ok]
@@ -146,14 +142,6 @@ checks:
     path: tui_gateway/server.py
     needles: [active_turn_snapshot, oldest_run_age_seconds, inflight_turn]
     description: restart probes can drain in-memory Desktop/TUI turns without filesystem or process probes
-  - id: desktop-browser-default
-    path: hermes_cli/config_defaults.py
-    needles: []  # RETIRED 2026-08-05: replaced by upstream native in-app browser
-    description: resolved config keeps the Desktop in-app transport independently disabled by default without changing browser tools
-  - id: desktop-browser-setup-default
-    path: cli.py
-    needles: []  # RETIRED 2026-08-05: replaced by upstream native in-app browser
-    description: setup-generated config preserves the same independent Desktop browser default
   - id: gateway-identity-restamp
     path: gateway/shutdown_watchdog.py
     needles: [_refresh_runtime_status_identity]
@@ -220,179 +208,12 @@ checks:
     description: shareable rerere setup helper
 
 features:
-  - id: desktop.browser-workspace
-    title: RETIRED 2026-08-05 — replaced by upstream native in-app browser (#77705, #79482); entry retained to own deleted paths in this revert commit, delete next commit
-    owner: kosta
-    class: upstream-replaced
-    owner_paths:
-      - apps/desktop/electron/browser-activity-repository.test.ts
-      - apps/desktop/electron/browser-activity-repository.ts
-      - apps/desktop/electron/browser-annotation-isolated-world.test.ts
-      - apps/desktop/electron/browser-annotation-isolated-world.ts
-      - apps/desktop/electron/browser-annotation-main-report.test.ts
-      - apps/desktop/electron/browser-annotation-main-report.ts
-      - apps/desktop/electron/browser-annotation-projection.test.ts
-      - apps/desktop/electron/browser-annotation-projection.ts
-      - apps/desktop/electron/browser-annotation-reporter.test.ts
-      - apps/desktop/electron/browser-annotation-reporter.ts
-      - apps/desktop/electron/browser-annotation-screenshot.test.ts
-      - apps/desktop/electron/browser-annotation-screenshot.ts
-      - apps/desktop/electron/browser-checkpoint-cache.test.ts
-      - apps/desktop/electron/browser-checkpoint-cache.ts
-      - apps/desktop/electron/browser-consent.test.ts
-      - apps/desktop/electron/browser-consent.ts
-      - apps/desktop/electron/browser-dark-client.test.ts
-      - apps/desktop/electron/browser-dark-client.ts
-      - apps/desktop/electron/browser-data-semantics.test.ts
-      - apps/desktop/electron/browser-data-semantics.ts
-      - apps/desktop/electron/browser-guest-security.test.ts
-      - apps/desktop/electron/browser-guest-security.ts
-      - apps/desktop/electron/browser-guest-security.v3probe.test.ts
-      - apps/desktop/electron/browser-navigation-policy.test.ts
-      - apps/desktop/electron/browser-navigation-policy.ts
-      - apps/desktop/electron/browser-profile-deletion.test.ts
-      - apps/desktop/electron/browser-profile-deletion.ts
-      - apps/desktop/electron/browser-public-suffix-asset.ts
-      - apps/desktop/electron/browser-resource-delivery.test.ts
-      - apps/desktop/electron/browser-resource-delivery.ts
-      - apps/desktop/electron/browser-resource-grants.test.ts
-      - apps/desktop/electron/browser-resource-grants.ts
-      - apps/desktop/electron/browser-sensitive-navigation-policy.test.ts
-      - apps/desktop/electron/browser-sensitive-navigation-policy.ts
-      - apps/desktop/electron/browser-site-data-clear.test.ts
-      - apps/desktop/electron/browser-site-data-clear.ts
-      - apps/desktop/electron/browser-state-repair.ts
-      - apps/desktop/electron/browser-state-repository.test.ts
-      - apps/desktop/electron/browser-state-repository.ts
-      - apps/desktop/electron/browser-upload-consent.test.ts
-      - apps/desktop/electron/browser-upload-consent.ts
-      - apps/desktop/electron/browser-upload-copy.test.ts
-      - apps/desktop/electron/browser-upload-copy.ts
-      - apps/desktop/electron/browser-upload-production.test.ts
-      - apps/desktop/electron/browser-upload-production.ts
-      - apps/desktop/electron/browser-upload-staging.test.ts
-      - apps/desktop/electron/browser-upload-staging.ts
-      - apps/desktop/electron/fixtures/browser-e0/host.html
-      - apps/desktop/electron/fixtures/browser-e0/main.mjs
-      - apps/desktop/electron/fixtures/browser-e0/package.json
-      - apps/desktop/electron/fixtures/browser-e0/verdicts.mjs
-      - apps/desktop/electron/fixtures/browser-e0/verdicts.test.mjs
-      - apps/desktop/electron/fixtures/browser-persistence-smoke/main.cjs
-      - apps/desktop/electron/fixtures/browser-persistence-smoke/package.json
-      - apps/desktop/electron/fixtures/browser-sqlite-smoke/main.cjs
-      - apps/desktop/electron/fixtures/browser-sqlite-smoke/package.json
-      - apps/desktop/scripts/generate-browser-public-suffix-asset.mjs
-      - apps/desktop/src/app/browser/browser-activity-copy.test.ts
-      - apps/desktop/src/app/browser/browser-annotations-layout.test.ts
-      - apps/desktop/src/app/browser/browser-annotations-layout.ts
-      - apps/desktop/src/app/browser/browser-annotations-panel.test.tsx
-      - apps/desktop/src/app/browser/browser-annotations-panel.tsx
-      - apps/desktop/src/app/browser/browser-consent-dialog.test.tsx
-      - apps/desktop/src/app/browser/browser-consent-dialog.tsx
-      - apps/desktop/src/app/browser/browser-consent.test.ts
-      - apps/desktop/src/app/browser/browser-consent.ts
-      - apps/desktop/src/app/browser/browser-controller.test.tsx
-      - apps/desktop/src/app/browser/browser-controller.tsx
-      - apps/desktop/src/app/browser/browser-intent-production.test.ts
-      - apps/desktop/src/app/browser/browser-intent-production.ts
-      - apps/desktop/src/app/browser/browser-intent-resolver.test.ts
-      - apps/desktop/src/app/browser/browser-intent-resolver.ts
-      - apps/desktop/src/app/browser/browser-lifecycle.test.ts
-      - apps/desktop/src/app/browser/browser-lifecycle.ts
-      - apps/desktop/src/app/browser/browser-partition.ts
-      - apps/desktop/src/app/browser/browser-pane.tsx
-      - apps/desktop/src/app/browser/browser-persistence.test.tsx
-      - apps/desktop/src/app/browser/browser-persistence.tsx
-      - apps/desktop/src/app/browser/browser-store.test.ts
-      - apps/desktop/src/app/browser/browser-store.ts
-      - apps/desktop/src/app/browser/browser-supervision.test.ts
-      - apps/desktop/src/app/browser/browser-supervision.ts
-      - apps/desktop/src/app/browser/browser-webviews.test.tsx
-      - apps/desktop/src/app/browser/browser-webviews.tsx
-      - apps/desktop/src/app/settings/browser-settings.test.tsx
-      - apps/desktop/src/app/settings/browser-settings.tsx
-      - apps/desktop/src/components/chat/generated-image-result.test.ts
-      - apps/desktop/src/i18n/v4-parity-probe.test.ts
-      - hermes_cli/browser_annotation_bundle.py
-      - hermes_cli/browser_annotation_lineage.py
-      - hermes_cli/browser_annotation_rpc.py
-      - hermes_cli/browser_annotation_worker.py
-      - hermes_cli/browser_annotation_worker_registry.py
-      - hermes_cli/browser_annotations_db.py
-      - hermes_cli/browser_annotations_models.py
-      - hermes_cli/browser_resource_grants.py
-      - hermes_cli/browser_transport.py
-      - hermes_cli/browser_upload_sources.py
-      - hermes_cli/browser_wire_v1.json
-      - tools/authenticated_browser_projection.py
-      - tools/in_app_browser_refs.py
-      - tools/in_app_browser_relay.py
-      - tools/browser_session_state.py
-      - apps/desktop/README.md
-      - apps/desktop/electron/remote-lifecycle.ts
-      - apps/desktop/electron/remote-lifecycle.test.ts
-      - apps/desktop/scripts/browser-dev-connection.mjs
-      - apps/desktop/scripts/browser-dev-connection.test.mjs
-      - apps/desktop/scripts/browser-dev.mjs
-      - apps/desktop/scripts/bundle-electron-main.mjs
-      - apps/desktop/src/app/artifacts/index.tsx
-      - apps/desktop/src/app/chat/composer/status-stack/preview-row.tsx
-      - apps/desktop/src/app/contrib/controller.tsx
-      - apps/desktop/src/app/contrib/wiring.tsx
-      - apps/desktop/src/app/settings/index.tsx
-      - apps/desktop/src/app/settings/types.ts
-      - apps/desktop/src/app/shell/titlebar-controls.tsx
-      - apps/desktop/src/components/assistant-ui/embeds/url-embed.tsx
-      - apps/desktop/src/components/assistant-ui/tool/fallback-preview-status.test.tsx
-      - apps/desktop/src/components/assistant-ui/tool/fallback.tsx
-      - apps/desktop/src/components/chat/generated-image-result.tsx
-      - apps/desktop/src/lib/external-link.tsx
-      - hermes_cli/backup.py
-      - hermes_cli/dashboard_auth/ws_tickets.py
-      - hermes_cli/doctor.py
-      - hermes_cli/setup.py
-      - hermes_cli/tools_config.py
-      - scripts/install.sh
-      - scripts/lib/node-bootstrap.sh
-      - tools/browser_cdp_tool.py
-      - tools/browser_dialog_tool.py
-      - tools/browser_supervisor.py
-      - tools/browser_tool.py
-    collision_paths:
-      - cli.py
-      - hermes_cli/config_defaults.py
-      - hermes_cli/web_server.py
-      - apps/desktop/scripts/bundle-electron-main.mjs
-      - apps/desktop/src/app/artifacts/index.tsx
-      - apps/desktop/src/app/chat/composer/status-stack/preview-row.tsx
-      - apps/desktop/src/app/contrib/controller.tsx
-      - apps/desktop/src/app/contrib/wiring.tsx
-      - apps/desktop/src/app/settings/index.tsx
-      - apps/desktop/src/app/settings/types.ts
-      - apps/desktop/src/app/shell/titlebar-controls.tsx
-      - apps/desktop/src/components/assistant-ui/embeds/url-embed.tsx
-      - apps/desktop/src/components/assistant-ui/tool/fallback.tsx
-      - apps/desktop/src/components/chat/generated-image-result.tsx
-      - apps/desktop/src/lib/external-link.tsx
-      - hermes_cli/backup.py
-      - hermes_cli/dashboard_auth/ws_tickets.py
-      - hermes_cli/doctor.py
-      - hermes_cli/setup.py
-      - hermes_cli/tools_config.py
-      - scripts/install.sh
-      - scripts/lib/node-bootstrap.sh
-      - tools/browser_cdp_tool.py
-      - tools/browser_dialog_tool.py
-      - tools/browser_supervisor.py
-      - tools/browser_tool.py
-    tests:
-      - tests/tools/test_browser_cleanup.py
-      - tests/tools/test_browser_hardening.py
   - id: update.futureproof-system
     title: Recoverable, resource-bounded slim update system
     owner: kosta
     class: keep-core
     owner_paths:
+      - apps/desktop/README.md  # local signing doc note (CSC_NAME hazard), formerly owned by browser-workspace
       - apps/desktop/vitest.config.ts
       - hermes_cli/memory_setup.py
       - hermes_cli/update_cmd.py
