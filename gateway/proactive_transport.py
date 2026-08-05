@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import asyncio
+import logging
 from typing import Any, Mapping
 
 from gateway.proactive_scheduler import ContactRoute, ProactiveOwnershipRegistry, ProactiveScheduler, SlotClaim
+
+logger = logging.getLogger(__name__)
 
 _ALLOWED = frozenset({("poke", "kosta-owner", "owner"), ("guest", "stephen-lucier", "guest")})
 
@@ -155,6 +158,10 @@ async def deliver_prepared_exactly_once(
     try:
         prepared_guid, transport_refusal = await delivery.prepare(route=route, slot_id=claim.slot_id)
     except Exception as exc:
+        logger.warning(
+            "proactive pre-send invariant failed in prepare slot=%s correlation_id=%s",
+            claim.slot_id, correlation_id, exc_info=True,
+        )
         return await asyncio.to_thread(
             scheduler.finish_delivery, claim, state="failed",
             reason=f"pre_send_invariant:{type(exc).__name__}", now=now,
@@ -201,6 +208,10 @@ async def deliver_prepared_exactly_once(
         finally:
             scheduler.finish_atomic_send_fence(fence)
     except Exception as exc:
+        logger.warning(
+            "proactive pre-send invariant failed in deliver slot=%s correlation_id=%s",
+            claim.slot_id, correlation_id, exc_info=True,
+        )
         return await asyncio.to_thread(
             scheduler.finish_delivery, claim, state="failed",
             reason=f"pre_send_invariant:{type(exc).__name__}", now=now,
