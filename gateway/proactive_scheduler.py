@@ -1534,7 +1534,12 @@ class ProactiveScheduler:
                         (timestamp, row["slot_id"]),
                     )
                     continue
-                reason = self._eligibility_reason_in(con, row["contact_hash"], row["kind"], timestamp)
+                reason = self._eligibility_reason_in(
+                    con, row["contact_hash"], row["kind"], timestamp,
+                    operator_smoke=json.loads(
+                        row["payload_json"] or "{}"
+                    ).get("operator_smoke") is True,
+                )
                 if reason:
                     con.execute(
                         "UPDATE proactive_slot SET status='suppressed',reason=?,updated_at=? WHERE slot_id=?",
@@ -1595,7 +1600,10 @@ class ProactiveScheduler:
                 self._finish(con)
                 return "cancelled"
             eligibility = self._eligibility_reason_in(
-                con, str(row["contact_hash"]), str(row["kind"]), timestamp
+                con, str(row["contact_hash"]), str(row["kind"]), timestamp,
+                operator_smoke=json.loads(
+                    row["payload_json"] or "{}"
+                ).get("operator_smoke") is True,
             )
             if eligibility:
                 sent = False
