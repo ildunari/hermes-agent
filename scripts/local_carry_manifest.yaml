@@ -182,6 +182,10 @@ checks:
     path: agent/memory_manager.py
     needles: [tools_only, self._tools_only]
     description: tools-only provider managers suppress recall and automatic capture while retaining explicit provider tool routing
+  - id: daemon-thread-pool-python-compatibility
+    path: tools/daemon_pool.py
+    needles: [_create_worker_context, worker_args]
+    description: daemon executor supports both legacy initializer args and Python 3.14 worker contexts
   - id: restart-first-upgrade-idle-bridge
     path: hermes_cli/restart_surfaces.py
     needles: [_old_writer_requires_graceful_transition, owner-controlled graceful drain]
