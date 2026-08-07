@@ -237,6 +237,7 @@ def sweep_recoverable(
     now: Optional[float] = None,
     *,
     deliverable_platforms: Optional[set] = None,
+    excluded_platforms: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
     """Claim undelivered rows owned by dead processes; return them for
     redelivery.
@@ -253,9 +254,18 @@ def sweep_recoverable(
     that failed to connect would otherwise burn one attempt per boot and hit
     the cap having never been sent once.  Rows for absent platforms are left
     untouched for a later boot; the stale cutoff still bounds them.
+
+    ``excluded_platforms`` is an explicit operator opt-out. Recoverable rows
+    for those transports are abandoned without a send or attempt increment so
+    stale debt cannot wake back up if the config changes later.
     """
     now = now if now is not None else time.time()
     pid, started = _owner_stamp()
+    excluded = {
+        str(platform).strip().lower()
+        for platform in (excluded_platforms or set())
+        if str(platform).strip()
+    }
     claimed: List[Dict[str, Any]] = []
     with _DB_LOCK, _transaction() as conn:
         rows = conn.execute(
@@ -269,6 +279,15 @@ def sweep_recoverable(
              attempts, created_at, owner_pid, owner_started_at) in rows:
             if _owner_alive(owner_pid, owner_started_at):
                 continue  # a live gateway still owns this row
+            if str(platform).strip().lower() in excluded:
+                conn.execute(
+                    """UPDATE delivery_obligations
+                       SET state='abandoned', updated_at=?,
+                           last_error='platform excluded by config'
+                       WHERE obligation_id=?""",
+                    (now, oid),
+                )
+                continue
             if attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS:
                 conn.execute(
                     """UPDATE delivery_obligations
@@ -348,6 +367,62 @@ def ledger_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
         if isinstance(value, str):
             return value.strip().lower() not in {"false", "0", "no", "off"}
         return bool(value)
+    except Exception:
+        return True
+
+
+def delivery_ledger_excluded_platforms(
+    config: Optional[Dict[str, Any]] = None,
+) -> set[str]:
+    """Return normalized platform names excluded from durable recovery."""
+    try:
+        if config is None:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        gateway_config = config.get("gateway") or {}
+        raw_exclusions = gateway_config.get(
+            "delivery_ledger_exclude_platforms", []
+        )
+        if isinstance(raw_exclusions, str):
+            raw_exclusions = [raw_exclusions]
+        if not isinstance(raw_exclusions, (list, tuple, set, frozenset)):
+            return set()
+        return {
+            str(value).strip().lower()
+            for value in raw_exclusions
+            if str(value).strip()
+        }
+    except Exception:
+        # Preserve the ledger's existing fail-open behavior: malformed config
+        # must not make ordinary final responses disappear silently.
+        return set()
+
+
+def ledger_enabled_for_platform(
+    platform: Any,
+    config: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Return whether durable final-response recovery is enabled for a platform.
+
+    Some transports already provide durable delivery semantics or make a
+    restart-time retry more disruptive than dropping an ambiguous response.
+    Operators can exclude those transports with
+    ``gateway.delivery_ledger_exclude_platforms`` while keeping the ledger for
+    every other platform. Platform names are compared case-insensitively.
+    """
+    try:
+        if config is None:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        if not ledger_enabled(config):
+            return False
+        platform_name = getattr(platform, "value", platform)
+        return (
+            str(platform_name).strip().lower()
+            not in delivery_ledger_excluded_platforms(config)
+        )
     except Exception:
         return True
 

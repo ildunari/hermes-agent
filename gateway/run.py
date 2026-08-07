@@ -12153,6 +12153,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         try:
             from gateway.delivery_ledger import (
                 RECOVERED_MARKER,
+                delivery_ledger_excluded_platforms,
                 ledger_enabled,
                 mark_delivered,
                 mark_failed,
@@ -12165,10 +12166,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # holds a platform only after its connect() succeeded, and each
             # claim spends one of the row's three redelivery attempts.
             _deliverable = {
-                getattr(p, "value", str(p)) for p in self.adapters
+                getattr(platform, "value", str(platform))
+                for platform in self.adapters
             }
+            _excluded = await asyncio.to_thread(
+                delivery_ledger_excluded_platforms
+            )
             claimed = await asyncio.to_thread(
-                sweep_recoverable, None, deliverable_platforms=_deliverable
+                sweep_recoverable,
+                None,
+                deliverable_platforms=_deliverable,
+                excluded_platforms=_excluded,
             )
         except Exception:
             logger.debug("delivery ledger sweep failed", exc_info=True)

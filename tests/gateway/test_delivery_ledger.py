@@ -141,6 +141,43 @@ class TestLedgerEnabled:
         assert dl.ledger_enabled({}) is True
         assert dl.ledger_enabled({"gateway": {}}) is True
 
+    def test_platform_defaults_on(self):
+        assert dl.ledger_enabled_for_platform("bluebubbles", {}) is True
+
+    def test_platform_can_be_excluded_without_disabling_other_ledgers(self):
+        config = {
+            "gateway": {
+                "delivery_ledger": True,
+                "delivery_ledger_exclude_platforms": ["BlueBubbles"],
+            }
+        }
+
+        assert dl.ledger_enabled_for_platform("bluebubbles", config) is False
+        assert dl.ledger_enabled_for_platform("telegram", config) is True
+        assert dl.delivery_ledger_excluded_platforms(config) == {"bluebubbles"}
+
+    def test_global_disable_still_wins(self):
+        config = {
+            "gateway": {
+                "delivery_ledger": False,
+                "delivery_ledger_exclude_platforms": [],
+            }
+        }
+
+        assert dl.ledger_enabled_for_platform("telegram", config) is False
+
+    def test_excluded_platform_rows_are_abandoned_without_a_send_attempt(self):
+        _record(platform="bluebubbles")
+        dl.mark_attempting("ob-1")
+        _orphan("ob-1")
+
+        assert dl.sweep_recoverable(
+            deliverable_platforms={"bluebubbles"},
+            excluded_platforms={"bluebubbles"},
+        ) == []
+        assert _row("ob-1")["state"] == "abandoned"
+        assert _row("ob-1")["attempts"] == 0
+
 
 class TestGatewayRedeliverySweep:
     """Drive the real GatewayRunner._redeliver_pending_obligations."""
@@ -198,6 +235,25 @@ class TestGatewayRedeliverySweep:
         sent = adapter.send.call_args.kwargs
         assert sent["content"].startswith(dl.RECOVERED_MARKER)
         assert sent["content"].endswith("the final answer")
+
+    @pytest.mark.asyncio
+    async def test_platform_exclusion_blocks_existing_row_redelivery(self):
+        _record()
+        dl.mark_attempting("ob-1")
+        _orphan("ob-1")
+        adapter = self._adapter()
+        runner = self._runner(adapter)
+
+        with patch.object(
+            dl,
+            "delivery_ledger_excluded_platforms",
+            return_value={"slack"},
+        ):
+            assert await runner._redeliver_pending_obligations() == 0
+
+        adapter.send.assert_not_awaited()
+        assert _row("ob-1")["state"] == "abandoned"
+        assert _row("ob-1")["attempts"] == 0
 
     @pytest.mark.parametrize(
         ("send_success", "ledger_method"),

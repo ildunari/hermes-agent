@@ -122,6 +122,19 @@ class TestProducerHook:
         assert len(rows) == 1
         assert rows[0][1] == "failed"
 
+    @pytest.mark.asyncio
+    async def test_platform_exclusion_sends_without_recording_obligation(self):
+        adapter = _Adapter()
+
+        with patch(
+            "gateway.delivery_ledger.ledger_enabled_for_platform",
+            return_value=False,
+        ):
+            await _run(adapter, _event())
+
+        assert adapter.sent == ["final answer"]
+        assert _rows() == []
+
 
     @pytest.mark.asyncio
     async def test_slow_ledger_record_does_not_block_event_loop(self):

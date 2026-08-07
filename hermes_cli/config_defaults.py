@@ -2462,6 +2462,11 @@ DEFAULT_CONFIG = {
         # crash/restart, as before.
         "delivery_ledger": True,
 
+        # Platforms that should still receive normal final responses but must
+        # not persist/replay them across gateway restarts. Names match platform
+        # config keys (for example: ["bluebubbles"]).
+        "delivery_ledger_exclude_platforms": [],
+
         # Seconds the gateway waits for a single messaging platform to finish
         # connecting during startup (and on reconnect). Discord in particular
         # can blow past the old fixed 30s when an account has many slash

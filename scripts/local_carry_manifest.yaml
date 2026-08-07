@@ -754,6 +754,8 @@ features:
     owner: kosta
     class: keep-core
     owner_paths:
+      - gateway/delivery_ledger.py
+      - gateway/platforms/base.py
       - gateway/run.py
       - gateway/turn_context.py
       - gateway/guest_access.py
@@ -761,11 +763,17 @@ features:
       - gateway/conversation_texture_v2.py
       - gateway/proactive_checkin.py
       - hermes_state.py
+      - hermes_cli/config_defaults.py
       - hermes_cli/env_loader.py
     collision_paths:
+      - gateway/delivery_ledger.py
+      - gateway/platforms/base.py
       - gateway/run.py
+      - hermes_cli/config_defaults.py
       - hermes_state.py
     tests:
+      - tests/gateway/test_delivery_ledger.py
+      - tests/gateway/test_delivery_ledger_producer.py
       - tests/gateway/test_conversation_texture_integration.py
       - tests/gateway/test_conversation_texture_v2.py
       - tests/gateway/test_bluebubbles_guest_policy.py
@@ -773,6 +781,10 @@ features:
       - tests/gateway/test_proactive_watcher_integration.py
       - tests/gateway/test_42039_duplicate_user_message.py
     checks:
+      - id: platform-scoped-delivery-ledger
+        path: gateway/delivery_ledger.py
+        needles: [ledger_enabled_for_platform, delivery_ledger_exclude_platforms]
+        description: BlueBubbles can opt out of restart-time response replay without disabling durable recovery globally
       - id: texture-callsite-wiring
         path: gateway/run.py
         needles: [_compile_conversation_texture_prompt, _with_conversation_texture, _conversation_texture_visible_text]

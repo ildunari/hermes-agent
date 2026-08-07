@@ -6207,12 +6207,22 @@ class BasePlatformAdapter(ABC):
                         try:
                             from gateway.delivery_ledger import (
                                 compute_obligation_id,
-                                ledger_enabled,
+                                ledger_enabled_for_platform,
                                 mark_attempting,
                                 record_obligation,
                             )
 
-                            if await asyncio.to_thread(ledger_enabled):
+                            _ledger_platform = str(
+                                getattr(
+                                    event.source.platform,
+                                    "value",
+                                    event.source.platform,
+                                )
+                            )
+                            if await asyncio.to_thread(
+                                ledger_enabled_for_platform,
+                                _ledger_platform,
+                            ):
                                 _obligation_id = compute_obligation_id(
                                     session_key,
                                     str(getattr(event, "message_id", "") or ""),
@@ -6222,10 +6232,7 @@ class BasePlatformAdapter(ABC):
                                     record_obligation,
                                     obligation_id=_obligation_id,
                                     session_key=session_key,
-                                    platform=str(
-                                        getattr(event.source.platform, "value",
-                                                event.source.platform)
-                                    ),
+                                    platform=_ledger_platform,
                                     chat_id=event.source.chat_id,
                                     thread_id=getattr(event.source, "thread_id", None),
                                     content=text_content,
