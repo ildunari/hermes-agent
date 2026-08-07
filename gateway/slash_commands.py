@@ -3518,9 +3518,16 @@ class GatewaySlashCommandsMixin:
         if not last_user_msg:
             return t("gateway.retry.no_previous")
         
-        # Truncate history to before the last user message and persist
+        # Truncate history to before the last user message and persist only the
+        # live view. After in-place compaction the pre-compaction transcript
+        # lives on as active=0/compacted=1 rows under this same session id, and
+        # a bare rewrite (active_only=False) would DELETE them (same class as
+        # #61145). /retry never intends to purge archived history, so avoid a
+        # separate existence probe: it could fail open or race with the write.
         truncated = history[:last_user_idx]
-        await self.async_session_store.rewrite_transcript(session_entry.session_id, truncated)
+        await self.async_session_store.rewrite_transcript(
+            session_entry.session_id, truncated, active_only=True
+        )
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
 

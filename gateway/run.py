@@ -8828,6 +8828,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # zero can authorize a restart while a live API task is still running.
         return max(0, int(cast(Callable[[], Any], helper)()))
 
+    def _interrupt_api_server_runs(self, reason: str) -> int:
+        """Interrupt API-server agents that are not in ``_running_agents``.
+
+        Counterpart of ``_active_api_run_count()``: that method folds
+        adapter-owned API work into the shutdown drain, so this one must reach
+        the same agents when the drain times out. Duck-typed on the adapter so
+        an older adapter (or a minimal test double for this class) without the
+        hook is simply skipped rather than raising mid-shutdown.
+        """
+        try:
+            adapter = getattr(self, "adapters", {}).get(Platform.API_SERVER)
+            helper = getattr(adapter, "interrupt_active_runs", None)
+            return max(0, int(helper(reason))) if callable(helper) else 0
+        except Exception as exc:
+            logger.debug("Failed interrupting api_server runs during shutdown: %s", exc)
+            return 0
+
     # ── scale-to-zero idle detection / dormant-quiesce (Phase 0) ──────────────
     # The gateway-side BEHAVIOUR that consumes the relay scale-to-zero primitives
     # (gateway-gateway Phase 5). Pure logic lives in gateway/scale_to_zero.py; the
@@ -10706,6 +10723,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("Interrupted running agent for session %s during shutdown", session_key)
             except Exception as e:
                 logger.debug("Failed interrupting agent during shutdown: %s", e)
+        # API-server / desk turns are adapter-owned and never enter
+        # _running_agents, so the loop above cannot see them even though
+        # _drain_active_agents() waited for them (#63529).
+        interrupted_api = self._interrupt_api_server_runs(reason)
+        if interrupted_api:
+            logger.debug("Interrupted %d api_server run(s) during shutdown", interrupted_api)
 
     async def _notify_active_sessions_of_shutdown(self) -> None:
         """Send shutdown/restart notifications to active chats and home channels.
@@ -14724,9 +14747,36 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _INTERRUPT_REASON_GATEWAY_RESTART if self._restart_requested else _INTERRUPT_REASON_GATEWAY_SHUTDOWN
                 )
                 interrupt_deadline = asyncio.get_running_loop().time() + 5.0
-                while self._running_agents and asyncio.get_running_loop().time() < interrupt_deadline:
+                # Wait on API-server work too. The interrupt is cooperative:
+                # without this the settle window closes the instant
+                # _running_agents is empty, and an API turn that was just asked
+                # to stop gets its tool subprocesses killed below before it can
+                # unwind — the exact amputation this interrupt exists to avoid.
+                while (
+                    self._running_agents or self._active_api_run_count()
+                ) and asyncio.get_running_loop().time() < interrupt_deadline:
                     self._update_runtime_status("draining")
                     await asyncio.sleep(0.1)
+
+                # The interrupt above fires exactly once, but work can
+                # materialize AFTER that one shot: a /v1/runs task admitted
+                # before the drain populates _active_run_agents only once
+                # _create_agent returns, and a _running_agents entry claimed
+                # as _AGENT_PENDING_SENTINEL is promoted to a real agent by
+                # track_agent() on its own schedule. Either way the settle
+                # loop waited on work nothing signaled. If any is still live
+                # at settle-loop exit, re-signal so a late-materializing
+                # agent gets a cooperative interrupt instead of going
+                # straight to the tool-subprocess kill.
+                if self._running_agents or self._active_api_run_count():
+                    self._interrupt_running_agents(
+                        _INTERRUPT_REASON_GATEWAY_RESTART
+                        if self._restart_requested
+                        else _INTERRUPT_REASON_GATEWAY_SHUTDOWN
+                    )
+                    logger.debug(
+                        "Re-signaled interrupt for work still live at settle-window exit"
+                    )
 
                 # Kill lingering tool subprocesses NOW, before we spend more
                 # budget on adapter disconnect / session DB close.  Under
