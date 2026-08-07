@@ -22,3 +22,18 @@ def test_update_service_does_not_notarize_ordinary_updates(tmp_path: Path) -> No
     )
 
     assert "APPLE_NOTARY_PROFILE" not in payload["EnvironmentVariables"]
+
+
+def test_update_service_launchd_path_can_find_node_tooling(tmp_path: Path) -> None:
+    payload = SETUP.plist_payload(
+        "/usr/bin/python3",
+        tmp_path / "service.py",
+        tmp_path / "repo",
+        tmp_path / "state",
+    )
+
+    path_entries = payload["EnvironmentVariables"]["PATH"].split(":")
+    assert "/opt/homebrew/bin" in path_entries
+    assert "/usr/local/bin" in path_entries
+    assert "/usr/bin" in path_entries
+    assert "/bin" in path_entries

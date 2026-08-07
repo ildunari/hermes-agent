@@ -18,6 +18,18 @@ from pathlib import Path
 DESCRIPTION = "Install or verify the user-private Hermes update launch service."
 LABEL = "com.ildunari.hermes-update-service"
 NOTARY_PROFILE = "my-notary-profile"
+SERVICE_PATH = ":".join(
+    (
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    )
+)
 
 
 def digest(path: Path) -> str:
@@ -70,8 +82,10 @@ def plist_payload(python: str, service: Path, repo: Path, state: Path) -> dict[s
         # Desktop afterSign hook notarizes whenever that variable is present,
         # so injecting it here made every Desktop-changing update perform a
         # distribution-grade notary round-trip. Explicit release flows set it
-        # themselves.
-        "EnvironmentVariables": {},
+        # themselves. launchd's default PATH omits Homebrew, while carry
+        # verification and Desktop builds invoke npm/node by name; provide the
+        # minimal cross-architecture tool path without inheriting shell state.
+        "EnvironmentVariables": {"PATH": SERVICE_PATH},
         "StandardOutPath": str(logs / "service.stdout.log"),
         "StandardErrorPath": str(logs / "service.stderr.log"),
         "ThrottleInterval": 5,
