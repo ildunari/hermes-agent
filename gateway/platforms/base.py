@@ -5174,10 +5174,12 @@ class BasePlatformAdapter(ABC):
         """
         Send a message with automatic retry for transient network errors.
 
-        On permanent failures (e.g. formatting / permission errors) falls back
-        to a plain-text version before giving up. If all attempts fail due to
-        network errors, sends the user a brief delivery-failure notice so they
-        know to retry rather than waiting indefinitely.
+        On positively classified formatting failures, falls back to a plain-
+        text version before giving up. Unknown and other permanent errors are
+        returned unchanged: retrying the same payload under a misleading
+        formatting label can duplicate an ambiguously delivered message. If
+        all attempts fail due to network errors, sends the user a brief
+        delivery-failure notice so they know to retry rather than waiting.
         """
 
         result = await self.send(
@@ -5191,19 +5193,29 @@ class BasePlatformAdapter(ABC):
             return result
 
         error_str = result.error or ""
-        if isinstance(getattr(result, "raw_response", None), dict) and result.raw_response.get("partial_delivery"):
-            logger.warning(
-                "[%s] Send failed after partial delivery: %s — not retrying full content",
-                self.name,
-                error_str,
-            )
-            return result
-        if isinstance(getattr(result, "raw_response", None), dict) and result.raw_response.get("skip_plaintext_fallback"):
-            logger.warning(
-                "[%s] Send failed: %s — skipping plain-text fallback",
-                self.name,
-                error_str,
-            )
+
+        def _full_resend_is_unsafe(failed_result: "SendResult", error: str) -> bool:
+            raw_response = getattr(failed_result, "raw_response", None)
+            if not isinstance(raw_response, dict):
+                return False
+            if raw_response.get("partial_delivery"):
+                logger.warning(
+                    "[%s] Send failed after partial delivery: %s — not retrying "
+                    "full content",
+                    self.name,
+                    error,
+                )
+                return True
+            if raw_response.get("skip_plaintext_fallback"):
+                logger.warning(
+                    "[%s] Send failed: %s — skipping plain-text fallback",
+                    self.name,
+                    error,
+                )
+                return True
+            return False
+
+        if _full_resend_is_unsafe(result, error_str):
             return result
         is_network = result.retryable or self._is_retryable_error(error_str)
 
@@ -5238,6 +5250,8 @@ class BasePlatformAdapter(ABC):
                     logger.info("[%s] Send succeeded on retry %d", self.name, attempt)
                     return result
                 error_str = result.error or ""
+                if _full_resend_is_unsafe(result, error_str):
+                    return result
                 if result.retry_after is not None:
                     server_retry_after = result.retry_after
                 if not (result.retryable or self._is_retryable_error(error_str)):
@@ -5255,7 +5269,20 @@ class BasePlatformAdapter(ABC):
                     logger.debug("[%s] Could not send delivery-failure notice: %s", self.name, notify_err)
                 return result
 
-        # Non-network / post-retry formatting failure: try plain text as fallback
+        # Plain-text fallback is only meaningful for a positively classified
+        # formatting error. Historically every unknown/permanent failure came
+        # through here, so empty timeout strings and permission/not-found
+        # failures were retried under a bogus "formatting failed" label.
+        if classify_send_error(None, error_str) != "bad_format":
+            logger.warning(
+                "[%s] Send failed: %s — not a formatting error; skipping "
+                "plain-text fallback",
+                self.name,
+                error_str,
+            )
+            return result
+
+        # Confirmed formatting failure: try plain text as fallback.
         logger.warning("[%s] Send failed: %s — trying plain-text fallback", self.name, error_str)
         fallback_result = await self.send(
             chat_id=chat_id,

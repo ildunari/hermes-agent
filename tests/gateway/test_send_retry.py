@@ -3,7 +3,8 @@ Tests for BasePlatformAdapter._send_with_retry and _is_retryable_error.
 
 Verifies that:
 - Transient network errors trigger retry with backoff
-- Permanent errors fall back to plain-text immediately (no retry)
+- Formatting errors fall back to plain text immediately (no retry)
+- Unknown and non-formatting permanent errors do not masquerade as formatting
 - User receives a delivery-failure notice when all retries are exhausted
 - Successful sends on retry return success
 - SendResult.retryable flag is respected
@@ -123,6 +124,34 @@ class TestSendWithRetryNetworkRetry:
         assert not result.success
         assert len(adapter._send_calls) == 1
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raw_response",
+        [
+            {"partial_delivery": True},
+            {"skip_plaintext_fallback": True},
+        ],
+    )
+    async def test_retry_result_rechecks_full_resend_guards(self, raw_response):
+        adapter = _StubAdapter()
+        guarded_failure = SendResult(
+            success=False,
+            error="Bad Request: can't parse entities",
+            raw_response=raw_response,
+        )
+        adapter._send_results = [
+            SendResult(success=False, error="ConnectError", retryable=True),
+            guarded_failure,
+        ]
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await adapter._send_with_retry(
+                "chat1", "**bold**", max_retries=2, base_delay=0
+            )
+
+        assert result is guarded_failure
+        assert len(adapter._send_calls) == 2
+
 
 # ---------------------------------------------------------------------------
 # _send_with_retry — all retries exhausted → user notification
@@ -166,6 +195,29 @@ class TestSendWithRetryFallback:
         assert len(adapter._send_calls) == 2
         # Fallback content should be plain-text notice
         assert "plain text" in adapter._send_calls[1][1].lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            None,
+            "",
+            "Forbidden: bot was blocked by the user",
+            "BlueBubbles chat not found for target: user@example.com",
+        ],
+    )
+    async def test_non_formatting_failure_does_not_send_bogus_fallback(self, error):
+        adapter = _StubAdapter()
+        adapter._send_results = [SendResult(success=False, error=error)]
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await adapter._send_with_retry(
+                "chat1", "hello", max_retries=2, base_delay=0
+            )
+
+        mock_sleep.assert_not_called()
+        assert result.success is False
+        assert len(adapter._send_calls) == 1
 
 
 # ---------------------------------------------------------------------------

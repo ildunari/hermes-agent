@@ -785,6 +785,10 @@ features:
         path: gateway/delivery_ledger.py
         needles: [ledger_enabled_for_platform, delivery_ledger_exclude_platforms]
         description: BlueBubbles can opt out of restart-time response replay without disabling durable recovery globally
+      - id: format-only-plaintext-fallback
+        path: gateway/platforms/base.py
+        needles: [classify_send_error, bad_format, "not a formatting error; skipping"]
+        description: only positively classified formatting failures may trigger a second outbound send under the plain-text fallback label
       - id: texture-callsite-wiring
         path: gateway/run.py
         needles: [_compile_conversation_texture_prompt, _with_conversation_texture, _conversation_texture_visible_text]
