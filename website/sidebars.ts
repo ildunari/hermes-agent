@@ -71,6 +71,7 @@ const sidebars: SidebarsConfig = {
           label: 'Core',
           items: [
             'user-guide/features/tools',
+            'user-guide/features/document-extraction',
             'user-guide/features/tool-search',
             'user-guide/features/skills',
             'user-guide/features/lsp',
@@ -200,6 +201,7 @@ const sidebars: SidebarsConfig = {
                   key: 'skills-bundled-email',
                   collapsed: true,
                   items: [
+                    'user-guide/skills/bundled/email/email-email-inbox-triage',
                     'user-guide/skills/bundled/email/email-himalaya',
                   ],
                 },
@@ -212,6 +214,7 @@ const sidebars: SidebarsConfig = {
                     'user-guide/skills/bundled/github/github-codebase-inspection',
                     'user-guide/skills/bundled/github/github-github-auth',
                     'user-guide/skills/bundled/github/github-github-code-review',
+                    'user-guide/skills/bundled/github/github-github-issue-to-pr',
                     'user-guide/skills/bundled/github/github-github-issues',
                     'user-guide/skills/bundled/github/github-github-pr-workflow',
                     'user-guide/skills/bundled/github/github-github-repo-management',
@@ -257,6 +260,7 @@ const sidebars: SidebarsConfig = {
                   collapsed: true,
                   items: [
                     'user-guide/skills/bundled/productivity/productivity-airtable',
+                    'user-guide/skills/bundled/productivity/productivity-document-to-action-items',
                     'user-guide/skills/bundled/productivity/productivity-docx',
                     'user-guide/skills/bundled/productivity/productivity-google-workspace',
                     'user-guide/skills/bundled/productivity/productivity-maps',
@@ -714,6 +718,7 @@ const sidebars: SidebarsConfig = {
         'guides/cron-troubleshooting',
         'guides/work-with-skills',
         'guides/delegation-patterns',
+        'guides/agent-email-address',
         'guides/github-pr-review-agent',
         'guides/webhook-github-pr-review',
         'guides/migrate-from-openclaw',
@@ -738,6 +743,7 @@ const sidebars: SidebarsConfig = {
           label: 'Architecture',
           items: [
             'developer-guide/architecture',
+            'developer-guide/codebase-ownership',
             'developer-guide/agent-loop',
             'developer-guide/prompt-assembly',
             'developer-guide/context-compression-and-caching',

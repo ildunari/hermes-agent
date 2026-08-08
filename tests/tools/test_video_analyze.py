@@ -2,13 +2,11 @@
 
 import asyncio
 import base64
-import inspect
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-import pytest
 
 
 from tools.vision_tools import (
@@ -380,10 +378,13 @@ class TestVideoAnalyzeTool:
         self.mock_upload.assert_awaited_once()
 
     def test_non_local_backend_reads_video_from_terminal_backend(self, tmp_path, monkeypatch):
-        """Non-local terminal backends upload sandbox bytes, never host bytes."""
-        if "task_id" not in inspect.signature(video_analyze_tool).parameters:
-            pytest.skip("requires the incoming terminal-backend task routing")
+        """Non-local terminal backends must not read local host video paths.
 
+        The read routes through the shared media resolver
+        (tools.image_source, ``permitted=("video",)``) which exec-reads the
+        bytes inside the sandbox — so the analyzed video is the container's
+        file, never the host's.
+        """
         host_video = tmp_path / "clip.mp4"
         host_video.write_bytes(b"HOST-VIDEO")
         remote_bytes = b"REMOTE-SANDBOX-VIDEO"
@@ -434,7 +435,8 @@ class TestVideoAnalyzeTool:
         data = json.loads(result)
         assert data["success"] is True
         assert env_lookups == ["task-123"]
-        assert captured_kwargs["messages"][0]["content"][1]["video_file"] == {
+        video_file = captured_kwargs["messages"][0]["content"][1]["video_file"]
+        assert video_file == {
             "uri": "https://files.example/video",
             "mime_type": "video/mp4",
         }
