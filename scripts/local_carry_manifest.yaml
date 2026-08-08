@@ -17,6 +17,10 @@ managed_roots:
   - web
 
 checks:
+  - id: prompt-dedupe-completion-blocks
+    path: agent/prompt_builder.py
+    needles: ["# Tool-use enforcement", "# Finishing the job", "# Execution discipline"]
+    description: 2026-08-08 injection-dedupe — TASK_COMPLETION_GUIDANCE is the sole owner of keep-working/verify prose; TOOL_USE_ENFORCEMENT (act-now) and OPENAI_MODEL_EXECUTION_GUIDANCE (tool persistence) were trimmed of duplicate completion sentences. If an upstream merge restores them, re-trim.
   - id: dashboard-host-allowlist
     path: hermes_cli/web_server.py
     needles: [register_instance, allowed_hosts, _configured_dashboard_allowed_hosts]
