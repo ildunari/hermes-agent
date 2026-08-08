@@ -1,10 +1,14 @@
 """Tests for video_analyze tool in tools/vision_tools.py."""
 
 import asyncio
+import base64
+import inspect
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
 
 from tools.vision_tools import (
@@ -374,6 +378,70 @@ class TestVideoAnalyzeTool:
         assert json.loads(result)["success"] is True
         inline_encode.assert_not_called()
         self.mock_upload.assert_awaited_once()
+
+    def test_non_local_backend_reads_video_from_terminal_backend(self, tmp_path, monkeypatch):
+        """Non-local terminal backends upload sandbox bytes, never host bytes."""
+        if "task_id" not in inspect.signature(video_analyze_tool).parameters:
+            pytest.skip("requires the incoming terminal-backend task routing")
+
+        host_video = tmp_path / "clip.mp4"
+        host_video.write_bytes(b"HOST-VIDEO")
+        remote_bytes = b"REMOTE-SANDBOX-VIDEO"
+        remote_b64 = base64.b64encode(remote_bytes).decode("ascii")
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+
+        import tools.image_source as isrc
+        import tools.terminal_tool as tt
+
+        env_lookups = []
+
+        def fake_get_active(task_id):
+            env_lookups.append(task_id)
+            return SimpleNamespace(
+                execute=lambda cmd, **kw: {"returncode": 0, "output": remote_b64}
+            )
+
+        monkeypatch.setattr(tt, "ensure_task_env", lambda *a, **k: None)
+        monkeypatch.setattr(isrc, "_get_active_env", fake_get_active)
+
+        captured_kwargs = {}
+        uploaded_payload = {}
+
+        async def capture_upload(path, mime_type, api_key):
+            uploaded_payload["bytes"] = path.read_bytes()
+            uploaded_payload["mime_type"] = mime_type
+            uploaded_payload["api_key"] = api_key
+            return "https://files.example/video", "files/test-video"
+
+        self.mock_upload.side_effect = capture_upload
+
+        async def capture_llm(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "sandbox video"
+            return mock_response
+
+        with (
+            patch("tools.vision_tools.async_call_llm", side_effect=capture_llm),
+            patch("tools.vision_tools.extract_content_or_reasoning", return_value="sandbox video"),
+        ):
+            result = self._run(
+                video_analyze_tool(str(host_video), "Describe this", task_id="task-123")
+            )
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert env_lookups == ["task-123"]
+        assert captured_kwargs["messages"][0]["content"][1]["video_file"] == {
+            "uri": "https://files.example/video",
+            "mime_type": "video/mp4",
+        }
+        assert uploaded_payload["bytes"] == remote_bytes
+        assert uploaded_payload["bytes"] != host_video.read_bytes()
+        assert uploaded_payload["mime_type"] == "video/mp4"
+        assert uploaded_payload["api_key"] == ""
 
 
 # ---------------------------------------------------------------------------
