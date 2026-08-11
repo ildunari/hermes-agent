@@ -39,7 +39,7 @@ import {
   setSessionsLoading
 } from '@/store/session'
 import { $attentionSessionIds, $workingSessionIds, resetTileRuntimeBindings } from '@/store/session-states'
-import { newSessionWindowProfile } from '@/store/windows'
+import { windowProfileOverride } from '@/store/windows'
 import type { RpcEvent } from '@/types/hermes'
 
 import { stashGatewaySurvivor, survivorIsStale, takeGatewaySurvivor } from './gateway-hmr-survivor'
@@ -100,7 +100,7 @@ export function useGatewayBoot({
     // that backend as its primary connection, not boot the stored/default
     // backend first and swap later (which can publish the default profile's
     // selected transcript into what should be a blank draft).
-    const requestedWindowProfile = newSessionWindowProfile()
+    const requestedWindowProfile = windowProfileOverride()
     const initialProfile = requestedWindowProfile ? normalizeProfileKey(requestedWindowProfile) : null
 
     const publish = (next: HermesConnection | null) => {
@@ -260,9 +260,13 @@ export function useGatewayBoot({
 
     // Adopt the profile the primary (window) backend booted as, so same-profile
     // resumes are no-op swaps and reconnects target the right backend.
-    // Best-effort: a missing preference means "default". A Cmd+Shift+N window
-    // already connected directly to its requested profile above, so never read
-    // or briefly publish the Electron main's stored/default profile here.
+    // Best-effort: a missing preference means "default". Shared by boot + soft
+    // switch.
+    //
+    // Helper windows (the HUD and Cmd+Shift+N scratch windows) can carry an
+    // explicit profile override in their URL. They already connected directly
+    // to that backend above, so never briefly publish the Electron main's
+    // stored/default profile here. Absent an override, behavior is unchanged.
     async function adoptPrimaryProfile() {
       try {
         const pref = initialProfile ? null : await desktop.profile?.get?.()
@@ -276,7 +280,7 @@ export function useGatewayBoot({
         setPrimaryGateway(gateway, profileKey)
         void ensureGatewayForProfile(profileKey)
       } catch {
-        $activeGatewayProfile.set('default')
+        $activeGatewayProfile.set(normalizeProfileKey(initialProfile))
       }
     }
 
@@ -514,6 +518,20 @@ export function useGatewayBoot({
           progress: 95
         })
         publish(conn)
+
+        // Seed the workspace BEFORE the gateway opens: every session-restore
+        // path is gated on gatewayState === 'open', so nothing can be active yet
+        // and ensureDefaultWorkspaceCwd's live-session guard passes. The
+        // post-connect seed could lose that race on a slow start (#71873). A
+        // resumed session's own cwd still supersedes this once its runtime
+        // arrives. Non-fatal: the remembered cwd is a fine fallback and the
+        // post-connect pass retries the sync.
+        try {
+          await ensureDefaultWorkspaceCwd()
+        } catch (err) {
+          console.warn('Failed to seed default workspace cwd pre-connect', err)
+        }
+
         // Mint a fresh WS URL right before connecting. For OAuth gateways the
         // ticket is single-use with a short TTL, so the ticket baked into
         // conn.wsUrl is stale; resolveGatewayWsUrl() re-mints it rather than
@@ -540,7 +558,10 @@ export function useGatewayBoot({
         })
 
         await Promise.all([
-          seedDefaultCwd(),
+          // The pre-connect seed already applied the configured default; this
+          // post-connect pass covers the remote backend default. Non-fatal: a
+          // failed sync must not abort boot (the remembered cwd remains).
+          seedDefaultCwd().catch(err => console.warn('Failed to sync default workspace cwd post-connect', err)),
           callbacksRef.current.refreshHermesConfig(),
           // Session-list population is never boot-fatal. The gateway WS is
           // already open by this point — a failed sidebar fetch (transient

@@ -1,5 +1,5 @@
 ---
-name: stable-diffusion-image-generation
+name: stable-diffusion
 description: Text-to-image generation, inpainting, and img2img.
 version: 1.0.0
 author: Orchestra Research
@@ -21,8 +21,7 @@ reaches its own loopback, not the user's. Never state which machine the backend 
 If the caller must receive generated files, confirm the write target is reachable from
 that caller before spending a generation, and say so plainly if it is not.
 
-
-Comprehensive guide to generating images with Stable Diffusion using the HuggingFace Diffusers library.
+Guide to generating images with Stable Diffusion using the HuggingFace Diffusers library.
 
 ## When to use Stable Diffusion
 

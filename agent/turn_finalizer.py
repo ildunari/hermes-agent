@@ -26,6 +26,7 @@ import os
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.message_content import flatten_message_text
+from agent.message_sanitization import _sanitize_surrogates
 
 
 def _is_pure_tool_call_tail(msg: dict) -> bool:
@@ -647,6 +648,11 @@ def finalize_turn(
             last_reasoning = msg["reasoning"]
             break
 
+    # Class-level surrogate chokepoint: scrub raw SDK text once before every
+    # delivery surface receives it.
+    if isinstance(final_response, str):
+        final_response = _sanitize_surrogates(final_response)
+
     # ``finished`` means a response actually completed. On an unsuccessful turn
     # restore the prior settled summary, or clear transient live routing.
     if completed and not interrupted:
@@ -661,6 +667,7 @@ def finalize_turn(
             else None
         )
         agent._runtime_routing = runtime_routing
+
 
     result = {
         "final_response": final_response,
