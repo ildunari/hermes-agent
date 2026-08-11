@@ -925,7 +925,7 @@ describe('resumeSession failure recovery', () => {
       return {} as never
     })
 
-    vi.mocked(getSessionMessages).mockResolvedValue({ messages: [] } as never)
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({ messages: [] } as never)
 
     await runResume(requestGateway)
 
@@ -1187,7 +1187,7 @@ describe('branchStoredSession desktop source tagging', () => {
     })
 
     setSessions([storedSession({ id: 'stored-parent', message_count: 1, profile: 'parent-profile' })])
-    vi.mocked(getSessionMessages).mockResolvedValue({
+    vi.mocked(getAllSessionMessages).mockResolvedValue({
       messages: [{ content: 'branch me', role: 'user', timestamp: 1 }],
       session_id: 'stored-parent'
     } as never)
@@ -1199,7 +1199,7 @@ describe('branchStoredSession desktop source tagging', () => {
     await waitFor(() => expect(branchStoredSession).not.toBeNull())
 
     await expect(branchStoredSession!('stored-parent', 'active-chip-profile')).resolves.toBe(true)
-    expect(getSessionMessages).toHaveBeenCalledWith('stored-parent', 'parent-profile')
+    expect(getAllSessionMessages).toHaveBeenCalledWith('stored-parent', 'parent-profile')
     expect(createParams).toMatchObject({
       parent_session_id: 'stored-parent',
       profile: 'parent-profile'
