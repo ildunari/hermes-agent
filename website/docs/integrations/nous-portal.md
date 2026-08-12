@@ -29,7 +29,7 @@ The Portal proxies a curated catalog of agentic models from across the ecosystem
 | **Anthropic Claude** | Opus 4.7, Opus 4.6, Sonnet 4.6, Haiku 4.5 |
 | **OpenAI** | GPT-5.5, GPT-5.5 Pro, GPT-5.4 Mini, GPT-5.4 Nano, GPT-5.3 Codex |
 | **Google Gemini** | Gemini 3 Pro Preview, Gemini 3 Flash Preview, Gemini 3.1 Pro Preview, Gemini 3.1 Flash Lite Preview |
-| **DeepSeek** | DeepSeek V4 Pro |
+| **DeepSeek** | DeepSeek V4 Pro (0813 via the stable `deepseek-v4-pro` slug) |
 | **Qwen** | Qwen3.7-Max, Qwen3.6-35B-A3B |
 | **Kimi / Moonshot** | Kimi K2.6 |
 | **GLM / Zhipu** | GLM-5.1 |

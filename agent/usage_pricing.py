@@ -463,7 +463,8 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         pricing_version="anthropic-pricing-2026-05",
     ),
     # DeepSeek
-    # Snapshot of https://api-docs.deepseek.com/quick_start/pricing (2026-07).
+    # Snapshot of https://api-docs.deepseek.com/quick_start/pricing (2026-08).
+    # ``deepseek-v4-pro`` now serves DeepSeek-V4-Pro-0813 at the same rates.
     # deepseek-chat / deepseek-reasoner are deprecated 2026-07-24 and now alias
     # deepseek-v4-flash's non-thinking / thinking modes — same rates.
     (
@@ -475,7 +476,7 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         cache_read_cost_per_million=Decimal("0.0028"),
         source="official_docs_snapshot",
         source_url="https://api-docs.deepseek.com/quick_start/pricing",
-        pricing_version="deepseek-pricing-2026-07",
+        pricing_version="deepseek-pricing-2026-08",
     ),
     (
         "deepseek",
@@ -486,7 +487,7 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         cache_read_cost_per_million=Decimal("0.0028"),
         source="official_docs_snapshot",
         source_url="https://api-docs.deepseek.com/quick_start/pricing",
-        pricing_version="deepseek-pricing-2026-07",
+        pricing_version="deepseek-pricing-2026-08",
     ),
     (
         "deepseek",
@@ -497,7 +498,7 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         cache_read_cost_per_million=Decimal("0.003625"),
         source="official_docs_snapshot",
         source_url="https://api-docs.deepseek.com/quick_start/pricing",
-        pricing_version="deepseek-pricing-2026-07",
+        pricing_version="deepseek-pricing-2026-08",
     ),
     (
         "deepseek",
@@ -508,7 +509,7 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         cache_read_cost_per_million=Decimal("0.0028"),
         source="official_docs_snapshot",
         source_url="https://api-docs.deepseek.com/quick_start/pricing",
-        pricing_version="deepseek-pricing-2026-07",
+        pricing_version="deepseek-pricing-2026-08",
     ),
     # Google Gemini
     (

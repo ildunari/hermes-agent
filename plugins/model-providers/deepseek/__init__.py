@@ -19,6 +19,11 @@ don't perturb the V3 wire format.
 The legacy aliases ``deepseek-chat`` / ``deepseek-reasoner`` were retired on
 2026-07-24.  Use ``deepseek-v4-flash`` or ``deepseek-v4-pro``; Hermes remaps
 the retired IDs in ``hermes_cli.model_normalize``.
+
+As of 2026-08-13, DeepSeek's stable ``deepseek-v4-pro`` API slug serves
+DeepSeek-V4-Pro-0813. The dated name is release metadata, not a callable model
+ID: the live API rejects ``deepseek-v4-pro-0813`` and instructs callers to use
+``deepseek-v4-pro``.
 """
 
 from __future__ import annotations
@@ -89,7 +94,7 @@ deepseek = DeepSeekProfile(
     aliases=("deepseek-chat",),
     env_vars=("DEEPSEEK_API_KEY",),
     display_name="DeepSeek",
-    description="DeepSeek — native DeepSeek API",
+    description="DeepSeek — native API (V4 Pro stable alias serves 0813)",
     signup_url="https://platform.deepseek.com/",
     fallback_models=(
         "deepseek-v4-pro",

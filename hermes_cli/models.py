@@ -443,6 +443,8 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "claude-haiku-4-5-20251001",
     ],
     "deepseek": [
+        # Stable API slug; serves DeepSeek-V4-Pro-0813 as of 2026-08-13.
+        # The dated release name itself is rejected by the native API.
         "deepseek-v4-pro",
         "deepseek-v4-flash",
     ],

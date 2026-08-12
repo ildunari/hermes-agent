@@ -90,7 +90,7 @@
         },
         {
           "id": "deepseek/deepseek-v4-pro",
-          "description": ""
+          "description": "stable alias for DeepSeek-V4-Pro-0813"
         },
         {
           "id": "deepseek/deepseek-v4-flash",

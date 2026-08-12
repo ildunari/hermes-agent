@@ -128,8 +128,8 @@ def test_deepseek_v4_pro_pricing_entry_exists():
         "deepseek-v4-pro",
         provider="deepseek",
     )
-
     assert entry is not None
+    assert entry.pricing_version == "deepseek-pricing-2026-08"
     assert entry.input_cost_per_million is not None
     assert entry.output_cost_per_million is not None
     assert float(entry.input_cost_per_million) == 0.435

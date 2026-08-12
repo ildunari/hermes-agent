@@ -194,6 +194,11 @@ class TestDeepSeekAuxModel:
             "deepseek-v4-pro",
             "deepseek-v4-flash",
         )
+        # 0813 is the release behind the stable Pro slug, not a callable ID.
+        assert "deepseek-v4-pro-0813" not in deepseek_profile.fallback_models
+
+    def test_profile_identifies_stable_pro_release(self, deepseek_profile):
+        assert "V4 Pro stable alias serves 0813" in deepseek_profile.description
 
     def test_consumer_api_returns_deepseek_v4_flash(self):
         from agent.auxiliary_client import _get_aux_model_for_provider

@@ -636,6 +636,42 @@ features:
         needles: ['"gemini": [', '"gemini-3.6-flash"']
         description: native Gemini picker catalog includes the current 3.6 Flash model
 
+  - id: models.deepseek-v4-pro-0813
+    title: DeepSeek V4 Pro stable slug tracks the 0813 release
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - plugins/model-providers/deepseek/__init__.py
+      - tests/plugins/model_providers/test_deepseek_profile.py
+    collision_paths:
+      - agent/model_metadata.py
+      - agent/usage_pricing.py
+      - hermes_cli/models.py
+    dependent_paths:
+      - tests/agent/test_usage_pricing.py
+      - website/docs/integrations/nous-portal.md
+      - website/static/api/model-catalog.json
+    tests:
+      - tests/plugins/model_providers/test_deepseek_profile.py
+      - tests/agent/test_model_metadata.py
+      - tests/agent/test_usage_pricing.py
+      - tests/hermes_cli/test_model_display.py
+    checks:
+      - id: deepseek-v4-pro-stable-0813
+        path: plugins/model-providers/deepseek/__init__.py
+        needles: ['DeepSeek-V4-Pro-0813', 'V4 Pro stable alias serves 0813']
+        forbidden_needles: ['"deepseek-v4-pro-0813",']
+        description: the callable stable slug remains deepseek-v4-pro while release metadata records 0813
+      - id: deepseek-v4-pro-picker
+        path: hermes_cli/models.py
+        needles: ['"deepseek": [', '"deepseek-v4-pro"', 'serves DeepSeek-V4-Pro-0813']
+        description: native picker keeps the stable Pro slug and documents its current served release
+      - id: deepseek-v4-pro-pricing-refresh
+        path: agent/usage_pricing.py
+        needles: ['deepseek-pricing-2026-08', 'DeepSeek-V4-Pro-0813']
+        forbidden_needles: ['deepseek-pricing-2026-07']
+        description: native DeepSeek pricing provenance is refreshed for the 0813 release
+
   - id: models.grok-46-oauth
     title: Grok 4.6 OAuth catalog, metadata, and X-search defaults
     owner: kosta
