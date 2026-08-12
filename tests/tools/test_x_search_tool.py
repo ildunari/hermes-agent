@@ -70,7 +70,7 @@ def test_x_search_posts_responses_request(monkeypatch):
     tool_def = captured["json"]["tools"][0]
     assert captured["url"] == "https://api.x.ai/v1/responses"
     assert captured["headers"]["User-Agent"] == f"Hermes-Agent/{__version__}"
-    assert captured["json"]["model"] == "grok-4.5"
+    assert captured["json"]["model"] == "grok-4.6"
     assert captured["json"]["store"] is False
     assert "reasoning" not in captured["json"]
     assert tool_def["type"] == "x_search"

@@ -13,7 +13,7 @@ describe('model display names', () => {
     expect(displayModelName('z-ai/glm-5v-turbo')).toBe('GLM 5V Turbo')
     expect(displayModelName('gpt-5.6-sol')).toBe('GPT 5.6 Sol')
     expect(displayModelName('gpt-5.6-terra')).toBe('GPT 5.6 Terra')
-    expect(displayModelName('grok-4.5')).toBe('Grok 4.5')
+    expect(displayModelName('grok-4.6')).toBe('Grok 4.6')
     expect(displayModelName('grok-composer-2.5-fast')).toBe('Grok Composer 2.5 Fast')
   })
 

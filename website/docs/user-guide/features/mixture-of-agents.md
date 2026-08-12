@@ -221,7 +221,7 @@ moa:
           model: gpt-5.6-sol
           reasoning_effort: xhigh
         - provider: xai-oauth
-          model: grok-4.5
+          model: grok-4.6
       aggregator:
         provider: openai-codex
         model: gpt-5.6-sol

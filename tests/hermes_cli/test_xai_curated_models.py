@@ -3,6 +3,12 @@
 from hermes_cli.models import _PROVIDER_MODELS, provider_model_ids
 
 
+def test_xai_oauth_includes_grok_4_6():
+    models = provider_model_ids("xai-oauth")
+    assert "grok-4.6" in models
+    assert "grok-4.5" not in models
+
+
 def test_xai_oauth_includes_grok_composer_2_5_fast():
     models = provider_model_ids("xai-oauth")
     assert "grok-composer-2.5-fast" in models

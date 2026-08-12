@@ -636,6 +636,46 @@ features:
         needles: ['"gemini": [', '"gemini-3.6-flash"']
         description: native Gemini picker catalog includes the current 3.6 Flash model
 
+  - id: models.grok-46-oauth
+    title: Grok 4.6 OAuth catalog, metadata, and X-search defaults
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - agent/reasoning_timeouts.py
+      - tests/agent/test_reasoning_stale_timeout_floor.py
+      - tests/hermes_cli/test_xai_curated_models.py
+    collision_paths:
+      - agent/model_metadata.py
+      - hermes_cli/config_defaults.py
+      - hermes_cli/models.py
+      - tools/x_search_tool.py
+    dependent_paths:
+      - apps/desktop/src/lib/model-display-name.test.ts
+      - tests/agent/test_model_metadata.py
+      - tests/tools/test_x_search_tool.py
+      - website/docs/user-guide/features/mixture-of-agents.md
+      - website/docs/user-guide/features/x-search.md
+      - website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/x-search.md
+      - website/static/api/model-catalog.json
+    tests:
+      - tests/hermes_cli/test_xai_curated_models.py
+      - tests/agent/test_model_metadata.py
+      - tests/agent/test_reasoning_stale_timeout_floor.py
+      - tests/tools/test_x_search_tool.py
+    checks:
+      - id: grok-46-oauth-curated
+        path: hermes_cli/models.py
+        needles: ['"grok-4.6"', '_XAI_SUPERSEDED_CURATED']
+        description: xAI OAuth surfaces Grok 4.6 while keeping 4.5 callable only for compatibility
+      - id: grok-46-x-search-default
+        path: tools/x_search_tool.py
+        needles: ['DEFAULT_X_SEARCH_MODEL = "grok-4.6"']
+        description: first-party X search uses the current Grok flagship
+      - id: grok-46-reasoning-timeout
+        path: agent/reasoning_timeouts.py
+        needles: ['("grok-4.6", 300)']
+        description: Grok 4.6 reasoning calls retain the long-running stale timeout floor
+
   - id: runtime.desktop-compression-reanchor
     title: Re-anchor Desktop session identity at the compression boundary
     owner: kosta

@@ -69,7 +69,7 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("google/gemini-3.1-pro-preview",          ""),
     ("google/gemini-3.6-flash",                ""),
     # xAI
-    ("x-ai/grok-4.5",                          ""),
+    ("x-ai/grok-4.6",                          ""),
     # DeepSeek
     ("deepseek/deepseek-v4-pro",               ""),
     ("deepseek/deepseek-v4-flash",             ""),
@@ -155,7 +155,7 @@ def _codex_curated_models() -> list[str]:
 #  grok-4-1-fast{,-reasoning,-non-reasoning}, grok-code-fast-1 → grok-4.3).
 _XAI_STATIC_FALLBACK: list[str] = [
     "grok-build-0.1",
-    "grok-4.5",
+    "grok-4.6",
     "grok-4.3",
     "grok-4.20-0309-reasoning",
     "grok-4.20-0309-non-reasoning",
@@ -164,9 +164,13 @@ _XAI_STATIC_FALLBACK: list[str] = [
 
 # Callable via xAI OAuth but omitted from models.dev and /v1/models listings.
 _XAI_CURATED_EXTRAS: list[str] = [
-    "grok-4.5",  # GA 2026-07 — kept until the models.dev disk cache refreshes
+    "grok-4.6",  # GA 2026-08 — kept until the models.dev disk cache refreshes
     "grok-composer-2.5-fast",
 ]
+
+# Do not keep superseded flagship releases in the default OAuth picker. They
+# remain callable when explicitly typed so old sessions can still resume.
+_XAI_SUPERSEDED_CURATED: frozenset[str] = frozenset({"grok-4.5"})
 
 
 _XAI_TOP_MODEL = "grok-build-0.1"
@@ -181,7 +185,7 @@ def _xai_promote_top(ids: list[str]) -> list[str]:
 
 def _xai_merge_curated_extras(ids: list[str]) -> list[str]:
     """Append Hermes-curated xAI models that are missing from models.dev."""
-    out = list(ids)
+    out = [model_id for model_id in ids if model_id not in _XAI_SUPERSEDED_CURATED]
     for extra in _XAI_CURATED_EXTRAS:
         if extra in out:
             continue
@@ -265,7 +269,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "google/gemini-3.1-pro-preview",
         "google/gemini-3.6-flash",
         # xAI
-        "x-ai/grok-4.5",
+        "x-ai/grok-4.6",
         # DeepSeek
         "deepseek/deepseek-v4-pro",
         "deepseek/deepseek-v4-flash",

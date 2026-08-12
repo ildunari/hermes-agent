@@ -61,9 +61,9 @@ Either choice satisfies the gating. You can pick whichever credentials you alrea
 # ~/.hermes/config.yaml
 x_search:
   # xAI model used for the Responses call.
-  # grok-4.5 is the recommended default; any Grok model
+  # grok-4.6 is the recommended default; any Grok model
   # with x_search tool access works.
-  model: grok-4.5
+  model: grok-4.6
 
   # Optional reasoning effort: low, medium, high, or xhigh. When omitted,
   # the selected model's default applies. xhigh is supported only by
@@ -140,7 +140,7 @@ The tool surfaces this when both auth paths fail. Either set `XAI_API_KEY` in `~
 
 ### "`x_search` is not enabled for this model"
 
-The configured `x_search.model` doesn't have access to the server-side `x_search` tool. Switch to `grok-4.5` (the default) or another Grok model that supports it. Check the [xAI documentation](https://docs.x.ai/) for the current list.
+The configured `x_search.model` doesn't have access to the server-side `x_search` tool. Switch to `grok-4.6` (the default) or another Grok model that supports it. Check the [xAI documentation](https://docs.x.ai/) for the current list.
 
 ### Tool doesn't appear in the schema
 
