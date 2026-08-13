@@ -1216,6 +1216,7 @@ def _consume_codex_event_stream(
     *,
     model: str,
     on_text_delta=None,
+    on_semantic_text_delta=None,
     on_reasoning_delta=None,
     on_commentary_message=None,
     on_first_delta=None,
@@ -1249,6 +1250,9 @@ def _consume_codex_event_stream(
     * ``on_text_delta(str)`` — fires per ``response.output_text.delta``, suppressed
       once a function_call event is seen (so tool-call turns don't bleed text
       into the chat).
+    * ``on_semantic_text_delta(str, phase)`` — fires only when a structured
+      message item explicitly identifies ``commentary`` or ``final_answer``.
+      Missing and unknown phases remain on the unphased text path.
     * ``on_reasoning_delta(str)`` — fires per ``response.reasoning.*.delta`` and
       ``phase=analysis`` message deltas. When no dedicated commentary callback
       is supplied, commentary also uses this legacy fallback.
@@ -1325,9 +1329,21 @@ def _consume_codex_event_stream(
             delta_text = _event_field(event, "delta", "")
             if delta_text and active_message_phase == "commentary":
                 commentary_text_deltas.append(delta_text)
+                if on_semantic_text_delta is not None:
+                    try:
+                        on_semantic_text_delta(delta_text, "commentary")
+                    except Exception:
+                        logger.debug(
+                            "Codex stream on_semantic_text_delta raised",
+                            exc_info=True,
+                        )
                 # Preserve CLI/backward compatibility when no first-class
                 # commentary consumer is installed.
-                if on_commentary_message is None and on_reasoning_delta is not None:
+                if (
+                    on_semantic_text_delta is None
+                    and on_commentary_message is None
+                    and on_reasoning_delta is not None
+                ):
                     try:
                         on_reasoning_delta(delta_text)
                     except Exception:
@@ -1348,7 +1364,18 @@ def _consume_codex_event_stream(
                                 on_first_delta()
                             except Exception:
                                 logger.debug("Codex stream on_first_delta raised", exc_info=True)
-                    if on_text_delta is not None:
+                    if (
+                        active_message_phase == "final_answer"
+                        and on_semantic_text_delta is not None
+                    ):
+                        try:
+                            on_semantic_text_delta(delta_text, "final_answer")
+                        except Exception:
+                            logger.debug(
+                                "Codex stream on_semantic_text_delta raised",
+                                exc_info=True,
+                            )
+                    elif on_text_delta is not None:
                         try:
                             on_text_delta(delta_text)
                         except Exception:
@@ -1386,6 +1413,9 @@ def _consume_codex_event_stream(
                 done_phase = _item_field(done_item, "phase", None)
                 done_phase = done_phase.strip().lower() if isinstance(done_phase, str) else None
                 if done_phase == "commentary" and on_commentary_message is not None:
+                    commentary_was_streamed = bool(
+                        commentary_text_deltas and on_semantic_text_delta is not None
+                    )
                     commentary_text = "".join(commentary_text_deltas).strip()
                     if not commentary_text:
                         content_parts = _item_field(done_item, "content", [])
@@ -1397,7 +1427,10 @@ def _consume_codex_event_stream(
                             ).strip()
                     if commentary_text:
                         try:
-                            on_commentary_message(commentary_text)
+                            on_commentary_message(
+                                commentary_text,
+                                already_streamed=commentary_was_streamed,
+                            )
                         except Exception:
                             logger.debug(
                                 "Codex stream on_commentary_message raised",
@@ -1579,11 +1612,23 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         agent._codex_streamed_text_parts.append(text)
         agent._fire_stream_delta(text)
 
+    def _on_semantic_text_delta(text: str, phase: str) -> None:
+        if phase == "final_answer":
+            agent._codex_streamed_text_parts.append(text)
+        agent._fire_stream_delta(text, phase=phase)
+
     def _on_reasoning_delta(text: str) -> None:
         agent._fire_reasoning_delta(text)
 
-    def _on_commentary_message(text: str) -> None:
-        agent._fire_streamed_codex_commentary(text)
+    def _on_commentary_message(
+        text: str,
+        *,
+        already_streamed: bool = False,
+    ) -> None:
+        agent._fire_streamed_codex_commentary(
+            text,
+            already_streamed=already_streamed,
+        )
 
     def _on_event(event: Any) -> None:
         # TTFB watchdog and activity touch — runs once per SSE event.
@@ -1701,6 +1746,11 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     event_stream,
                     model=api_kwargs.get("model"),
                     on_text_delta=_on_text_delta,
+                    on_semantic_text_delta=(
+                        _on_semantic_text_delta
+                        if agent._has_semantic_stream_consumers()
+                        else None
+                    ),
                     on_reasoning_delta=_on_reasoning_delta,
                     on_commentary_message=(
                         _on_commentary_message

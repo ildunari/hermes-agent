@@ -35,6 +35,7 @@ import asyncio
 import base64
 import copy
 import hashlib
+import inspect
 import json
 import logging
 logger = logging.getLogger(__name__)
@@ -6372,7 +6373,12 @@ class AIAgent:
                 self._delivered_interim_texts = delivered
             delivered.add(normalized)
 
-    def _fire_streamed_codex_commentary(self, text: str) -> None:
+    def _fire_streamed_codex_commentary(
+        self,
+        text: str,
+        *,
+        already_streamed: bool = False,
+    ) -> None:
         """Deliver a completed live Codex commentary message immediately."""
         cb = getattr(self, "interim_assistant_callback", None)
         if cb is None or not isinstance(text, str):
@@ -6383,7 +6389,13 @@ class AIAgent:
         if not visible or visible == "(empty)" or self._interim_text_was_delivered(visible):
             return
         try:
-            cb(visible, already_streamed=False)
+            cb(
+                visible,
+                already_streamed=(
+                    already_streamed
+                    or self._interim_content_was_streamed(visible)
+                ),
+            )
             self._record_delivered_interim_text(visible)
         except Exception:
             logger.debug("interim_assistant_callback error", exc_info=True)
@@ -6564,8 +6576,52 @@ class AIAgent:
         except Exception:
             logger.debug("on_stream_end plugin hook enqueue failed", exc_info=True)
 
-    def _fire_stream_delta(self, text: str) -> None:
-        """Fire all registered stream delta callbacks (display + TTS)."""
+    def _stream_callback_accepts_phase(self, callback: Callable[..., Any]) -> bool:
+        """Return whether ``callback`` accepts the additive ``phase`` keyword.
+
+        Existing stream consumers are one-argument callables.  Semantic
+        runtimes may now pass ``phase=commentary|final_answer`` without
+        breaking those consumers: final-answer text falls back to the legacy
+        call shape, while commentary is sent only to phase-aware consumers so
+        old displays do not mistake progress narration for answer prose.
+        """
+        cache = getattr(self, "_stream_callback_phase_support", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._stream_callback_phase_support = cache
+        key = id(callback)
+        cached = cache.get(key)
+        if cached is not None and cached[0] is callback:
+            return cached[1]
+        try:
+            parameters = inspect.signature(callback).parameters.values()
+            accepts_phase = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                or (
+                    parameter.name == "phase"
+                    and parameter.kind
+                    in {
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    }
+                )
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_phase = False
+        # At most the two current stream callbacks should be retained. Clear
+        # stale identities when callers replace callbacks between turns.
+        if len(cache) >= 2 and key not in cache:
+            cache.clear()
+        cache[key] = (callback, accepts_phase)
+        return accepts_phase
+
+    def _fire_stream_delta(self, text: str, *, phase: str | None = None) -> None:
+        """Fire registered stream callbacks with optional semantic phase.
+
+        Unphased provider deltas remain provisional.  Only runtimes with
+        explicit wire evidence should pass ``commentary`` or ``final_answer``.
+        """
         # Single-writer guard (#65991): a superseded stream must not interleave
         # its tokens into the turn alongside the retry that replaced it.
         if self._stream_writer_superseded():
@@ -6611,27 +6667,46 @@ class AIAgent:
                 text = text.lstrip("\n")
         if not text:
             return
+        if phase not in {"commentary", "final_answer"}:
+            phase = None
         callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
         delivered = False
         for cb in callbacks:
             try:
-                cb(text)
+                if phase is not None and self._stream_callback_accepts_phase(cb):
+                    cb(text, phase=phase)
+                elif phase != "commentary":
+                    cb(text)
+                else:
+                    continue
                 delivered = True
             except Exception:
                 pass
         try:
             from agent.plugin_stream_hooks import enqueue_plugin_stream_hook
 
-            enqueue_plugin_stream_hook(
-                "on_stream_delta",
+            payload = {
                 **self._stream_hook_base_payload(),
-                delta=text,
-                kind="text",
-            )
+                "delta": text,
+                "kind": "text",
+            }
+            if phase is not None:
+                payload["phase"] = phase
+            enqueue_plugin_stream_hook("on_stream_delta", **payload)
         except Exception:
             logger.debug("on_stream_delta plugin hook enqueue failed", exc_info=True)
         if delivered:
             self._record_streamed_assistant_text(text)
+
+    def _has_semantic_stream_consumers(self) -> bool:
+        """Whether any registered text callback understands ``phase``."""
+        return any(
+            callback is not None and self._stream_callback_accepts_phase(callback)
+            for callback in (
+                getattr(self, "stream_delta_callback", None),
+                getattr(self, "_stream_callback", None),
+            )
+        )
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""

@@ -166,6 +166,22 @@ class TestStreamDeltaDispatch:
         assert agent._fire_stream_delta.call_args_list[0].args == ("hello ",)
         assert agent._fire_stream_delta.call_args_list[1].args == ("world",)
 
+    def test_agent_message_delta_stays_unphased_without_protocol_evidence(self):
+        """Codex app-server 0.147's AgentMessageDeltaNotification contains
+        delta/itemId/threadId/turnId but no semantic phase. Even an unknown
+        extra field must not become an inferred final-answer claim."""
+        agent = _make_stub_agent()
+        bridge = make_codex_app_server_event_bridge(agent)
+
+        bridge(
+            {
+                "method": "item/agentMessage/delta",
+                "params": {"delta": "text", "phase": "final_answer"},
+            }
+        )
+
+        agent._fire_stream_delta.assert_called_once_with("text")
+
 
 
     def test_reasoning_delta_fires_reasoning_callback(self):
