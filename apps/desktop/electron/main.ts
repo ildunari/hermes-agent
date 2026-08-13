@@ -46,7 +46,12 @@ import {
 } from './backend-probes'
 import { waitForDashboardPortAnnouncement } from './backend-ready'
 import { shouldLatchBackendStartFailure, shouldLatchRemoteReauthFailure } from './backend-start-failure'
-import { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } from './bootstrap-platform'
+import {
+  detectRemoteDisplay,
+  isWindowsBinaryPathInWsl,
+  isWslEnvironment,
+  resolveLinuxPasswordStore
+} from './bootstrap-platform'
 import { decideBootstrapRepair } from './bootstrap-repair-guard'
 import { runBootstrap } from './bootstrap-runner'
 import { applyConnectionChange, resolveTerminalConnection } from './connection-apply'
@@ -104,6 +109,7 @@ import {
   reviewCommitContext,
   reviewCreatePr,
   reviewDiff,
+  reviewFetchPrComment,
   reviewList,
   reviewPrList,
   reviewPush,
@@ -136,7 +142,10 @@ import {
   resolveReadableFileForIpc,
   resolveRequestedPathForIpc,
   resolveTimeoutMs,
-  TEXT_PREVIEW_SOURCE_MAX_BYTES
+  SAFE_STORAGE_ENCODING,
+  TEXT_PREVIEW_SOURCE_MAX_BYTES,
+  tightenSecretFileMode,
+  writeSecretFileAtomic
 } from './hardening'
 import { cursorPointInWindow } from './hud-cursor'
 import { snapHudBounds } from './hud-snap'
@@ -333,6 +342,22 @@ if (IS_WSL && !REMOTE_DISPLAY_REASON && fs.existsSync('/dev/dxg')) {
   app.commandLine.appendSwitch('enable-gpu-rasterization')
   app.commandLine.appendSwitch('enable-zero-copy')
   console.log('[hermes] WSL GPU passthrough (/dev/dxg) detected; enabling GPU acceleration')
+}
+
+// Linux: point Chromium at the session's keychain backend so safeStorage can
+// encrypt remote gateway tokens (hardening.ts refuses to persist them without
+// it). The value arrives via HERMES_DESKTOP_PASSWORD_STORE, bridged by the
+// `hermes desktop` launcher from detection or `desktop.password_store` in
+// config.yaml. Must run before app `ready` — the switch only applies pre-launch.
+const PASSWORD_STORE = resolveLinuxPasswordStore()
+
+if (PASSWORD_STORE.warning) {
+  console.warn(`[hermes] ${PASSWORD_STORE.warning}`)
+}
+
+if (PASSWORD_STORE.store) {
+  app.commandLine.appendSwitch('password-store', PASSWORD_STORE.store)
+  console.log(`[hermes] using password-store backend: ${PASSWORD_STORE.store}`)
 }
 
 // Windows sandbox / GPU breakpoint crash recovery (#38216).
@@ -6674,7 +6699,7 @@ function decryptDesktopSecret(secret) {
     return ''
   }
 
-  if (secret.encoding === 'safeStorage') {
+  if (secret.encoding === SAFE_STORAGE_ENCODING) {
     try {
       return safeStorage.decryptString(Buffer.from(value, 'base64'))
     } catch {
@@ -6682,6 +6707,10 @@ function decryptDesktopSecret(secret) {
     }
   }
 
+  // Any other encoding (a hand-edited config, or one written by a pre-release
+  // build) is returned verbatim on purpose: this fallback is what lets such a
+  // config connect at all. Not a plaintext-writing path — nothing in this file
+  // persists a token this way.
   return value
 }
 
@@ -6785,7 +6814,31 @@ function readDesktopConnectionConfig() {
 
   try {
     const raw = fs.readFileSync(DESKTOP_CONNECTION_CONFIG_PATH, 'utf8')
+    // Tighten an install written before this file was owner-only. Every write
+    // now goes out at 0600, but a file already on disk keeps its old 0644 bits
+    // until something chmods it, and waiting for the user's next Settings save
+    // would leave it group/other-readable indefinitely. Runs on a cache miss
+    // only (once per launch, plus after an external edit); chmod moves ctime,
+    // not mtime, so it cannot invalidate the cache it sits inside.
+    //
+    // Deliberately BEFORE JSON.parse, not after: a truncated or hand-mangled
+    // connection.json still contains the token bytes, and parse throws into the
+    // catch below, which swallows the error and falls back to local mode. With
+    // the tighten after the parse, exactly the file that is both corrupt AND
+    // world-readable would be the one file never tightened — and nothing would
+    // ever retry it, because the fallback config is not written back. The chmod
+    // needs only the path, so it has no reason to wait for valid JSON.
+    tightenSecretFileMode(DESKTOP_CONNECTION_CONFIG_PATH)
+
     const parsed = JSON.parse(raw)
+
+    // NOT done here: migrating a legacy non-safeStorage token payload to
+    // ciphertext at rest. Deferred deliberately — it has to honor the opt-in
+    // plaintext choice PR #62319 adds (re-encrypting it converts a portable
+    // credential into a keychain-bound one and can lose the token), write
+    // through sanitizeConnectionProfiles below rather than persisting raw
+    // `parsed`, and tell the user to ROTATE, since every existing backup copy
+    // still holds the old secret. Do not add it without those three.
 
     if (parsed && typeof parsed === 'object') {
       const remote = parsed.remote && typeof parsed.remote === 'object' ? parsed.remote : {}
@@ -6814,7 +6867,14 @@ function readDesktopConnectionConfig() {
 
 function writeDesktopConnectionConfig(config) {
   fs.mkdirSync(path.dirname(DESKTOP_CONNECTION_CONFIG_PATH), { recursive: true })
-  writeFileAtomic(DESKTOP_CONNECTION_CONFIG_PATH, JSON.stringify(config, null, 2))
+  // Owner-only, not writeFileAtomic: this is the single choke point for every
+  // connection.json write (the IPC save/apply handlers and
+  // persistSshConnectionToken all land here), and the file carries the
+  // safeStorage-encrypted gateway token plus its URL and SSH host/user/keyPath.
+  // safeStorage keeps the token opaque; 0600 keeps the whole record — and the
+  // fields that are NOT encrypted — off other local accounts, matching
+  // native-oauth-tokens.json and desktop-installation.json.
+  writeSecretFileAtomic(DESKTOP_CONNECTION_CONFIG_PATH, JSON.stringify(config, null, 2))
   connectionConfigCache = config
   connectionConfigCacheMtime = fs.statSync(DESKTOP_CONNECTION_CONFIG_PATH).mtimeMs
 }
@@ -11844,6 +11904,9 @@ ipcMain.handle('hermes:git:review:push', async (_event, repoPath) => reviewPush(
 ipcMain.handle('hermes:git:review:shipInfo', async (_event, repoPath) => reviewShipInfo(repoPath, resolveGhBinary()))
 ipcMain.handle('hermes:git:review:prList', async (_event, repoPath, branches, numbers) =>
   reviewPrList(repoPath, resolveGhBinary(), branches, numbers)
+)
+ipcMain.handle('hermes:git:review:fetchPrComment', async (_event, repoPath, url) =>
+  reviewFetchPrComment(repoPath, resolveGhBinary(), url)
 )
 ipcMain.handle('hermes:git:review:createPr', async (_event, repoPath) =>
   reviewCreatePr(repoPath, resolveGitBinary(), resolveGhBinary())

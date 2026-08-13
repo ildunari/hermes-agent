@@ -1019,6 +1019,8 @@ def write_runtime_status(
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
     platform_metadata: Any = _UNSET,
+    needs_attention: Any = _UNSET,
+    retrying_since: Any = _UNSET,
     served_profiles: Any = _UNSET,
     status_path: Optional[Path] = None,
 ) -> None:
@@ -1063,6 +1065,8 @@ def write_runtime_status(
             error_code=error_code,
             error_message=error_message,
             platform_metadata=platform_metadata,
+            needs_attention=needs_attention,
+            retrying_since=retrying_since,
             served_profiles=served_profiles,
             path=path,
             platform_only=platform_only,
@@ -1133,6 +1137,8 @@ def _write_runtime_status_locked(
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
     platform_metadata: Any = _UNSET,
+    needs_attention: Any = _UNSET,
+    retrying_since: Any = _UNSET,
     served_profiles: Any = _UNSET,
     path: Optional[Path] = None,
     platform_only: bool = False,
@@ -1206,6 +1212,17 @@ def _write_runtime_status_locked(
                 platform_payload["metadata"] = metadata_payload
             else:
                 platform_payload["metadata"] = platform_metadata
+        if needs_attention is not _UNSET:
+            # Long-lived reconnect-loop escalation (OOF-156): True once a
+            # platform has been continuously failing/retrying past the
+            # attention threshold. Retry never stops — this is a signal for
+            # owners and fleet monitoring, not a circuit breaker. Cleared
+            # (False) on successful reconnect.
+            platform_payload["needs_attention"] = bool(needs_attention)
+        if retrying_since is not _UNSET:
+            # ISO timestamp of when the platform entered its current
+            # continuous retry episode; None clears it on reconnect.
+            platform_payload["retrying_since"] = retrying_since
         platform_payload["updated_at"] = _utc_now_iso()
         payload["platforms"][platform] = platform_payload
 

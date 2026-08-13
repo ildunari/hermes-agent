@@ -227,6 +227,12 @@ DEFAULT_CONFIG = {
         # from gateway_timeout (which kills the turn) and
         # gateway_notify_interval ("still working" heartbeats). 0 = disable.
         "session_stall_timeout": 300,
+        # Long-lived reconnect-loop escalation (seconds). A platform that has
+        # been continuously failing/reconnecting for this long gets
+        # needs_attention flagged in gateway runtime status (visible in
+        # `hermes status` / fleet monitoring). Retries never stop — this is a
+        # signal, not a circuit breaker. 0 = disable.
+        "reconnect_attention_after": 7200,
         # Freshness window for the gateway auto-continue note (seconds).
         # After a gateway crash/restart/SIGTERM mid-run, the next user
         # message gets a "[System note: your previous turn was
@@ -3226,6 +3232,17 @@ DEFAULT_CONFIG = {
         #   false   - always keep GPU acceleration on, even over a remote display.
         # Bridged to the HERMES_DESKTOP_DISABLE_GPU env var the Electron app reads.
         "disable_gpu": "auto",
+        # Linux keychain backend for secure token storage (Chromium's
+        # --password-store switch, which safeStorage needs before it can
+        # encrypt remote gateway tokens):
+        #   "auto"  - detect the session keychain: KWallet via KDE session env
+        #             vars, GNOME Keyring / any org.freedesktop.secrets
+        #             provider (e.g. KeePassXC) via D-Bus (default).
+        #   "gnome-libsecret" / "kwallet" / "kwallet5" / "kwallet6" / "basic"
+        #           - force a specific backend ("basic" = unencrypted store).
+        # Ignored on macOS/Windows. Bridged to the HERMES_DESKTOP_PASSWORD_STORE
+        # env var the Electron app reads, so an explicit env var still wins.
+        "password_store": "auto",
         # macOS only: optional persistent code-signing identity (a cert in the
         # login keychain — a self-signed "Code Signing" cert from Keychain
         # Access works; no Apple Developer account needed) used to re-sign
