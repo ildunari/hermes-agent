@@ -141,6 +141,47 @@ class TestConfiguredOnlySelection:
         assert len(results) == 2
         assert all(r.status == "pass" for r in results)
 
+    def test_disabled_mcp_server_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(
+            doctor_live, "_load_config",
+            lambda: {"mcp_servers": {"disabled": {
+                "url": "https://unused", "enabled": False,
+            }}},
+        )
+        monkeypatch.setattr(
+            doctor_live, "_probe_mcp_server",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("disabled MCP server was probed")
+            ),
+        )
+
+        results = {r.name: r for r in run_live_checks([])}
+
+        assert results["MCP: disabled"].status == "skip"
+
+    def test_browser_probe_uses_agent_browser_backend(self, monkeypatch):
+        calls = []
+
+        monkeypatch.setattr(doctor_live.shutil, "which", lambda name: "/bin/agent-browser")
+
+        def _run(argv, **kwargs):
+            calls.append(argv)
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"success":true,"data":{"url":"about:blank"}}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(doctor_live.subprocess, "run", _run)
+
+        assert doctor_live._launch_browser_probe(3) == (
+            True, "agent-browser opened about:blank",
+        )
+        assert calls == [
+            ["/bin/agent-browser", "open", "about:blank", "--json"],
+            ["/bin/agent-browser", "close", "--json"],
+        ]
+
     def test_tts_local_provider_skipped(self, monkeypatch):
         monkeypatch.setattr(
             doctor_live, "_load_config",

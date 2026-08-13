@@ -533,6 +533,25 @@ features:
         needles: [runtimeRouting, "state.runtimeRouting?.state === 'finished'"]
         description: cancellation follows the same settled routing lifecycle
 
+  - id: runtime.doctor-live-backend-probes
+    title: Keep live doctor aligned with configured runtime backends
+    owner_paths:
+      - hermes_cli/doctor_live.py
+      - tests/hermes_cli/test_doctor_live.py
+    collision_paths:
+      - hermes_cli/doctor_live.py
+    tests:
+      - tests/hermes_cli/test_doctor_live.py
+    checks:
+      - id: doctor-live-agent-browser
+        path: hermes_cli/doctor_live.py
+        needles: [agent-browser opened about:blank, executable = shutil.which]
+        description: probe the installed agent-browser backend instead of requiring an unrelated Python Playwright package
+      - id: doctor-live-disabled-mcp-skip
+        path: hermes_cli/doctor_live.py
+        needles: ['e.get("enabled") is False', '"(disabled)"']
+        description: disabled MCP registrations are skipped rather than reported as failed live backends
+
   - id: runtime.codex-profile-wiring
     title: Codex app-server launch-scoped profile wiring
     owner_paths:

@@ -19,6 +19,9 @@ Design invariants:
 from __future__ import annotations
 
 import os
+import json
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -97,13 +100,47 @@ def _browser_available() -> bool:
 def _launch_browser_probe(timeout: float) -> tuple:
     """Launch a browser, open about:blank, close. Returns (ok, detail).
 
-    Uses Playwright directly (what agent-browser drives underneath) so the
-    probe owns the full lifecycle and always cleans up.
+    Prefer the installed ``agent-browser`` executable because that is the
+    backend Hermes actually exposes.  Requiring the unrelated Python
+    Playwright package made healthy agent-browser installations fail doctor.
+    Fall back to Python Playwright only for legacy installs.
     """
+    executable = shutil.which("agent-browser")
+    if executable:
+        try:
+            opened = subprocess.run(
+                [executable, "open", "about:blank", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            if opened.returncode != 0:
+                detail = (opened.stderr or opened.stdout or "launch failed").strip()
+                return (False, detail[:200])
+            try:
+                payload = json.loads(opened.stdout or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            if payload and not payload.get("success", False):
+                return (False, str(payload.get("error") or "launch failed")[:200])
+            return (True, "agent-browser opened about:blank")
+        finally:
+            try:
+                subprocess.run(
+                    [executable, "close", "--json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except Exception:
+                pass
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        return (False, "playwright not installed")
+        return (False, "agent-browser and playwright are unavailable")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True,
@@ -284,6 +321,8 @@ def run_live_checks(issues: List[str]) -> List[ProbeResult]:
                 if not isinstance(e, dict):
                     return ProbeResult(f"MCP: {n}", "skip",
                                        "(malformed config entry)")
+                if e.get("enabled") is False:
+                    return ProbeResult(f"MCP: {n}", "skip", "(disabled)")
                 tools = _probe_mcp_server(n, e, timeout)
                 return ProbeResult(f"MCP: {n}", "pass",
                                    f"({len(tools)} tool(s))")
