@@ -760,6 +760,24 @@ def _webui_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
     return []
 
 
+def _webui_restart_condition(name: str) -> tuple[bool | None, str]:
+    """Read a fail-closed WebUI restart precondition from health."""
+    if name != "agent_runtime_stale":
+        return None, f"unsupported condition {name!r}"
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(WEBUI_HEALTH_URL, timeout=WEBUI_HEALTH_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+        runtime = payload.get("agent_runtime") if isinstance(payload, dict) else None
+        stale = runtime.get("stale") if isinstance(runtime, dict) else None
+        if not isinstance(stale, bool):
+            raise ValueError("agent_runtime.stale is not a boolean")
+        return stale, f"agent_runtime.stale={str(stale).lower()}"
+    except Exception as exc:
+        return None, f"health probe unavailable or invalid ({type(exc).__name__})"
+
+
 def _desktop_busy_details(targets: Iterable[RestartTarget]) -> list[str]:
     """Report dashboard-backed Desktop turns that a restart would destroy."""
     if not any(target.label in DESKTOP_BUSY_LABELS for target in targets):
@@ -1160,14 +1178,21 @@ def _notify_tty(tty_path: str | None, message: str) -> None:
         _append_log(f"tty completion notification failed: {exc}")
 
 
-def _write_completion_marker(marker_path: str | None, scope: str, exit_code: int, message: str) -> None:
+def _write_completion_marker(
+    marker_path: str | None,
+    scope: str,
+    exit_code: int,
+    message: str,
+    *,
+    status: str = "complete",
+) -> None:
     if not marker_path:
         return
     try:
         path = Path(marker_path).expanduser()
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         payload = {
-            "status": "complete",
+            "status": status,
             "scope": normalize_scope(scope),
             "exit_code": int(exit_code),
             "message": message,
@@ -1635,6 +1660,7 @@ def restart_scope(
     completion_marker: str | None = None,
     safe_wait_timeout: float = DEFAULT_SAFE_WAIT_TIMEOUT,
     safe_wait_interval: float = DEFAULT_SAFE_WAIT_INTERVAL,
+    abort_if_not: str | None = None,
 ) -> int:
     """Restart a configured Hermes surface scope.
 
@@ -1710,6 +1736,29 @@ def restart_scope(
                 failures.append(msg)
                 _append_log(msg)
                 break
+            if abort_if_not:
+                condition, detail = _webui_restart_condition(abort_if_not)
+                if condition is False:
+                    message = (
+                        "Hermes WebUI restart was no longer needed; "
+                        "the runtime-staleness condition cleared before restart."
+                    )
+                    _append_log(f"restart aborted at destructive boundary: {detail}")
+                    _notify_origin(notify_origin_json, message)
+                    _notify_tty(notify_tty, message)
+                    _write_completion_marker(
+                        completion_marker,
+                        normalized,
+                        0,
+                        message,
+                        status="aborted_condition_cleared",
+                    )
+                    return 0
+                if condition is None:
+                    msg = f"final WebUI restart precondition could not be verified: {detail}"
+                    failures.append(msg)
+                    _append_log(msg)
+                    break
         if target.label in DESKTOP_BUSY_LABELS:
             safe, busy = _wait_for_desktop_safe_restart(
                 target,
@@ -1807,6 +1856,7 @@ def enqueue_detached_restart(
     completion_marker: str | None = None,
     safe_wait_timeout: float | None = None,
     safe_wait_interval: float | None = None,
+    abort_if_not: str | None = None,
 ) -> str:
     """Spawn an OS-session-independent restart worker and return immediately.
 
@@ -1841,6 +1891,8 @@ def enqueue_detached_restart(
         cmd.extend(["--safe-wait-timeout", str(safe_wait_timeout)])
     if safe_wait_interval is not None:
         cmd.extend(["--safe-wait-interval", str(safe_wait_interval)])
+    if abort_if_not:
+        cmd.extend(["--abort-if-not", abort_if_not])
     with LOG_PATH.open("a", encoding="utf-8") as log_fh:
         subprocess.Popen(
             cmd,
@@ -1875,6 +1927,15 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--completion-marker", default=None)
     parser.add_argument("--safe-wait-timeout", type=float, default=DEFAULT_SAFE_WAIT_TIMEOUT)
     parser.add_argument("--safe-wait-interval", type=float, default=DEFAULT_SAFE_WAIT_INTERVAL)
+    parser.add_argument(
+        "--abort-if-not",
+        choices=("agent_runtime_stale",),
+        default=None,
+        help=(
+            "optional destructive-boundary precondition; abort successfully if "
+            "WebUI health proves the named condition cleared"
+        ),
+    )
     parser.add_argument(
         "--install-system-restart-sudoers",
         action="store_true",
@@ -1922,6 +1983,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 completion_marker=args.completion_marker,
                 safe_wait_timeout=args.safe_wait_timeout,
                 safe_wait_interval=args.safe_wait_interval,
+                abort_if_not=args.abort_if_not,
             )
         )
         return 0
@@ -1940,6 +2002,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             completion_marker=args.completion_marker,
             safe_wait_timeout=args.safe_wait_timeout,
             safe_wait_interval=args.safe_wait_interval,
+            abort_if_not=args.abort_if_not,
         )
     except Exception as exc:
         _append_log(f"restart helper crashed: {exc}")
