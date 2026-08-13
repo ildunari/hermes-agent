@@ -233,11 +233,11 @@ DEFAULT_SAFE_WAIT_TIMEOUT = 24 * 60 * 60
 DEFAULT_SAFE_WAIT_INTERVAL = 2.0
 DEFAULT_BOOTSTRAP_WAIT_TIMEOUT = 10.0
 DEFAULT_BOOTSTRAP_WAIT_INTERVAL = 0.25
-# The system dashboard LaunchDaemon uses ThrottleInterval=30. A failed first
-# launch (for example, while an updated editable checkout is refreshing
-# bytecode) cannot be retried before that interval expires, so readiness must
-# cover at least one throttled retry plus normal dashboard startup.
-DEFAULT_HEALTH_WAIT_TIMEOUT = 60.0
+# The system dashboard LaunchDaemon uses ThrottleInterval=30, and WebUI cold
+# starts can spend more than two minutes rebuilding their skill/session index
+# before binding port 8787. Readiness must cover both paths; otherwise a live
+# process is reported as a failed restart while it is still starting normally.
+DEFAULT_HEALTH_WAIT_TIMEOUT = 180.0
 DEFAULT_HEALTH_WAIT_INTERVAL = 0.5
 
 # WebUI busy probe: the WebUI (ai.hermes.webui) hosts live chat turns whose
@@ -356,6 +356,22 @@ def targets_for_scope(scope: str) -> tuple[RestartTarget, ...]:
 def _multiplex_listener_ports(config: Any) -> tuple[int, ...]:
     from gateway.config import platform_binds_port
 
+    # A detached restart can be spawned by a named-profile gateway/WebUI whose
+    # process environment contains that profile's legacy port assignments. The
+    # topology being restarted is the root multiplex gateway, so resolve its
+    # port overrides from the root .env instead of inheriting profile-local
+    # API_SERVER_PORT/WEBHOOK_PORT values (which caused phantom 8643/8645
+    # verification failures on an otherwise healthy 8642/8644/8647 restart).
+    from agent.secret_scope import load_env_file
+    from hermes_cli.profiles import get_profile_dir
+
+    root_home = get_profile_dir("default").expanduser().resolve()
+    configured_home = os.getenv("HERMES_HOME", "").strip()
+    if configured_home and Path(configured_home).expanduser().resolve() != root_home:
+        port_env = load_env_file(root_home / ".env")
+    else:
+        port_env = os.environ
+
     ports: set[int] = set()
     platform_blocks: dict[str, dict[str, Any]] = {}
     gateway_section = config.get("gateway") if isinstance(config, dict) else None
@@ -397,7 +413,7 @@ def _multiplex_listener_ports(config: Any) -> tuple[int, ...]:
         if platform_name == "bluebubbles" and effective.get("webhook_register", True) is False:
             continue
         port_key, default_port = port_spec
-        raw_port = os.getenv(_PLATFORM_PORT_ENV.get(platform_name, "")) or effective.get(
+        raw_port = port_env.get(_PLATFORM_PORT_ENV.get(platform_name, "")) or effective.get(
             port_key,
             default_port,
         )

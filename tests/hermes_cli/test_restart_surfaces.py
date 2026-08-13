@@ -128,12 +128,15 @@ def test_multiplex_gateway_scope_plan_uses_single_root_topology(monkeypatch):
     assert "Verification ports: 8642, 8644, 8647, 8787, 9119, 9120" in plan
 
 
-def test_multiplex_gateway_listener_ports_follow_merged_config(monkeypatch):
+def test_multiplex_gateway_listener_ports_follow_merged_config(monkeypatch, tmp_path):
     from hermes_cli import restart_surfaces
 
-    # Port env vars deliberately override merged config in production; a
-    # dotenv load by any earlier test (the drain suites) leaks them into
-    # os.environ and breaks this exact-port assertion. Isolate them.
+    root = tmp_path / ".hermes"
+    root.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda _name: root)
+
+    # Root-gateway port env vars deliberately override merged config.
     for env_name in restart_surfaces._PLATFORM_PORT_ENV.values():
         if env_name:
             monkeypatch.delenv(env_name, raising=False)
@@ -149,6 +152,35 @@ def test_multiplex_gateway_listener_ports_follow_merged_config(monkeypatch):
     )
 
     assert verification_ports_for_scope("gateways") == (
+        19642,
+        19644,
+        19647,
+        8787,
+        9119,
+        9120,
+    )
+
+
+def test_multiplex_listener_ports_ignore_named_profile_env(monkeypatch, tmp_path):
+    from hermes_cli import restart_surfaces
+
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "gpt"
+    profile.mkdir(parents=True)
+    (root / ".env").write_text(
+        "API_SERVER_PORT=19642\n"
+        "WEBHOOK_PORT=19644\n"
+        "BLUEBUBBLES_WEBHOOK_PORT=19647\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setenv("API_SERVER_PORT", "8643")
+    monkeypatch.setenv("WEBHOOK_PORT", "8645")
+    monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda _name: root)
+
+    assert restart_surfaces._verification_ports_for_scope(
+        "gateways", _multiplex_config()
+    ) == (
         19642,
         19644,
         19647,
@@ -958,12 +990,12 @@ def test_restart_scope_tolerates_best_effort_dashboard_lag(monkeypatch, tmp_path
     assert "9119" in log
 
 
-def test_health_wait_covers_one_launchd_throttled_retry():
+def test_health_wait_covers_webui_cold_start():
     from hermes_cli import restart_surfaces
 
-    # com.kosta.hermes-dashboard-system has ThrottleInterval=30. The bounded
-    # readiness window must permit one failed launch and its delayed retry.
-    assert restart_surfaces.DEFAULT_HEALTH_WAIT_TIMEOUT > 30
+    # Current WebUI cold starts can spend more than two minutes indexing skills
+    # before they bind port 8787.
+    assert restart_surfaces.DEFAULT_HEALTH_WAIT_TIMEOUT >= 180
 
 
 def test_describe_plan_names_canonical_command_and_scope_summary():
