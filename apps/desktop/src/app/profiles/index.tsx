@@ -6,6 +6,7 @@ import { CodeEditor } from '@/components/chat/code-editor'
 import { PageLoader } from '@/components/page-loader'
 import { Button } from '@/components/ui/button'
 import { ProfileGlyph } from '@/components/ui/profile-glyph'
+import { Slot } from '@/contrib/react/slot'
 import { getProfileSoul, type ProfileInfo, updateProfileSoul } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { displayPath } from '@/lib/display-path'
@@ -38,6 +39,10 @@ import { RenameProfileDialog } from './rename-profile-dialog'
 interface ProfilesViewProps {
   onClose: () => void
 }
+
+export const PROFILE_DETAIL_ACTIONS_AREA = 'profiles.detail.actions'
+export const profileDetailActionsArea = (profileName: string) =>
+  `${PROFILE_DETAIL_ACTIONS_AREA}.${encodeURIComponent(profileName)}`
 
 export function ProfilesView({ onClose }: ProfilesViewProps) {
   const { t } = useI18n()
@@ -232,6 +237,7 @@ function ProfileDetail({ profile }: { profile: ProfileInfo }) {
             <h3 className="text-[0.95rem] font-semibold tracking-tight text-foreground">{profile.name}</h3>
             {profile.is_default && <PanelPill tone="good">{p.defaultBadge}</PanelPill>}
             {profile.has_env && <PanelPill tone="muted">.env</PanelPill>}
+            <Slot area={profileDetailActionsArea(profile.name)} />
           </div>
           <p
             className="mt-1 truncate font-mono text-[0.66rem] text-muted-foreground/55"

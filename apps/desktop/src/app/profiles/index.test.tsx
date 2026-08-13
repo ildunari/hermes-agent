@@ -3,10 +3,11 @@ import type * as Nanostores from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { deleteProfile } from '@/hermes'
+import { registry } from '@/contrib/registry'
 import { refreshProfiles, selectProfile, setActiveProfile } from '@/store/profile'
 import type { ProfileInfo } from '@/types/hermes'
 
-import { ProfilesView } from './index'
+import { profileDetailActionsArea, ProfilesView } from './index'
 
 // These tests pin the invariant this whole area exists to hold: the Manage
 // Profiles page and the sidebar rail share ONE set of profile dialogs, so both
@@ -112,6 +113,23 @@ async function deleteTheNamedProfile() {
 }
 
 describe('ProfilesView', () => {
+  it('renders profile detail action contributions beside the built-in badges', async () => {
+    vi.mocked(refreshProfiles).mockResolvedValue([makeProfile('default', true)])
+    const dispose = registry.register({
+      area: profileDetailActionsArea('default'),
+      id: 'test-home-action',
+      render: () => <button type="button">Make Desktop Home</button>
+    })
+
+    try {
+      await renderProfilesView()
+
+      expect(await screen.findByRole('button', { name: 'Make Desktop Home' })).toBeTruthy()
+    } finally {
+      dispose()
+    }
+  })
+
   it('opens the shared create dialog with the SOUL.md field (parity with the rail)', async () => {
     vi.mocked(refreshProfiles).mockResolvedValue([])
 

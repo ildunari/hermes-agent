@@ -208,8 +208,8 @@ checks:
     description: draft pending notice outside hot locale literals
   - id: desktop-plugin-home-profile-door
     path: apps/desktop/src/sdk/index.ts
-    needles: [getHomeProfile, listHomeProfiles, setHomeProfile, setDesktopHomeProfile]
-    description: generic Desktop SDK door for external plugins to read and change the persisted Home profile; upstream-PR candidate
+    needles: [getHomeProfile, listHomeProfiles, setHomeProfile, setDesktopHomeProfile, profileDetailActionsArea]
+    description: generic Desktop SDK doors for external plugins to read/change Home and contribute selected-profile actions; upstream-PR candidate
   - id: shared-rerere-cache
     path: scripts/setup_local_merge_aids.sh
     needles: [rerere.autoupdate, git-rr-cache]
@@ -221,11 +221,18 @@ features:
     owner: kosta
     class: keep-core
     owner_paths:
+      - apps/desktop/src/app/profiles/index.test.tsx
+      - apps/desktop/src/app/profiles/index.tsx
       - apps/desktop/src/store/profile.test.ts
       - apps/desktop/src/store/profile.ts
     tests:
+      - apps/desktop/src/app/profiles/index.test.tsx
       - apps/desktop/src/store/profile.test.ts
     checks:
+      - id: desktop-plugin-profile-detail-actions
+        path: apps/desktop/src/app/profiles/index.tsx
+        needles: [PROFILE_DETAIL_ACTIONS_AREA, profileDetailActionsArea]
+        description: profile detail header exposes a selected-profile-scoped contribution slot
       - id: desktop-plugin-home-profile-store
         path: apps/desktop/src/store/profile.ts
         needles: [getDesktopHomeProfile, listDesktopHomeProfiles, setDesktopHomeProfile]
