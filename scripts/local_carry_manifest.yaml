@@ -552,6 +552,18 @@ features:
         needles: ['e.get("enabled") is False', '"(disabled)"']
         description: disabled MCP registrations are skipped rather than reported as failed live backends
 
+  - id: maintenance.node-build-tool-audits
+    title: Keep audited web and TUI build dependencies patched
+    owner_paths:
+      - package-lock.json
+    tests:
+      - package-lock.json
+    checks:
+      - id: node-build-tool-lockfile
+        path: package-lock.json
+        needles: ['node_modules/postcss/node_modules/nanoid', 'node_modules/undici']
+        description: lockfile carries patched nanoid and undici releases used by the web and TUI build workspaces
+
   - id: runtime.codex-profile-wiring
     title: Codex app-server launch-scoped profile wiring
     owner_paths:
