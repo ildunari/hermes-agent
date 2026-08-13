@@ -3110,6 +3110,12 @@ class BasePlatformAdapter(ABC):
         self._reaction_handler: Optional[
             Callable[[Dict[str, Any]], Awaitable[None]]
         ] = None
+        # Normalized platform events cross this runner-owned boundary before
+        # plugin dispatch so authorization/profile state never lives in an SDK
+        # adapter. The second argument is an internal SessionSource.
+        self._platform_event_handler: Optional[
+            Callable[[Dict[str, Any], Any], Awaitable[None]]
+        ] = None
         # Optional hook (e.g. Telegram DM topic recovery) that rewrites
         # ``event.source.thread_id`` before session keying. Returns the
         # corrected thread_id or None to leave the source untouched.
@@ -3701,6 +3707,19 @@ class BasePlatformAdapter(ABC):
     def set_ingress_handler(self, handler: IngressHandler) -> None:
         """Set the bounded durable-ingress handler used before webhook ACK."""
         self._ingress_handler = handler
+
+    def set_platform_event_handler(
+        self,
+        handler: Optional[Callable[[Dict[str, Any], Any], Awaitable[None]]],
+    ) -> None:
+        """Install the gateway-owned normalized platform-event boundary.
+
+        Adapters normalize SDK updates and pass only stable dictionaries plus an
+        internal ``SessionSource`` to this callback. The runner owns the final
+        authorization decision and plugin dispatch; an adapter with no callback
+        therefore fails closed instead of exposing pre-auth events.
+        """
+        self._platform_event_handler = handler
 
     def set_topic_recovery_fn(
         self,
@@ -7209,8 +7228,11 @@ class BasePlatformAdapter(ABC):
 
         # Resolve profile from configured routes (None when no match / no routes)
         profile = None
+        profile_route_rejected = False
         runner = getattr(self, "gateway_runner", None)
         if runner is not None:
+            from gateway.profile_routing import ProfileRouteRejected
+
             try:
                 profile = runner._profile_name_for_source(
                     SessionSource(
@@ -7231,6 +7253,8 @@ class BasePlatformAdapter(ABC):
                         message_id=str(message_id) if message_id else None,
                     )
                 )
+            except ProfileRouteRejected:
+                profile_route_rejected = True
             except Exception:
                 logger.warning(
                     "Profile resolution failed for %s/%s, defaulting to active profile",
@@ -7262,6 +7286,11 @@ class BasePlatformAdapter(ABC):
         # SessionSource.to_dict(). The live receiving adapter is authoritative
         # for this turn even when profile_routes selects a different runtime.
         source._transport_adapter_ref = weakref.ref(self)
+        # Keep this transport-only fail-closed signal out of SessionSource
+        # serialization/session identity. The shared gateway handler consumes it
+        # before auth, hooks, or session setup, so every adapter drops matched
+        # routes to unserved profiles consistently without surfacing HTTP 500s.
+        source.profile_route_rejected = profile_route_rejected
         return source
 
     @abstractmethod

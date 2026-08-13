@@ -182,13 +182,16 @@ DEFAULT_CONFIG = {
         # Verification closure: after the agent edits files in a code workspace,
         # do not accept a final answer until fresh verification evidence exists
         # or the agent explains why it cannot run checks. The loop is bounded
-        # and uses the passive verification ledger. Default is "auto" —
-        # surface-aware: on for interactive coding surfaces (CLI, TUI, desktop)
-        # and programmatic callers, off for conversational messaging surfaces
-        # (Telegram, Discord, etc.) where the verification narrative would reach
-        # a human as chat noise. Doc/markdown/skill-only edits never fire it.
-        # Set true to force on everywhere, or false to disable.
-        "verify_on_stop": "auto",
+        # and uses the passive verification ledger. Default is False (opt-in):
+        # the v31/v32 config migrations already switch existing installs off
+        # because the verification narrative proved more noise than signal,
+        # and the docs tell users to treat off as the effective default — a
+        # fresh install must not be the one population that still gets the
+        # nudges. Set true to force on everywhere, or "auto" for the legacy
+        # surface-aware behavior (on for interactive coding surfaces — CLI,
+        # TUI, desktop — and programmatic callers, off for conversational
+        # messaging surfaces). Doc/markdown/skill-only edits never fire it.
+        "verify_on_stop": False,
         # Staged inactivity warning: send a warning to the user at this
         # threshold before escalating to a full timeout.  The warning fires
         # once per run and does not interrupt the agent.  0 = disable warning.
@@ -980,6 +983,7 @@ DEFAULT_CONFIG = {
             "enabled": True,
             "provider": "auto",
             "model": "",
+            "prefer_fast_model": False,  # opt in to provider fast tier; auto otherwise uses the main model
             "base_url": "",
             "api_key": "",
             "timeout": 30,
@@ -1623,6 +1627,7 @@ DEFAULT_CONFIG = {
 
     "voice": {
         "record_key": "ctrl+b",
+        "submit_mode": "direct",       # TUI: direct submits immediately; draft leaves an editable transcript
         "max_recording_seconds": 120,
         "auto_tts": False,
         "beep_enabled": True,         # Play record start/stop beeps in CLI voice mode
@@ -2201,6 +2206,16 @@ DEFAULT_CONFIG = {
     "security": {
         "allow_private_urls": False,  # Allow requests to private/internal IPs (for OpenWrt, proxies, VPNs)
         "redact_secrets": True,
+        # Human approval presentation transport. "builtin" preserves the
+        # current CLI/TUI/gateway/ACP surfaces. A plugin transport is used only
+        # when named explicitly here. Transport timeout/error/invalid response
+        # denies unless transport_fallback is explicitly set to "builtin".
+        # This is presentation only: plugins cannot detect, suppress, or
+        # auto-approve commands outside a correlated human response.
+        "approval": {
+            "transport": "builtin",
+            "transport_fallback": "deny",
+        },
         # Writes to agent-instruction files (AGENTS.md/CLAUDE.md/SOUL.md/
         # .cursorrules, project-local .hermes config) always require human
         # approval — even under auto-approve/yolo. Extra patterns are
@@ -2546,6 +2561,10 @@ DEFAULT_CONFIG = {
     # Gateway settings — control how messaging platforms (Telegram, Discord,
     # Slack, etc.) deliver agent-produced files as native attachments.
     "gateway": {
+        # Optional named-profile allowlist for multiplex mode. None preserves
+        # the historical serve-all behavior; [] serves only the default.
+        "multiplex_profile_allowlist": None,
+
         # Durable delivery-obligation ledger: final agent responses are
         # recorded in state.db around the platform send, and a gateway that
         # died between finalize and platform ACK redelivers the stored

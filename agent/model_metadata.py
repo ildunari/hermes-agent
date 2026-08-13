@@ -508,8 +508,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     "grok-2-vision": 8192,      # grok-2-vision, -1212, -latest
     "grok-4-fast": 2000000,     # grok-4-fast-(non-)reasoning, also matches -reasoning
     "grok-4.20": 2000000,       # grok-4.20-0309-(non-)reasoning, -multi-agent-0309
-    "grok-4.6": 500000,         # grok-4.6 — 500K context per docs.x.ai
-    "grok-4.5": 500000,         # retained for explicit legacy sessions
+    "grok-4.6": 500000,         # grok-4.6 — 500K context (OpenRouter / docs.x.ai)
+    "grok-4.5": 500000,         # 500K legacy model; retained for explicit legacy sessions
     "grok-4.3": 1000000,        # grok-4.3, grok-4.3-latest — 1M context per docs.x.ai
     "grok-4": 256000,           # grok-4, grok-4-0709
     "grok-3": 131072,           # grok-3, grok-3-mini, grok-3-fast, grok-3-mini-fast
@@ -581,6 +581,8 @@ _GROK_EFFORT_CAPABLE_PREFIXES = (
     # grok-4.6: xAI release notes (2026-08-12) document low/medium/high/xhigh
     # reasoning effort (default: high). Like 4.5, it does not advertise "none".
     "grok-4.6",
+    # grok-4.5: verified live against /v1/responses 2026-07-08 — accepts
+    # effort low/medium/high (default: high when omitted) but rejects "none".
     "grok-4.5",
 )
 
