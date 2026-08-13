@@ -556,13 +556,14 @@ features:
     title: Keep audited web and TUI build dependencies patched
     owner_paths:
       - package-lock.json
+      - tests/scripts/test_node_build_tool_audits.py
     tests:
-      - package-lock.json
+      - tests/scripts/test_node_build_tool_audits.py
     checks:
       - id: node-build-tool-lockfile
         path: package-lock.json
         needles: ['node_modules/postcss/node_modules/nanoid', 'node_modules/undici']
-        description: lockfile carries patched nanoid and undici releases used by the web and TUI build workspaces
+        description: lockfile checks, rather than an executable test-path entry, pin patched nanoid and undici releases used by the web and TUI build workspaces
 
   - id: runtime.codex-profile-wiring
     title: Codex app-server launch-scoped profile wiring
@@ -773,8 +774,8 @@ features:
     checks:
       - id: computer-use-element-label-cap
         path: tools/computer_use/tool.py
-        needles: [_MAX_ELEMENT_LABEL_CHARS, "label[: _MAX_ELEMENT_LABEL_CHARS - 1]"]
-        description: oversized AX labels are clamped before entering model context
+        needles: [_MAX_ELEMENT_LABEL_CHARS, "len(label) > _MAX_ELEMENT_LABEL_CHARS"]
+        description: oversized AX labels are clamped before entering model context across both the local ellipsis form and upstream label_truncated form
 
 
   - id: tools.fuzzy-match-indentation-boundary
