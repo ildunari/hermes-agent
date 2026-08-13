@@ -245,7 +245,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "claude-opus-5",
         "claude-sonnet-5",
         "claude-haiku-4-5-20251001",
-        "gemini-3.6-flash-high",
+        "gemini-3.7-flash-high",
         "gemini-3.1-pro",
     ],
     "nous": [
