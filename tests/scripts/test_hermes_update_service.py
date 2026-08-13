@@ -814,6 +814,24 @@ def test_materialize_node_dependencies_breaks_symlinks(
     assert commands == [["npm", "ci"]]
 
 
+def test_desktop_node_dependencies_incomplete_detects_pruned_closure(
+    tmp_path: Path,
+) -> None:
+    required = (
+        "node_modules/@assistant-ui/core/package.json",
+        "node_modules/@testing-library/react/package.json",
+        "node_modules/typescript/package.json",
+    )
+    for relative in required:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+
+    assert not SERVICE.desktop_node_dependencies_incomplete(tmp_path)
+    (tmp_path / required[0]).unlink()
+    assert SERVICE.desktop_node_dependencies_incomplete(tmp_path)
+
+
 def test_macbook_deferral_paths_exist_in_deploy() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 

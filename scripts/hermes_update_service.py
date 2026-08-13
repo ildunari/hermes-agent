@@ -1471,6 +1471,23 @@ def materialize_node_dependencies(
     )
 
 
+def desktop_node_dependencies_incomplete(worktree: Path) -> bool:
+    """Return whether the linked tree lacks Desktop's validation toolchain.
+
+    A successful scoped web build used to prune the hoisted Desktop closure
+    while leaving manifests unchanged.  A later update then linked that stale
+    tree into its integration worktree and failed typecheck with hundreds of
+    false module-not-found errors.  Check representative production and test
+    dependencies before trusting the fast symlink path.
+    """
+    required = (
+        Path("node_modules/@assistant-ui/core/package.json"),
+        Path("node_modules/@testing-library/react/package.json"),
+        Path("node_modules/typescript/package.json"),
+    )
+    return any(not (worktree / path).is_file() for path in required)
+
+
 def link_checkout_dependencies(repo: Path, worktree: Path) -> None:
     for relative in (
         Path("node_modules"),
@@ -1851,7 +1868,10 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
         try:
             if phase_before(ledger, "VERIFIED"):
                 ensure_not_aborted(root, run_id)
-                if dependency_manifests_changed(changed):
+                if dependency_manifests_changed(changed) or (
+                    desktop_diff_changed
+                    and desktop_node_dependencies_incomplete(worktree)
+                ):
                     materialize_node_dependencies(root, run_id, worktree)
                 carry_env = os.environ.copy()
                 carry_env["HERMES_CARRY_TEST_JOBS"] = "1"
