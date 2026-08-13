@@ -206,12 +206,31 @@ checks:
     path: apps/desktop/src/i18n/local-carry.ts
     needles: [draftPendingNotice]
     description: draft pending notice outside hot locale literals
+  - id: desktop-plugin-home-profile-door
+    path: apps/desktop/src/sdk/index.ts
+    needles: [getHomeProfile, listHomeProfiles, setHomeProfile, setDesktopHomeProfile]
+    description: generic Desktop SDK door for external plugins to read and change the persisted Home profile; upstream-PR candidate
   - id: shared-rerere-cache
     path: scripts/setup_local_merge_aids.sh
     needles: [rerere.autoupdate, git-rr-cache]
     description: shareable rerere setup helper
 
 features:
+  - id: desktop.plugin-home-profile
+    title: Desktop Home profile plugin SDK door
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - apps/desktop/src/store/profile.test.ts
+      - apps/desktop/src/store/profile.ts
+    tests:
+      - apps/desktop/src/store/profile.test.ts
+    checks:
+      - id: desktop-plugin-home-profile-store
+        path: apps/desktop/src/store/profile.ts
+        needles: [getDesktopHomeProfile, listDesktopHomeProfiles, setDesktopHomeProfile]
+        description: renderer store wraps the Electron-authoritative Desktop Home profile bridge
+
   - id: update.futureproof-system
     title: Recoverable, resource-bounded slim update system
     owner: kosta

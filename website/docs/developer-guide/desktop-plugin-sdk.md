@@ -41,7 +41,8 @@ plugin, and fail to resolve in a disk plugin). Capability comes in tiers:
 - **`host.state.*`** — readonly views over the app's live state (nanostore
   atoms): active session, cwd, gateway status, model, profile, viewport.
 - **`host.*` actions** — curated safe verbs: toast, navigate, tail logs,
-  restart the gateway, subscribe to the gateway event stream.
+  restart the gateway, choose the Desktop Home profile, subscribe to the
+  gateway event stream.
 - **`host.request`** — the gateway JSON-RPC door: sessions, config, skills,
   cron — everything the app itself calls.
 - **`ctx.rest` / `ctx.socket`** — your plugin's own backend namespace
@@ -385,8 +386,18 @@ host.onEvent(type, fn)                     // gateway event stream ('*' = all); 
 host.logs(...)                             // tail an app log file
 host.status()                              // one-shot system status snapshot
 host.restartGateway()                      // restart the backend gateway
+host.getHomeProfile()                      // persisted Desktop Home, or null
+host.listHomeProfiles()                    // local profiles Electron can launch as Home
+host.setHomeProfile(name)                  // persist Home, re-home backend, reload window
 host.request<T>(method, params?)           // gateway JSON-RPC — the real power
 ```
+
+The Desktop Home profile is the profile whose backend owns the primary app
+window. It is distinct from `host.state.profile` (the live soft-routed gateway
+profile) and from the sticky CLI default changed by `hermes profile use`.
+Use `host.listHomeProfiles()` for a Home picker rather than `profiles.list`:
+the live gateway can point at a remote machine whose profile roster is not
+launchable by the local Desktop app.
 
 `host.request` is the same JSON-RPC the app itself uses (sessions, config, skills,
 cron, kanban, …). Profile-shaped plugins get first-class methods too:

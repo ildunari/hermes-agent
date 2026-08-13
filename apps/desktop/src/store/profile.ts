@@ -141,6 +141,47 @@ export async function switchProfile(name: string): Promise<void> {
   await window.hermesDesktop.profile.set(name)
 }
 
+/** Read the Desktop window's persisted Home profile. `null` means Electron is
+ * still using automatic legacy selection (sticky CLI profile / default). */
+export async function getDesktopHomeProfile(): Promise<null | string> {
+  if (!window.hermesDesktop?.profile) {
+    throw new Error('Desktop profile controls unavailable')
+  }
+
+  const result = await window.hermesDesktop.profile.get()
+
+  return result.profile
+}
+
+/** List profiles that Electron can safely launch as the primary Desktop Home.
+ * This is intentionally local-authoritative rather than gateway-derived: the
+ * live gateway may currently point at a remote machine with a different roster. */
+export async function listDesktopHomeProfiles(): Promise<string[]> {
+  if (!window.hermesDesktop?.profile) {
+    throw new Error('Desktop profile controls unavailable')
+  }
+
+  const result = await window.hermesDesktop.profile.list()
+
+  return result.profiles
+}
+
+/** Persist a new Desktop Home profile. Electron owns the re-home operation: it
+ * tears down the primary backend and reloads the window under that profile. */
+export async function setDesktopHomeProfile(name: string): Promise<void> {
+  const profile = name.trim()
+
+  if (!profile) {
+    throw new Error('Home profile name is required')
+  }
+
+  if (!window.hermesDesktop?.profile) {
+    throw new Error('Desktop profile controls unavailable')
+  }
+
+  await window.hermesDesktop.profile.set(profile)
+}
+
 // ── Swap-minimal gateway routing ──────────────────────────────────────────
 // One live gateway at a time. When the user opens/sends a session whose profile
 // differs from the gateway's current profile, we lazily reconnect the single

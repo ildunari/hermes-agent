@@ -26,7 +26,15 @@ import { onGatewayEvent } from '@/contrib/events'
 import { getLogs, getStatus } from '@/hermes'
 import { $gateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
-import { $activeGatewayProfile, ensureGatewayProfile, newSessionInProfile, setShowAllProfiles } from '@/store/profile'
+import {
+  $activeGatewayProfile,
+  ensureGatewayProfile,
+  getDesktopHomeProfile,
+  listDesktopHomeProfiles,
+  newSessionInProfile,
+  setDesktopHomeProfile,
+  setShowAllProfiles
+} from '@/store/profile'
 import { $activeSessionId, $currentCwd, $currentModel, $gatewayState } from '@/store/session'
 import { runGatewayRestart } from '@/store/system-actions'
 
@@ -140,6 +148,20 @@ export const host = {
 
   /** Restart the backend gateway (progress surfaces in the core statusbar). */
   restartGateway: async () => runGatewayRestart(),
+
+  /** Read the Desktop window's persisted Home profile. `null` means the app is
+   *  still using legacy automatic selection (sticky CLI profile / default). */
+  getHomeProfile: async (): Promise<null | string> => getDesktopHomeProfile(),
+
+  /** Electron-authoritative profiles that can safely own the Desktop window.
+   *  Do not substitute `profiles.list`: the live gateway may be remote. */
+  listHomeProfiles: async (): Promise<string[]> => listDesktopHomeProfiles(),
+
+  /** Make a profile the Desktop Home. Electron persists the choice, tears down
+   *  the primary backend, and reloads the window under that profile's
+   *  HERMES_HOME. This is deliberately distinct from the gateway's soft active
+   *  profile and from `hermes profile use` (the sticky CLI default). */
+  setHomeProfile: async (name: string): Promise<void> => setDesktopHomeProfile(name),
 
   /** One-shot system status snapshot (platforms, versions, …). */
   status: async () => getStatus(),

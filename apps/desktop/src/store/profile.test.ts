@@ -19,8 +19,16 @@ vi.mock('@/hermes', () => ({
 vi.mock('@/lib/query-client', () => ({ invalidateProfileScopedQueries: vi.fn() }))
 vi.mock('@/store/starmap', () => ({ resetStarmapGraph }))
 
-const { $activeGatewayProfile, $profiles, ensureGatewayProfile, prewarmProfileBackend, refreshProfiles } =
-  await import('./profile')
+const {
+  $activeGatewayProfile,
+  $profiles,
+  ensureGatewayProfile,
+  getDesktopHomeProfile,
+  listDesktopHomeProfiles,
+  prewarmProfileBackend,
+  refreshProfiles,
+  setDesktopHomeProfile
+} = await import('./profile')
 
 const { $connection } = await import('./session')
 const { invalidateProfileScopedQueries } = await import('@/lib/query-client')
@@ -43,16 +51,24 @@ const localConn = (over: Partial<HermesConnection> = {}): HermesConnection =>
   ({ baseUrl: '', mode: 'local', profile: 'default', ...over }) as HermesConnection
 
 const getConnection = vi.fn<(profile?: string | null) => Promise<HermesConnection>>()
+const getHomeProfile = vi.fn<() => Promise<{ profile: null | string }>>()
+const listHomeProfiles = vi.fn<() => Promise<{ profiles: string[] }>>()
+const setHomeProfile = vi.fn<(profile: null | string) => Promise<{ profile: null | string }>>()
 
 beforeEach(() => {
   getConnection.mockReset()
+  getHomeProfile.mockReset()
+  listHomeProfiles.mockReset()
+  setHomeProfile.mockReset()
   ensureGatewayForProfile.mockClear()
   openGatewayForProfile.mockClear()
   $gateway.set({ id: 'live-socket' })
   $activeGatewayProfile.set('default')
   $connection.set(localConn())
   $profiles.set([])
-  vi.stubGlobal('window', { hermesDesktop: { getConnection } })
+  vi.stubGlobal('window', {
+    hermesDesktop: { getConnection, profile: { get: getHomeProfile, list: listHomeProfiles, set: setHomeProfile } }
+  })
   vi.mocked(invalidateProfileScopedQueries).mockClear()
   resetStarmapGraph.mockClear()
 })
@@ -107,6 +123,34 @@ describe('ensureGatewayProfile → $connection sync (#46651)', () => {
     expect(getConnection).not.toHaveBeenCalled()
     expect(ensureGatewayForProfile).not.toHaveBeenCalled()
     expect($connection.get()?.mode).toBe('remote')
+  })
+})
+
+describe('Desktop Home profile controls', () => {
+  it('reads the profile persisted by Electron', async () => {
+    getHomeProfile.mockResolvedValue({ profile: 'gpt' })
+
+    await expect(getDesktopHomeProfile()).resolves.toBe('gpt')
+    expect(getHomeProfile).toHaveBeenCalledOnce()
+  })
+
+  it('uses Electron-authoritative profiles for the Home picker', async () => {
+    listHomeProfiles.mockResolvedValue({ profiles: ['default', 'coding', 'gpt'] })
+
+    await expect(listDesktopHomeProfiles()).resolves.toEqual(['default', 'coding', 'gpt'])
+    expect(listHomeProfiles).toHaveBeenCalledOnce()
+  })
+
+  it('trims and persists the requested profile through Electron', async () => {
+    setHomeProfile.mockResolvedValue({ profile: 'coding' })
+
+    await expect(setDesktopHomeProfile('  coding  ')).resolves.toBeUndefined()
+    expect(setHomeProfile).toHaveBeenCalledWith('coding')
+  })
+
+  it('rejects an empty profile without touching Electron', async () => {
+    await expect(setDesktopHomeProfile('   ')).rejects.toThrow('Home profile name is required')
+    expect(setHomeProfile).not.toHaveBeenCalled()
   })
 })
 

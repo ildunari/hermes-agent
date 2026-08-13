@@ -6905,10 +6905,31 @@ function writeActiveDesktopProfile(name) {
     throw new Error(`Invalid profile name: ${value}`)
   }
 
+  if (value && value !== 'default' && !directoryExists(path.join(HERMES_HOME, 'profiles', value))) {
+    throw new Error(`Desktop profile does not exist locally: ${value}`)
+  }
+
   fs.mkdirSync(path.dirname(DESKTOP_PROFILE_CONFIG_PATH), { recursive: true })
   writeFileAtomic(DESKTOP_PROFILE_CONFIG_PATH, JSON.stringify({ profile: value || null }, null, 2))
 
   return value || null
+}
+
+function listDesktopProfiles() {
+  const names = ['default']
+  const profilesDir = path.join(HERMES_HOME, 'profiles')
+
+  try {
+    for (const entry of fs.readdirSync(profilesDir, { withFileTypes: true })) {
+      if ((entry.isDirectory() || entry.isSymbolicLink()) && PROFILE_NAME_RE.test(entry.name)) {
+        names.push(entry.name)
+      }
+    }
+  } catch {
+    // A fresh install has no profiles directory yet; the root profile remains.
+  }
+
+  return [...new Set(names)].sort((a, b) => (a === 'default' ? -1 : b === 'default' ? 1 : a.localeCompare(b)))
 }
 
 // Sanitize a connection config into the renderer-facing shape. With no
@@ -10581,6 +10602,7 @@ ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
 })
 
 ipcMain.handle('hermes:profile:get', async () => ({ profile: readActiveDesktopProfile() }))
+ipcMain.handle('hermes:profile:list', async () => ({ profiles: listDesktopProfiles() }))
 ipcMain.handle('hermes:profile:set', async (_event, name) => {
   const next = writeActiveDesktopProfile(name)
 

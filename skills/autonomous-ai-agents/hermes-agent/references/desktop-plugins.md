@@ -50,6 +50,13 @@ The ONLY import surface is `@hermes/plugin-sdk` (plus `react` /
   disposer.
 - `host.notify({ kind, message })`, `host.navigate(path)`, `host.logs(...)`,
   `host.status()`, `haptic('tap')`.
+- Desktop Home: `host.getHomeProfile()` reads the persisted primary Desktop
+  profile; `host.listHomeProfiles()` lists the local profiles Electron can
+  safely launch; `host.setHomeProfile(name)` persists a new Home, re-homes the
+  primary backend, and reloads the window. This is distinct from the live
+  gateway profile and sticky CLI default (`hermes profile use`). Never build a
+  Home picker from gateway `profiles.list`: a remote gateway has a different
+  profile roster.
 - `ctx.register({ id, area, order?, render?, data? })` — contribute UI.
   Key areas: `'statusBar.right'`/`'statusBar.left'` (chips),
   `'panes'` (layout zones — set `title` and
