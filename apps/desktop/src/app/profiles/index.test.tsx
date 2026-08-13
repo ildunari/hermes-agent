@@ -126,7 +126,7 @@ describe('ProfilesView', () => {
 
       expect(await screen.findByRole('button', { name: 'Make Desktop Home' })).toBeTruthy()
     } finally {
-      dispose()
+      act(() => dispose())
     }
   })
 
