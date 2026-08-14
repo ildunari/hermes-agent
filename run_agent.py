@@ -8018,6 +8018,9 @@ class AIAgent:
             reasoning_effort=function_args.get("reasoning_effort"),
             enabled_toolsets=function_args.get("enabled_toolsets"),
             profile=function_args.get("profile"),
+            action=function_args.get("action"),
+            subagent_id=function_args.get("subagent_id"),
+            message=function_args.get("message"),
             parent_agent=self,
         )
 
