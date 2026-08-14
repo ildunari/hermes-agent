@@ -770,6 +770,44 @@ features:
         needles: ['("grok-4.6", 300)']
         description: Grok 4.6 reasoning calls retain the long-running stale timeout floor
 
+  - id: models.glm-53-zai
+    title: GLM-5.3 native Z.AI Coding Plan catalog and reasoning contract
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - agent/retry_utils.py
+      - hermes_cli/setup.py
+      - plugins/model-providers/zai/__init__.py
+      - tests/plugins/model_providers/test_zai_profile.py
+    collision_paths:
+      - agent/model_metadata.py
+      - agent/retry_utils.py
+      - hermes_cli/auth.py
+      - hermes_cli/models.py
+      - hermes_cli/setup.py
+    dependent_paths:
+      - tests/agent/test_model_metadata.py
+      - tests/test_model_picker_visibility_policy.py
+      - tests/test_retry_utils.py
+    tests:
+      - tests/plugins/model_providers/test_zai_profile.py
+      - tests/agent/test_model_metadata.py
+      - tests/test_model_picker_visibility_policy.py
+      - tests/test_retry_utils.py
+    checks:
+      - id: glm-53-zai-curated
+        path: plugins/model-providers/zai/__init__.py
+        needles: ['"glm-5.3"', _glm_5_3_reasoning_effort, 'thinking": {"type": "enabled"']
+        description: native Z.AI inventory leads with GLM-5.3 and maps Hermes effort onto its forced-thinking low/high/max contract
+      - id: glm-53-context-window
+        path: agent/model_metadata.py
+        needles: ['"glm-5.3": 1_048_576', '"glm-5.3",       # 1M; pre-catalog builds persisted']
+        description: GLM-5.3 resolves to 1M and invalidates stale pre-catalog 131K cache entries
+      - id: glm-53-coding-overload
+        path: agent/retry_utils.py
+        needles: ['("glm-5.2", "glm-5.3")']
+        description: GLM-5.3 receives the established Coding Plan transient-overload backoff policy
+
   - id: runtime.desktop-compression-reanchor
     title: Re-anchor Desktop session identity at the compression boundary
     owner: kosta

@@ -1429,6 +1429,27 @@ class TestGenericPreCatalogStaleGuard:
         # Sibling qwen slugs with legitimately small windows are untouched.
         assert not _stale_pre_catalog_cache_entry("qwen3-coder", 131_072)
 
+    def test_glm_5_3_stale_catch_all_is_dropped(self):
+        from agent.model_metadata import _stale_pre_catalog_cache_entry
+
+        assert _stale_pre_catalog_cache_entry("glm-5.3", 131_072)
+        assert _stale_pre_catalog_cache_entry("zai/glm-5.3", 131_072)
+        assert not _stale_pre_catalog_cache_entry("glm-5.3", 1_048_576)
+        assert not _stale_pre_catalog_cache_entry("glm-5", 131_072)
+
+    def test_glm_5_3_stale_cache_reresolves_to_1m(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import importlib
+        import agent.model_metadata as mm
+
+        importlib.reload(mm)
+        base = "https://api.z.ai/api/coding/paas/v4"
+        mm.save_context_length("glm-5.3", base, 131_072)
+        ctx = mm.get_model_context_length(
+            "glm-5.3", base_url=base, api_key="", provider="zai"
+        )
+        assert ctx == 1_048_576
+
     def test_unknown_models_never_dropped(self):
         from agent.model_metadata import _stale_pre_catalog_cache_entry
         assert not _stale_pre_catalog_cache_entry("totally-unknown-model", 4096)

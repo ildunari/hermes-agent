@@ -136,6 +136,37 @@ class TestZaiGLM52ReasoningEffort:
         assert top_level == {}
 
 
+class TestZaiGLM53ReasoningEffort:
+    """GLM-5.3 is forced-thinking with low/high/max effort."""
+
+    @pytest.mark.parametrize(
+        "reasoning_config,expected",
+        [
+            ({"enabled": False}, "low"),
+            ({"enabled": True, "effort": "none"}, "low"),
+            ({"enabled": True, "effort": "minimal"}, "low"),
+            ({"enabled": True, "effort": "low"}, "low"),
+            ({"enabled": True, "effort": "medium"}, "high"),
+            ({"enabled": True, "effort": "high"}, "high"),
+            ({"enabled": True, "effort": "xhigh"}, "max"),
+            ({"enabled": True, "effort": "max"}, "max"),
+        ],
+    )
+    def test_forced_thinking_effort_mapping(self, zai_profile, reasoning_config, expected):
+        extra_body, top_level = zai_profile.build_api_kwargs_extras(
+            reasoning_config=reasoning_config, model="glm-5.3"
+        )
+        assert extra_body == {"thinking": {"type": "enabled"}}
+        assert top_level == {"reasoning_effort": expected}
+
+    @pytest.mark.parametrize("model", ["z-ai/glm-5.3", "glm-5-3", "glm-5p3"])
+    def test_alias_spellings_recognized(self, zai_profile, model):
+        _, top_level = zai_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "max"}, model=model
+        )
+        assert top_level == {"reasoning_effort": "max"}
+
+
 class TestZaiModelGating:
     """GLM 4.5+ get thinking; earlier GLM models are left untouched."""
 

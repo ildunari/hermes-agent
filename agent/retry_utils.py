@@ -154,7 +154,7 @@ def is_zai_coding_overload_error(*, base_url: str | None, model: str | None, err
     return (
         status == 429
         and "api.z.ai/api/coding/paas/v4" in base
-        and "glm-5.2" in model_name
+        and any(name in model_name for name in ("glm-5.2", "glm-5.3"))
         and ("1305" in text or "temporarily overloaded" in text)
     )
 
@@ -171,7 +171,7 @@ def adaptive_rate_limit_backoff(
     """Provider-aware rate-limit backoff.
 
     For most providers this returns ``default_wait`` unchanged. For Z.AI
-    Coding Plan GLM-5.2 overloads, keep the first ``short_attempts`` retries on
+    Coding Plan GLM-5.2/5.3 overloads, keep the first ``short_attempts`` retries on
     the normal short exponential schedule, then switch to progressively longer
     waits (30s → 60s → 90s → 120s, capped) plus light jitter.
 

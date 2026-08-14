@@ -185,7 +185,7 @@ def test_shared_policy_can_pin_unconfigured_providers_in_explicit_picker(monkeyp
     by_slug = {row["slug"]: row for row in payload["providers"]}
 
     assert by_slug["deepseek"]["models"] == ["deepseek-v4-pro", "deepseek-v4-flash"]
-    assert by_slug["zai"]["models"] == ["glm-5.2", "glm-5v-turbo"]
+    assert by_slug["zai"]["models"] == ["glm-5.3", "glm-5.2", "glm-5v-turbo"]
     assert by_slug["deepseek"]["source"] == "shared-picker-policy"
 
 

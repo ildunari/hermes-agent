@@ -113,6 +113,21 @@ def _zai_overload_error():
     )
 
 
+def test_zai_overload_classifier_covers_current_coding_plan_models():
+    err = _zai_overload_error()
+    for model in ("glm-5.2", "glm-5.3", "zai/glm-5.3"):
+        assert is_zai_coding_overload_error(
+            base_url="https://api.z.ai/api/coding/paas/v4",
+            model=model,
+            error=err,
+        )
+    assert not is_zai_coding_overload_error(
+        base_url="https://api.z.ai/api/coding/paas/v4",
+        model="glm-5.1",
+        error=err,
+    )
+
+
 
 
 
