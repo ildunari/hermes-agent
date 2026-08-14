@@ -8,6 +8,8 @@ historical inline formatting.
 
 import html as _html
 
+import pytest
+
 from gateway.platforms.base import BasePlatformAdapter
 
 
@@ -70,12 +72,42 @@ class TestFormatChoicePage:
         assert meta["total_pages"] == 1
         assert meta["page"] == 0
 
-
     def test_page_clamped_high(self):
         opts, meta = BasePlatformAdapter._format_choice_page(list(range(25)), 99, 10)
         assert meta["page"] == 2
         assert opts == list(range(20, 25))
         assert meta["page_info"] == " (21–25 of 25)"
+
+
+@pytest.mark.asyncio
+async def test_open_ended_clarify_enables_gateway_text_capture(monkeypatch):
+    """A plain-text reply must unblock the turn waiting in clarify."""
+    adapter = _bare(_DefaultAdapter)
+    sent = []
+    marked = []
+
+    async def fake_send(*, chat_id, content, metadata):
+        sent.append((chat_id, content, metadata))
+        return object()
+
+    adapter.send = fake_send
+    monkeypatch.setattr(
+        "tools.clarify_gateway.mark_awaiting_text",
+        lambda clarify_id: marked.append(clarify_id) or True,
+    )
+
+    await adapter.send_clarify(
+        chat_id="mom-chat",
+        question="What company do you work for?",
+        choices=None,
+        clarify_id="clarify-1",
+        session_key="agent:guest:bluebubbles:dm:mom",
+    )
+
+    assert marked == ["clarify-1"]
+    assert sent == [
+        ("mom-chat", "❓ What company do you work for?", None),
+    ]
 
 
 class TestAdapterParity:

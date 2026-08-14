@@ -4364,6 +4364,12 @@ class BasePlatformAdapter(ABC):
             mark_awaiting_text(clarify_id)
         else:
             text = f"❓ {question}"
+            # Open-ended prompts have no button callback. The agent thread is
+            # blocked waiting for this clarify, so mark the pending entry for
+            # text capture before sending; otherwise the active-session guard
+            # queues the user's reply behind the blocked turn forever.
+            from tools.clarify_gateway import mark_awaiting_text
+            mark_awaiting_text(clarify_id)
         return await self.send(
             chat_id=chat_id,
             content=text,

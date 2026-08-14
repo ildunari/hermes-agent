@@ -40,6 +40,7 @@ from agent.tool_dispatch_helpers import (
     _plan_tool_batch_segments,
     make_tool_result_message,
 )
+from agent.request_scoped_tools import get_request_scoped_handler
 from tools.terminal_tool import (
     get_active_env,
 )
@@ -1778,6 +1779,30 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
+        elif (request_handler := get_request_scoped_handler(agent, function_name)) is not None:
+            # Request-scoped tools are intentionally absent from the global
+            # registry. The concurrent executor routes them through
+            # agent._invoke_tool(); keep the legacy sequential executor at the
+            # same dispatch seam instead of falling through to the registry as
+            # an advertised-but-unknown tool.
+            assert request_handler is not None
+
+            def _execute(next_args: dict) -> Any:
+                return request_handler(next_args)
+
+            function_result, function_args, middleware_trace, _execution_blocked, _execution_dispatched = _managed_values(_run_agent_tool_execution_middleware(
+                agent,
+                function_name=function_name,
+                function_args=function_args,
+                effective_task_id=effective_task_id,
+                tool_call_id=getattr(tool_call, "id", "") or "",
+                execute=_execute,
+                scope_block=_ts_scope_block,
+                display_index=i,
+            ))
+            tool_duration = time.time() - tool_start_time
+            if agent._should_emit_quiet_tool_messages():
+                agent._vprint(f"  {_get_cute_tool_message_impl(function_name, function_args, tool_duration, result=function_result)}")
         elif function_name == "memory":
             def _execute(next_args: dict) -> Any:
                 target = next_args.get("target", "memory")
