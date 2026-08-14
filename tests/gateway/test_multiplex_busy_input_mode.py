@@ -82,12 +82,15 @@ async def _load_profile_snapshot(
     mode: str | None,
     *,
     legacy_text_mode: str | None = None,
+    steer_ack_enabled: bool | None = None,
 ) -> _ProfileAdapter:
     display = "display:\n"
     if mode is not None:
         display += f"  busy_input_mode: {mode}\n"
     if legacy_text_mode is not None:
         display += f"  busy_text_mode: {legacy_text_mode}\n"
+    if steer_ack_enabled is not None:
+        display += f"  busy_steer_ack_enabled: {str(steer_ack_enabled).lower()}\n"
     profile_home.mkdir()
     (profile_home / "config.yaml").write_text(display, encoding="utf-8")
 
@@ -264,6 +267,31 @@ async def test_secondary_adapter_busy_guard_stamps_profile_before_resolving_mode
     assert event.source.profile == "research"
     agent.steer.assert_called_once_with("follow up")
     agent.interrupt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_secondary_profile_can_silence_steer_ack(tmp_path, monkeypatch):
+    """A routed profile's silent-steer setting must not affect siblings."""
+    monkeypatch.delenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", raising=False)
+    monkeypatch.delenv("HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED", raising=False)
+    runner = _runner(default_mode="interrupt")
+    adapter = await _load_profile_snapshot(
+        runner,
+        tmp_path / "research",
+        "steer",
+        steer_ack_enabled=False,
+    )
+    event = _event(profile="research")
+    session_key = runner._session_key_for_source(event.source)
+    agent = MagicMock()
+    agent._active_children = []
+    agent.steer.return_value = True
+    runner._running_agents[session_key] = agent
+    adapter._send_with_retry = AsyncMock()
+
+    assert await runner._handle_active_session_busy_message(event, session_key) is True
+    agent.steer.assert_called_once_with("follow up")
+    adapter._send_with_retry.assert_not_awaited()
 
 
 @pytest.mark.asyncio

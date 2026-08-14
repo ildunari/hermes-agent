@@ -7738,6 +7738,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # without rereading config or mutating process-global environment.
         self._busy_input_modes_by_profile: Dict[str, str] = {}
         self._busy_text_modes_by_profile: Dict[str, str] = {}
+        self._busy_steer_ack_by_profile: Dict[str, bool] = {}
         self._restart_drain_timeout = self._load_restart_drain_timeout()
         self._restart_after_turn_timeout = self._load_restart_after_turn_timeout()
         self._provider_routing = self._load_provider_routing()
@@ -10397,6 +10398,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         text_modes = self.__dict__.setdefault("_busy_text_modes_by_profile", {})
         input_modes[profile_name] = input_mode
         text_modes[profile_name] = text_mode
+        raw_steer_ack = cfg_get(
+            config,
+            "display",
+            "busy_steer_ack_enabled",
+            default=None,
+        )
+        if raw_steer_ack is not None:
+            ack_modes = self.__dict__.setdefault("_busy_steer_ack_by_profile", {})
+            ack_modes[profile_name] = is_truthy_value(raw_steer_ack, default=True)
 
     def _busy_profile_name_for_source(self, source: SessionSource) -> Optional[str]:
         """Return the routed profile whose busy policy applies, if any."""
@@ -10427,6 +10437,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return fallback
         modes = getattr(self, "_busy_text_modes_by_profile", None)
         return modes.get(profile_name, fallback) if isinstance(modes, dict) else fallback
+
+    def _effective_busy_steer_ack_enabled(
+        self, source: SessionSource
+    ) -> Optional[bool]:
+        """Return a routed profile's explicit steer-ack policy, if configured."""
+        profile_name = self._busy_profile_name_for_source(source)
+        if not profile_name:
+            return None
+        modes = getattr(self, "_busy_steer_ack_by_profile", None)
+        return modes.get(profile_name) if isinstance(modes, dict) else None
 
     @staticmethod
     def _load_restart_drain_timeout() -> float:
@@ -11220,8 +11240,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # like STT transcript echo suppression: keep the behavior, drop only
         # the confirmation bubble.
         if is_steer_mode:
+            profile_steer_ack = self._effective_busy_steer_ack_enabled(event.source)
             steer_ack_env = os.environ.get("HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED")
-            if steer_ack_env is not None:
+            if profile_steer_ack is not None:
+                steer_ack_enabled = profile_steer_ack
+            elif steer_ack_env is not None:
                 steer_ack_enabled = steer_ack_env.strip().lower() in {"1", "true", "yes", "on"}
             else:
                 steer_ack_enabled = bool(
