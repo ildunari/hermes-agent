@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   getGatewayWsUrl: profile => ipcRenderer.invoke('hermes:gateway:ws-url', profile),
   openSessionWindow: (sessionId, opts) => ipcRenderer.invoke('hermes:window:openSession', sessionId, opts),
   openNewSessionWindow: (profile?: string) => ipcRenderer.invoke('hermes:window:openNewSession', profile),
+  openSessionInTerminal: (sessionId, opts) => ipcRenderer.invoke('hermes:window:openInTerminal', sessionId, opts),
   openWindow: () => ipcRenderer.invoke('hermes:window:openInstance'),
   claimAmbientCue: key => ipcRenderer.invoke('hermes:ambient:claim', key),
   wakeIndicator: {

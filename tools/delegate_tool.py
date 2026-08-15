@@ -985,7 +985,7 @@ DEFAULT_ITERATION_BUDGETS = {
     "deep": 150,
 }
 DEFAULT_BUDGET_CLASS = "standard"
-DEFAULT_MAX_ITERATIONS = 150
+DEFAULT_MAX_ITERATIONS = 250
 
 
 def _positive_iteration_value(value: Any, fallback: int) -> int:
