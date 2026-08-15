@@ -200,7 +200,7 @@ class TestBuildChildProgressCallback:
         assert compact[-1]["parent_run_id"] == "run-contract"
         assert compact[-1]["delegation_group_id"] == "dg-contract"
         assert "sk-proj-" not in compact[-1]["prompt"]
-        for forbidden in ("summary", "error", "args", "files_read", "files_written", "output_tail"):
+        for forbidden in ("summary", "args", "files_read", "files_written", "output_tail"):
             assert forbidden not in compact[-1]
 
         assert list_subagent_status("different-owner") == []
@@ -235,6 +235,30 @@ class TestBuildChildProgressCallback:
         assert record["raw_lifecycle"] == "teleporting"
         assert isinstance(record["completed_at"], float)
         assert "usage" not in record
+
+    def test_failed_terminal_projection_includes_only_bounded_redacted_error(self):
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent_cb = MagicMock()
+        parent.tool_progress_callback = parent_cb
+        cb = _build_child_progress_callback(
+            0,
+            "Failure projection",
+            parent,
+            subagent_id="sa-failed",
+            delegation_group_id="dg-failed",
+            parent_session_id="owner-failed",
+            parent_run_id="run-failed",
+        )
+        secret = "sk-proj-abcdef1234567890abcdef1234567890abcdef12"
+
+        cb("subagent.complete", preview=f"provider rejected {secret} " + "x" * 800, status="error")
+
+        record = parent_cb.call_args.kwargs["subagent"]
+        assert record["lifecycle"] == "failed"
+        assert "sk-proj-" not in record["error"]
+        assert len(record["error"]) <= 500
+        assert "summary" not in record
 
     def test_terminal_projection_is_bounded_per_owner(self):
         owner = "bounded-owner"

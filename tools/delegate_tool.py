@@ -171,7 +171,7 @@ _SUBAGENT_STATUS_FIELDS = frozenset({
     "parent_run_id", "parent_subagent_id", "task_index", "task_count",
     "prompt", "short_label", "lifecycle", "raw_lifecycle", "model",
     "provider", "reasoning_effort", "started_at", "updated_at",
-    "completed_at", "current_tool", "tool_count", "usage", "sequence",
+    "completed_at", "current_tool", "tool_count", "usage", "error", "sequence",
 })
 
 
@@ -232,6 +232,8 @@ def _store_subagent_status(record: Dict[str, Any]) -> None:
         safe["short_label"] = _safe_subagent_prompt(
             safe["short_label"], limit=120
         )
+    if "error" in safe:
+        safe["error"] = _safe_subagent_prompt(safe["error"], limit=500)
     if isinstance(safe.get("usage"), dict):
         safe["usage"] = {
             key: value
@@ -1529,6 +1531,7 @@ def _build_child_progress_callback(
         *,
         current_tool: Optional[str] = None,
         usage: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
         terminal: bool = False,
     ) -> Dict[str, Any]:
         now = time.time()
@@ -1575,6 +1578,8 @@ def _build_child_progress_callback(
             }
             if known_usage:
                 record["usage"] = known_usage
+        if error:
+            record["error"] = _safe_subagent_prompt(error, limit=500)
         _store_subagent_status(record)
         return record
 
@@ -1624,8 +1629,14 @@ def _build_child_progress_callback(
         if event_type == "subagent.complete":
             usage = kwargs.pop("compact_usage", None)
             raw_status = kwargs.get("status") or "unknown"
+            lifecycle, _ = _normalize_subagent_lifecycle(raw_status)
+            error = preview if lifecycle in {
+                "failed", "interrupted", "cancelled", "timed_out", "stalled"
+            } else None
             record = (
-                _compact_record(raw_status, usage=usage, terminal=True)
+                _compact_record(
+                    raw_status, usage=usage, error=error, terminal=True
+                )
                 if _compact_enabled else None
             )
             compact_kw = {"subagent": record} if record is not None else {}
