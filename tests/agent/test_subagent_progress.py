@@ -14,7 +14,11 @@ import pytest
 from unittest.mock import MagicMock
 
 from agent.display import KawaiiSpinner
-from tools.delegate_tool import _build_child_progress_callback
+from tools.delegate_tool import (
+    _build_child_progress_callback,
+    _store_subagent_status,
+    list_subagent_status,
+)
 
 
 # =========================================================================
@@ -146,6 +150,115 @@ class TestBuildChildProgressCallback:
         output = buf.getvalue()
         assert "[3]" in output
 
+    def test_compact_lifecycle_is_ordered_owner_scoped_and_safe(self):
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent_cb = MagicMock()
+        parent.tool_progress_callback = parent_cb
+
+        cb = _build_child_progress_callback(
+            1,
+            "Inspect /tmp/private.py with sk-proj-abcdef1234567890abcdef1234567890abcdef12",
+            parent,
+            task_count=3,
+            subagent_id="sa-contract-1",
+            parent_id="sa-parent",
+            model="claude-opus-5",
+            provider="vibeproxy",
+            reasoning_effort="high",
+            delegation_group_id="dg-contract",
+            parent_session_id="owner-session",
+            parent_run_id="run-contract",
+        )
+
+        cb("subagent.spawn_requested")
+        cb("subagent.start")
+        cb("tool.started", "read_file", "/tmp/private.py", {"path": "/tmp/private.py"})
+        cb("subagent.finalizing")
+        cb(
+            "subagent.complete",
+            status="success",
+            summary="child output must remain legacy-only",
+            compact_usage={"input_tokens": 12, "output_tokens": 3},
+        )
+
+        compact = [
+            call.kwargs["subagent"]
+            for call in parent_cb.call_args_list
+            if "subagent" in call.kwargs
+        ]
+        assert [record["sequence"] for record in compact] == [1, 2, 3, 4, 5]
+        assert [record["lifecycle"] for record in compact] == [
+            "queued", "running", "running", "finalizing", "completed"
+        ]
+        assert compact[0]["raw_lifecycle"] == "spawn_requested"
+        assert compact[-1]["raw_lifecycle"] == "success"
+        assert compact[2]["current_tool"] == "read_file"
+        assert compact[2]["tool_count"] == 1
+        assert compact[-1]["usage"] == {"input_tokens": 12, "output_tokens": 3}
+        assert compact[-1]["parent_session_id"] == "owner-session"
+        assert compact[-1]["parent_run_id"] == "run-contract"
+        assert compact[-1]["delegation_group_id"] == "dg-contract"
+        assert "sk-proj-" not in compact[-1]["prompt"]
+        for forbidden in ("summary", "error", "args", "files_read", "files_written", "output_tail"):
+            assert forbidden not in compact[-1]
+
+        assert list_subagent_status("different-owner") == []
+        owned = list_subagent_status("owner-session", parent_run_id="run-contract")
+        assert [record["subagent_id"] for record in owned] == ["sa-contract-1"]
+        assert owned[0]["lifecycle"] == "completed"
+        stale = dict(owned[0])
+        stale.update({"lifecycle": "running", "raw_lifecycle": "running", "sequence": 4})
+        _store_subagent_status(stale)
+        assert list_subagent_status(
+            "owner-session", parent_run_id="run-contract"
+        )[0]["lifecycle"] == "completed"
+
+    def test_unknown_lifecycle_stays_unknown_and_missing_usage_is_omitted(self):
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent_cb = MagicMock()
+        parent.tool_progress_callback = parent_cb
+        cb = _build_child_progress_callback(
+            0,
+            "Future lifecycle",
+            parent,
+            subagent_id="sa-future",
+            delegation_group_id="dg-future",
+            parent_session_id="owner-future",
+            parent_run_id="run-future",
+        )
+
+        cb("subagent.complete", status="teleporting")
+        record = parent_cb.call_args.kwargs["subagent"]
+        assert record["lifecycle"] == "unknown"
+        assert record["raw_lifecycle"] == "teleporting"
+        assert isinstance(record["completed_at"], float)
+        assert "usage" not in record
+
+    def test_terminal_projection_is_bounded_per_owner(self):
+        owner = "bounded-owner"
+        for index in range(70):
+            _store_subagent_status({
+                "version": 1,
+                "subagent_id": f"sa-bounded-{index}",
+                "parent_session_id": owner,
+                "parent_run_id": "run-bounded",
+                "delegation_group_id": "dg-bounded",
+                "task_index": index,
+                "lifecycle": "completed",
+                "raw_lifecycle": "completed",
+                "updated_at": float(index),
+                "completed_at": float(index),
+                "sequence": 2,
+            })
+
+        records = list_subagent_status(owner, parent_run_id="run-bounded")
+        assert len(records) == 64
+        assert {record["subagent_id"] for record in records} == {
+            f"sa-bounded-{index}" for index in range(6, 70)
+        }
+
 
 
 # =========================================================================
@@ -265,4 +378,3 @@ class TestBatchFlush:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

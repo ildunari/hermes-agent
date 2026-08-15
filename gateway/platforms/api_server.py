@@ -1509,6 +1509,10 @@ class APIServerAdapter(BasePlatformAdapter):
         self._stopping_run_ids: set[str] = set()
         # Pollable run status for dashboards and external control-plane UIs.
         self._run_statuses: Dict[str, Dict[str, Any]] = {}
+        # Compact, sanitized child lifecycle projection retained with each run.
+        # This is not a transcript: it contains no arguments, paths, reasoning,
+        # child text, output, or summary.
+        self._run_subagents: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Active approval session key for each run_id.  The approval core
         # resolves requests by session key, while API clients address the
         # in-flight run by run_id.
@@ -6780,6 +6784,139 @@ class APIServerAdapter(BasePlatformAdapter):
         self._run_statuses[run_id] = current
         return current
 
+    _RUN_SUBAGENT_TERMINAL_LIMIT = 64
+    _RUN_SUBAGENT_TERMINAL_STATES = frozenset(
+        {"completed", "failed", "interrupted", "cancelled", "timed_out", "stalled"}
+    )
+
+    def _upsert_run_subagent(
+        self, run_id: str, candidate: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Validate, sanitize, and retain one child record for its owning run."""
+        if not isinstance(candidate, dict):
+            return None
+        sid = candidate.get("subagent_id")
+        if not isinstance(sid, str) or not sid:
+            return None
+        run_status = self._run_statuses.get(run_id, {})
+        expected_session = run_status.get("session_id")
+        parent_run_id = candidate.get("parent_run_id")
+        parent_session_id = candidate.get("parent_session_id")
+        if parent_run_id not in (None, "", run_id):
+            return None
+        if expected_session and parent_session_id not in (None, "", expected_session):
+            return None
+
+        lifecycle_aliases = {
+            "success": "completed",
+            "succeeded": "completed",
+            "error": "failed",
+            "timeout": "timed_out",
+            "canceled": "cancelled",
+            "starting": "queued",
+        }
+        raw_lifecycle = str(candidate.get("raw_lifecycle") or candidate.get("lifecycle") or "unknown").lower()
+        lifecycle = lifecycle_aliases.get(
+            str(candidate.get("lifecycle") or raw_lifecycle).lower(),
+            str(candidate.get("lifecycle") or raw_lifecycle).lower(),
+        )
+        allowed_lifecycle = self._RUN_SUBAGENT_TERMINAL_STATES | {
+            "queued", "running", "finalizing", "unknown"
+        }
+        if lifecycle not in allowed_lifecycle:
+            lifecycle = "unknown"
+
+        compact: Dict[str, Any] = {
+            "version": 1,
+            "subagent_id": sid[:256],
+            "parent_run_id": run_id,
+            "parent_session_id": expected_session or parent_session_id,
+            "lifecycle": lifecycle,
+            "raw_lifecycle": raw_lifecycle[:64],
+        }
+        for key in ("delegation_group_id", "parent_subagent_id", "model", "provider", "reasoning_effort"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value:
+                compact[key] = redact_sensitive_text(value[:256], force=True)
+        for key in ("prompt", "short_label"):
+            value = candidate.get(key)
+            if isinstance(value, str):
+                compact[key] = redact_sensitive_text(
+                    value[:2000 if key == "prompt" else 120], force=True
+                )
+        for key in ("task_index", "task_count", "tool_count", "sequence"):
+            value = candidate.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                compact[key] = value
+        for key in ("started_at", "updated_at", "completed_at"):
+            value = candidate.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                compact[key] = float(value)
+        current_tool = candidate.get("current_tool")
+        if isinstance(current_tool, str) and current_tool:
+            compact["current_tool"] = redact_sensitive_text(current_tool[:256], force=True)
+        else:
+            compact["current_tool"] = None
+        usage = candidate.get("usage")
+        candidate_is_terminal = (
+            lifecycle in self._RUN_SUBAGENT_TERMINAL_STATES
+            or isinstance(compact.get("completed_at"), (int, float))
+        )
+        if candidate_is_terminal and isinstance(usage, dict):
+            known_usage = {
+                key: value
+                for key, value in usage.items()
+                if key in {"input_tokens", "output_tokens", "reasoning_tokens", "cost_usd"}
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            }
+            if known_usage:
+                compact["usage"] = known_usage
+
+        records = self._run_subagents.setdefault(run_id, {})
+        previous = records.get(sid)
+        if previous is not None:
+            old_sequence = previous.get("sequence")
+            new_sequence = compact.get("sequence")
+            if isinstance(old_sequence, int) and isinstance(new_sequence, int) and new_sequence <= old_sequence:
+                return None
+            if (
+                (
+                    previous.get("lifecycle") in self._RUN_SUBAGENT_TERMINAL_STATES
+                    or isinstance(previous.get("completed_at"), (int, float))
+                )
+                and not candidate_is_terminal
+            ):
+                return None
+        records[sid] = compact
+
+        terminal = sorted(
+            (
+                record for record in records.values()
+                if (
+                    record.get("lifecycle") in self._RUN_SUBAGENT_TERMINAL_STATES
+                    or isinstance(record.get("completed_at"), (int, float))
+                )
+            ),
+            key=lambda record: float(record.get("completed_at") or record.get("updated_at") or 0),
+        )
+        for record in terminal[:-self._RUN_SUBAGENT_TERMINAL_LIMIT]:
+            records.pop(record["subagent_id"], None)
+        ordered = sorted(
+            records.values(),
+            key=lambda record: (
+                str(record.get("delegation_group_id") or ""),
+                int(record.get("task_index") or 0),
+                float(record.get("started_at") or record.get("updated_at") or 0),
+            ),
+        )
+        self._set_run_status(
+            run_id,
+            run_status.get("status", "running"),
+            subagents=ordered,
+        )
+        return compact
+
     def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
         """Return a tool_progress_callback that pushes structured events to the run's SSE queue."""
         def _push(event: Dict[str, Any]) -> None:
@@ -6866,10 +7003,30 @@ class APIServerAdapter(BasePlatformAdapter):
                         value = redact_sensitive_text(value, force=True)
                     event[key] = value
                 _push(event)
-            # _thinking, subagent.tool, and subagent_progress are intentionally
-            # not forwarded on the /v1/runs stream: they are high-volume UI
-            # noise. Lifecycle boundaries (start/complete) still need to land
-            # so clients can observe delegate_task timeouts and failures.
+                compact = self._upsert_run_subagent(run_id, kwargs.get("subagent"))
+                if compact is not None:
+                    _push({
+                        "event": "subagent.upsert",
+                        "run_id": run_id,
+                        "timestamp": compact.get("updated_at", ts),
+                        "subagent": compact,
+                        "boundary": event_type,
+                    })
+            elif event_type in {
+                "subagent.spawn_requested", "subagent.finalizing", "subagent.tool"
+            }:
+                compact = self._upsert_run_subagent(run_id, kwargs.get("subagent"))
+                if compact is not None:
+                    _push({
+                        "event": "subagent.upsert",
+                        "run_id": run_id,
+                        "timestamp": compact.get("updated_at", ts),
+                        "subagent": compact,
+                        "boundary": event_type,
+                    })
+            # Child text/thinking and batched summaries are intentionally not
+            # forwarded on Runs. Tool starts are reduced to compact metadata;
+            # arguments and previews remain confined to legacy internal relays.
 
         return _callback
 
@@ -7085,6 +7242,10 @@ class APIServerAdapter(BasePlatformAdapter):
                         model_options=agent_overrides.get("model_options"),
                         route=route,
                     )
+                # Delegated children read these immutable ownership markers
+                # when constructing their compact lifecycle records.
+                agent._api_run_id = run_id
+                agent._api_parent_session_id = session_id
                 self._active_run_agents[run_id] = agent
 
                 def _approval_notify(approval_data: Dict[str, Any]) -> None:
@@ -7653,6 +7814,7 @@ class APIServerAdapter(BasePlatformAdapter):
         ]
         for run_id in stale_statuses:
             self._run_statuses.pop(run_id, None)
+            self._run_subagents.pop(run_id, None)
 
     # ------------------------------------------------------------------
     # BasePlatformAdapter interface

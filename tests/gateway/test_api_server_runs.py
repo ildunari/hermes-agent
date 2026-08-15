@@ -165,6 +165,8 @@ class TestStartRun:
                     from tools.async_delegation import _current_origin_session_id
 
                     captured["origin_session_id"] = _current_origin_session_id()
+                    captured["parent_session_id"] = mock_agent._api_parent_session_id
+                    captured["parent_run_id"] = mock_agent._api_run_id
                     return {"final_response": "done"}
 
                 mock_agent.run_conversation.side_effect = _capture_run
@@ -191,6 +193,8 @@ class TestStartRun:
         assert captured.get("origin_session_id") == "runs-raw-sid", (
             "runs route must bind chat_id so delegation dispatch sees a wake target"
         )
+        assert captured["parent_session_id"] == "runs-raw-sid"
+        assert captured["parent_run_id"] == run_id
 
 
     @pytest.mark.asyncio
@@ -334,6 +338,103 @@ class TestRunEvents:
                 # Should contain run.completed
                 assert "run.completed" in body
                 assert "Hello!" in body
+
+    @pytest.mark.asyncio
+    async def test_compact_subagent_upserts_are_sanitized_and_retained(self, adapter):
+        run_id = "run_subagent_contract"
+        loop = asyncio.get_running_loop()
+        queue = asyncio.Queue()
+        adapter._run_streams[run_id] = queue
+        adapter._set_run_status(
+            run_id, "running", session_id="parent-session"
+        )
+        callback = adapter._make_run_event_callback(run_id, loop)
+        secret = "sk-proj-abcdef1234567890abcdef1234567890abcdef12"
+
+        base = {
+            "version": 1,
+            "subagent_id": "sa-1",
+            "delegation_group_id": "dg-1",
+            "parent_session_id": "parent-session",
+            "parent_run_id": run_id,
+            "task_index": 0,
+            "task_count": 1,
+            "prompt": f"inspect {secret}",
+            "short_label": f"inspect {secret}",
+            "model": "claude-opus-5",
+            "provider": "vibeproxy",
+            "reasoning_effort": "high",
+            "started_at": time.time(),
+            "updated_at": time.time(),
+            "completed_at": None,
+            "current_tool": "read_file",
+            "tool_count": 1,
+            "sequence": 1,
+            "lifecycle": "running",
+            "raw_lifecycle": "running",
+            # These must never cross the compact projection boundary.
+            "summary": "private child output",
+            "args": {"path": "/tmp/private.py"},
+            "files_read": ["/tmp/private.py"],
+        }
+        callback(
+            "subagent.tool",
+            "read_file",
+            "/tmp/private.py",
+            {"path": "/tmp/private.py"},
+            subagent=base,
+        )
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["event"] == "subagent.upsert"
+        record = event["subagent"]
+        assert record["parent_run_id"] == run_id
+        assert record["parent_session_id"] == "parent-session"
+        assert "sk-proj-" not in record["prompt"]
+        for forbidden in ("summary", "args", "files_read", "preview", "output"):
+            assert forbidden not in record
+        assert adapter._run_statuses[run_id]["subagents"] == [record]
+
+        completed = dict(base)
+        completed.update({
+            "sequence": 2,
+            "lifecycle": "completed",
+            "raw_lifecycle": "success",
+            "updated_at": time.time(),
+            "completed_at": time.time(),
+            "current_tool": None,
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        })
+        callback("subagent.complete", status="completed", subagent=completed)
+        legacy = await asyncio.wait_for(queue.get(), timeout=1.0)
+        upsert = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert legacy["event"] == "subagent.complete"
+        assert upsert["event"] == "subagent.upsert"
+        assert upsert["subagent"]["usage"] == {
+            "input_tokens": 10, "output_tokens": 2
+        }
+
+    @pytest.mark.asyncio
+    async def test_compact_subagent_projection_rejects_cross_run_owner(self, adapter):
+        run_id = "run_owner"
+        loop = asyncio.get_running_loop()
+        queue = asyncio.Queue()
+        adapter._run_streams[run_id] = queue
+        adapter._set_run_status(run_id, "running", session_id="session-owner")
+        callback = adapter._make_run_event_callback(run_id, loop)
+        callback(
+            "subagent.tool",
+            "terminal",
+            subagent={
+                "subagent_id": "sa-cross-run",
+                "parent_run_id": "run-other",
+                "parent_session_id": "session-owner",
+                "lifecycle": "running",
+                "sequence": 1,
+            },
+        )
+        await asyncio.sleep(0)
+        assert queue.empty()
+        assert adapter._run_statuses[run_id].get("subagents") is None
 
 
     @pytest.mark.asyncio

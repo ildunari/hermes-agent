@@ -21,6 +21,7 @@ import copy
 import enum
 import contextvars
 import json
+from collections import deque
 from difflib import get_close_matches
 import logging
 import re
@@ -153,6 +154,182 @@ _active_subagents_lock = threading.Lock()
 # subagent_id -> mutable record tracking the live child agent.  Stays only
 # for the lifetime of the run; _run_single_child is the owner.
 _active_subagents: Dict[str, Dict[str, Any]] = {}
+
+# Compact, display-safe lifecycle projection.  This is deliberately separate
+# from ``_active_subagents``: the latter is a control registry containing live
+# agent/transport objects, while this one is safe to expose to an owning UI and
+# retains a small terminal tail for reconnects.
+_subagent_status_lock = threading.Lock()
+_subagent_status_active: Dict[str, Dict[str, Any]] = {}
+_subagent_status_terminal: Dict[str, deque] = {}
+_SUBAGENT_TERMINAL_LIMIT = 64
+_SUBAGENT_TERMINAL_STATES = frozenset(
+    {"completed", "failed", "interrupted", "cancelled", "timed_out", "stalled"}
+)
+_SUBAGENT_STATUS_FIELDS = frozenset({
+    "version", "subagent_id", "delegation_group_id", "parent_session_id",
+    "parent_run_id", "parent_subagent_id", "task_index", "task_count",
+    "prompt", "short_label", "lifecycle", "raw_lifecycle", "model",
+    "provider", "reasoning_effort", "started_at", "updated_at",
+    "completed_at", "current_tool", "tool_count", "usage", "sequence",
+})
+
+
+def _normalize_subagent_lifecycle(value: Any) -> tuple[str, str]:
+    """Return the compact lifecycle plus the untouched source spelling."""
+    raw = str(value or "unknown").strip().lower() or "unknown"
+    aliases = {
+        "spawn_requested": "queued",
+        "starting": "queued",
+        "success": "completed",
+        "succeeded": "completed",
+        "done": "completed",
+        "error": "failed",
+        "failure": "failed",
+        "timeout": "timed_out",
+        "timedout": "timed_out",
+        "canceled": "cancelled",
+    }
+    normalized = aliases.get(raw, raw)
+    allowed = _SUBAGENT_TERMINAL_STATES | {
+        "queued",
+        "running",
+        "finalizing",
+        "unknown",
+    }
+    return (normalized if normalized in allowed else "unknown", raw)
+
+
+def _safe_subagent_prompt(value: Any, *, limit: int = 2000) -> str:
+    """Bound and redact the only child-authored text allowed in the compact record."""
+    text = " ".join(str(value or "").split())
+    try:
+        from agent.redact import redact_sensitive_text
+
+        text = redact_sensitive_text(text, force=True)
+    except Exception:
+        # Redaction should always be available in the agent runtime.  If an
+        # unusual embedding cannot import it, fail closed instead of exposing
+        # unreviewed prompt text.
+        return ""
+    return text[:limit]
+
+
+def _store_subagent_status(record: Dict[str, Any]) -> None:
+    """Upsert one sanitized record and retain a bounded terminal tail by owner."""
+    sid = record.get("subagent_id")
+    owner = record.get("parent_session_id")
+    if not isinstance(sid, str) or not sid or not isinstance(owner, str) or not owner:
+        return
+    safe = {
+        key: copy.deepcopy(value)
+        for key, value in record.items()
+        if key in _SUBAGENT_STATUS_FIELDS
+    }
+    if "prompt" in safe:
+        safe["prompt"] = _safe_subagent_prompt(safe["prompt"])
+    if "short_label" in safe:
+        safe["short_label"] = _safe_subagent_prompt(
+            safe["short_label"], limit=120
+        )
+    if isinstance(safe.get("usage"), dict):
+        safe["usage"] = {
+            key: value
+            for key, value in safe["usage"].items()
+            if key in {"input_tokens", "output_tokens", "reasoning_tokens", "cost_usd"}
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        }
+        if not safe["usage"]:
+            safe.pop("usage", None)
+    lifecycle = safe.get("lifecycle")
+    is_terminal = (
+        lifecycle in _SUBAGENT_TERMINAL_STATES
+        or isinstance(safe.get("completed_at"), (int, float))
+    )
+    with _subagent_status_lock:
+        previous = _subagent_status_active.get(sid)
+        terminal = _subagent_status_terminal.get(owner, ())
+        terminal_previous = next(
+            (
+                existing for existing in terminal
+                if existing.get("subagent_id") == sid
+                and existing.get("parent_run_id") == safe.get("parent_run_id")
+            ),
+            None,
+        )
+        previous = terminal_previous or previous
+        if previous is not None:
+            old_sequence = previous.get("sequence")
+            new_sequence = safe.get("sequence")
+            if (
+                isinstance(old_sequence, int)
+                and isinstance(new_sequence, int)
+                and new_sequence <= old_sequence
+            ):
+                return
+            if (
+                (
+                    previous.get("lifecycle") in _SUBAGENT_TERMINAL_STATES
+                    or isinstance(previous.get("completed_at"), (int, float))
+                )
+                and not is_terminal
+            ):
+                return
+        if is_terminal:
+            _subagent_status_active.pop(sid, None)
+            terminal = _subagent_status_terminal.setdefault(
+                owner, deque(maxlen=_SUBAGENT_TERMINAL_LIMIT)
+            )
+            # A retried terminal callback is an upsert, not a duplicate row.
+            for index, existing in enumerate(terminal):
+                if (
+                    existing.get("subagent_id") == sid
+                    and existing.get("parent_run_id") == safe.get("parent_run_id")
+                ):
+                    terminal[index] = safe
+                    break
+            else:
+                terminal.append(safe)
+        else:
+            _subagent_status_active[sid] = safe
+
+
+def list_subagent_status(
+    parent_session_id: str, *, parent_run_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Return only compact children owned by the exact parent session/run.
+
+    Missing owner identity fails closed.  Agent objects, transport handles,
+    tool arguments, paths, reasoning, child output, and summaries never enter
+    this projection.
+    """
+    owner = str(parent_session_id or "").strip()
+    if not owner:
+        return []
+    with _subagent_status_lock:
+        records = [
+            copy.deepcopy(record)
+            for record in _subagent_status_active.values()
+            if record.get("parent_session_id") == owner
+        ]
+        records.extend(
+            copy.deepcopy(record)
+            for record in _subagent_status_terminal.get(owner, ())
+        )
+    if parent_run_id is not None:
+        records = [
+            record for record in records
+            if record.get("parent_run_id") == parent_run_id
+        ]
+    records.sort(
+        key=lambda record: (
+            str(record.get("delegation_group_id") or ""),
+            int(record.get("task_index") or 0),
+            float(record.get("started_at") or record.get("updated_at") or 0),
+        )
+    )
+    return records
 
 
 def set_spawn_paused(paused: bool) -> bool:
@@ -1270,6 +1447,11 @@ def _build_child_progress_callback(
     parent_id: Optional[str] = None,
     depth: Optional[int] = None,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    delegation_group_id: Optional[str] = None,
+    parent_session_id: Optional[str] = None,
+    parent_run_id: Optional[str] = None,
     toolsets: Optional[List[str]] = None,
     session_ref: Optional[Dict[str, Any]] = None,
 ) -> Optional[callable]:
@@ -1302,6 +1484,9 @@ def _build_child_progress_callback(
     _BATCH_SIZE = 5
     _batch: List[str] = []
     _tool_count = [0]  # per-subagent running counter (list for closure mutation)
+    _sequence = [0]
+    _started_at: List[Optional[float]] = [None]
+    _compact_enabled = bool(delegation_group_id and parent_session_id)
 
     def _identity_kwargs() -> Dict[str, Any]:
         kw: Dict[str, Any] = {
@@ -1339,11 +1524,77 @@ def _build_child_progress_callback(
         except Exception as e:
             logger.debug("Parent callback failed: %s", e)
 
+    def _compact_record(
+        raw_lifecycle: str,
+        *,
+        current_tool: Optional[str] = None,
+        usage: Optional[Dict[str, Any]] = None,
+        terminal: bool = False,
+    ) -> Dict[str, Any]:
+        now = time.time()
+        lifecycle, raw = _normalize_subagent_lifecycle(raw_lifecycle)
+        _sequence[0] += 1
+        if lifecycle == "running" and _started_at[0] is None:
+            _started_at[0] = now
+        prompt = _safe_subagent_prompt(goal_label)
+        record: Dict[str, Any] = {
+            "version": 1,
+            "subagent_id": subagent_id,
+            "delegation_group_id": delegation_group_id,
+            "parent_session_id": parent_session_id,
+            "parent_run_id": parent_run_id,
+            "parent_subagent_id": parent_id,
+            "task_index": task_index,
+            "task_count": task_count,
+            "prompt": prompt,
+            "short_label": prompt[:120],
+            "lifecycle": lifecycle,
+            "raw_lifecycle": raw,
+            "started_at": _started_at[0],
+            "updated_at": now,
+            "completed_at": (
+                now if terminal or lifecycle in _SUBAGENT_TERMINAL_STATES else None
+            ),
+            "current_tool": current_tool or None,
+            "tool_count": _tool_count[0],
+            "sequence": _sequence[0],
+        }
+        if isinstance(model, str) and model:
+            record["model"] = model
+        if isinstance(provider, str) and provider:
+            record["provider"] = provider
+        if isinstance(reasoning_effort, str) and reasoning_effort:
+            record["reasoning_effort"] = reasoning_effort
+        if usage:
+            known_usage = {
+                key: value
+                for key, value in usage.items()
+                if key in {"input_tokens", "output_tokens", "reasoning_tokens", "cost_usd"}
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            }
+            if known_usage:
+                record["usage"] = known_usage
+        _store_subagent_status(record)
+        return record
+
     def _callback(
         event_type, tool_name: str = None, preview: str = None, args=None, **kwargs
     ):
         # Lifecycle events emitted by the orchestrator itself — handled
         # before enum normalisation since they are not part of DelegateEvent.
+        if event_type == "subagent.spawn_requested":
+            if not _compact_enabled:
+                return
+            record = _compact_record("spawn_requested")
+            _relay(
+                "subagent.spawn_requested",
+                preview=preview or goal_label or "",
+                subagent=record,
+                **kwargs,
+            )
+            return
+
         if event_type == "subagent.start":
             if spinner and goal_label:
                 short = (
@@ -1353,11 +1604,37 @@ def _build_child_progress_callback(
                     spinner.print_above(f" {prefix}├─ 🔀 {short}")
                 except Exception as e:
                     logger.debug("Spinner print_above failed: %s", e)
-            _relay("subagent.start", preview=preview or goal_label or "", **kwargs)
+            record = _compact_record("running") if _compact_enabled else None
+            compact_kw = {"subagent": record} if record is not None else {}
+            _relay(
+                "subagent.start",
+                preview=preview or goal_label or "",
+                **compact_kw,
+                **kwargs,
+            )
+            return
+
+        if event_type == "subagent.finalizing":
+            if not _compact_enabled:
+                return
+            record = _compact_record("finalizing")
+            _relay("subagent.finalizing", subagent=record, **kwargs)
             return
 
         if event_type == "subagent.complete":
-            _relay("subagent.complete", preview=preview, **kwargs)
+            usage = kwargs.pop("compact_usage", None)
+            raw_status = kwargs.get("status") or "unknown"
+            record = (
+                _compact_record(raw_status, usage=usage, terminal=True)
+                if _compact_enabled else None
+            )
+            compact_kw = {"subagent": record} if record is not None else {}
+            _relay(
+                "subagent.complete",
+                preview=preview,
+                **compact_kw,
+                **kwargs,
+            )
             return
 
         if event_type == "subagent.text":
@@ -1444,7 +1721,12 @@ def _build_child_progress_callback(
                 logger.debug("Spinner print_above failed: %s", e)
 
         if parent_cb:
-            _relay("subagent.tool", tool_name, preview, args)
+            record = (
+                _compact_record("running", current_tool=tool_name)
+                if _compact_enabled else None
+            )
+            compact_kw = {"subagent": record} if record is not None else {}
+            _relay("subagent.tool", tool_name, preview, args, **compact_kw)
             _batch.append(tool_name or "")
             if len(_batch) >= _BATCH_SIZE:
                 summary = ", ".join(_batch)
@@ -1509,6 +1791,7 @@ def _build_child_agent(
     max_iterations: int,
     task_count: int,
     parent_agent,
+    delegation_group_id: Optional[str] = None,
     reasoning_effort: Any = None,
     # Credential overrides from delegation config (provider:model resolution)
     override_provider: Optional[str] = None,
@@ -1641,6 +1924,17 @@ def _build_child_agent(
 
     # Resolve the child's effective model early so it can ride on every event.
     effective_model_for_cb = model or getattr(parent_agent, "model", None)
+    effective_provider_for_cb = override_provider or getattr(parent_agent, "provider", None)
+    requested_effort_for_cb = reasoning_effort
+    if requested_effort_for_cb is None:
+        requested_effort_for_cb = delegation_cfg.get("reasoning_effort")
+    if not isinstance(requested_effort_for_cb, str):
+        requested_effort_for_cb = None
+    parent_session_id = (
+        getattr(parent_agent, "_api_parent_session_id", None)
+        or getattr(parent_agent, "session_id", None)
+    )
+    parent_run_id = getattr(parent_agent, "_api_run_id", None)
 
     # Build progress callback to relay tool calls to parent display.
     # Identity kwargs thread the subagent_id through every emitted event so the
@@ -1655,6 +1949,13 @@ def _build_child_agent(
         parent_id=parent_subagent_id,
         depth=tui_depth,
         model=effective_model_for_cb,
+        provider=effective_provider_for_cb,
+        reasoning_effort=requested_effort_for_cb,
+        delegation_group_id=delegation_group_id,
+        parent_session_id=(
+            str(parent_session_id) if isinstance(parent_session_id, str) else None
+        ),
+        parent_run_id=(str(parent_run_id) if isinstance(parent_run_id, str) else None),
         toolsets=child_toolsets,
         session_ref=child_session_ref,
     )
@@ -1873,6 +2174,8 @@ def _build_child_agent(
     child._parent_subagent_id = parent_subagent_id
     child._subagent_goal = goal
     child._parent_turn_id = getattr(parent_agent, "_current_turn_id", "") or ""
+    child._delegation_group_id = delegation_group_id
+    child._parent_run_id = parent_run_id
     # Ownership chain for the model-facing control plane (action=list/steer/
     # stop): a parent may only control agents whose weakref chain reaches it.
     # Weakref so a finished parent can be collected while a detached child
@@ -2822,6 +3125,15 @@ def _run_single_child(
                 else _late_pending_steer
             )
 
+        # The child has finished generating but terminal accounting and result
+        # shaping still remain.  Emit this boundary explicitly so clients do
+        # not mislabel that interval as either active tool work or completion.
+        if child_progress_cb:
+            try:
+                child_progress_cb("subagent.finalizing")
+            except Exception as e:
+                logger.debug("Progress callback finalizing relay failed: %s", e)
+
         # Flush any remaining batched progress to gateway
         if child_progress_cb and hasattr(child_progress_cb, "_flush"):
             try:
@@ -2910,8 +3222,8 @@ def _run_single_child(
             exit_reason = "max_iterations"
 
         # Extract token counts (safe for mock objects)
-        _input_tokens = getattr(child, "session_prompt_tokens", 0)
-        _output_tokens = getattr(child, "session_completion_tokens", 0)
+        _input_tokens = getattr(child, "session_prompt_tokens", None)
+        _output_tokens = getattr(child, "session_completion_tokens", None)
         _model = getattr(child, "model", None)
 
         entry: Dict[str, Any] = {
@@ -3026,7 +3338,7 @@ def _run_single_child(
         # pane + accordion rollups (features 1, 2, 4).  All fields are
         # optional — missing data degrades gracefully on the client.
         _cost_usd = getattr(child, "session_estimated_cost_usd", None)
-        _reasoning_tokens = getattr(child, "session_reasoning_tokens", 0)
+        _reasoning_tokens = getattr(child, "session_reasoning_tokens", None)
         try:
             _files_read = list(file_state.known_reads(child_task_id))[:40]
         except Exception:
@@ -3069,11 +3381,22 @@ def _run_single_child(
             "files_written": _files_written,
             "output_tail": _output_tail,
         }
+        _compact_usage: Dict[str, Any] = {}
+        for _wire_key, _value in (
+            ("input_tokens", _input_tokens),
+            ("output_tokens", _output_tokens),
+            ("reasoning_tokens", _reasoning_tokens),
+        ):
+            if isinstance(_value, (int, float)) and not isinstance(_value, bool):
+                _compact_usage[_wire_key] = int(_value)
         if _cost_usd is not None:
             try:
                 complete_kwargs["cost_usd"] = float(_cost_usd)
+                _compact_usage["cost_usd"] = float(_cost_usd)
             except (TypeError, ValueError):
                 pass
+        if _compact_usage:
+            complete_kwargs["compact_usage"] = _compact_usage
 
         if child_progress_cb:
             try:
@@ -3690,6 +4013,12 @@ def delegate_task(
     overall_start = time.monotonic()
     results = []
 
+    import uuid as _delegation_uuid
+
+    delegation_group_id = (
+        None if background else f"dg-{_delegation_uuid.uuid4().hex}"
+    )
+
     n_tasks = len(task_list)
     # Track goal labels for progress display (truncated for readability)
     task_labels = [t["goal"][:40] for t in task_list]
@@ -3763,6 +4092,7 @@ def delegate_task(
             max_iterations=iteration_budgets[effective_budget_class],
             task_count=n_tasks,
             parent_agent=parent_agent,
+            delegation_group_id=delegation_group_id,
             override_provider=creds["provider"],
             override_base_url=creds["base_url"],
             override_api_key=creds["api_key"],
