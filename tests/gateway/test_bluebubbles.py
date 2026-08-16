@@ -234,6 +234,64 @@ class TestBlueBubblesGuidResolution:
         assert "user@example.com" not in adapter._guid_cache
 
 
+class TestBlueBubblesAttachmentSending:
+    @staticmethod
+    def _response():
+        class MockResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"status": 200, "data": {"guid": "sent-guid"}}
+
+        return MockResponse()
+
+    def test_dm_attachment_uses_bare_address(self, monkeypatch, tmp_path):
+        adapter = _make_adapter(monkeypatch)
+        sent_data = {}
+
+        async def resolve(_target):
+            return "iMessage;-;+15551234567"
+
+        class MockClient:
+            async def post(self, _url, *, files, data, timeout):
+                sent_data.update(data)
+                return TestBlueBubblesAttachmentSending._response()
+
+        monkeypatch.setattr(adapter, "_resolve_chat_guid", resolve)
+        monkeypatch.setattr(adapter, "client", MockClient())
+        attachment = tmp_path / "report.md"
+        attachment.write_text("hello")
+
+        result = asyncio.run(adapter.send_document("+15551234567", str(attachment)))
+
+        assert result.success is True
+        assert sent_data["chatGuid"] == "+15551234567"
+
+    def test_group_attachment_preserves_full_guid(self, monkeypatch, tmp_path):
+        adapter = _make_adapter(monkeypatch)
+        sent_data = {}
+        group_guid = "iMessage;+;chat1234567890"
+
+        async def resolve(_target):
+            return group_guid
+
+        class MockClient:
+            async def post(self, _url, *, files, data, timeout):
+                sent_data.update(data)
+                return TestBlueBubblesAttachmentSending._response()
+
+        monkeypatch.setattr(adapter, "_resolve_chat_guid", resolve)
+        monkeypatch.setattr(adapter, "client", MockClient())
+        attachment = tmp_path / "report.zip"
+        attachment.write_bytes(b"PK")
+
+        result = asyncio.run(adapter.send_document(group_guid, str(attachment)))
+
+        assert result.success is True
+        assert sent_data["chatGuid"] == group_guid
+
+
 class TestBlueBubblesAttachmentDownload:
     """Verify _download_attachment routes to the correct cache helper."""
 

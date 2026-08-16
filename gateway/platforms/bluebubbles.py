@@ -607,11 +607,21 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"Chat not found: {chat_id}")
 
         fname = filename or os.path.basename(file_path)
+        # BlueBubbles' attachment endpoint differs from its text endpoint for
+        # 1:1 chats: passing a full ``service;-;address`` GUID makes the server
+        # treat the service prefix ("any", "iMessage", or "SMS") as the
+        # recipient and creates a phantom failed conversation.  Send the bare
+        # address for DMs, while preserving real group GUIDs unchanged.
+        attachment_target = guid
+        if guid.startswith(("any;-;", "iMessage;-;", "SMS;-;")):
+            candidate = guid.split(";-;", 1)[1]
+            if candidate and not candidate.startswith("chat"):
+                attachment_target = candidate
         try:
             with open(file_path, "rb") as f:
                 files = {"attachment": (fname, f, "application/octet-stream")}
                 data: Dict[str, str] = {
-                    "chatGuid": guid,
+                    "chatGuid": attachment_target,
                     "name": fname,
                     "tempGuid": uuid.uuid4().hex,
                 }
