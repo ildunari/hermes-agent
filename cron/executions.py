@@ -22,11 +22,10 @@ from hermes_constants import (
 )
 from hermes_time import now as _hermes_now
 
-EXECUTIONS_FILE = get_hermes_home().resolve() / "cron" / "executions.db"
-# Import-time snapshot so a deliberately re-pointed module constant (the
-# documented test/embedder escape hatch) is distinguishable from the constant
-# merely being stale for the active cron store.
-_IMPORT_EXECUTIONS_FILE = EXECUTIONS_FILE
+# Optional test override. Production resolves the path at transaction time so
+# dashboard operations that temporarily enter another profile cannot leak that
+# profile's execution records into the import-time home.
+EXECUTIONS_FILE: Optional[Path] = None
 MAX_TERMINAL_EXECUTIONS = 1000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
@@ -44,15 +43,19 @@ def _store_paths() -> "tuple[Path, Optional[Path]]":
     journal-mode config against the same profile instead of mkdir-ing the
     ambient ``HERMES_HOME``.
     """
-    if EXECUTIONS_FILE != _IMPORT_EXECUTIONS_FILE:
+    if EXECUTIONS_FILE is not None:
         return EXECUTIONS_FILE, None
     try:
-        from cron.jobs import _current_cron_store
+        from cron import jobs
 
-        store = _current_cron_store()
+        override = jobs._cron_store_override.get()
+        if override is not None:
+            return override.cron_dir / "executions.db", override.cron_dir.parent
     except Exception:
-        return EXECUTIONS_FILE, None
-    return store.cron_dir / "executions.db", store.cron_dir.parent
+        pass
+
+    home = get_hermes_home().resolve()
+    return home / "cron" / "executions.db", home
 
 
 def _connect() -> sqlite3.Connection:

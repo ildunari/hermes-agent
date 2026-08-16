@@ -206,7 +206,7 @@ export const en: Translations = {
     enterHud: 'HUD mode',
     exitHud: 'Exit HUD mode',
     layoutEditor: 'Layout editor',
-    layoutEditorTitle: 'Layout editor — ⌘-click resets the layout'
+    layoutEditorTitle: mod => `Layout editor — ${mod}-click resets the layout`
   },
 
   keybinds: {
@@ -253,6 +253,7 @@ export const en: Translations = {
       'session.slot.9': 'Switch to recent session 9',
       'session.focusSearch': 'Search sessions',
       'session.togglePin': 'Pin / unpin current session',
+      'session.archive': 'Archive current session',
       'workspace.newWorktree': 'New worktree',
       'workspace.openFolder': 'Open folder as project',
       'composer.focus': 'Focus composer',
@@ -345,6 +346,7 @@ export const en: Translations = {
       providerApiKeys: 'API keys',
       providerCustomEndpoints: 'Custom Endpoints',
       gateway: 'Gateway',
+      connections: 'Connections',
       apiKeys: 'Tools & Keys',
       keybinds: 'Keyboard Shortcuts',
       keysTools: 'Tools',
@@ -457,6 +459,8 @@ export const en: Translations = {
       colorModeDesc: 'Pick a fixed mode or let Hermes follow your system setting.',
       toolViewTitle: 'Tool Call Display',
       toolViewDesc: 'Product hides raw tool payloads; Technical shows full input/output.',
+      reasoningCollapsedTitle: 'Collapse thinking by default',
+      reasoningCollapsedDesc: 'Keep streamed reasoning available without expanding it until you open it.',
       uiScaleTitle: 'UI Scale',
       uiScaleDesc: (percent: number) =>
         `Scales text and controls across the whole app. Cmd/Ctrl with +, - and 0 also works. Current: ${percent}%.`,
@@ -470,6 +474,11 @@ export const en: Translations = {
         'Fit wraps tables inside the chat; Scroll preserves useful column widths with horizontal scrolling.',
       tableLayoutFit: 'Fit',
       tableLayoutScroll: 'Scroll',
+      sessionDensityTitle: 'Session List Density',
+      sessionDensityDesc: 'Choose how much context appears beneath session titles in the sidebar.',
+      sessionDensityCompact: 'Compact',
+      sessionDensityComfortable: 'Comfortable',
+      sessionDensityDetailed: 'Detailed',
       terminalFontTitle: 'Terminal Font',
       terminalFontDesc:
         'Choose an installed font for Desktop terminals. Nerd Fonts render Powerlevel10k and shell icons; leave blank to use bundled JetBrains Mono.',
@@ -482,6 +491,8 @@ export const en: Translations = {
       backdropDesc: 'The faint statue image behind the conversation.',
       reactionsTitle: 'Message Reactions',
       reactionsDesc: 'iMessage-style emoji tapbacks — react to messages, and Hermes can react to yours.',
+      composerPopoutTitle: 'Floating Composer',
+      composerPopoutDesc: 'Allow dragging the composer out of its dock. Turn this off to keep it locked at the bottom.',
       embedsTitle: 'Inline Embeds',
       embedsDesc:
         'Rich previews load from third-party sites (YouTube, X, …). Ask shows a placeholder until you allow each one; Always loads them automatically; Off keeps plain links.',
@@ -593,8 +604,12 @@ export const en: Translations = {
       autosaveFailed: 'Autosave failed',
       imported: 'Config imported',
       invalidJson: 'Invalid config JSON',
+      toolsetsWipeConfirm:
+        'Remove all enabled toolsets? This disables memory, terminal, web search, delegation, and most other tools until you re-enable them.',
       keepAwakeTitle: 'Keep computer awake',
       keepAwakeDesc: 'Stop this machine from sleeping so long or overnight runs keep going. The display can still dim.',
+      disableF12Title: 'Disable F12 DevTools',
+      disableF12Desc: 'Block F12 from opening Developer Tools. Ctrl+Shift+I (or Cmd+Opt+I on Mac) still works.',
       attachmentSizeTitle: 'Max preview / image load size',
       attachmentSizeDesc:
         'How big a local file Desktop will load for previews and image attach, in MB. Default is 16. Remote non-image attach uses a separate 256 MB cap. Setting this very high loads the whole file into memory and can freeze or crash the app.',
@@ -630,6 +645,51 @@ export const en: Translations = {
       replace: 'Replace',
       set: 'Set',
       clear: 'Clear'
+    },
+    // v2 multi-connection registry: Settings → Connections.
+    connections: {
+      title: 'Connections',
+      intro:
+        'Register every place your agents live — this device, remote gateways on your network, and Hermes Cloud instances. All of them are stored here.',
+      stagedNote:
+        'Chats and the agent roster follow the source you pick; the app-managed window backend is still chosen in Settings → Gateway.',
+      loadFailed: 'Could not load connections',
+      primaryPill: 'Primary',
+      managedPill: 'This device',
+      addConnection: 'Add connection',
+      editConnection: 'Edit',
+      removeConnection: 'Remove',
+      removeConfirmTitle: 'Remove this connection?',
+      removeConfirmDesc: (label: string) =>
+        `“${label}” will be removed from this app. The instance itself is not touched — you can add it again any time.`,
+      makePrimary: 'Make primary',
+      testConnection: 'Test',
+      testOk: 'Reachable',
+      testFailed: 'Connection test failed',
+      saveFailed: 'Could not save the connection',
+      removeFailed: 'Could not remove the connection',
+      updateAll: 'Update all instances',
+      updateAllRunning: 'Updating all instances…',
+      updateAllDone: 'Updates dispatched',
+      updateAllFailed: 'Update fan-out failed',
+      updateSkippedCloud: 'Managed by Hermes Cloud',
+      kindLocal: 'Local',
+      kindRemote: 'Remote gateway',
+      kindCloud: 'Hermes Cloud',
+      kindSsh: 'SSH',
+      kindLocalDesc: 'The Hermes runtime managed by this app.',
+      kindRemoteDesc: 'A Hermes gateway reachable over HTTP(S) — LAN, Tailscale, or the internet.',
+      kindCloudDesc: 'A hosted instance discovered through your Hermes Cloud account.',
+      kindSshDesc: 'A Hermes install reached over SSH.',
+      labelTitle: 'Name',
+      labelDesc: 'Required. Shown everywhere this instance appears; must be unique (e.g. “Homelab”, “Work laptop”).',
+      labelPlaceholder: 'Homelab',
+      urlTitle: 'Gateway URL',
+      sshHostTitle: 'SSH host',
+      save: 'Save connection',
+      saving: 'Saving…',
+      cancel: 'Cancel',
+      empty: 'No connections registered yet.'
     },
     gateway: {
       loading: 'Loading gateway settings...',
@@ -1026,7 +1086,6 @@ export const en: Translations = {
     tabToolsets: 'Tools',
     configuringProfile: 'Configuring:',
     tabMcp: 'MCP',
-    tabHub: 'Browse Hub',
     all: 'All',
     searchSkills: 'Search skills...',
     searchToolsets: 'Search tools...',
@@ -1121,6 +1180,11 @@ export const en: Translations = {
       updateStarted: 'Updating installed skills...',
       actionFailed: 'Skill action failed',
       actionLog: 'Action log',
+      alreadyInstalled: (name: string) => `"${name}" is already installed`,
+      pickerTitle: 'Skills Hub',
+      pickerBrowse: 'Browse the full hub',
+      pickerHide: 'Hide the hub browser',
+      pickerHint: 'Hit "+ Add to this Agent" on any skill — it installs and appears in the list above.',
       loadFailed: 'Skill hub failed to load',
       previewFailed: 'Skill preview failed',
       scanFailed: 'Security scan failed',
@@ -1979,9 +2043,14 @@ export const en: Translations = {
     loading: 'Loading…',
     loadMore: 'Load more',
     loadCount: step => `Load ${step} more`,
+    messageCount: count => `${count} ${count === 1 ? 'message' : 'messages'}`,
+    toolCallCount: count => `${count} ${count === 1 ? 'tool call' : 'tool calls'}`,
     row: {
       pin: 'Pin',
       unpin: 'Unpin',
+      markUnread: 'Mark as unread',
+      markRead: 'Mark as read',
+      unreadFailed: 'Could not update unread state',
       copyId: 'Copy ID',
       export: 'Export',
       branchFrom: 'Branch',
@@ -2007,6 +2076,10 @@ export const en: Translations = {
       renameTitle: 'Rename session',
       renameDesc: 'Leave empty to clear.',
       untitledPlaceholder: 'Untitled session',
+      deleteTitle: 'Delete session?',
+      deleteDesc: title => `This will permanently delete “${title}”. This cannot be undone.`,
+      deleting: 'Deleting…',
+      deleted: 'Session deleted',
       untitledChat: id => `Chat ${id}`,
       messageCount: count => `${count} ${count === 1 ? 'message' : 'messages'}`,
       todoProgress: 'Tasks completed',
@@ -2025,7 +2098,8 @@ export const en: Translations = {
     statusDivider: {
       working: 'Working',
       done: 'Done'
-    }
+    },
+    markAllRead: 'Mark all as read'
   },
 
   composer: {
@@ -2163,6 +2237,12 @@ export const en: Translations = {
       done: skill => `Added /${skill}`,
       doneTip: 'The skill loads when you send'
     },
+    githubSuggestions: {
+      label: 'Set up GitHub',
+      tip: 'GitHub works through the gh CLI skills here — click to connect your account',
+      done: 'Added /github-auth',
+      doneTip: 'Send the message and the agent walks you through GitHub sign-in'
+    },
     repairSuggestions: {
       label: server => `Reconnect ${server}`,
       tip: server => `A ${server} call just failed with a connection error`,
@@ -2241,7 +2321,7 @@ export const en: Translations = {
       scopeLastTurn: 'Last turn',
       commit: 'Commit',
       commitAndPush: 'Commit & Push',
-      commitPlaceholder: 'Message (⌘↵ to commit)',
+      commitPlaceholder: shortcut => `Message (${shortcut} to commit)`,
       generateCommitMessage: 'Generate commit message',
       stopGenerating: 'Stop generating',
       createPr: 'Create PR',
@@ -2816,6 +2896,7 @@ export const en: Translations = {
       thought: 'Thought',
       thoughtBriefly: 'Thought briefly',
       thoughtFor: duration => `Thought for ${duration}`,
+      turnDuration: duration => `This turn took ${duration}`,
       today: time => `Today, ${time}`,
       yesterday: time => `Yesterday, ${time}`,
       copy: 'Copy',

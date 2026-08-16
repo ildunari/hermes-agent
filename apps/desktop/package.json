@@ -60,6 +60,7 @@
     "test:ui": "cross-env NODE_OPTIONS=--no-experimental-webstorage vitest run --project ui",
     "test:desktop:platforms": "vitest run --project electron --exclude electron/runtime-paths.test.ts --exclude electron/autoplay-policy.test.ts && tsx --test electron/runtime-paths.test.ts electron/autoplay-policy.test.ts",
     "test": "vitest run --exclude electron/runtime-paths.test.ts --exclude electron/autoplay-policy.test.ts && tsx --test electron/runtime-paths.test.ts electron/autoplay-policy.test.ts",
+    "test:find-in-page-native": "electron electron/find-in-page-native-fixture",
     "preview": "node scripts/assert-root-install.mjs && vite preview --host 127.0.0.1 --port 4174",
     "check:test:desktop:platforms": "npm run test:desktop:platforms",
     "check:test:ui:shard-1of3": "node scripts/run-ui-shard.mjs",
@@ -70,7 +71,9 @@
     "check": "npm run check:lint && npm run test:ui && npm run test:desktop:platforms && npm run test:desktop:all",
     "test:e2e": "npm run build && playwright test e2e/",
     "test:e2e:visual": "npm run build && WLR_BACKENDS=headless WLR_NO_HARDWARE_CURSORS=1 cage -- npx playwright test e2e/ --reporter=list",
-    "test:e2e:update-snapshots": "npm run build && WLR_BACKENDS=headless WLR_NO_HARDWARE_CURSORS=1 cage -- npx playwright test e2e/ --reporter=list --update-snapshots"
+    "test:e2e:update-snapshots": "npm run build && WLR_BACKENDS=headless WLR_NO_HARDWARE_CURSORS=1 cage -- npx playwright test e2e/ --reporter=list --update-snapshots",
+    "repro:short-session-hang": "node scripts/run-short-session-hang-repro.mjs",
+    "repro:short-session-hang:test": "node --test scripts/run-short-session-hang-repro.test.mjs"
   },
   "dependencies": {
     "@assistant-ui/core": "0.2.23",

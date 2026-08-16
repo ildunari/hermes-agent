@@ -1,4 +1,4 @@
-import type { TestProjectConfiguration } from 'vitest/config';
+import type { TestProjectConfiguration } from 'vitest/config'
 import { defineConfig } from 'vitest/config'
 
 const reactUi: TestProjectConfiguration = {
@@ -21,7 +21,12 @@ const electronNative: TestProjectConfiguration = {
     name: 'electron',
     environment: 'node',
     testTimeout: 15_000,
-    include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}']
+    include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}'],
+    exclude: [
+      'electron/autoplay-policy.test.ts',
+      'electron/runtime-paths.test.ts',
+      'scripts/run-short-session-hang-repro.test.mjs'
+    ]
   }
 }
 
