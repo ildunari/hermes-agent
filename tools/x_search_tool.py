@@ -148,7 +148,7 @@ def _resolve_xai_bearer(force_refresh: bool = False) -> Tuple[str, str, str]:
         )
     except TypeError:
         try:
-            creds = resolve_xai_http_credentials(prefer_api_key=True)
+            creds = resolve_xai_http_credentials(force_refresh=force_refresh)
         except TypeError:
             creds = resolve_xai_http_credentials()
     api_key = str(creds.get("api_key") or "").strip()
