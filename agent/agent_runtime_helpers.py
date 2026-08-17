@@ -1854,6 +1854,15 @@ def restore_primary_runtime(agent) -> bool:
         agent._fallback_activated = False
         agent._fallback_index = 0
         agent._rate_limit_backoff_count = 0  # reset exponential backoff counter
+        # Undo a turn-scoped fallback's reasoning override so the primary's
+        # reasoning config is restored for the next turn. try_activate_fallback
+        # captures the pre-fallback config on first activation; without this the
+        # fallback model's effort (or a chained entry's effort) would leak onto
+        # the restored primary. Membership in __dict__ (not hasattr) so a
+        # Mock-based agent in tests is not fooled by auto-created attributes.
+        if "_fallback_previous_reasoning_config" in getattr(agent, "__dict__", {}):
+            agent.reasoning_config = agent._fallback_previous_reasoning_config
+            delattr(agent, "_fallback_previous_reasoning_config")
 
         # Reset the stale-call circuit breaker (#58962): the streak measured
         # the FALLBACK provider we're leaving; the restored primary deserves

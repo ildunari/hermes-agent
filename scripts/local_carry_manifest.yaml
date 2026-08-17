@@ -869,6 +869,36 @@ features:
         description: oversized AX labels are clamped before entering model context across both the local ellipsis form and upstream label_truncated form
 
 
+  - id: runtime.fallback-reasoning-attribution
+    title: Fallback reasoning attribution (entry effort, session baseline, primary restore)
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - agent/chat_completion_helpers.py
+      - agent/agent_runtime_helpers.py
+      - tests/run_agent/test_provider_fallback.py
+    collision_paths:
+      - agent/chat_completion_helpers.py
+      - agent/agent_runtime_helpers.py
+    dependent_paths:
+      - tests/run_agent/test_provider_fallback.py
+      - tests/run_agent/test_fallback_reasoning_override.py
+      - tests/run_agent/test_switch_model_reasoning_override.py
+    tests:
+      - tests/run_agent/test_provider_fallback.py
+      - tests/run_agent/test_fallback_reasoning_override.py
+      - tests/run_agent/test_switch_model_reasoning_override.py
+    checks:
+      - id: fallback-reasoning-entry-and-baseline
+        path: agent/chat_completion_helpers.py
+        needles: [_fallback_previous_reasoning_config, parse_reasoning_effort, "reasoning_effort\" in fb", resolve_reasoning_config]
+        description: fallback activation honors an entry's explicit reasoning_effort, otherwise keeps the pre-fallback session baseline, and only re-resolves through the documented chokepoint when no baseline exists — session-selected reasoning attribution survives failover without leaking one entry's effort into the next
+      - id: fallback-reasoning-restore
+        path: agent/agent_runtime_helpers.py
+        needles: [_fallback_previous_reasoning_config]
+        description: restore_primary_runtime undoes a turn-scoped fallback's reasoning override and clears the capture marker so the primary's own reasoning returns on the next turn
+
+
   - id: tools.fuzzy-match-indentation-boundary
     title: Preserve full line indentation in fuzzy replacements
     owner: kosta

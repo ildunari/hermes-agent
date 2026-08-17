@@ -181,6 +181,147 @@ class TestFallbackChainAdvancement:
             assert agent._try_activate_fallback() is True
             assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
 
+    def test_fallback_baseline_captured_once_survives_chain(self):
+        """The pre-fallback baseline is captured on the FIRST activation only.
+
+        Later fallback activations must not overwrite it with a prior
+        entry's explicit effort. The baseline is the session's reasoning
+        (selected pick or config-resolved runtime config), not the chain's
+        current level — so it keeps attributing correctly across a chain.
+        """
+        fbs = [
+            {"provider": "zai", "model": "glm-5.2", "reasoning_effort": "high"},
+            {"provider": "deepseek", "model": "deepseek-v4-pro"},
+            {"provider": "openai", "model": "gpt-4o", "reasoning_effort": "low"},
+        ]
+        agent = _make_agent(fallback_model=fbs)
+        agent.reasoning_config = {"enabled": True, "effort": "medium"}
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(_mock_client(), "resolved"),
+        ):
+            assert agent._try_activate_fallback() is True
+            assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+            assert agent._fallback_previous_reasoning_config == {
+                "enabled": True, "effort": "medium",
+            }
+
+            # Entry without explicit effort reverts to the session baseline —
+            # it must NOT inherit entry 1's "high".
+            assert agent._try_activate_fallback() is True
+            assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+            assert agent._fallback_previous_reasoning_config == {
+                "enabled": True, "effort": "medium",
+            }
+
+            # A later explicit entry applies only to itself; the marker still
+            # holds the ORIGINAL baseline, never a prior entry's level.
+            assert agent._try_activate_fallback() is True
+            assert agent.reasoning_config == {"enabled": True, "effort": "low"}
+            assert agent._fallback_previous_reasoning_config == {
+                "enabled": True, "effort": "medium",
+            }
+
+    def test_fallback_preserves_session_selected_reasoning_over_config_resolution(self):
+        """A session-selected reasoning pick survives failover.
+
+        Regression: try_activate_fallback re-resolved reasoning_config from
+        config for the fallback model on every activation, silently
+        clobbering the user's session-scoped /reasoning pick (and the
+        composer/desktop create_reasoning_override) with the config-derived
+        value. The session baseline — the "selected" attribution — must win
+        when the entry declares no explicit effort.
+        """
+        fbs = [
+            {"provider": "zai", "model": "glm-5.2"},
+        ]
+        agent = _make_agent(fallback_model=fbs)
+        # Session-scoped selection (CLI /reasoning, gateway session override,
+        # desktop composer pick) — the "selected" attribution.
+        agent.reasoning_config = {"enabled": True, "effort": "high"}
+
+        def _forbidden_load_config():
+            raise AssertionError(
+                "config re-resolution must not run when a session baseline exists"
+            )
+
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(_mock_client(), "glm-5.2"),
+            ),
+            patch(
+                "hermes_cli.config.load_config", side_effect=_forbidden_load_config
+            ),
+        ):
+            assert agent._try_activate_fallback() is True
+            # Runtime stays attributed to the session selection, not config.
+            assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+    def test_fallback_without_baseline_retains_per_model_override_semantics(self):
+        """No session baseline → the documented per-model override chokepoint applies.
+
+        resolve_reasoning_config is the shared reasoning-effort chokepoint
+        (per-model override > global reasoning_effort). When the session has
+        no baseline to preserve, a fallback model with a config
+        reasoning_overrides entry must still pick it up instead of silently
+        running on the provider default.
+        """
+        fbs = [
+            {"provider": "zai", "model": "glm-5.2"},
+        ]
+        agent = _make_agent(fallback_model=fbs)
+        agent.reasoning_config = None  # no session baseline / no global effort
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(_mock_client(), "glm-5.2"),
+            ),
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={
+                    "agent": {"reasoning_overrides": {"glm-5.2": "xhigh"}},
+                    "model": {"default": "gpt-4o"},
+                },
+            ),
+        ):
+            assert agent._try_activate_fallback() is True
+            assert agent.reasoning_config == {"enabled": True, "effort": "xhigh"}
+
+    def test_restore_primary_runtime_restores_session_reasoning_after_explicit_entry(self):
+        """restore_primary_runtime undoes a turn-scoped fallback's reasoning override.
+
+        Full cycle: baseline medium → fallback entry pins high → restore puts
+        the primary's medium back and clears the capture marker so the next
+        fallback turn captures a fresh baseline.
+        """
+        from agent.agent_runtime_helpers import restore_primary_runtime
+
+        fbs = [
+            {
+                "provider": "zai",
+                "model": "glm-5.2",
+                "base_url": "https://api.z.ai/api/coding/paas/v4",
+                "reasoning_effort": "high",
+            },
+        ]
+        agent = _make_agent(fallback_model=fbs)
+        agent.reasoning_config = {"enabled": True, "effort": "medium"}
+        agent._create_openai_client = MagicMock(return_value=MagicMock())
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(
+                _mock_client(base_url="https://api.z.ai/api/coding/paas/v4"),
+                "glm-5.2",
+            ),
+        ):
+            assert agent._try_activate_fallback() is True
+            assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+
+        assert restore_primary_runtime(agent) is True
+        assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+        assert not hasattr(agent, "_fallback_previous_reasoning_config")
+
     def test_nous_anthropic_fallback_uses_the_messages_wire(self):
         """Portal Claude fallbacks must not stay on chat_completions.
 

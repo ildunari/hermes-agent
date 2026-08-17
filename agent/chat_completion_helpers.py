@@ -2674,6 +2674,15 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
         old_model = agent.model
         old_provider = agent.provider
+        # Capture the pre-fallback reasoning config ONCE so a chain of fallbacks
+        # can revert to it when an entry does not declare its own effort, and so
+        # restore_primary_runtime can put the primary's reasoning back after the
+        # turn. Only the first activation records it — later fallbacks must not
+        # overwrite the primary's baseline with a prior fallback's level.
+        if not hasattr(agent, "_fallback_previous_reasoning_config"):
+            agent._fallback_previous_reasoning_config = getattr(
+                agent, "reasoning_config", None
+            )
 
         # Clear the per-config context_length override so the fallback
         # model's actual context window is resolved instead of inheriting
@@ -2833,17 +2842,52 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 api_mode=agent.api_mode,
             )
 
-        # Re-resolve reasoning_config for the new fallback model (Closes #21256).
-        # Shared chokepoint: per-model override > global reasoning_effort
-        # (YAML boolean False = disabled). Wrapped in try/except because a
-        # config load failure must not kill the swap.
+        # Resolve reasoning_config for the fallback model (Closes #21256).
+        #
+        # A fallback entry's explicit ``reasoning_effort`` wins — the operator
+        # pinned it for THIS fallback. Otherwise revert to the pre-fallback
+        # reasoning config (captured on the first activation) so a chain of
+        # fallbacks can never leak one entry's effort into the next, and a
+        # session-scoped /reasoning or composer pick survives the failover.
+        # When there is no session baseline to preserve, retain the documented
+        # per-model override semantics: the shared chokepoint applies the
+        # fallback model's per-model ``reasoning_effort`` override, then the
+        # global ``reasoning_effort`` (YAML boolean False = disabled). An
+        # unrecognized entry effort is logged and leaves the current config
+        # untouched rather than breaking the swap.
+        #
+        # Wrapped in try/except because a parse/config failure must not kill
+        # the swap.
         try:
-            from hermes_cli.config import load_config
-            from hermes_constants import resolve_reasoning_config
+            from hermes_constants import parse_reasoning_effort
 
-            agent.reasoning_config = resolve_reasoning_config(
-                load_config() or {}, agent.model
-            )
+            if "reasoning_effort" in fb:
+                parsed_reasoning = parse_reasoning_effort(fb.get("reasoning_effort"))
+                if parsed_reasoning is not None:
+                    agent.reasoning_config = parsed_reasoning
+                else:
+                    logger.warning(
+                        "Fallback to %s/%s has unknown reasoning_effort %r; "
+                        "keeping current reasoning config",
+                        fb_provider, fb_model, fb.get("reasoning_effort"),
+                    )
+            elif (
+                hasattr(agent, "_fallback_previous_reasoning_config")
+                and agent._fallback_previous_reasoning_config is not None
+            ):
+                # Session baseline survives the failover: the user's
+                # session-scoped /reasoning pick or composer selection (or
+                # the config-resolved runtime config for the primary) keeps
+                # applying on the fallback model instead of being replaced by
+                # the fallback model's config resolution.
+                agent.reasoning_config = agent._fallback_previous_reasoning_config
+            else:
+                from hermes_cli.config import load_config
+                from hermes_constants import resolve_reasoning_config
+
+                agent.reasoning_config = resolve_reasoning_config(
+                    load_config() or {}, agent.model
+                )
             logger.info(
                 "Fallback %s: reasoning_config resolved: %s",
                 agent.model, agent.reasoning_config,
