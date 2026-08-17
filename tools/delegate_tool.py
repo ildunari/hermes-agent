@@ -4141,8 +4141,11 @@ def delegate_task(
         wrap_progress_callback,
     )
 
+    _header_creds = task_creds[0] if task_creds else {}
     live_deleg_id, live_writers, live_paths = create_live_transcripts(
-        task_list, context, model=creds.get("model"), provider=creds.get("provider")
+        task_list, context,
+        model=_header_creds.get("model"),
+        provider=_header_creds.get("provider"),
     )
 
     # Capture the ORIGINATING session's wake target BEFORE any child agent is
