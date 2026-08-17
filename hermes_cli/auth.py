@@ -739,12 +739,19 @@ def _resolve_api_key_provider_secret(
 # may only have access to recent models (glm-5.1, glm-5v-turbo) while older
 # ones still use glm-4.7.
 
+ZAI_ENDPOINT_POLICY_VERSION = 2
+
 ZAI_ENDPOINTS = [
     # (id, base_url, probe_models, label)
-    ("global",        "https://api.z.ai/api/paas/v4",        ["glm-5"],   "Global"),
-    ("cn",            "https://open.bigmodel.cn/api/paas/v4", ["glm-5"],   "China"),
+    # Prefer Coding Plan when a credential works on both billing pools. Some
+    # subscription credentials are also accepted by the general endpoint; the
+    # reverse order silently bypasses the included plan allowance and can spend
+    # separately billed API balance. General API remains the fallback for keys
+    # that do not have Coding Plan access.
     ("coding-global", "https://api.z.ai/api/coding/paas/v4",  ["glm-5.3", "glm-5.2", "glm-5.1", "glm-5v-turbo", "glm-4.7"], "Global (Coding Plan)"),
     ("coding-cn",     "https://open.bigmodel.cn/api/coding/paas/v4", ["glm-5.3", "glm-5.2", "glm-5.1", "glm-5v-turbo", "glm-4.7"], "China (Coding Plan)"),
+    ("global",        "https://api.z.ai/api/paas/v4",        ["glm-5"],   "Global"),
+    ("cn",            "https://open.bigmodel.cn/api/paas/v4", ["glm-5"],   "China"),
 ]
 
 
@@ -810,21 +817,29 @@ def detect_zai_endpoint(api_key: str, timeout: float = 8.0) -> Optional[Dict[str
         }
         by_id = {ep_id: f for f, ep_id in futures.items()}
         results: Dict[str, Dict[str, str]] = {}
-        for future in as_completed(futures):
-            ep_id = futures[future]
-            try:
-                result = future.result()
-                if result is not None:
-                    results[ep_id] = result
-            except Exception:
-                pass
-            # Early exit in PRIORITY order: walk endpoints highest-priority
-            # first; if one has succeeded and every higher-priority probe
-            # has already finished (without success), no later completion
-            # can win — return now instead of waiting out slow endpoints
-            # (main's sequential loop also stopped at first success).
+        harvested: set[str] = set()
+        for _future in as_completed(futures):
+            # ``as_completed`` does not promise that already-done futures are
+            # yielded in endpoint priority order. Harvest every completed probe
+            # before choosing a winner; otherwise a lower-priority success can
+            # win while a completed higher-priority success is still waiting to
+            # be yielded by the iterator.
+            for ep_id, future in by_id.items():
+                if ep_id in harvested or not future.done():
+                    continue
+                harvested.add(ep_id)
+                try:
+                    result = future.result()
+                    if result is not None:
+                        results[ep_id] = result
+                except Exception:
+                    pass
+
+            # Early exit in PRIORITY order: if one has succeeded and every
+            # higher-priority probe has finished without success, no later
+            # completion can win.
             for ep in ZAI_ENDPOINTS:
-                if not by_id[ep[0]].done():
+                if ep[0] not in harvested:
                     break  # a higher-priority probe is still in flight
                 if ep[0] in results:
                     return results[ep[0]]
@@ -861,7 +876,11 @@ def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> 
     auth_store = _load_auth_store()
     state = _load_provider_state(auth_store, "zai") or {}
     cached = state.get("detected_endpoint")
-    if isinstance(cached, dict) and cached.get("base_url"):
+    if (
+        isinstance(cached, dict)
+        and cached.get("base_url")
+        and cached.get("policy_version") == ZAI_ENDPOINT_POLICY_VERSION
+    ):
         key_hash = cached.get("key_hash", "")
         if key_hash == hashlib.sha256(api_key.encode()).hexdigest()[:16]:
             logger.debug("Z.AI: using cached endpoint %s", cached["base_url"])
@@ -878,6 +897,7 @@ def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> 
             "model": detected.get("model", ""),
             "label": detected.get("label", ""),
             "key_hash": key_hash,
+            "policy_version": ZAI_ENDPOINT_POLICY_VERSION,
         }
         # Persist failure (disk full, permissions, lock timeout) must not
         # break resolution — detection already succeeded; worst case the

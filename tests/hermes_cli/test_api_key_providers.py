@@ -777,6 +777,39 @@ class TestZaiParallelProbe:
         assert result["id"] == "coding-global"
         assert result["model"] == last_model
 
+    def test_coding_plan_wins_when_both_billing_pools_accept_key(self, monkeypatch):
+        """A dual-valid key must use its included Coding Plan allowance."""
+        from hermes_cli.auth import ZAI_ENDPOINTS, detect_zai_endpoint
+
+        coding = next(ep for ep in ZAI_ENDPOINTS if ep[0] == "coding-global")
+        general = next(ep for ep in ZAI_ENDPOINTS if ep[0] == "global")
+        monkeypatch.setattr(
+            "hermes_cli.auth.httpx.post",
+            self._mock_post(
+                {
+                    (coding[1], coding[2][0]): True,
+                    (general[1], general[2][0]): True,
+                }
+            ),
+        )
+
+        def _all_done_lower_priority_first(futures):
+            ordered = list(futures)
+            for future in ordered:
+                future.result()
+            # Force the old race: every probe is done, but as_completed yields
+            # lower-priority endpoint futures before coding-global.
+            return iter(reversed(ordered))
+
+        monkeypatch.setattr(
+            "concurrent.futures.as_completed", _all_done_lower_priority_first
+        )
+
+        result = detect_zai_endpoint("dual-valid-key", timeout=1.0)
+
+        assert result is not None
+        assert result["id"] == "coding-global"
+
     def test_priority_order_wins_over_completion_order(self, monkeypatch):
         """When multiple endpoints accept the key, the FIRST in
         ZAI_ENDPOINTS order must win, even if another finishes earlier."""

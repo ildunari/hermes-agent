@@ -102,6 +102,14 @@ checks:
     path: hermes_cli/auth.py
     needles: [File-system/resource failures, json.JSONDecodeError, UnicodeDecodeError]
     description: quarantine only malformed auth JSON; propagate permission, EMFILE, and storage I/O failures truthfully
+  - id: zai-coding-plan-endpoint-priority
+    path: hermes_cli/auth.py
+    needles: [ZAI_ENDPOINT_POLICY_VERSION, harvested, Coding Plan when a credential works on both billing pools]
+    description: prefer included Z.AI Coding Plan allowance over separately billed general API and deterministically harvest completed parallel probes in priority order
+  - id: zai-coding-plan-endpoint-priority-test
+    path: tests/hermes_cli/test_api_key_providers.py
+    needles: [test_coding_plan_wins_when_both_billing_pools_accept_key, _all_done_lower_priority_first]
+    description: deterministic regression guard for dual-valid credentials and out-of-order completed probe futures
   - id: parallel-sdk-availability-probe
     path: plugins/web/parallel/provider.py
     needles: [import parallel, availability probe]
@@ -216,6 +224,25 @@ checks:
     description: shareable rerere setup helper
 
 features:
+  - id: providers.zai-coding-plan-priority
+    title: Z.AI Coding Plan billing-safe endpoint selection
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - hermes_cli/auth.py
+      - tests/hermes_cli/test_api_key_providers.py
+    tests:
+      - tests/hermes_cli/test_api_key_providers.py
+    checks:
+      - id: zai-coding-plan-endpoint-priority-feature
+        path: hermes_cli/auth.py
+        needles: [ZAI_ENDPOINT_POLICY_VERSION, harvested, Coding Plan when a credential works on both billing pools]
+        description: coding-plan-first endpoint policy, cache migration, and deterministic parallel-probe selection
+      - id: zai-coding-plan-endpoint-priority-test-feature
+        path: tests/hermes_cli/test_api_key_providers.py
+        needles: [test_coding_plan_wins_when_both_billing_pools_accept_key, _all_done_lower_priority_first]
+        description: deterministic dual-valid credential regression coverage
+
   - id: desktop.plugin-home-profile
     title: Desktop Home profile plugin SDK door
     owner: kosta
