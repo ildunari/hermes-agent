@@ -38,10 +38,23 @@ from gateway.platforms.api_server import (
     _hermes_version,
     _redact_api_error_text,
     _request_agent_overrides,
+    _request_reasoning_config,
     check_api_server_requirements,
     cors_middleware,
     security_headers_middleware,
 )
+
+
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
+def test_request_reasoning_config_accepts_canonical_effort_vocabulary(effort):
+    assert _request_reasoning_config({"reasoning": {"enabled": True, "effort": effort}}) == {
+        "enabled": True,
+        "effort": effort,
+    }
+
+
+def test_request_reasoning_config_rejects_unknown_effort_without_enabling_it():
+    assert _request_reasoning_config({"reasoning_effort": "turbo"}) is None
 
 
 # ---------------------------------------------------------------------------

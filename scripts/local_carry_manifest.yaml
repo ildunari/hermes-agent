@@ -586,6 +586,24 @@ features:
         needles: [runtimeRouting, "state.runtimeRouting?.state === 'finished'"]
         description: cancellation follows the same settled routing lifecycle
 
+  - id: gateway.api-reasoning-effort-parity
+    title: Keep API request reasoning levels aligned with Hermes core
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - tests/gateway/test_api_server.py
+    collision_paths:
+      - gateway/platforms/api_server.py
+    tests:
+      - tests/gateway/test_api_server.py
+      - tests/gateway/test_api_server_runtime_routing.py
+      - tests/gateway/test_api_server_runs.py
+    checks:
+      - id: gateway-api-canonical-reasoning-efforts
+        path: gateway/platforms/api_server.py
+        needles: [VALID_REASONING_EFFORTS, '_REASONING_EFFORTS = frozenset']
+        description: API model-options parsing accepts every canonical Hermes reasoning level, including max
+
   - id: runtime.doctor-live-backend-probes
     title: Keep live doctor aligned with configured runtime backends
     owner_paths:

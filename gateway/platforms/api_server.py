@@ -96,6 +96,7 @@ from gateway.platforms.base import (
 from agent.redact import redact_sensitive_text
 from agent.interrupt_compat import request_hard_interrupt
 from gateway.readiness import collect_runtime_readiness
+from hermes_constants import VALID_REASONING_EFFORTS
 
 from agent.secret_scope import UnscopedSecretError as _UnscopedSecretError
 from agent.secret_scope import get_secret as _scoped_get_secret
@@ -275,7 +276,10 @@ def _coerce_request_bool(value: Any, default: bool = False) -> bool:
 
 
 _REQUEST_OPTION_MISSING = object()
-_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+# Keep request parsing aligned with the agent's canonical vocabulary. A stale
+# local copy here previously discarded newer valid levels such as ``max`` and
+# silently created the run with the provider's default effort instead.
+_REASONING_EFFORTS = frozenset(("none", *VALID_REASONING_EFFORTS))
 _RUNTIME_AGENT_OVERRIDE_KEYS = (
     "api_key",
     "base_url",
