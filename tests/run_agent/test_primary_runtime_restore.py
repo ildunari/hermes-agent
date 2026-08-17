@@ -197,6 +197,75 @@ class TestRestorePrimaryRuntime:
         assert agent.context_compressor.context_length == original_ctx_len
         assert agent.context_compressor.threshold_tokens == original_threshold
 
+    def test_restore_clears_stale_marker_when_not_on_fallback(self):
+        """The no-op restore branch still clears a stale capture marker.
+
+        restore_primary_runtime is the sole owner of the marker lifecycle. A
+        marker can outlive an active fallback (switch_model resets the
+        activation flag without clearing it; the transport-recovery path in
+        conversation_loop.py calls restore while already on primary), and it
+        must not survive to skew the next fallback activation's baseline
+        capture.
+        """
+        agent = _make_agent()
+        agent._fallback_previous_reasoning_config = {"enabled": True, "effort": "low"}
+        assert agent._fallback_activated is False
+
+        result = agent._restore_primary_runtime()
+
+        assert result is False  # no active fallback → no-op reset
+        assert agent._fallback_index == 0
+        assert "_fallback_previous_reasoning_config" not in agent.__dict__
+
+    def test_restore_snapshot_reasoning_is_authoritative_over_baseline(self):
+        """A deliberate primary snapshot's reasoning wins over a stale baseline.
+
+        switch_model persists the reasoning config it resolved for the new
+        primary in _primary_runtime. When a fallback baseline was captured
+        before/around the switch, restore must not let it overwrite the
+        snapshot's saved reasoning — the snapshot is the authoritative
+        deliberate primary, the baseline is only a fallback for snapshots
+        that predate the reasoning save.
+        """
+        agent = _make_agent(
+            fallback_model={"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+        )
+        # A deliberate switch saved the resolved reasoning for the primary.
+        agent._primary_runtime["reasoning_config"] = {"enabled": True, "effort": "high"}
+        # Stale baseline captured before the switch (or by an older fallback).
+        agent._fallback_previous_reasoning_config = {"enabled": True, "effort": "low"}
+        agent._fallback_activated = True
+
+        with patch("run_agent.OpenAI", return_value=MagicMock()):
+            result = agent._restore_primary_runtime()
+
+        assert result is True
+        assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+        assert "_fallback_previous_reasoning_config" not in agent.__dict__
+
+    def test_restore_snapshot_reasoning_gap_filled_by_baseline(self):
+        """Without a saved snapshot reasoning (init-time snapshot), the baseline fills the gap.
+
+        A snapshot that predates the reasoning save has no
+        ``reasoning_config`` key; the pre-fallback baseline is then the only
+        record of the primary's reasoning and must be restored (session pick
+        survives the failover) while the marker still clears.
+        """
+        agent = _make_agent(
+            fallback_model={"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+        )
+        assert "reasoning_config" not in agent._primary_runtime
+        agent.reasoning_config = {"enabled": True, "effort": "medium"}
+        agent._fallback_previous_reasoning_config = {"enabled": True, "effort": "medium"}
+        agent._fallback_activated = True
+
+        with patch("run_agent.OpenAI", return_value=MagicMock()):
+            result = agent._restore_primary_runtime()
+
+        assert result is True
+        assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+        assert "_fallback_previous_reasoning_config" not in agent.__dict__
+
     def test_restores_prompt_caching_flag(self):
         agent = _make_agent()
         original_caching = agent._use_prompt_caching
@@ -414,6 +483,36 @@ class TestTryRecoverPrimaryTransport:
             error, retry_count=3, max_retries=3,
         )
         assert result is False
+
+    def test_recovery_sequence_clears_stale_reasoning_marker(self):
+        """Regression: the transport-recovery path must not leave a stale marker.
+
+        conversation_loop.py used to hand-reset ``_fallback_index`` /
+        ``_fallback_activated`` after a successful primary transport
+        recovery, which left ``_fallback_previous_reasoning_config`` set. A
+        follow-on 429 then skipped baseline capture and attributed stale
+        reasoning. The loop now routes through ``_restore_primary_runtime``;
+        simulate its exact sequence (recovery success, then the canonical
+        restore) and assert the marker is gone and fallback state is re-opened
+        for a fresh activation.
+        """
+        agent = _make_agent(provider="custom")
+        agent._fallback_previous_reasoning_config = {"enabled": True, "effort": "low"}
+        error = _make_transport_error("ReadTimeout")
+
+        with (
+            patch("run_agent.OpenAI", return_value=MagicMock()),
+            patch("time.sleep"),
+        ):
+            assert agent._try_recover_primary_transport(
+                error, retry_count=3, max_retries=3,
+            ) is True
+            # The loop's recovery branch calls the canonical restore next.
+            agent._restore_primary_runtime()
+
+        assert "_fallback_previous_reasoning_config" not in agent.__dict__
+        assert agent._fallback_activated is False
+        assert agent._fallback_index == 0
 
 
 

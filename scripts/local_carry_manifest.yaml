@@ -876,27 +876,36 @@ features:
     owner_paths:
       - agent/chat_completion_helpers.py
       - agent/agent_runtime_helpers.py
+      - agent/conversation_loop.py
       - tests/run_agent/test_provider_fallback.py
+      - tests/run_agent/test_primary_runtime_restore.py
     collision_paths:
       - agent/chat_completion_helpers.py
       - agent/agent_runtime_helpers.py
+      - agent/conversation_loop.py
     dependent_paths:
       - tests/run_agent/test_provider_fallback.py
+      - tests/run_agent/test_primary_runtime_restore.py
       - tests/run_agent/test_fallback_reasoning_override.py
       - tests/run_agent/test_switch_model_reasoning_override.py
     tests:
       - tests/run_agent/test_provider_fallback.py
+      - tests/run_agent/test_primary_runtime_restore.py
       - tests/run_agent/test_fallback_reasoning_override.py
       - tests/run_agent/test_switch_model_reasoning_override.py
     checks:
       - id: fallback-reasoning-entry-and-baseline
         path: agent/chat_completion_helpers.py
-        needles: [_fallback_previous_reasoning_config, parse_reasoning_effort, "reasoning_effort\" in fb", resolve_reasoning_config]
-        description: fallback activation honors an entry's explicit reasoning_effort, otherwise keeps the pre-fallback session baseline, and only re-resolves through the documented chokepoint when no baseline exists — session-selected reasoning attribution survives failover without leaking one entry's effort into the next
+        needles: [_fallback_previous_reasoning_config, parse_reasoning_effort, "reasoning_effort\" in fb", resolve_reasoning_config, "not in getattr(agent, \"__dict__\", {})"]
+        description: fallback activation honors an entry's explicit reasoning_effort, otherwise keeps the pre-fallback session baseline, and only re-resolves through the documented chokepoint when no baseline exists — the baseline capture predicate uses __dict__ membership (consistent with restore, not hasattr) so class-level/Mock attributes cannot suppress the first capture
       - id: fallback-reasoning-restore
         path: agent/agent_runtime_helpers.py
-        needles: [_fallback_previous_reasoning_config]
-        description: restore_primary_runtime undoes a turn-scoped fallback's reasoning override and clears the capture marker so the primary's own reasoning returns on the next turn
+        needles: [_fallback_previous_reasoning_config, saved_reasoning, "getattr(agent, \"__dict__\", {})"]
+        description: restore_primary_runtime restores the primary snapshot's saved reasoning as the authoritative deliberate primary (the fallback baseline only fills the gap for snapshots that predate the reasoning save, never overwriting a conflicting snapshot), clears the capture marker on both the full and no-op paths, and stays Mock-safe via __dict__ membership
+      - id: fallback-reasoning-transport-recovery
+        path: agent/conversation_loop.py
+        needles: [_restore_primary_runtime, "primary_recovery_attempted"]
+        description: the transport-recovery path routes through the canonical restore_primary_runtime (not hand-reset fallback flags) so model/provider stay on the rebuilt primary, fallback state re-opens, and the reasoning capture marker clears for a fresh baseline on any follow-on fallback activation
 
 
   - id: tools.fuzzy-match-indentation-boundary

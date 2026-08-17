@@ -6263,12 +6263,18 @@ def run_conversation(
                         _retry.primary_recovery_attempted = True
                         retry_count = 0
                         # Primary transport recovery starts a fresh attempt
-                        # cycle. Re-open fallback state so a follow-on 429 can
-                        # still activate fallback_providers after stale
-                        # pre-recovery fallback/credential-pool bookkeeping.
+                        # cycle. Route through the canonical primary-runtime
+                        # restore instead of hand-resetting fallback flags:
+                        # _try_recover_primary_transport already rebuilt the
+                        # primary client and restored model/provider from the
+                        # snapshot, and restore_primary_runtime re-opens the
+                        # fallback state (chain index, activation flag,
+                        # rate-limit backoff) AND clears the fallback
+                        # reasoning capture marker so a follow-on 429
+                        # re-captures a fresh baseline instead of reusing
+                        # stale pre-recovery attribution.
                         _retry.has_retried_429 = False
-                        agent._fallback_index = 0
-                        agent._fallback_activated = False
+                        agent._restore_primary_runtime()
                         continue
                     # Try fallback before giving up entirely
                     if agent._has_pending_fallback():

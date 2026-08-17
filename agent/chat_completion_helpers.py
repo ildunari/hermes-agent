@@ -2679,7 +2679,10 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # restore_primary_runtime can put the primary's reasoning back after the
         # turn. Only the first activation records it — later fallbacks must not
         # overwrite the primary's baseline with a prior fallback's level.
-        if not hasattr(agent, "_fallback_previous_reasoning_config"):
+        # Membership in __dict__ (not hasattr), mirroring the restore path: a
+        # class-level attribute or Mock auto-created attribute must not make us
+        # believe a baseline was already captured when it was not.
+        if "_fallback_previous_reasoning_config" not in getattr(agent, "__dict__", {}):
             agent._fallback_previous_reasoning_config = getattr(
                 agent, "reasoning_config", None
             )
@@ -2872,7 +2875,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                         fb_provider, fb_model, fb.get("reasoning_effort"),
                     )
             elif (
-                hasattr(agent, "_fallback_previous_reasoning_config")
+                "_fallback_previous_reasoning_config" in getattr(agent, "__dict__", {})
                 and agent._fallback_previous_reasoning_config is not None
             ):
                 # Session baseline survives the failover: the user's

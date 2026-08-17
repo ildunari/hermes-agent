@@ -1600,6 +1600,15 @@ def restore_primary_runtime(agent) -> bool:
         # entirely, stranding the index and silently blocking all future
         # fallback attempts for the session.  Fixes #20465.
         agent._fallback_index = 0
+        # A stale capture marker can outlive an active fallback: a deliberate
+        # switch_model resets _fallback_activated without clearing the marker,
+        # and the conversation loop's transport-recovery path routes through
+        # this function while already on primary.  The canonical restore path
+        # owns the marker lifecycle, so clear it here too — a later fallback
+        # activation must capture a fresh baseline instead of reusing
+        # pre-switch/pre-recovery attribution.
+        if "_fallback_previous_reasoning_config" in getattr(agent, "__dict__", {}):
+            delattr(agent, "_fallback_previous_reasoning_config")
         return False
 
     # Credential fallback can happen during construction, before a usable
@@ -1843,10 +1852,29 @@ def restore_primary_runtime(agent) -> bool:
                         primary_provider or "?",
                     )
 
-        # ── Restore reasoning_config if it was saved ──
-        # switch_model saves reasoning_config in _primary_runtime. If the
-        # snapshot predates that (older sessions), keep the current value.
+        # ── Restore reasoning_config ──
+        # The primary runtime snapshot is the authoritative deliberate
+        # primary: switch_model persists the reasoning config it resolved
+        # for the chosen model.  Apply it LAST so it always wins.  The
+        # fallback baseline captured by try_activate_fallback only fills
+        # the gap for snapshots that predate the reasoning save (init-time
+        # snapshots / older sessions) — it must never overwrite a
+        # conflicting snapshot, or a deliberate model switch's reasoning
+        # would be silently clobbered by a stale pre-switch baseline.
+        # Membership in __dict__ (not hasattr) so a Mock-based agent in
+        # tests is not fooled by auto-created attributes.
         saved_reasoning = rt.get("reasoning_config")
+        _marker_in_dict = (
+            "_fallback_previous_reasoning_config" in getattr(agent, "__dict__", {})
+        )
+        if _marker_in_dict and saved_reasoning is None:
+            # Undo a turn-scoped fallback's reasoning override so the
+            # primary's own reasoning returns on the next turn.
+            agent.reasoning_config = agent._fallback_previous_reasoning_config
+        if _marker_in_dict:
+            # Always clear the capture marker: it is turn-scoped
+            # bookkeeping and must not leak into a later activation.
+            delattr(agent, "_fallback_previous_reasoning_config")
         if saved_reasoning is not None:
             agent.reasoning_config = dict(saved_reasoning)
 
@@ -1854,15 +1882,6 @@ def restore_primary_runtime(agent) -> bool:
         agent._fallback_activated = False
         agent._fallback_index = 0
         agent._rate_limit_backoff_count = 0  # reset exponential backoff counter
-        # Undo a turn-scoped fallback's reasoning override so the primary's
-        # reasoning config is restored for the next turn. try_activate_fallback
-        # captures the pre-fallback config on first activation; without this the
-        # fallback model's effort (or a chained entry's effort) would leak onto
-        # the restored primary. Membership in __dict__ (not hasattr) so a
-        # Mock-based agent in tests is not fooled by auto-created attributes.
-        if "_fallback_previous_reasoning_config" in getattr(agent, "__dict__", {}):
-            agent.reasoning_config = agent._fallback_previous_reasoning_config
-            delattr(agent, "_fallback_previous_reasoning_config")
 
         # Reset the stale-call circuit breaker (#58962): the streak measured
         # the FALLBACK provider we're leaving; the restored primary deserves

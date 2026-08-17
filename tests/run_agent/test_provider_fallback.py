@@ -322,6 +322,43 @@ class TestFallbackChainAdvancement:
         assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
         assert not hasattr(agent, "_fallback_previous_reasoning_config")
 
+    def test_fallback_capture_uses_instance_membership_not_hasattr(self):
+        """Regression: the baseline capture predicate must mirror restore's
+        ``__dict__`` membership check, not ``hasattr``.
+
+        ``hasattr`` reports True for attributes inherited from the class (and
+        for Mock auto-created attributes), so a class-level marker would make
+        the first fallback activation believe a baseline was already captured
+        and skip recording the session's reasoning.  The capture predicate is
+        the same membership check the restore path uses.
+        """
+        fbs = [{"provider": "zai", "model": "glm-5.2"}]
+        agent = _make_agent(fallback_model=fbs)
+        agent.reasoning_config = {"enabled": True, "effort": "medium"}
+
+        cls = type(agent)
+        had_class_attr = hasattr(cls, "_fallback_previous_reasoning_config")
+        prior_class_value = getattr(cls, "_fallback_previous_reasoning_config", None)
+        # Class-level attribute: hasattr(agent, ...) is True while the marker
+        # is absent from the instance's __dict__.  Only the membership
+        # predicate records the baseline here.
+        cls._fallback_previous_reasoning_config = None
+        try:
+            with patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(_mock_client(), "glm-5.2"),
+            ):
+                assert agent._try_activate_fallback() is True
+            assert agent.reasoning_config == {"enabled": True, "effort": "medium"}
+            assert agent._fallback_previous_reasoning_config == {
+                "enabled": True, "effort": "medium",
+            }
+        finally:
+            if had_class_attr:
+                cls._fallback_previous_reasoning_config = prior_class_value
+            else:
+                delattr(cls, "_fallback_previous_reasoning_config")
+
     def test_nous_anthropic_fallback_uses_the_messages_wire(self):
         """Portal Claude fallbacks must not stay on chat_completions.
 
