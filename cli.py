@@ -10342,6 +10342,26 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             "agent_primary_runtime": copy.deepcopy(
                 getattr(agent, "_primary_runtime", None)
             ) if agent is not None else None,
+            # Routing-identity truth (#17929): mirror the gateway snapshot
+            # (tui_gateway/server.py _snapshot_agent_model_runtime) so a
+            # one-turn restore cannot erase the "selected X, running Y"
+            # record of an init-time credential fallback.
+            "agent_primary_runtime_restorable": getattr(
+                agent, "_primary_runtime_restorable", True
+            ) if agent is not None else True,
+            "agent_fallback_activated": bool(
+                getattr(agent, "_fallback_activated", False)
+            ) if agent is not None else False,
+            "agent_fallback_index": getattr(agent, "_fallback_index", 0) if agent is not None else 0,
+            "agent_runtime_route_reason": getattr(
+                agent, "_runtime_route_reason", "unknown"
+            ) if agent is not None else "unknown",
+            "agent_runtime_route_cause": getattr(
+                agent, "_runtime_route_cause", ""
+            ) if agent is not None else "",
+            "agent_selected_runtime_identity": copy.deepcopy(
+                getattr(agent, "_selected_runtime_identity", None)
+            ) if agent is not None else None,
         }
 
     def _restore_model_runtime_snapshot(self, snapshot: dict | None) -> None:
@@ -10365,6 +10385,28 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         if agent is None:
             return
 
+        def _restore_routing_identity() -> None:
+            # Re-assert the pre-override routing truth (#17929). Without
+            # this, restoring after a one-turn override marks an init-time
+            # credential fallback as a deliberate selection and the
+            # "selected X, running Y" record is lost.
+            agent._primary_runtime_restorable = snapshot.get(
+                "agent_primary_runtime_restorable", True
+            )
+            agent._fallback_activated = bool(
+                snapshot.get("agent_fallback_activated", False)
+            )
+            agent._fallback_index = snapshot.get("agent_fallback_index", 0)
+            agent._runtime_route_reason = snapshot.get(
+                "agent_runtime_route_reason", "unknown"
+            )
+            agent._runtime_route_cause = snapshot.get(
+                "agent_runtime_route_cause", ""
+            )
+            selected = snapshot.get("agent_selected_runtime_identity")
+            if isinstance(selected, dict):
+                agent._selected_runtime_identity = copy.deepcopy(selected)
+
         primary = snapshot.get("agent_primary_runtime")
         if primary and hasattr(agent, "_restore_primary_runtime"):
             try:
@@ -10372,6 +10414,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 agent._fallback_activated = True
                 agent._rate_limited_until = 0
                 if agent._restore_primary_runtime():
+                    _restore_routing_identity()
                     return
             except Exception:
                 logger.debug("CLI one-turn model restore via primary runtime failed", exc_info=True)
@@ -10387,6 +10430,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 )
             except Exception as exc:
                 logger.warning("CLI one-turn model restore failed: %s", exc)
+            else:
+                _restore_routing_identity()
 
     @staticmethod
     def _compute_model_picker_viewport(

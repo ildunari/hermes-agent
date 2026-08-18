@@ -2960,6 +2960,13 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,
         )
+        # Loud fallback (#17929): persist a sanitized cause (classified
+        # failure label only — never raw exception text) so session
+        # metadata explains WHY the runtime differs from the selection.
+        _reason_label = str(getattr(reason, "value", reason) or "unknown")
+        agent._runtime_route_cause = (
+            f"primary {old_model} via {old_provider} failed ({_reason_label})"
+        )
         # Emit only after the entire swap succeeds. Failed/skipped candidates
         # must never be presented as the running runtime.
         from agent.runtime_routing import emit_runtime_route

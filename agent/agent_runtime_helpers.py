@@ -3156,6 +3156,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
     # for the new selection before its first turn starts.
     agent._runtime_routing = None
     agent._runtime_route_reason = "unknown"
+    agent._runtime_route_cause = ""
 
     # When the user deliberately swaps primary providers (e.g. openrouter
     # → anthropic), drop any fallback entries that target the OLD primary

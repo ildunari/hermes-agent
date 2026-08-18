@@ -168,11 +168,11 @@ def test_init_credential_fallback_remains_truthful_across_turn_boundaries():
     assert [payload["state"] for _, payload in events] == ["started"]
     assert started["selected"] == {"model": "wanted-model", "provider": "missing-provider"}
     assert started["runtime"] == {"model": "resolved-backup", "provider": "openai"}
-    assert started["fallback"] == {
-        "active": True,
-        "reason": "authentication",
-        "chain_index": 0,
-    }
+    assert started["fallback"]["active"] is True
+    assert started["fallback"]["reason"] == "authentication"
+    assert started["fallback"]["chain_index"] == 0
+    # Loud-fallback: the sanitized cause explains WHY the init fallback fired.
+    assert "missing-provider" in started["fallback"].get("cause", "")
 
     finished = emit_runtime_route(agent, "finished")
     assert finished["runtime"] == {"model": "resolved-backup", "provider": "openai"}

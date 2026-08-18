@@ -57,12 +57,19 @@ export function parseRuntimeRouting(value: unknown): RuntimeRouting | undefined 
     return undefined
   }
 
+  const cause = typeof fallback?.cause === 'string' ? fallback.cause.trim() : ''
+
   return {
     schema_version: 1,
     state: state as RuntimeRouting['state'],
     selected,
     runtime,
-    fallback: { active: fallback.active, reason: reason.trim(), chain_index: chainIndex }
+    fallback: {
+      active: fallback.active,
+      reason: reason.trim(),
+      chain_index: chainIndex,
+      ...(cause ? { cause } : {})
+    }
   }
 }
 

@@ -716,6 +716,8 @@ export interface RuntimeRouting {
     active: boolean
     reason: string
     chain_index: number
+    /** Sanitized human-readable cause set at activation (optional, additive). */
+    cause?: string
   }
 }
 

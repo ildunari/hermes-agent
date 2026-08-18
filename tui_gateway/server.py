@@ -4768,6 +4768,7 @@ def _snapshot_agent_model_runtime(agent) -> dict:
         "fallback_activated": bool(getattr(agent, "_fallback_activated", False)),
         "fallback_index": getattr(agent, "_fallback_index", 0),
         "runtime_route_reason": getattr(agent, "_runtime_route_reason", "unknown"),
+        "runtime_route_cause": getattr(agent, "_runtime_route_cause", ""),
         "selected_runtime_identity": copy.deepcopy(
             getattr(agent, "_selected_runtime_identity", None)
         ),
@@ -4807,6 +4808,7 @@ def _restore_agent_model_runtime(agent, snapshot: dict | None) -> None:
         agent._fallback_activated = bool(snapshot.get("fallback_activated", False))
         agent._fallback_index = snapshot.get("fallback_index", 0)
         agent._runtime_route_reason = snapshot.get("runtime_route_reason", "unknown")
+        agent._runtime_route_cause = snapshot.get("runtime_route_cause", "")
         selected = snapshot.get("selected_runtime_identity")
         if isinstance(selected, dict):
             agent._selected_runtime_identity = copy.deepcopy(selected)

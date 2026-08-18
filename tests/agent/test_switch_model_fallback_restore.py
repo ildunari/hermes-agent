@@ -91,7 +91,9 @@ def _agent(provider="openai-codex", model="gpt-5.5"):
     agent._create_openai_client = lambda *_args, **_kwargs: object()
     agent._apply_client_headers_for_base_url = lambda *_args, **_kwargs: None
     agent._anthropic_prompt_cache_policy = lambda **_kwargs: (False, False)
-    agent._ensure_lmstudio_runtime_loaded = lambda: None
+    agent._ensure_lmstudio_runtime_loaded = lambda *_args, **_kwargs: None
+    agent._lmstudio_load_was_unverified = lambda *_args, **_kwargs: False
+    agent._effective_lmstudio_context_length = lambda intent, _runtime: intent
     agent._is_azure_openai_url = lambda *_args, **_kwargs: False
     agent._swap_credential = lambda *_args, **_kwargs: setattr(agent, "swapped", True)
     return agent

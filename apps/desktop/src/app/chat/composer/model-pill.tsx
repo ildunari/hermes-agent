@@ -152,7 +152,7 @@ export function ModelPill({
     : copy.switchModel
 
   const routingTitle = routedFallback
-    ? `${routeLabel}: ${routedFallback.runtime.provider}: ${routedFallback.runtime.model} — ${copy.modelSelected}: ${routedFallback.selected.provider}: ${routedFallback.selected.model}`
+    ? `${routeLabel}: ${routedFallback.runtime.provider}: ${routedFallback.runtime.model} — ${copy.modelSelected}: ${routedFallback.selected.provider}: ${routedFallback.selected.model}${routedFallback.fallback.cause ? ` — ${routedFallback.fallback.cause}` : ''}`
     : baseTitle
 
   const title = pinnedOverride ? `${routingTitle} — ${copy.modelPinned}` : routingTitle

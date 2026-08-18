@@ -1316,6 +1316,17 @@ def init_agent(
                     except Exception:
                         pass
                     # --- Init-time fallback (#17929) ---
+                    # Capture the selected identity and the concrete cause
+                    # BEFORE the loop below swaps agent.model/provider, so
+                    # the fallback can be reported loudly (errors.log +
+                    # visible notice) instead of silently rerouting (#17929).
+                    _sel_model = str(agent.model or "")
+                    _sel_provider = _explicit
+                    _fb_cause = (
+                        f"no usable credentials resolved for provider "
+                        f"'{_explicit}' (check `hermes auth status {_explicit}` "
+                        f"or set {_env_hint})"
+                    )
                     _fb_entries = []
                     if isinstance(fallback_model, list):
                         _fb_entries = [
@@ -1344,6 +1355,25 @@ def init_agent(
                             agent.provider = _fb["provider"]
                             agent.model = _fb_model or _fb["model"]
                             agent._fallback_activated = True
+                            # Loud fallback (#17929): the WHY is otherwise
+                            # discarded — persist it on the agent so the
+                            # session record / UI can surface it, and put a
+                            # WARNING in errors.log so post-hoc diagnosis
+                            # doesn't require reverse-engineering auth state.
+                            agent._runtime_route_cause = _fb_cause
+                            logger.warning(
+                                "Init-time model fallback: selected %s/%s is "
+                                "unavailable (%s); running this session on "
+                                "%s/%s instead.",
+                                _sel_provider, _sel_model, _fb_cause,
+                                agent.provider, agent.model,
+                            )
+                            if not agent.quiet_mode:
+                                print(
+                                    f"⚠️  Selected model {_sel_provider}:{_sel_model} is "
+                                    f"unavailable — {_fb_cause}. Running on "
+                                    f"{agent.provider}:{agent.model} for this session."
+                                )
                             client_kwargs = {
                                 "api_key": _fb_client.api_key,
                                 "base_url": str(_fb_client.base_url),

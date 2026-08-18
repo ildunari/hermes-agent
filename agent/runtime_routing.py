@@ -64,6 +64,12 @@ def build_runtime_route(agent: Any, state: str, *, reason: Any = None) -> dict[s
     # Preserve the activation reason through finished/session.info snapshots.
     if active and reason is None:
         payload["fallback"]["reason"] = str(getattr(agent, "_runtime_route_reason", "unknown") or "unknown")
+    # Additive, optional: a sanitized human-readable cause set at activation
+    # time (never raw exception text or credentials — see module docstring).
+    if active:
+        _cause = getattr(agent, "_runtime_route_cause", "") or ""
+        if _cause:
+            payload["fallback"]["cause"] = str(_cause)
     return payload
 
 
@@ -73,6 +79,7 @@ def emit_runtime_route(agent: Any, state: str, *, reason: Any = None) -> dict[st
         agent._runtime_route_reason = payload["fallback"]["reason"]
     elif not payload["fallback"]["active"]:
         agent._runtime_route_reason = "unknown"
+        agent._runtime_route_cause = ""
     agent._runtime_routing = payload
     callback = getattr(agent, "event_callback", None)
     if callable(callback):
