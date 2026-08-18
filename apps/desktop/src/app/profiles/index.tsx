@@ -14,7 +14,7 @@ import { AlertTriangle, Save } from '@/lib/icons'
 import { resolveProfileColor } from '@/lib/profile-color'
 import { normalize } from '@/lib/text'
 import { notify, notifyError } from '@/store/notifications'
-import { $profileColors, refreshProfiles } from '@/store/profile'
+import { $profileColors, profileLabel, refreshProfiles } from '@/store/profile'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import {
@@ -138,7 +138,9 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
                   key={profile.name}
                   menuItems={
                     profile.is_default
-                      ? []
+                      ? // Renaming the default profile sets a presentation-only
+                        // display name (the canonical id stays "default").
+                        [{ icon: 'edit', label: p.renameMenu, onSelect: () => setPendingRename(profile) }]
                       : [
                           { icon: 'edit', label: p.renameMenu, onSelect: () => setPendingRename(profile) },
                           {
@@ -167,6 +169,7 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
 
       <RenameProfileDialog
         currentName={pendingRename?.name ?? ''}
+        isDefault={pendingRename?.is_default ?? false}
         onClose={() => setPendingRename(null)}
         onRenamed={selectAndRefresh}
         open={pendingRename !== null}
@@ -217,10 +220,10 @@ function ProfileRow({
         />
       }
       menuItems={menuItems}
-      menuLabel={profile.name}
+      menuLabel={profileLabel(profile)}
       onSelect={onSelect}
       rowKey={profile.name}
-      title={profile.name}
+      title={profileLabel(profile)}
     />
   )
 }
@@ -234,7 +237,7 @@ function ProfileDetail({ profile }: { profile: ProfileInfo }) {
       <header className="space-y-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-[0.95rem] font-semibold tracking-tight text-foreground">{profile.name}</h3>
+            <h3 className="text-[0.95rem] font-semibold tracking-tight text-foreground">{profileLabel(profile)}</h3>
             {profile.is_default && <PanelPill tone="good">{p.defaultBadge}</PanelPill>}
             {profile.has_env && <PanelPill tone="muted">.env</PanelPill>}
             <Slot area={profileDetailActionsArea(profile.name)} />

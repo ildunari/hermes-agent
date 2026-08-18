@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { deleteProfile } from '@/hermes'
 import { registry } from '@/contrib/registry'
+import { retireLocalProfileGateways } from '@/store/gateway'
 import { refreshProfiles, selectProfile, setActiveProfile } from '@/store/profile'
 import type { ProfileInfo } from '@/types/hermes'
 
@@ -40,6 +41,10 @@ vi.mock('@/store/notifications', () => ({
   notifyError: vi.fn()
 }))
 
+vi.mock('@/store/gateway', () => ({
+  retireLocalProfileGateways: vi.fn()
+}))
+
 const { $activeGatewayProfile: activeGateway, $profileColors } = vi.hoisted(() => {
   const { atom } = require('nanostores') as typeof Nanostores
 
@@ -53,6 +58,8 @@ vi.mock('@/store/profile', () => ({
   $activeGatewayProfile: activeGateway,
   $profileColors,
   normalizeProfileKey: (name: null | string | undefined) => (name ?? '').trim() || 'default',
+  profileLabel: (profile: { display_name?: string; name: string }) =>
+    (profile.display_name ?? '').trim() || profile.name,
   refreshProfiles: vi.fn(async () => [] as ProfileInfo[]),
   selectProfile: vi.fn(),
   setActiveProfile: vi.fn()
@@ -144,6 +151,11 @@ describe('ProfilesView', () => {
   })
 
   it('re-homes to default when the active profile is deleted', async () => {
+    const deleteProfileMock = vi.mocked(deleteProfile)
+    const retireLocalProfileGatewaysMock = vi.mocked(retireLocalProfileGateways)
+
+    deleteProfileMock.mockClear()
+    retireLocalProfileGatewaysMock.mockClear()
     vi.mocked(refreshProfiles).mockResolvedValue([makeProfile('default', true), makeProfile(NAMED_PROFILE)])
     activeGateway.set(NAMED_PROFILE)
 
@@ -151,6 +163,10 @@ describe('ProfilesView', () => {
     await deleteTheNamedProfile()
 
     await waitFor(() => expect(deleteProfile).toHaveBeenCalledWith(NAMED_PROFILE))
+    expect(retireLocalProfileGateways).toHaveBeenCalledWith(NAMED_PROFILE)
+    expect(retireLocalProfileGatewaysMock.mock.invocationCallOrder[0]).toBeLessThan(
+      deleteProfileMock.mock.invocationCallOrder[0]
+    )
     await waitFor(() => expect(selectProfile).toHaveBeenCalledWith('default'))
     expect(setActiveProfile).toHaveBeenCalledWith('default')
   })
