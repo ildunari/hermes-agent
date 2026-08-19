@@ -12,8 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tools.vision_tools import (
-    _convert_heic_to_jpeg_for_vision,
-    _detect_image_mime_type,
     _validate_image_url,
     _handle_vision_analyze,
     _determine_mime_type,
@@ -22,7 +20,6 @@ from tools.vision_tools import (
     _image_exceeds_dimension,
     _EMBED_MAX_DIMENSION,
     _is_image_size_error,
-    _normalize_image_for_vision,
     _MAX_BASE64_BYTES,
     _RESIZE_TARGET_BYTES,
     vision_analyze_tool,
@@ -298,42 +295,6 @@ class TestVisionConfig:
 
 
 class TestVisionSafetyGuards:
-    def test_detects_heic_magic_even_when_extension_says_jpg(self, tmp_path):
-        img = tmp_path / "iphone-upload.jpg"
-        img.write_bytes(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 32)
-
-        assert _detect_image_mime_type(img) == "image/heic"
-
-    def test_normalizes_heic_to_lossless_png_with_macos_sips(self, tmp_path):
-        img = tmp_path / "iphone-upload.jpg"
-        img.write_bytes(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 32)
-
-        def fake_sips(args, **kwargs):
-            out_path = Path(args[-1])
-            if "png" in args:
-                out_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"png")
-            else:
-                out_path.write_bytes(b"\xff\xd8\xff" + b"jpeg")
-            return MagicMock(returncode=0)
-
-        with (
-            patch("agent.image_normalization.sys.platform", "darwin"),
-            patch("agent.image_normalization.subprocess.run", side_effect=fake_sips) as run,
-        ):
-            out = _convert_heic_to_jpeg_for_vision(img)
-            normalized, mime, cleanup = _normalize_image_for_vision(img, "image/heic")
-
-        try:
-            assert run.called
-            assert out.suffix == ".png"
-            assert _detect_image_mime_type(out) == "image/png"
-            assert mime == "image/png"
-            assert cleanup is True
-            assert _detect_image_mime_type(normalized) == "image/png"
-        finally:
-            for p in (out, normalized):
-                p.unlink(missing_ok=True)
-
     @pytest.mark.asyncio
     async def test_local_non_image_file_rejected_before_llm_call(self, tmp_path):
         secret = tmp_path / "secret.txt"

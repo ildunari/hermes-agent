@@ -55,6 +55,30 @@ from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context
 logger = logging.getLogger(__name__)
 
 
+def _record_tool_call_stats(agent, tool_name: str, *, is_error: bool) -> None:
+    """Record one executed tool outcome without ever breaking tool delivery."""
+    name = str(tool_name or "unknown")
+    try:
+        stats = getattr(agent, "session_tool_stats", None)
+        if not isinstance(stats, dict):
+            stats = {}
+            agent.session_tool_stats = stats
+        row = stats.setdefault(name, {"calls": 0, "errors": 0})
+        row["calls"] = int(row.get("calls", 0)) + 1
+        if is_error:
+            row["errors"] = int(row.get("errors", 0)) + 1
+    except Exception:
+        logger.debug("tool-call accounting state was malformed; resetting", exc_info=True)
+        try:
+            stats = getattr(agent, "session_tool_stats", None)
+            if not isinstance(stats, dict):
+                stats = {}
+                agent.session_tool_stats = stats
+            stats[name] = {"calls": 1, "errors": int(bool(is_error))}
+        except Exception:
+            logger.debug("tool-call accounting reset failed", exc_info=True)
+
+
 def _ensure_file_checkpoint(
     agent,
     function_name: str,
@@ -1756,6 +1780,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         agent._current_tool = None
         _status_suffix = " (error)" if is_error else ""
         agent._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s){_status_suffix}")
+        _record_tool_call_stats(agent, name, is_error=is_error)
 
         display_function_result = function_result
         function_result = maybe_persist_tool_result(
@@ -2590,6 +2615,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         agent._current_tool = None
         _status_suffix = " (error)" if _is_error_result else ""
         agent._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s){_status_suffix}")
+        if not _execution_blocked:
+            _record_tool_call_stats(agent, function_name, is_error=_is_error_result)
 
         if agent.verbose_logging:
             logging.debug("Tool %s completed in %.2fs", function_name, tool_duration)
