@@ -501,14 +501,45 @@ def listener_pids() -> dict[int, int]:
     return result
 
 
+def listener_hosts(port: int) -> list[str]:
+    """Local addresses the port is actually bound on (loopback first).
+
+    Surfaces here may bind a specific interface (e.g. the WebUI/API server on
+    the Tailscale IP) rather than loopback; probing only 127.0.0.1 then
+    reports a healthy restart as FAILED. Wildcard binds map to loopback.
+    """
+    hosts: list[str] = ["127.0.0.1"]
+    try:
+        probe = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fn"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        for line in probe.stdout.splitlines():
+            if not line.startswith("n"):
+                continue
+            addr = line[1:].rsplit(":", 1)[0]
+            if addr in ("*", "0.0.0.0", "[::]", "::", "127.0.0.1", "[::1]"):
+                continue
+            if addr not in hosts:
+                hosts.append(addr)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return hosts
+
+
 def http_ready(port: int) -> bool:
     path = HTTP_PROBES[port]
-    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            return response.status < 500
-    except (OSError, urllib.error.URLError):
-        return False
+    for host in listener_hosts(port):
+        request = urllib.request.Request(f"http://{host}:{port}{path}")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if response.status < 500:
+                    return True
+        except (OSError, urllib.error.URLError):
+            continue
+    return False
 
 
 def surface_inventory(
