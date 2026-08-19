@@ -1936,6 +1936,14 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 validation_env["UPDATE_CHANGED_DESKTOP"] = (
                     "1" if desktop_diff_changed or web_diff_changed else "0"
                 )
+                # Known-failing upstream desktop UI tests. The validation lane
+                # runs the FULL desktop suite; these pre-existing failures are
+                # tolerated so they don't block merges, but any NEW failure
+                # pushes the count above the baseline and fails the gate.
+                # Drop this to 0 once upstream removes the stale tests.
+                validation_env["UPDATE_DESKTOP_UI_BASELINE"] = os.environ.get(
+                    "UPDATE_DESKTOP_UI_BASELINE", "14"
+                )
                 _gate_ledger = read_json(ledger_path(root, run_id))
                 full_required, full_reason = full_validation_required(
                     _gate_ledger,

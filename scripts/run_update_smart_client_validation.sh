@@ -93,7 +93,32 @@ if [[ "${UPDATE_VALIDATION_FULL:-0}" != "1" && "${UPDATE_CHANGED_DESKTOP:-1}" ==
 else
   cd "$ROOT/apps/desktop"
   npm run typecheck
-  npm run test:ui -- --run src/app/session/hooks/use-session-actions.test.tsx src/hermes.test.ts
+  # Run the FULL desktop UI suite, not a hand-picked pair. The old two-file
+  # scope gated ~6,500 tests on 2 files, so real breakage (2026-08-19: 14
+  # failures across preview-pane and model-menu-panel) sailed through every
+  # update invisibly. A known-failing baseline is tolerated via
+  # UPDATE_DESKTOP_UI_BASELINE so pre-existing upstream redness doesn't block
+  # a merge, while any NEW failure still fails the gate.
+  ui_status=0
+  npm run test:ui -- --run > /tmp/update-smart-ui.log 2>&1 || ui_status=$?
+  tail -40 /tmp/update-smart-ui.log
+
+  # Parse the "Tests  N failed | ..." summary line specifically. Matching a
+  # bare "N failed" also hits the "Test Files" line above it and yields the
+  # wrong number, which would let real regressions pass the gate.
+  ui_failed="$(grep -oE '^[[:space:]]*Tests[[:space:]]+[0-9]+ failed' /tmp/update-smart-ui.log | grep -oE '[0-9]+' | tail -1 || true)"
+  ui_failed="${ui_failed:-0}"
+  baseline="${UPDATE_DESKTOP_UI_BASELINE:-0}"
+
+  if [[ "$ui_status" != "0" ]]; then
+    if [[ "$ui_failed" -gt 0 && "$ui_failed" -le "$baseline" ]]; then
+      echo "DESKTOP UI: $ui_failed failed, at/below known baseline ($baseline) — not blocking"
+    else
+      echo "DESKTOP UI FAILED: $ui_failed failed vs baseline $baseline"
+      exit "$ui_status"
+    fi
+  fi
+
   npm run test:desktop:platforms
 fi
 
