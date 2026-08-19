@@ -1232,6 +1232,32 @@ def build_resume_recovery_note(
     )
 
 
+def _prepare_resume_pending_message(
+    reason: Optional[str],
+    message: Optional[str],
+    *,
+    interactive: bool = True,
+) -> tuple[str, str]:
+    """Return the recovery message and the user text to persist.
+
+    Resume turns replace the startup event's text with a recovery note before
+    entering the agent. When the original message is empty (the synthesized
+    auto-resume turn), persist the note too — persisting the empty string
+    left a blank user row in state.db that the pre-call sanitizer re-healed
+    on every later call forever (#86580). When the user sent REAL text while
+    the resume was pending, keep persisting their clean words: the transcript
+    stays scaffold-free (the model still receives the wrapped note), and a
+    non-empty row never trips the sanitizer.
+    """
+    recovery_message = build_resume_recovery_note(
+        reason, message or "", interactive=interactive,
+    )
+    persist_message = (
+        message if isinstance(message, str) and message.strip() else recovery_message
+    )
+    return recovery_message, persist_message
+
+
 # Assistant-message fields that must survive transcript replay so multi-turn
 # reasoning context, prefix-cache hits, and provider-specific echo
 # requirements all behave the same on the gateway as they do in the CLI.
@@ -7476,7 +7502,6 @@ class TurnRunner:
 
         if _is_resume_pending:
             _reason = getattr(_resume_entry, "resume_reason", None) or "restart_timeout"
-            _persist_user_message_override = ctx.message
             # The empty-message case is the auto-resume startup turn
             # synthesized by _schedule_resume_pending_sessions — there is
             # no NEW user message to address.  Guidance is adapter-aware:
@@ -7489,7 +7514,7 @@ class TurnRunner:
             _interactive_resume = bool(
                 getattr(_resume_adapter, "interactive_resume", True)
             )
-            ctx.message = build_resume_recovery_note(
+            ctx.message, _persist_user_message_override = _prepare_resume_pending_message(
                 _reason, ctx.message, interactive=_interactive_resume,
             )
         elif _has_fresh_tool_tail:
@@ -23783,6 +23808,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             return 20
 
+    async def _warm_goals_session_db(self, label: str) -> None:
+        """Warm the goals SessionDB cache off-loop (best-effort).
+
+        A cold cache runs the state.db init on the loop thread behind the
+        bootstrap windows. That freezes the loop for the init duration.
+        The executor hop keeps the profile home override alive under
+        multiplex, so the warm cache belongs to the caller's profile.
+        On failure the caller falls back to the bootstrap windows, so a
+        dropped warm-up is a bounded stall, never a crash.
+        """
+        try:
+            from hermes_cli.goals import _get_session_db as _warm_goals_db
+
+            await self._run_in_executor_with_context(_warm_goals_db)
+        except Exception as exc:
+            logger.warning("%s: session DB warm-up failed: %s", label, exc)
+
     async def _get_goal_manager_for_event(self, event: "MessageEvent"):
         """Return a GoalManager bound to the session for this gateway event.
 
@@ -23794,6 +23836,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as exc:
             logger.debug("goal manager unavailable: %s", exc)
             return None, None
+        # Warm the SessionDB cache off-loop. A cold cache freezes the
+        # loop for the init duration and drops the first write: the
+        # /goal reply claims the goal was set.
+        await self._warm_goals_session_db("goal manager")
         try:
             # Session lookups on behalf of an internal event must not advance
             # the user-activity clock that drives idle/daily reset policy
@@ -23821,6 +23867,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as exc:
             logger.debug("heartbeat manager unavailable: %s", exc)
             return None, None
+        # Warm the SessionDB cache off-loop. A cold cache can drop the
+        # first /heartbeat write while the reply claims it was set.
+        await self._warm_goals_session_db("heartbeat manager")
         try:
             # Same reset-policy contract as _get_goal_manager_for_event:
             # internal events look up the session without touching activity.
@@ -23871,6 +23920,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 watch = getattr(self, "_heartbeat_watch", None)
                 if not watch:
                     continue
+                # Warm the cache off-loop once per poll. A watch can only
+                # be registered through the warmed /heartbeat command, so
+                # this covers only the degraded path where that warm-up
+                # failed.
+                await self._warm_goals_session_db("heartbeat poll")
                 for quick_key, (source, session_id) in list(watch.items()):
                     try:
                         # Busy sessions coalesce their tick to the next idle poll.
@@ -24001,6 +24055,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return
 
         max_turns = self._goal_max_turns_from_config()
+
+        # Warm the SessionDB cache off-loop. A cold cache runs the
+        # state.db init on the loop thread at the turn boundary (the
+        # 2026-08-14 crash-loop seam). A slow init can drop the goal
+        # read and silently end the goal loop.
+        await self._warm_goals_session_db("goal continuation")
 
         mgr = GoalManager(session_id=sid, default_max_turns=max_turns)
         if not mgr.is_active():
@@ -24147,6 +24207,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not sid:
             return
 
+        # Warm the SessionDB cache off-loop. A cold cache at the turn
+        # boundary stalls the loop for the init duration and can drop
+        # the tick-completion write (the /goal continuation seam, one
+        # sibling over).
+        await self._warm_goals_session_db("loop completion")
+
         mgr = LoopManager(session_id=sid)
         state = mgr.state
         if state is None or not state.awaiting_response:
@@ -24184,6 +24250,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     goal_blocks_loop_tick,
                     list_active_loops,
                 )
+
+                # Warm the cache off-loop once per scan. The scan reads
+                # every persisted loop, so a cold cache runs the state.db
+                # init on the loop thread before the first read.
+                await self._warm_goals_session_db("loop wakeup")
 
                 now = time.time()
                 for sid, state in list_active_loops():

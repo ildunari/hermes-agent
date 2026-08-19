@@ -23,7 +23,9 @@ import { parseMarkdownIntoBlocksCached } from '@/lib/markdown-blocks'
 import { preprocessMarkdown } from '@/lib/markdown-preprocess'
 import {
   downloadGatewayMediaFile,
+  isFileMediaPath,
   isInlineMediaSrc,
+  isMarkdownDocumentPath,
   isRemoteGateway,
   mediaExternalUrl,
   mediaKind,
@@ -256,11 +258,18 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
   const mediaPath = mediaPathFromMarkdownHref(href)
 
   if (mediaPath) {
-    return isVisualDocumentPath(mediaPath) ? (
-      <PreviewAttachment target={mediaPath} />
-    ) : (
-      <MediaAttachment path={mediaPath} />
-    )
+    // Renderable documents route to the preview rail instead of the opaque
+    // download-link fallback: visual docs (pdf/docx) via the carry's visual
+    // preview, markdown via upstream's rendered/source toggle. (#84951)
+    if (isVisualDocumentPath(mediaPath)) {
+      return <PreviewAttachment target={mediaPath} />
+    }
+
+    if (isMarkdownDocumentPath(mediaPath)) {
+      return <PreviewAttachment source="tool-result" target={mediaPath} />
+    }
+
+    return <MediaAttachment path={mediaPath} />
   }
 
   const previewTarget = previewTargetFromMarkdownHref(href)
@@ -278,6 +287,25 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
   const target = href ? normalizeExternalUrl(href) : href
 
   if (!target || !/^https?:\/\//i.test(target)) {
+    // A plain filesystem href (`[report](/home/user/report.md)`, `file://…`,
+    // `~/notes.md`, `C:\…`) names a file on the AGENT's machine. A bare
+    // anchor is a dead link there — file:// is blocked in the renderer, and
+    // on a remote gateway the path isn't even on this disk. Route it through
+    // the preview pipeline instead: normalizeOrLocalPreviewTarget resolves at
+    // VIEW time against the session's backend (local reads the file directly;
+    // remote fetches it over the authenticated /api/fs bridge), so the same
+    // transcript works from every machine that opens it. Media extensions
+    // keep their richer inline player.
+    const fileHref = href && !href.startsWith('#') && isFileMediaPath(href) ? href : null
+
+    if (fileHref) {
+      return mediaKind(fileHref) === 'file' ? (
+        <PreviewAttachment source="explicit-link" target={fileHref} />
+      ) : (
+        <MediaAttachment path={fileHref} />
+      )
+    }
+
     return (
       <a
         className={cn('ref wrap-anywhere', className)}

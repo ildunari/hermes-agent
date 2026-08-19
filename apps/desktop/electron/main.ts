@@ -117,6 +117,7 @@ import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import { formatDesktopLogLine } from './desktop-log-line'
+import { installDesktopPluginFromGit, probePluginRepo } from './desktop-plugin-install'
 import { resolveDesktopRemoteRoute } from './desktop-remote-route'
 import {
   buildPosixCleanupScript,
@@ -205,7 +206,6 @@ import { cursorPointInWindow } from './hud-cursor'
 import { snapHudBounds } from './hud-snap'
 import { createHudSnapShortcut } from './hud-snap-shortcut'
 import { buildHudWindowUrl } from './hud-url'
-import { imageContextMenuItems } from './image-context-menu'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
 import { ensureMainWindow } from './main-window-lifecycle'
 import { createMediaProtocolHandler, MEDIA_PROTOCOL } from './media-protocol'
@@ -260,8 +260,11 @@ import { prepareProfileRenameLifecycle, profileRenameFromRequest } from './profi
 import {
   buildSidebarSessionSliceParams,
   fetchPrimaryProfileSessions,
+  fetchRegistrySessionRows,
   fetchRemoteProfileSessions,
-  mergeProfileSessionWindow
+  mergeProfileSessionWindow,
+  type RegistrySessionSource,
+  spliceRegistrySessionRows
 } from './profile-session-routing'
 import { createQuickEntryShortcut, quickEntryWindowBounds, sanitizeQuickEntrySettings } from './quick-entry'
 import { type ActiveWork, mergeActiveWork, normalizeActiveWork, quitPromptFor } from './quit-guard'
@@ -6410,92 +6413,30 @@ function installZoomShortcuts(window) {
   })
 }
 
-function installContextMenu(window) {
+/**
+ * The custom (renderer) context menu's main-process half.
+ *
+ * The app popups no native menus: the renderer owns the menu UI so labels
+ * are translated with the rest of the app. Main keeps only what Chromium
+ * reports here and the renderer cannot see:
+ *  - spell-check facts (misspelled word + suggestions) — forwarded so the
+ *    renderer appends them to its already-open menu,
+ *  - the gesture coordinates — kept for copyImageAt, which needs them.
+ */
+const lastContextMenuPoint = new Map<number, { x: number; y: number }>()
+
+function installContextMenuBridge(window: BrowserWindow) {
   window.webContents.on('context-menu', (_event, params) => {
-    const template = []
-    const hasSelection = Boolean(params.selectionText?.trim())
-    const hasLink = Boolean(params.linkURL)
-    const isEditable = Boolean(params.isEditable)
+    lastContextMenuPoint.set(window.webContents.id, { x: params.x, y: params.y })
 
-    template.push(
-      ...imageContextMenuItems(params, {
-        copyImageAt: (x, y) => window.webContents.copyImageAt(x, y),
-        openImage: openExternalUrl,
-        copyImageAddress: url => clipboard.writeText(url),
-        saveImage: url => {
-          void saveImageFromUrl(url).catch(error => rememberLog(`Save image failed: ${error.message}`))
-        }
-      })
-    )
-
-    if (hasLink) {
-      if (template.length) {
-        template.push({ type: 'separator' })
-      }
-
-      template.push(
-        {
-          label: 'Open Link',
-          click: () => openExternalUrl(params.linkURL)
-        },
-        {
-          label: 'Copy Link',
-          click: () => clipboard.writeText(params.linkURL)
-        }
-      )
-    }
-
-    // Spell-check suggestions for the misspelled word under the caret.
-    // Chromium surfaces them on `params.dictionarySuggestions`; we offer the
-    // top 5 plus a "Add to dictionary" affordance.
     const suggestions = Array.isArray(params.dictionarySuggestions) ? params.dictionarySuggestions : []
 
-    if (isEditable && params.misspelledWord && suggestions.length > 0) {
-      if (template.length) {
-        template.push({ type: 'separator' })
-      }
-
-      for (const suggestion of suggestions.slice(0, 5)) {
-        template.push({
-          label: suggestion,
-          click: () => window.webContents.replaceMisspelling(suggestion)
-        })
-      }
-
-      template.push({ type: 'separator' })
-      template.push({
-        label: 'Add to dictionary',
-        click: () => window.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord)
+    if (params.isEditable && params.misspelledWord) {
+      window.webContents.send('hermes:context-menu-spellcheck', {
+        misspelledWord: params.misspelledWord,
+        suggestions
       })
     }
-
-    if (hasSelection || isEditable) {
-      if (template.length) {
-        template.push({ type: 'separator' })
-      }
-
-      if (isEditable) {
-        template.push(
-          { role: 'cut', enabled: params.editFlags.canCut },
-          { role: 'copy', enabled: params.editFlags.canCopy },
-          { role: 'paste', enabled: params.editFlags.canPaste },
-          { type: 'separator' },
-          { role: 'selectAll', enabled: params.editFlags.canSelectAll }
-        )
-      } else {
-        template.push({ role: 'copy', enabled: params.editFlags.canCopy })
-      }
-    }
-
-    // Bare right-click on non-editable, non-selected, non-media content (a pane
-    // body, the sidebar, chrome): the renderer's own context menus own those
-    // surfaces, and anywhere without one shows nothing — not a lone, useless
-    // "Select All" from the native fallback.
-    if (!template.length) {
-      return
-    }
-
-    Menu.buildFromTemplate(template).popup({ window })
   })
 }
 
@@ -10811,7 +10752,7 @@ function wireCommonWindowHandlers(win, { zoom = true }: { zoom?: boolean } = {})
     win.webContents.on('did-finish-load', () => restorePersistedZoomLevel(win))
   }
 
-  installContextMenu(win)
+  installContextMenuBridge(win)
   win.webContents.setWindowOpenHandler(details => {
     openExternalUrl(details.url)
 
@@ -13334,9 +13275,10 @@ async function interceptSessionRequestForRemote(request) {
 
   if (method === 'GET' && pathname === '/api/profiles/sessions') {
     const remoteProfiles = configuredRemoteProfileNames()
+    const registrySources = await pooledRegistrySessionSources()
 
-    if (remoteProfiles.length === 0) {
-      return undefined // no remote profiles → local fast path
+    if (remoteProfiles.length === 0 && registrySources.length === 0) {
+      return undefined // no remote profiles and no connected registry gateways → local fast path
     }
 
     const requested = (searchParams.get('profile') || 'all').trim() || 'all'
@@ -13356,8 +13298,9 @@ async function interceptSessionRequestForRemote(request) {
   // remote correctness is preserved.
   if (method === 'GET' && pathname === '/api/profiles/sessions/sidebar') {
     const remoteProfiles = configuredRemoteProfileNames()
+    const registrySources = await pooledRegistrySessionSources()
 
-    if (remoteProfiles.length === 0) {
+    if (remoteProfiles.length === 0 && registrySources.length === 0) {
       return undefined // local fast path → batched endpoint's single DB open
     }
 
@@ -13475,7 +13418,9 @@ async function fetchProfilesSessionSlice(searchParams, remoteProfiles) {
 // Unified list: primary's local aggregate, with each remote profile's stale local
 // rows/totals swapped for the remote's real ones, re-sorted by recency and
 // re-windowed to the requested page. A dead remote contributes nothing rather
-// than breaking the sidebar.
+// than breaking the sidebar. Connected registry gateways' sessions are spliced
+// in too (#88880) — the unified Sessions list shows EVERY connected gateway's
+// chats, tagged with connection_id + profile so opens route correctly.
 async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
   const limit = Math.max(1, Number(searchParams.get('limit')) || 20)
   const offset = Math.max(0, Number(searchParams.get('offset')) || 0)
@@ -13512,6 +13457,22 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
     })
   )
 
+  // Registry gateways (v2 connections): splice every CONNECTED gateway's rows
+  // into the unified list. Only already-pooled backends are read — a sidebar
+  // refresh must never dial or spawn a backend (the Bot Mode roster-respawn
+  // trap). Reads omit include_hidden, so Bot Mode's hidden canonical chats
+  // stay out of the global list, same as local sessions.
+  const registrySources = await pooledRegistrySessionSources()
+
+  if (registrySources.length) {
+    const registryRows = await fetchRegistrySessionRows(registrySources, remoteParams, (descriptor, path) =>
+      getJsonForBackend(descriptor, path, { timeoutMs: 10_000 })
+    )
+
+    const { added } = spliceRegistrySessionRows(merged, registryRows, profileTotals)
+    total += added
+  }
+
   const recency = s => s?.[order] ?? s?.started_at ?? 0
   merged.sort((a, b) => recency(b) - recency(a))
 
@@ -13521,6 +13482,59 @@ async function mergeRemoteProfileSessions(searchParams, remoteProfiles) {
     total,
     profile_totals: profileTotals
   }
+}
+
+// Every CONNECTED registry gateway as a session source: resolved descriptors
+// straight from the backend pool, never dialing. SSH sources contribute one
+// backend per pooled (connection, profile) scope; remote/cloud sources are one
+// shared host (any pooled scope's descriptor serves the cross-profile read).
+// The primary local connection is excluded — the primary aggregate already
+// carries local rows.
+async function pooledRegistrySessionSources(): Promise<RegistrySessionSource[]> {
+  const registry = readDesktopConnectionsRegistry()
+  const sources: RegistrySessionSource[] = []
+
+  for (const connection of registry.connections) {
+    if (connection.kind === 'local') {
+      continue
+    }
+
+    const prefix = backendScopePrefix(connection.id)
+
+    const pooled = [...backendPool.entries()].filter(
+      ([key, entry]) => key.startsWith(prefix) && entry.connectionPromise
+    )
+
+    if (pooled.length === 0) {
+      continue
+    }
+
+    const backends: Array<{ descriptor: unknown; profileLabel: null | string }> = []
+
+    for (const [key, entry] of connection.kind === 'ssh' ? pooled : pooled.slice(0, 1)) {
+      try {
+        // Already-resolved for a connected backend; a still-dialing entry is
+        // skipped via the timeout guard rather than blocking the sidebar.
+        const descriptor = await Promise.race([
+          entry.connectionPromise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('pending')), 2_000))
+        ])
+
+        backends.push({
+          descriptor,
+          profileLabel: connection.kind === 'ssh' ? key.slice(prefix.length) || 'default' : null
+        })
+      } catch {
+        // Dead or still-connecting backend — contributes nothing this refresh.
+      }
+    }
+
+    if (backends.length) {
+      sources.push({ backends, connectionId: connection.id, kind: connection.kind })
+    }
+  }
+
+  return sources
 }
 
 async function handleHermesApiRequest(request) {
@@ -13695,11 +13709,13 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
   // Action buttons render only on signed macOS builds; elsewhere they're dropped
   // and the body click still works.
   const actions = Array.isArray(payload?.actions) ? payload.actions : []
+  const icon = typeof payload?.icon === 'string' && payload.icon.trim() ? payload.icon.trim() : undefined
 
   const notification = new Notification({
     title: payload?.title || 'Hermes',
     body: payload?.body || '',
     silent: Boolean(payload?.silent),
+    ...(icon ? { icon } : {}),
     actions: actions.map(action => ({ type: 'button', text: String(action?.text || '') }))
   })
 
@@ -13713,6 +13729,16 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
     if (payload?.sessionId) {
       mainWindow.webContents.send('hermes:focus-session', payload.sessionId)
     }
+
+    // Plugin / session-less activation — serializable path (+ optional notifyId
+    // for renderer callbacks). Same vocabulary as hermes://index-network/….
+    if (payload?.activate || payload?.notifyId) {
+      mainWindow.webContents.send('hermes:notification-activate', {
+        activate: payload?.activate,
+        notifyId: payload?.notifyId,
+        tag: payload?.tag
+      })
+    }
   })
   notification.on('action', (_actionEvent, index) => {
     if (!mainWindow || mainWindow.isDestroyed()) {
@@ -13721,9 +13747,24 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
 
     const action = actions[index]
 
-    if (action?.id) {
-      mainWindow.webContents.send('hermes:notification-action', { sessionId: payload?.sessionId, actionId: action.id })
+    if (!action?.id) {
+      return
     }
+
+    // Approvals keep the existing session-scoped channel.
+    if (payload?.sessionId && !payload?.notifyId && !payload?.activate) {
+      mainWindow.webContents.send('hermes:notification-action', { sessionId: payload.sessionId, actionId: action.id })
+
+      return
+    }
+
+    focusWindow(mainWindow)
+    mainWindow.webContents.send('hermes:notification-activate', {
+      actionId: action.id,
+      activate: action.activate || payload?.activate,
+      notifyId: payload?.notifyId,
+      tag: payload?.tag
+    })
   })
   notification.show()
 
@@ -13890,6 +13931,58 @@ ipcMain.handle('hermes:readClipboard', () => clipboard.readText())
 ipcMain.handle('hermes:saveGatewayFile', (_event, payload) => saveGatewayFile(payload))
 
 ipcMain.handle('hermes:saveImageFromUrl', (_event, url) => saveImageFromUrl(String(url || '')))
+
+// The custom context menu's edit verbs. They act on the SENDER's focused
+// element, so the renderer restores focus to the editable before invoking.
+ipcMain.handle('hermes:context-menu:edit', (event, command) => {
+  const contents = event.sender
+
+  if (command === 'copy') {
+    contents.copy()
+  } else if (command === 'cut') {
+    contents.cut()
+  } else if (command === 'paste') {
+    contents.paste()
+  } else if (command === 'selectAll') {
+    contents.selectAll()
+  }
+})
+
+// Copy the image under the sender's LAST context-menu gesture. Chromium only
+// exposes image bytes through copyImageAt, and only main saw the coordinates.
+ipcMain.handle('hermes:context-menu:copy-image', event => {
+  const point = lastContextMenuPoint.get(event.sender.id)
+
+  if (point) {
+    event.sender.copyImageAt(point.x, point.y)
+  }
+})
+
+ipcMain.handle('hermes:context-menu:spellcheck', (event, action) => {
+  const kind = action?.kind
+  const word = String(action?.word || '')
+
+  if (!word) {
+    return
+  }
+
+  if (kind === 'replace') {
+    event.sender.replaceMisspelling(word)
+  } else if (kind === 'add') {
+    event.sender.session.addWordToSpellCheckerDictionary(word)
+  }
+})
+
+// Guest dictionary add: the webview TAG exposes replaceMisspelling but no
+// session API, so the renderer names the guest by webContents id.
+ipcMain.handle('hermes:context-menu:guest-add-word', (_event, payload) => {
+  const word = String(payload?.word || '')
+  const guest = electronWebContents.fromId(Number(payload?.webContentsId))
+
+  if (word && guest && !guest.isDestroyed()) {
+    guest.session.addWordToSpellCheckerDictionary(word)
+  }
+})
 
 ipcMain.handle('hermes:saveImageBuffer', async (_event, payload) => {
   const data = payload?.data
@@ -14595,6 +14688,28 @@ ipcMain.handle('hermes:fs:desktopPluginsRoot', async () => localPluginsRoot('des
 // this root for it — one installable folder serving both SDKs.
 ipcMain.handle('hermes:fs:agentPluginsRoot', async () => localPluginsRoot('plugins'))
 
+ipcMain.handle('hermes:plugin:probe', async (_event, payload) => {
+  const identifier = String(payload?.identifier || payload?.repo || '').trim()
+
+  if (!identifier) {
+    return { ok: false, error: 'identifier is required', agent: false, desktop: false, warnings: [] }
+  }
+
+  return probePluginRepo(resolveGitBinary(), identifier)
+})
+
+ipcMain.handle('hermes:plugin:installDesktop', async (_event, payload) => {
+  const identifier = String(payload?.identifier || payload?.repo || '').trim()
+
+  if (!identifier) {
+    return { ok: false, error: 'identifier is required' }
+  }
+
+  const desktopPluginsRoot = await localPluginsRoot('desktop-plugins')
+
+  return installDesktopPluginFromGit(resolveGitBinary(), identifier, desktopPluginsRoot, Boolean(payload?.force))
+})
+
 // Rename a file/folder in place. The renderer passes the existing path + a new
 // base name; the destination is resolved in the SAME parent dir so a rename can
 // never move the item elsewhere or traverse out. Rejects on a name collision.
@@ -15180,15 +15295,20 @@ ipcMain.handle('hermes:vscode-theme:fetch', async (_event, id) => fetchMarketpla
 ipcMain.handle('hermes:vscode-theme:search', async (_event, query) => searchMarketplaceThemes(String(query || ''), 20))
 
 // ---------------------------------------------------------------------------
-// hermes:// deep links (e.g. hermes://blueprint/morning-brief?time=08:00, or
+// hermes:// deep links (e.g. hermes://blueprint/morning-brief?time=08:00,
 // hermes://mcp/install?name=NAME&config=B64 — the vendor "Add to Hermes"
-// button). Parsing is generic ({kind, name, params}); the renderer routes per
-// kind and anything install-shaped requires explicit user confirmation there.
+// button, or hermes://plugin/install?repo=owner/repo). Dev
+// (`HERMES_DESKTOP_DEV_SERVER`) registers hermes-dev:// instead — bare
+// Electron or a stale OS handler often owns hermes:// on dev machines.
+// Parsing is generic ({kind, name, params}); the renderer routes per kind
+// and anything install-shaped requires explicit user confirmation there.
 // A docs/dashboard "Send to App" button opens this URL; we route it into the
 // running app. Three delivery paths: macOS 'open-url',
 // Win/Linux running-app 'second-instance' (argv), Win/Linux cold-start argv.
 // ---------------------------------------------------------------------------
-const HERMES_PROTOCOL = 'hermes'
+const HERMES_PROTOCOL = DEV_SERVER ? 'hermes-dev' : 'hermes'
+/** Schemes accepted when parsing inbound URLs (dev accepts both). */
+const DEEPLINK_SCHEMES = DEV_SERVER ? ['hermes-dev', 'hermes'] : ['hermes']
 let _pendingDeepLink = null
 let _rendererReadyForDeepLink = false
 
@@ -15197,7 +15317,7 @@ function _extractDeepLink(argv) {
     return null
   }
 
-  return argv.find(a => typeof a === 'string' && a.startsWith(`${HERMES_PROTOCOL}://`)) || null
+  return argv.find(a => typeof a === 'string' && DEEPLINK_SCHEMES.some(s => a.startsWith(`${s}://`))) || null
 }
 
 function handleDeepLink(url) {
@@ -15211,6 +15331,14 @@ function handleDeepLink(url) {
     parsed = new URL(url)
   } catch {
     rememberLog(`[deeplink] ignoring malformed url: ${url}`)
+
+    return
+  }
+
+  const scheme = parsed.protocol.replace(/:$/, '')
+
+  if (!DEEPLINK_SCHEMES.includes(scheme)) {
+    rememberLog(`[deeplink] ignoring scheme ${scheme} (expected ${DEEPLINK_SCHEMES.join(' or ')})`)
 
     return
   }
@@ -15264,11 +15392,15 @@ function registerDeepLinkProtocol() {
   try {
     if (process.defaultApp && process.argv.length >= 2) {
       // Dev: register with the electron exec path + entry script so the OS can
-      // relaunch us with the URL.
-      app.setAsDefaultProtocolClient(HERMES_PROTOCOL, process.execPath, [path.resolve(process.argv[1])])
+      // relaunch us with the URL. argv[1] is usually "." when launched via
+      // `electron .` from apps/desktop — resolve against cwd.
+      const entry = path.resolve(process.argv[1])
+      app.setAsDefaultProtocolClient(HERMES_PROTOCOL, process.execPath, [entry])
     } else {
       app.setAsDefaultProtocolClient(HERMES_PROTOCOL)
     }
+
+    rememberLog(`[deeplink] registered ${HERMES_PROTOCOL}:// handler`)
   } catch (err) {
     rememberLog(`[deeplink] protocol registration failed: ${err.message}`)
   }
@@ -15350,6 +15482,7 @@ app.whenReady().then(() => {
   installEmbedReferer()
   installRemoteHeaderRules()
   registerDeepLinkProtocol()
+
   ensureWslWindowsFonts()
   configureSpellChecker()
   registerPowerResumeListeners()

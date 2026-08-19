@@ -2327,6 +2327,12 @@ export const ar = defineLocale({
   zones: {
     showHeader: 'إظهار الرأس',
     hideHeader: 'إخفاء الرأس',
+    showStripTab: title => `إظهار ${title}`,
+    hideStripTab: title => `إخفاء ${title}`,
+    lastTabKeptTitle: 'يبقى آخر تبويب',
+    lastTabKeptBody:
+      'تحتاج هذه المنطقة إلى تبويب مرئي واحد على الأقل. أظهر تبويبا آخر أولا، أو اطو الشريط الجانبي بأكمله.',
+    toggleStripTab: title => `تبديل تبويب ${title}`,
     minimize: 'تصغير',
     restore: 'استعادة',
     closeRunningTitle: 'إغلاق تبويب يعمل؟',
@@ -2364,6 +2370,29 @@ export const ar = defineLocale({
     notExpressible: 'هذا الترتيب متشابك — لا يمكن تمثيله كتقسيمات متداخلة بعد',
     zoneCount: count => `${count} مناطق`,
     tabCount: count => `${count} تبويبات`
+  },
+  contextMenu: {
+    link: {
+      openInApp: 'فتح في متصفح التطبيق',
+      openExternal: 'فتح في المتصفح الخارجي',
+      copyUrl: 'نسخ الرابط',
+      copyResolvedUrl: 'نسخ الرابط المُحلَّل'
+    },
+    image: {
+      copyImage: 'نسخ الصورة',
+      copyImageAddress: 'نسخ عنوان الصورة',
+      saveImageAs: 'حفظ الصورة باسم…'
+    },
+    edit: {
+      cut: 'قص',
+      paste: 'لصق',
+      selectAll: 'تحديد الكل',
+      addToDictionary: 'إضافة إلى القاموس'
+    },
+    page: {
+      copyPageUrl: 'نسخ رابط الصفحة',
+      inspectElement: 'فحص العنصر'
+    }
   },
   assistant: {
     thread: {
@@ -2427,7 +2456,10 @@ export const ar = defineLocale({
       other: 'غير ذلك',
       placeholder: 'اكتب إجابتك...',
       skip: 'تخطي',
-      continueLabel: 'متابعة'
+      continueLabel: 'متابعة',
+      confirmAndContinueLabel: 'تأكيد ومتابعة',
+      answeredBadge: 'تمت الإجابة',
+      questionProgress: (answered, total) => `تمت الإجابة على ${answered} من ${total}`
     },
     tool: {
       copyCode: 'نسخ الكود',
