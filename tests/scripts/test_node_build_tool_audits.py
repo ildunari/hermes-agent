@@ -14,6 +14,6 @@ def _locked_package(path: str) -> dict:
 
 def test_audited_node_build_dependencies_stay_patched() -> None:
     """Pin the patched releases used by the web and TUI build workspaces."""
-    assert _locked_package("node_modules/postcss/node_modules/nanoid")["version"] == "3.3.17"
+    assert _locked_package("node_modules/postcss/node_modules/nanoid")["version"] == "3.3.18"
     assert _locked_package("node_modules/node-gyp/node_modules/undici")["version"] == "6.28.0"
     assert _locked_package("node_modules/undici")["version"] == "7.29.0"
