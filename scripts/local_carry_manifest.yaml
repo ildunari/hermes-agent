@@ -279,6 +279,7 @@ features:
       - scripts/carry_gate.py
       - scripts/hermes_update_service.py
       - scripts/local_carry_manifest.yaml
+      - scripts/release.py
       - scripts/setup_update_service.py
       - scripts/setup_futureproof_hooks.sh
       - scripts/thinning.py
@@ -290,6 +291,7 @@ features:
       - scripts/run_tests_parallel.py
       - scripts/run_update_smart_client_validation.sh
       - tests/scripts/test_verify_deployed_turn.py
+      - tests/scripts/test_release_version_files.py
     collision_paths:
       - scripts/run_tests.sh
       - scripts/run_tests_parallel.py
@@ -310,6 +312,7 @@ features:
       - tests/scripts/test_hermes_update_service.py
       - tests/scripts/test_setup_update_service.py
       - tests/scripts/test_verify_deployed_turn.py
+      - tests/scripts/test_release_version_files.py
     checks:
       - id: futureproof-safe-checkpoint
         path: scripts/hermes_checkpoint.py

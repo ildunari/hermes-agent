@@ -33,6 +33,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = REPO_ROOT / "hermes_cli" / "__init__.py"
 PYPROJECT_FILE = REPO_ROOT / "pyproject.toml"
+PACKAGE_LOCK_FILE = REPO_ROOT / "package-lock.json"
 
 # ──────────────────────────────────────────────────────────────────────
 # Git email → GitHub username mapping
@@ -2220,6 +2221,22 @@ def update_version_files(semver: str, calver_date: str):
             count=1,
         )
         desktop_pkg.write_text(pkg_text, encoding="utf-8")
+
+    # npm records workspace package versions separately from package.json.
+    # Keep that metadata aligned too, otherwise release builds can package the
+    # new version while the canonical lock still advertises the previous one.
+    if PACKAGE_LOCK_FILE.exists():
+        lock_text = PACKAGE_LOCK_FILE.read_text(encoding="utf-8")
+        lock_text, replacements = re.subn(
+            r'("apps/desktop"\s*:\s*\{\s*"name"\s*:\s*"hermes",\s*'
+            r'"version"\s*:\s*)"[^"]+"',
+            rf'\g<1>"{semver}"',
+            lock_text,
+            count=1,
+        )
+        if replacements != 1:
+            raise RuntimeError("could not update apps/desktop version in package-lock.json")
+        PACKAGE_LOCK_FILE.write_text(lock_text, encoding="utf-8")
 
 
 def resolve_author(name: str, email: str) -> str:
