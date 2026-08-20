@@ -270,6 +270,9 @@ exemptions:
 - path_glob: apps/desktop/src/hermes.test.ts
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
+- path_glob: apps/desktop/src/api/sessions.ts
+  reason: grandfathered current slim carry pending classification
+  expires: '2026-10-01'
 - path_glob: apps/desktop/src/hermes.ts
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'

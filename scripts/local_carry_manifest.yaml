@@ -537,7 +537,7 @@ features:
       - apps/desktop/src/app/session/hooks/use-message-stream/utils.ts
       - apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
       - apps/desktop/src/app/types.ts
-      - apps/desktop/src/lib/chat-messages.ts
+      - apps/desktop/src/lib/chat-messages/types.ts
       - apps/desktop/src/lib/runtime-routing.test.ts
       - apps/desktop/src/lib/runtime-routing.ts
     collision_paths:
@@ -546,7 +546,7 @@ features:
       - apps/desktop/src/app/session/hooks/use-message-stream/index.ts
       - apps/desktop/src/app/session/hooks/use-prompt-actions/index.ts
       - apps/desktop/src/app/types.ts
-      - apps/desktop/src/lib/chat-messages.ts
+      - apps/desktop/src/lib/chat-messages/types.ts
     tests:
       - tests/agent/test_runtime_routing.py
       - tests/gateway/test_api_server_runtime_routing.py
