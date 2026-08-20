@@ -32,7 +32,7 @@ afterEach(() => {
 
 describe('clampDataUrlReadMaxMb', () => {
   it('defaults invalid input and clamps only the safety range', () => {
-    expect(clampDataUrlReadMaxMb(undefined)).toBe(16)
+    expect(clampDataUrlReadMaxMb(undefined)).toBe(DATA_URL_READ_DEFAULT_MAX_MB)
     expect(clampDataUrlReadMaxMb(0)).toBe(1)
     expect(clampDataUrlReadMaxMb(100)).toBe(100)
     expect(clampDataUrlReadMaxMb(99999)).toBe(4096)
@@ -57,7 +57,7 @@ describe('data-url-read-max store', () => {
   it('keeps the last known-good value when the bridge write fails', async () => {
     set.mockRejectedValueOnce(new Error('boom'))
 
-    await expect(setDataUrlReadMaxMb(48)).resolves.toBe(16)
-    expect($dataUrlReadMaxMb.get()).toBe(16)
+    await expect(setDataUrlReadMaxMb(48)).resolves.toBe(DATA_URL_READ_DEFAULT_MAX_MB)
+    expect($dataUrlReadMaxMb.get()).toBe(DATA_URL_READ_DEFAULT_MAX_MB)
   })
 })

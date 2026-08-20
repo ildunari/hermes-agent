@@ -524,6 +524,21 @@ features:
         needles: [normalizeStoredSkin, normalizeSkin, registry reactivity]
         description: stored runtime-plugin theme names survive startup until asynchronous contributions register
 
+  - id: desktop.data-url-read-budget
+    title: Preserve the Studio Desktop data URL read budget
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - apps/shared/src/data-url-read-max.ts
+      - apps/desktop/src/store/data-url-read-max.test.ts
+    tests:
+      - apps/desktop/src/store/data-url-read-max.test.ts
+    checks:
+      - id: desktop-data-url-default-budget
+        path: apps/shared/src/data-url-read-max.ts
+        needles: ['DATA_URL_READ_DEFAULT_MAX_MB = 64']
+        description: Desktop file reads retain the locally validated 64 MB default budget
+
   - id: runtime.fallback-routing
     title: Backend-owned runtime fallback routing lifecycle
     owner_paths:
