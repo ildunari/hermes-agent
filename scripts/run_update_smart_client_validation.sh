@@ -106,7 +106,9 @@ else
   # Parse the "Tests  N failed | ..." summary line specifically. Matching a
   # bare "N failed" also hits the "Test Files" line above it and yields the
   # wrong number, which would let real regressions pass the gate.
-  ui_failed="$(grep -oE '^[[:space:]]*Tests[[:space:]]+[0-9]+ failed' /tmp/update-smart-ui.log | grep -oE '[0-9]+' | tail -1 || true)"
+  # Vitest colors the summary even when stdout is redirected. Strip ANSI
+  # before matching so an accepted non-zero baseline is not misread as zero.
+  ui_failed="$(perl -pe 's/\e\[[0-9;]*[mK]//g' /tmp/update-smart-ui.log | grep -oE '^[[:space:]]*Tests[[:space:]]+[0-9]+ failed' | grep -oE '[0-9]+' | tail -1 || true)"
   ui_failed="${ui_failed:-0}"
   baseline="${UPDATE_DESKTOP_UI_BASELINE:-0}"
 

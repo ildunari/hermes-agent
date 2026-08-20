@@ -1513,6 +1513,13 @@ def test_validation_env_scoping_signals_in_source() -> None:
     assert bash_check.returncode == 0, bash_check.stderr
 
 
+def test_validation_strips_vitest_ansi_before_counting_failures() -> None:
+    script = SCRIPT.parent / "run_update_smart_client_validation.sh"
+    shell_source = script.read_text(encoding="utf-8")
+
+    assert "perl -pe 's/\\e\\[[0-9;]*[mK]//g' /tmp/update-smart-ui.log" in shell_source
+
+
 def test_validation_isolates_tui_gateway_suite_from_parallel_group() -> None:
     script = SCRIPT.parent / "run_update_smart_client_validation.sh"
     shell_source = script.read_text(encoding="utf-8")
