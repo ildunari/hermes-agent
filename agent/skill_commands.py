@@ -537,7 +537,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                         "skill_dir": str(skill_md.parent),
                         "command_priority": command_priority,
                     }
-                    _skill_commands[cmd_key] = info
+                    commands[cmd_key] = info
                     raw_aliases = hermes_meta.get("command_aliases", ()) if isinstance(hermes_meta, dict) else ()
                     if isinstance(raw_aliases, str):
                         raw_aliases = (raw_aliases,)
@@ -549,9 +549,9 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                                 alias_name
                                 and alias_name != cmd_name
                                 and resolve_command(alias_name) is None
-                                and alias_key not in _skill_commands
+                                and alias_key not in commands
                             ):
-                                _skill_commands[alias_key] = info
+                                commands[alias_key] = info
                 except Exception:
                     continue
     except Exception:
