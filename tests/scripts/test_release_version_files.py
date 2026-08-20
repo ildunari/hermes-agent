@@ -47,5 +47,6 @@ def test_update_version_files_updates_desktop_lock_metadata(tmp_path):
     release.update_version_files("0.21.0", "2026.8.20")
 
     assert json.loads(package_json.read_text())["version"] == "0.21.0"
+    assert '__release_date__ = "2026.8.20"' in version_file.read_text(encoding="utf-8")
     lock = json.loads(package_lock.read_text())
     assert lock["packages"]["apps/desktop"]["version"] == "0.21.0"

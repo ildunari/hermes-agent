@@ -14,7 +14,17 @@ def test_format_banner_version_label_on_upstream_main():
         value = banner.format_banner_version_label()
 
     assert value.endswith("· upstream b2f477a3")
+    assert f"· released {banner.RELEASE_DATE}" in value
     assert "local" not in value
+
+
+def test_format_banner_version_label_labels_release_date_without_git_state():
+    from hermes_cli import banner
+
+    with patch.object(banner, "get_git_banner_state", return_value=None):
+        value = banner.format_banner_version_label()
+
+    assert value == f"Hermes Agent v{banner.VERSION} · released {banner.RELEASE_DATE}"
 
 
 def test_get_git_banner_state_reads_origin_and_head(tmp_path):
