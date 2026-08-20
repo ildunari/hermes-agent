@@ -1503,6 +1503,7 @@ def test_validation_env_scoping_signals_in_source() -> None:
 
     assert '"UPDATE_CHANGED_DESKTOP"' in service_source
     assert '"UPDATE_VALIDATION_FULL"' in service_source
+    assert 'validation_env["FORCE_COLOR"] = "0"' in service_source
     assert "UPDATE_CHANGED_DESKTOP" in shell_source
     assert "UPDATE_VALIDATION_FULL" in shell_source
     bash_check = subprocess.run(

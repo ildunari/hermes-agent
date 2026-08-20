@@ -1933,6 +1933,9 @@ def execute_worker(repo: Path, root: Path, run_id: str) -> None:
                 validation_env = os.environ.copy()
                 validation_env["HERMES_REPO_ROOT"] = str(worktree)
                 validation_env["HERMES_TEST_RUNNER"] = str(bundle / "run_tests.sh")
+                # Vitest emits ANSI through redirected output on some launchd
+                # paths unless this is set on the curated child itself.
+                validation_env["FORCE_COLOR"] = "0"
                 validation_env["UPDATE_CHANGED_DESKTOP"] = (
                     "1" if desktop_diff_changed or web_diff_changed else "0"
                 )
