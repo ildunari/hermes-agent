@@ -1,7 +1,24 @@
-"""Regression tests for packaging metadata in pyproject.toml."""
+"""Regression tests for project and packaging metadata."""
 
+import json
 from pathlib import Path
 import tomllib
+
+
+def test_desktop_version_matches_python_release_version():
+    """Keep the signed desktop bundle on the canonical Hermes release line."""
+    root = Path(__file__).resolve().parents[1]
+    with (root / "pyproject.toml").open("rb") as handle:
+        python_version = tomllib.load(handle)["project"]["version"]
+    desktop_package = json.loads(
+        (root / "apps" / "desktop" / "package.json").read_text(encoding="utf-8")
+    )
+    package_lock = json.loads(
+        (root / "package-lock.json").read_text(encoding="utf-8")
+    )
+
+    assert desktop_package["version"] == python_version
+    assert package_lock["packages"]["apps/desktop"]["version"] == python_version
 
 def _load_optional_dependencies():
     pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
