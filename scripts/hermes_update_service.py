@@ -11,6 +11,7 @@ import os
 import plistlib
 import re
 import resource
+import shlex
 import shutil
 import signal
 import socket
@@ -2264,6 +2265,58 @@ def live_dependency_refresh(root: Path, run_id: str, repo: Path) -> None:
         raise
 
 
+def macbook_activation_command(
+    run_id: str,
+    remote_ref: str,
+    result_commit: str,
+    dependency_sensitive_paths: list[str],
+) -> str:
+    """Build the idempotent remote activation command for the MacBook checkout."""
+    marker_dir = "$HOME/.hermes/state/update-service"
+    marker = f"$HOME/.hermes/state/update-service/macbook-activated-{run_id}"
+    commands = [
+        "set -e",
+        "cd ~/.hermes/hermes-agent",
+        'test "$(git branch --show-current)" = local/studio-slim',
+        'test -z "$(git status --porcelain)"',
+        'current="$(git rev-parse HEAD)"',
+        f'git merge-base --is-ancestor "$current" {result_commit}',
+        f'if test "$current" != {result_commit}; then '
+        f"git -c core.hooksPath=/dev/null merge --ff-only {remote_ref}; fi",
+    ]
+    manifest_names = {Path(path).name for path in dependency_sensitive_paths}
+    if manifest_names & {"package.json", "package-lock.json"}:
+        commands.append("npm ci")
+    if manifest_names & {"pyproject.toml", "uv.lock", "requirements.txt"}:
+        extras = " ".join(shlex.quote(value) for value in UV_SYNC_EXTRA_ARGS)
+        commands.extend(
+            [
+                f"uv sync {extras}",
+                "for config in ~/.hermes/config.yaml ~/.hermes/profiles/*/config.yaml; do "
+                "test -f \"$config\" || continue; "
+                "profile_home=\"$(dirname \"$config\")\"; "
+                "HERMES_HOME=\"$profile_home\" PYTHONPATH=\"$PWD\" "
+                "./.venv/bin/python -c \"from hermes_cli.update_cmd import "
+                "_refresh_active_memory_provider_dependencies as refresh; "
+                "refresh(strict=True)\"; done",
+            ]
+        )
+    commands.extend(
+        [
+            "if pgrep -x Hermes >/dev/null; then "
+            "osascript -e 'tell application \"Hermes\" to quit' >/dev/null 2>&1 || true; "
+            "for attempt in $(seq 1 60); do pgrep -x Hermes >/dev/null || break; sleep 1; done; "
+            "test -z \"$(pgrep -x Hermes || true)\"; "
+            "open -a /Applications/Hermes.app; "
+            "for attempt in $(seq 1 60); do pgrep -x Hermes >/dev/null && break; sleep 1; done; "
+            "pgrep -x Hermes >/dev/null; fi",
+            f'mkdir -p "{marker_dir}"',
+            f'printf \'%s\\n\' {result_commit} > "{marker}"',
+        ]
+    )
+    return "; ".join(commands)
+
+
 def deploy(
     root: Path,
     repo: Path,
@@ -2452,6 +2505,71 @@ def deploy(
             complete_receipt(
                 root, run_id, "live_dependency_refresh", {"refreshed": True}
             )
+    if not ledger_now.get("macbook_deferred"):
+        macbook_activate_key = hashlib.sha256(
+            f"{run_id}:{result_commit}:macbook-activate".encode()
+        ).hexdigest()
+        macbook_marker = (
+            f"$HOME/.hermes/state/update-service/macbook-activated-{run_id}"
+        )
+
+        def macbook_activate_probe() -> tuple[bool, dict[str, Any]]:
+            remote = subprocess.run(
+                [
+                    "ssh",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=8",
+                    "macbook",
+                    "cd ~/.hermes/hermes-agent; "
+                    "printf '%s %s\\n' \"$(git rev-parse HEAD)\" "
+                    f'"$(cat {macbook_marker} 2>/dev/null || true)"',
+                ],
+                text=True,
+                capture_output=True,
+            )
+            fields = remote.stdout.strip().split()
+            observed_head = fields[0] if fields else ""
+            observed_marker = fields[1] if len(fields) > 1 else ""
+            return (
+                remote.returncode == 0
+                and observed_head == result_commit
+                and observed_marker == result_commit,
+                {"commit": observed_head, "marker": observed_marker},
+            )
+
+        def macbook_activate_action() -> None:
+            dependency_paths = list(
+                read_json(ledger_path(root, run_id)).get(
+                    "dependency_sensitive_paths", []
+                )
+            )
+            remote = macbook_activation_command(
+                run_id,
+                remote_ref,
+                result_commit,
+                dependency_paths,
+            )
+            worker_command(
+                root,
+                run_id,
+                ["ssh", "macbook", remote],
+                repo,
+                "macbook-activate",
+                3600,
+                honor_abort=False,
+            )
+
+        receipted(
+            root,
+            run_id,
+            "macbook_activate",
+            macbook_activate_key,
+            {"commit": result_commit},
+            macbook_activate_probe,
+            macbook_activate_action,
+        )
     install_key = hashlib.sha256(f"{run_id}:{result_commit}:artifact".encode()).hexdigest()
     expected_identity = desktop_artifact_identity or {}
     prior = Path(f"/Applications/.Hermes.update-prior-{run_id}.app")

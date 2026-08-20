@@ -840,6 +840,38 @@ def test_macbook_deferral_paths_exist_in_deploy() -> None:
     assert 'remote_state: Any = "deferred"' in source
 
 
+def test_macbook_activation_command_fast_forwards_refreshes_and_restarts() -> None:
+    command = SERVICE.macbook_activation_command(
+        "20260820T120000Z-abcdefabcdef",
+        "refs/hermes/update-runs/20260820T120000Z-abcdefabcdef",
+        "a" * 40,
+        ["apps/desktop/package.json", "package-lock.json", "uv.lock"],
+    )
+
+    assert 'test "$(git branch --show-current)" = local/studio-slim' in command
+    assert 'test -z "$(git status --porcelain)"' in command
+    assert "git merge-base --is-ancestor" in command
+    assert "git -c core.hooksPath=/dev/null merge --ff-only" in command
+    assert "npm ci" in command
+    assert "uv sync" in command
+    assert "_refresh_active_memory_provider_dependencies" in command
+    assert "tell application \"Hermes\" to quit" in command
+    assert "open -a /Applications/Hermes.app" in command
+    assert "macbook-activated-20260820T120000Z-abcdefabcdef" in command
+
+
+def test_macbook_activation_command_skips_unaffected_dependency_refresh() -> None:
+    command = SERVICE.macbook_activation_command(
+        "20260820T120000Z-abcdefabcdef",
+        "refs/hermes/update-runs/20260820T120000Z-abcdefabcdef",
+        "b" * 40,
+        ["hermes_cli/main.py"],
+    )
+
+    assert "npm ci" not in command
+    assert "uv sync" not in command
+
+
 def test_desktop_identity_match_is_exact() -> None:
     expected = {
         "CDHash": "abc",
