@@ -265,6 +265,45 @@ features:
         needles: [getDesktopHomeProfile, listDesktopHomeProfiles, setDesktopHomeProfile]
         description: renderer store wraps the Electron-authoritative Desktop Home profile bridge
 
+  - id: desktop.remote-folder-navigation
+    title: Typed remote workspace folder navigation
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - apps/desktop/src/app/right-sidebar/files/remote-picker.test.tsx
+      - apps/desktop/src/app/right-sidebar/files/remote-picker.tsx
+    tests:
+      - apps/desktop/src/app/right-sidebar/files/remote-picker.test.tsx
+    checks:
+      - id: desktop-remote-folder-query-planning
+        path: apps/desktop/src/app/right-sidebar/files/remote-picker.tsx
+        needles: [planFolderQuery, filterAndRankFolders, RemoteFolderPicker]
+        description: typed remote folder paths browse the deepest known parent and fuzzy-rank the remaining segment
+
+  - id: desktop.compaction-transcript-hygiene
+    title: Desktop compaction transcript reconciliation and summary visibility
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - apps/desktop/src/app/session/hooks/use-session-actions/utils.test.ts
+      - apps/desktop/src/app/session/hooks/use-session-actions/utils.ts
+      - apps/desktop/src/app/settings/appearance-settings.tsx
+      - apps/desktop/src/lib/compression-summary.ts
+      - apps/desktop/src/store/compaction-summary-visibility.ts
+      - apps/desktop/src/i18n/ar.ts
+      - apps/desktop/src/i18n/en.ts
+      - apps/desktop/src/i18n/ja.ts
+      - apps/desktop/src/i18n/types.ts
+      - apps/desktop/src/i18n/zh-hant.ts
+      - apps/desktop/src/i18n/zh.ts
+    tests:
+      - apps/desktop/src/app/session/hooks/use-session-actions/utils.test.ts
+      - apps/desktop/src/i18n/runtime.test.ts
+    checks:
+      - id: desktop-compaction-summary-reconciliation
+        path: apps/desktop/src/app/session/hooks/use-session-actions/utils.ts
+        needles: [compressionSummaryRepresentsUserMessage, nextMessages.some]
+        description: stale optimistic user rows are removed only when an authoritative compaction summary represents that turn
   - id: update.futureproof-system
     title: Recoverable, resource-bounded slim update system
     owner: kosta
@@ -721,6 +760,10 @@ features:
         forbidden_needles:
           - 'className="flex min-w-0 flex-col gap-(--conversation-turn-gap) pb-(--conversation-turn-gap) [contain-intrinsic-size:auto_37.5rem] [content-visibility:auto]"'
         description: sticky user bubbles stay paintable while off-screen tails retain content skipping
+      - id: desktop-compaction-summary-visibility
+        path: apps/desktop/src/components/assistant-ui/thread/list.tsx
+        needles: [threadStructuralSignature, showCompactionSummaries]
+        description: presentation-only filtering hides synthetic summary rows without mutating authoritative history; upstream-PR candidate
 
   - id: models.vibeproxy-alias-priority
     title: VibeProxy wins bare Claude-family aliases under provider auto
