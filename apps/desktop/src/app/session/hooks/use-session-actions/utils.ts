@@ -449,6 +449,18 @@ const compressionSummaryRepresentsUserMessage = (summary: ChatMessage, message: 
   return summaryText.includes(JSON.stringify(userText)) || (userText.length >= 32 && summaryText.includes(userText))
 }
 
+/** True when compression retained the same user turn under a committed id.
+ * Text alone is not identity: a user may deliberately repeat the same prompt.
+ * The retained backend row preserves the optimistic row's original timestamp,
+ * so requiring both fields removes the stale cache without swallowing a later
+ * identical turn. */
+const authoritativeUserCopyMatches = (authoritative: ChatMessage, optimistic: ChatMessage): boolean =>
+  authoritative.role === 'user' &&
+  typeof authoritative.timestamp === 'number' &&
+  typeof optimistic.timestamp === 'number' &&
+  authoritative.timestamp === optimistic.timestamp &&
+  textWithoutReferenceLines(chatMessageText(authoritative)) === textWithoutReferenceLines(chatMessageText(optimistic))
+
 /**
  * Does the row carry anything a viewer would miss — streamed answer text, or
  * the reasoning / tool-call structure the gateway's flat dump cannot express?
@@ -608,9 +620,10 @@ export function preserveLocalPendingTurnMessages(
 
     if (
       isOptimisticUser &&
-      latestAuthoritativeUser &&
-      (textWithoutReferenceLines(chatMessageText(latestAuthoritativeUser)) ===
-        textWithoutReferenceLines(chatMessageText(message)) ||
+      ((latestAuthoritativeUser &&
+        textWithoutReferenceLines(chatMessageText(latestAuthoritativeUser)) ===
+          textWithoutReferenceLines(chatMessageText(message))) ||
+        nextMessages.some(candidate => authoritativeUserCopyMatches(candidate, message)) ||
         nextMessages.some(candidate => compressionSummaryRepresentsUserMessage(candidate, message)))
     ) {
       continue

@@ -836,6 +836,41 @@ describe('preserveLocalPendingTurnMessages', () => {
     ])
   })
 
+  it('drops a stale optimistic turn retained earlier in the authoritative post-compaction tail', () => {
+    const original = 'the retained prompt that compression copied into the active transcript'
+    const timestamp = 1_787_417_012.709342
+
+    const next = [
+      msg('9-user', 'user', '[Recent Summary (d0, node 66)]\n## User requests verbatim\n- "an older request"'),
+      msg('10-user', 'user', original, { timestamp }),
+      msg('11-assistant', 'assistant', 'the retained prompt was answered'),
+      msg('12-user', 'user', '[Your active task list was preserved across context compression]')
+    ]
+
+    const previous = [...next, msg('user-optimistic-stale', 'user', original, { timestamp })]
+
+    expect(preserveLocalPendingTurnMessages(next, previous)).toBe(next)
+  })
+
+  it('keeps a genuinely repeated prompt when only an older authoritative row has the same text', () => {
+    const repeated = 'run the same check again'
+
+    const next = [
+      msg('1-user', 'user', repeated, { timestamp: 100 }),
+      msg('2-assistant', 'assistant', 'first run complete'),
+      msg('3-user', 'user', '[Your active task list was preserved across context compression]', { timestamp: 150 })
+    ]
+
+    const optimisticRepeat = msg('user-optimistic-repeat', 'user', repeated, { timestamp: 200 })
+
+    expect(preserveLocalPendingTurnMessages(next, [...next, optimisticRepeat]).map(message => message.id)).toEqual([
+      '1-user',
+      '2-assistant',
+      '3-user',
+      'user-optimistic-repeat'
+    ])
+  })
+
   it('keeps an optimistic user turn and pending assistant when the server projection is behind', () => {
     const next = [msg('1-user', 'user', 'first'), msg('2-assistant', 'assistant', 'first answer')]
 
