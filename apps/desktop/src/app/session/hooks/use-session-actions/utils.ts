@@ -2,6 +2,7 @@ import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-k
 import { getSession } from '@/hermes'
 import { assistantTextPart, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
+import { isCompressionSummaryText } from '@/lib/compression-summary'
 import { embeddedImageUrls, textWithoutEmbeddedImages } from '@/lib/embedded-images'
 import { parseRuntimeRouting } from '@/lib/runtime-routing'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
@@ -428,22 +429,24 @@ export function reconcileResumeMessages(nextMessages: ChatMessage[], previousMes
 const isGatewaySystemMarker = (message: ChatMessage): boolean =>
   message.role === 'user' && chatMessageText(message).trimStart().startsWith('[System:')
 
-// Context compaction replaces the transcript's user turn with a synthetic
-// summary row (agent/context_compressor.py SUMMARY_PREFIX / legacy prefixes;
-// the LCM engine emits "[Recent Summary (...)]"). When that row is the latest
-// authoritative user message, the real user turn was consumed by compression —
-// an optimistic copy that no longer text-matches must be dropped, not
-// resurrected as a duplicate bubble.
-const COMPRESSION_SUMMARY_PREFIXES = [
-  '[CONTEXT COMPACTION',
-  '[CONTEXT SUMMARY]',
-  '[Recent Summary',
-  '[Session Arc Summary'
-] as const
+/** True only when a synthetic summary actually carries this optimistic turn.
+ * LCM's "User requests verbatim" entries are JSON-style quoted strings. The
+ * direct-text fallback covers legacy summaries while requiring enough text to
+ * avoid treating a fresh short reply such as "ok" as an old summarized turn. */
+const compressionSummaryRepresentsUserMessage = (summary: ChatMessage, message: ChatMessage): boolean => {
+  if (!isCompressionSummaryText(chatMessageText(summary))) {
+    return false
+  }
 
-const isCompressionSummaryMessage = (message: ChatMessage): boolean => {
-  const text = chatMessageText(message).trimStart()
-  return COMPRESSION_SUMMARY_PREFIXES.some(prefix => text.startsWith(prefix))
+  const userText = textWithoutReferenceLines(chatMessageText(message)).trim()
+
+  if (!userText) {
+    return false
+  }
+
+  const summaryText = chatMessageText(summary)
+
+  return summaryText.includes(JSON.stringify(userText)) || (userText.length >= 32 && summaryText.includes(userText))
 }
 
 /**
@@ -608,7 +611,7 @@ export function preserveLocalPendingTurnMessages(
       latestAuthoritativeUser &&
       (textWithoutReferenceLines(chatMessageText(latestAuthoritativeUser)) ===
         textWithoutReferenceLines(chatMessageText(message)) ||
-        isCompressionSummaryMessage(latestAuthoritativeUser))
+        nextMessages.some(candidate => compressionSummaryRepresentsUserMessage(candidate, message)))
     ) {
       continue
     }
@@ -813,8 +816,7 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
 
   const inflightUserAlreadyPersisted =
     projection[safelyPersistedInflightUser] === true ||
-    (Boolean(inflightUser) &&
-      (persistedInLatestRun(inflightUser) || turnAlreadyAnswered(messages, inflightUser)))
+    (Boolean(inflightUser) && (persistedInLatestRun(inflightUser) || turnAlreadyAnswered(messages, inflightUser)))
 
   if (inflightUser && !inflightUserAlreadyPersisted) {
     projected.push({
@@ -960,22 +962,29 @@ export function appendLiveSessionProjection(messages: ChatMessage[], projection:
  */
 export function turnAlreadyAnswered(messages: ChatMessage[], text: string): boolean {
   const wanted = textWithoutReferenceLines(text)
+
   if (!wanted) {
     return false
   }
+
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]
+
     if (message.role !== 'user' || textWithoutReferenceLines(chatMessageText(message)) !== wanted) {
       continue
     }
+
     for (let after = index + 1; after < messages.length; after++) {
       const later = messages[after]
+
       if (later.role === 'assistant' && !later.pending) {
         return true
       }
     }
+
     return false
   }
+
   return false
 }
 
