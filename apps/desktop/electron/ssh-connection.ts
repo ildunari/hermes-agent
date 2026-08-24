@@ -39,7 +39,12 @@ import path from 'node:path'
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
 const DEFAULT_EXEC_TIMEOUT_MS = 20_000
 const DEFAULT_FORWARD_TIMEOUT_MS = 15_000
-const CONTROL_PERSIST_SECONDS = 300
+// A mux forward added with `ssh -O forward` does not count as an active
+// session for ControlPersist's idle timer. A numeric timeout therefore tears
+// down a healthy Desktop tunnel when the timer expires. Desktop owns and
+// explicitly closes this master, so keep it alive until close().
+const CONTROL_PERSIST = 'yes'
+const CONTROL_SOCKET_PROTOCOL = 'persistent-forward-v2'
 
 // eslint-disable-next-line no-control-regex -- deliberately reject control chars in ssh targets
 const _CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/
@@ -167,6 +172,7 @@ function controlSocketPath(user, host, port, baseDir?, identity: any = {}) {
   const keyPathIdentity = path.normalize(String(identity.keyPath || ''))
 
   const parts = [
+    CONTROL_SOCKET_PROTOCOL,
     identity.ownershipId || '',
     identity.scope || '',
     user || '',
@@ -206,7 +212,7 @@ function baseSshOptions(controlPath, connectTimeoutMs?) {
         '-o',
         'ControlMaster=auto',
         '-o',
-        `ControlPersist=${CONTROL_PERSIST_SECONDS}`
+        `ControlPersist=${CONTROL_PERSIST}`
       ]
     : []
 
@@ -218,6 +224,10 @@ function baseSshOptions(controlPath, connectTimeoutMs?) {
     'StrictHostKeyChecking=accept-new',
     '-o',
     'ExitOnForwardFailure=yes',
+    '-o',
+    'ServerAliveInterval=30',
+    '-o',
+    'ServerAliveCountMax=3',
     '-o',
     `ConnectTimeout=${connectSecs}`
   ]
@@ -750,9 +760,9 @@ class SshConnection {
   }
 
   // -O exit (best-effort) then drop the socket so ControlMaster=auto cannot
-  // re-attach to the corpse. (The orphaned master process is left to
-  // ControlPersist; a wedged channel can pin it, but without its socket it is
-  // inert.)
+  // re-attach to the corpse. A master wedged badly enough to refuse the
+  // control command can remain as an inert orphan, but it no longer owns a
+  // reachable socket or forward.
   async _evictStaleMaster() {
     try {
       await runSsh(buildControlArgs(this, 'exit', [], this._connectTimeoutMs), {
@@ -953,8 +963,7 @@ class SshConnection {
       this._logLine('control master closed')
     } catch (error: any) {
       // A master that refuses -O exit is the wedge that poisons re-attach;
-      // disown it. (Without its socket the orphan is inert; ControlPersist may
-      // not reap it if a wedged channel never idles.)
+      // disown it. Without its socket the orphan is inert and cannot be reused.
       this._logLine(`close failed; removing control socket: ${error.message}`)
 
       try {
@@ -1007,7 +1016,7 @@ export {
   buildInteractiveSshArgs,
   buildMasterArgs,
   classifySshError,
-  CONTROL_PERSIST_SECONDS,
+  CONTROL_PERSIST,
   controlSocketPath,
   createSshProbeConnection,
   DEFAULT_CONNECT_TIMEOUT_MS,

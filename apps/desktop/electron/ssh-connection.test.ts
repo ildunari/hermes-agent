@@ -104,12 +104,14 @@ test('controlSocketPath default base stays under sun_path even with the temp-lis
   assert.ok(!p.includes('/var/folders/'), 'default base must not be os.tmpdir() on macOS')
 })
 
-test('baseSshOptions carries the house ControlMaster/BatchMode/accept-new policy', () => {
+test('baseSshOptions keeps the ControlMaster alive for owned forwards', () => {
   const opts = baseSshOptions('/tmp/x.sock', 15000)
   const joined = opts.join(' ')
   assert.match(joined, /ControlPath=\/tmp\/x\.sock/)
   assert.match(joined, /ControlMaster=auto/)
-  assert.match(joined, /ControlPersist=\d+/)
+  assert.match(joined, /ControlPersist=yes/)
+  assert.match(joined, /ServerAliveInterval=30/)
+  assert.match(joined, /ServerAliveCountMax=3/)
   assert.match(joined, /BatchMode=yes/)
   assert.match(joined, /StrictHostKeyChecking=accept-new/)
   assert.match(joined, /ExitOnForwardFailure=yes/)

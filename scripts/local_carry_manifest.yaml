@@ -224,6 +224,21 @@ checks:
     description: shareable rerere setup helper
 
 features:
+  - id: desktop.ssh-forward-lifetime
+    title: Desktop SSH tunnel lifetime ownership
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - apps/desktop/electron/ssh-connection.ts
+      - apps/desktop/electron/ssh-connection.test.ts
+    tests:
+      - apps/desktop/electron/ssh-connection.test.ts
+    checks:
+      - id: desktop-ssh-owned-control-master
+        path: apps/desktop/electron/ssh-connection.ts
+        needles: [CONTROL_SOCKET_PROTOCOL, "ControlPersist=${CONTROL_PERSIST}", ServerAliveInterval=30]
+        description: keep mux-owned local forwards alive until Desktop explicitly closes the control master
+
   - id: providers.zai-coding-plan-priority
     title: Z.AI Coding Plan billing-safe endpoint selection
     owner: kosta
