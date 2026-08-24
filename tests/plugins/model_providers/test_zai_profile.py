@@ -106,7 +106,6 @@ class TestZaiGLM52ReasoningEffort:
         assert extra_body == {"thinking": {"type": "disabled"}}
         assert top_level == {}
 
-
     @pytest.mark.parametrize(
         "model",
         [
@@ -137,34 +136,50 @@ class TestZaiGLM52ReasoningEffort:
 
 
 class TestZaiGLM53ReasoningEffort:
-    """GLM-5.3 is forced-thinking with low/high/max effort."""
+    """GLM-5.3's graded low/medium/high/max effort scale (issue #91789).
+
+    Verified live on api.z.ai/api/coding/paas/v4: all four levels accepted
+    with monotonic reasoning-token scaling. Unlike 5.2, low and medium must
+    reach the wire instead of clamping up to high.
+    """
 
     @pytest.mark.parametrize(
-        "reasoning_config,expected",
+        ("effort", "expected"),
         [
-            ({"enabled": False}, "low"),
-            ({"enabled": True, "effort": "none"}, "low"),
-            ({"enabled": True, "effort": "minimal"}, "low"),
-            ({"enabled": True, "effort": "low"}, "low"),
-            ({"enabled": True, "effort": "medium"}, "high"),
-            ({"enabled": True, "effort": "high"}, "high"),
-            ({"enabled": True, "effort": "xhigh"}, "max"),
-            ({"enabled": True, "effort": "max"}, "max"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("max", "max"),
+            ("xhigh", "max"),
+            ("minimal", "low"),
         ],
     )
-    def test_forced_thinking_effort_mapping(self, zai_profile, reasoning_config, expected):
+    def test_graded_efforts_pass_through(self, zai_profile, effort, expected):
         extra_body, top_level = zai_profile.build_api_kwargs_extras(
-            reasoning_config=reasoning_config, model="glm-5.3"
+            reasoning_config={"enabled": True, "effort": effort},
+            model="glm-5.3",
         )
         assert extra_body == {"thinking": {"type": "enabled"}}
         assert top_level == {"reasoning_effort": expected}
 
-    @pytest.mark.parametrize("model", ["z-ai/glm-5.3", "glm-5-3", "glm-5p3"])
-    def test_alias_spellings_recognized(self, zai_profile, model):
+    @pytest.mark.parametrize(
+        "model",
+        ["z-ai/glm-5.3", "glm-5-3", "glm-5p3", "zai-org-glm-5-3"],
+    )
+    def test_alias_spellings_get_graded_scale(self, zai_profile, model):
         _, top_level = zai_profile.build_api_kwargs_extras(
-            reasoning_config={"enabled": True, "effort": "max"}, model=model
+            reasoning_config={"enabled": True, "effort": "low"},
+            model=model,
         )
-        assert top_level == {"reasoning_effort": "max"}
+        assert top_level == {"reasoning_effort": "low"}
+
+    def test_glm_5_2_still_clamps_low_to_high(self, zai_profile):
+        """The 5.3 widening must not leak into 5.2's two-level wire."""
+        _, top_level = zai_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "low"},
+            model="glm-5.2",
+        )
+        assert top_level == {"reasoning_effort": "high"}
 
 
 class TestZaiModelGating:
