@@ -45,6 +45,65 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+# carry-stable picker helpers — parked above inventory class/defs so upstream rewrites cannot drop them.
+def _append_pinned_provider_rows(
+    rows: list[dict], pinned: tuple[str, ...], ctx: ConfigContext
+) -> list[dict]:
+    """Add display-only canonical rows requested by the shared picker policy."""
+    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_LABELS, _PROVIDER_MODELS
+
+    out = list(rows)
+    seen = {str(row.get("slug", "")).lower() for row in out}
+    canonical = {entry.slug.lower(): entry for entry in CANONICAL_PROVIDERS}
+    current = (ctx.current_provider or "").lower()
+    for raw_slug in pinned:
+        slug = str(raw_slug or "").strip().lower()
+        if not slug or slug in seen or slug not in canonical:
+            continue
+        entry = canonical[slug]
+        models = list(_PROVIDER_MODELS.get(slug, ()))
+        out.append(
+            {
+                "slug": entry.slug,
+                "name": _PROVIDER_LABELS.get(entry.slug, entry.label),
+                "is_current": slug == current,
+                "is_user_defined": False,
+                "models": models,
+                "total_models": len(models),
+                "source": "shared-picker-policy",
+            }
+        )
+        seen.add(slug)
+    return out
+
+def _filter_hidden_models(
+    rows: list[dict], hidden: dict[str, tuple[str, ...]]
+) -> list[dict]:
+    from hermes_cli.model_switch import filter_hidden_model_rows
+
+    return filter_hidden_model_rows(rows, hidden)
+
+def _filter_hidden_providers(rows: list[dict], hidden: tuple[str, ...]) -> list[dict]:
+    from hermes_cli.model_switch import filter_hidden_provider_rows
+
+    return filter_hidden_provider_rows(rows, hidden)
+
+def _filter_visible_models(
+    rows: list[dict], visible: dict[str, tuple[str, ...]]
+) -> list[dict]:
+    from hermes_cli.model_switch import filter_visible_model_rows
+
+    return filter_visible_model_rows(rows, visible)
+
+def _apply_picker_labels(
+    rows: list[dict],
+    provider_labels: dict[str, str] | None,
+    model_labels: dict[str, dict[str, str]] | None,
+) -> list[dict]:
+    from hermes_cli.model_switch import apply_model_picker_labels
+
+    return apply_model_picker_labels(rows, provider_labels, model_labels)
+
 class ConfigContext:
     """Snapshot of the model + provider config every inventory caller
     needs. Built once via ``load_picker_context()``; the TUI overlays
@@ -770,73 +829,10 @@ def _append_unconfigured_rows(
     return extras
 
 
-def _append_pinned_provider_rows(
-    rows: list[dict], pinned: tuple[str, ...], ctx: ConfigContext
-) -> list[dict]:
-    """Add display-only canonical rows requested by the shared picker policy."""
-    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_LABELS, _PROVIDER_MODELS
-
-    out = list(rows)
-    seen = {str(row.get("slug", "")).lower() for row in out}
-    canonical = {entry.slug.lower(): entry for entry in CANONICAL_PROVIDERS}
-    current = (ctx.current_provider or "").lower()
-    for raw_slug in pinned:
-        slug = str(raw_slug or "").strip().lower()
-        if not slug or slug in seen or slug not in canonical:
-            continue
-        entry = canonical[slug]
-        models = list(_PROVIDER_MODELS.get(slug, ()))
-        out.append(
-            {
-                "slug": entry.slug,
-                "name": _PROVIDER_LABELS.get(entry.slug, entry.label),
-                "is_current": slug == current,
-                "is_user_defined": False,
-                "models": models,
-                "total_models": len(models),
-                "source": "shared-picker-policy",
-            }
-        )
-        seen.add(slug)
-    return out
-
-
 def _expand_hidden_provider_slugs(hidden: tuple[str, ...]) -> set[str]:
     from hermes_cli.model_switch import expand_hidden_provider_slugs
 
     return expand_hidden_provider_slugs(hidden)
-
-
-def _filter_hidden_providers(rows: list[dict], hidden: tuple[str, ...]) -> list[dict]:
-    from hermes_cli.model_switch import filter_hidden_provider_rows
-
-    return filter_hidden_provider_rows(rows, hidden)
-
-
-def _filter_visible_models(
-    rows: list[dict], visible: dict[str, tuple[str, ...]]
-) -> list[dict]:
-    from hermes_cli.model_switch import filter_visible_model_rows
-
-    return filter_visible_model_rows(rows, visible)
-
-
-def _filter_hidden_models(
-    rows: list[dict], hidden: dict[str, tuple[str, ...]]
-) -> list[dict]:
-    from hermes_cli.model_switch import filter_hidden_model_rows
-
-    return filter_hidden_model_rows(rows, hidden)
-
-
-def _apply_picker_labels(
-    rows: list[dict],
-    provider_labels: dict[str, str] | None,
-    model_labels: dict[str, dict[str, str]] | None,
-) -> list[dict]:
-    from hermes_cli.model_switch import apply_model_picker_labels
-
-    return apply_model_picker_labels(rows, provider_labels, model_labels)
 
 
 def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list[dict]:
