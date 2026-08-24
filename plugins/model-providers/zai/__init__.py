@@ -97,18 +97,9 @@ def _glm_5_2_reasoning_effort(reasoning_config: dict | None) -> str | None:
     return clamped if clamped in GLM52_EFFORTS else "high"
 
 
-def _glm_5_3_reasoning_effort(reasoning_config: dict | None) -> str | None:
-    """Map Hermes effort onto GLM-5.3's forced ``low``/``high``/``max`` ladder."""
-    if not isinstance(reasoning_config, dict):
-        return None
-    effort = (reasoning_config.get("effort") or "").strip().lower()
-    if reasoning_config.get("enabled") is False or effort in {"none", "minimal", "low"}:
-        return "low"
-    if effort in {"xhigh", "max", "ultra", "ultracode"}:
-        return "max"
-    if effort in {"medium", "high"}:
-        return "high"
-    return None
+def _glm_5_3_reasoning_effort(reasoning_config: dict | None, *, model: str | None = None) -> str | None:
+    """Carry needle + graded GLM-5.3 effort. Delegates to the shared mapper."""
+    return _glm_5_2_reasoning_effort(reasoning_config, model=model or "glm-5.3")
 
 
 class ZaiProfile(ProviderProfile):
@@ -134,13 +125,6 @@ class ZaiProfile(ProviderProfile):
             # the closest representation of an off/minimal request is low.
             enabled = _is_glm_5_3(model) or reasoning_config.get("enabled") is not False
             extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
-            if enabled and _model_supports_reasoning_effort(model):
-                effort = str(reasoning_config.get("effort") or "").strip().lower()
-                if effort in {"xhigh", "max", "ultracode"}:
-                    top_level["reasoning_effort"] = "max"
-                elif effort in {"low", "medium", "high"}:
-                    top_level["reasoning_effort"] = "high"
-
         if _is_glm_5_2(model):
             effort = _glm_5_2_reasoning_effort(reasoning_config)
             if effort is not None:

@@ -279,6 +279,7 @@ _REQUEST_OPTION_MISSING = object()
 # Keep request parsing aligned with the agent's canonical vocabulary. A stale
 # local copy here previously discarded newer valid levels such as ``max`` and
 # silently created the run with the provider's default effort instead.
+from hermes_constants import VALID_REASONING_EFFORTS
 _REASONING_EFFORTS = frozenset(("none", *VALID_REASONING_EFFORTS))
 _RUNTIME_AGENT_OVERRIDE_KEYS = (
     "api_key",
