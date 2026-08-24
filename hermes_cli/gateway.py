@@ -4831,6 +4831,7 @@ def generate_launchd_plist() -> str:
     # Build ProgramArguments array, including --profile when using a named profile.
     # The stderr wrapper preserves launchd's restart semantics while adding
     # timestamps to raw stderr lines before they land in gateway.error.log.
+    profile_arg = _profile_arg()
     prog_args = [
         f"<string>{part}</string>"
         for part in _timestamped_stderr_gateway_command(
