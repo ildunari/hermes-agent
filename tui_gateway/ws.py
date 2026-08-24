@@ -332,7 +332,7 @@ async def handle_ws(
     ``None`` transport identity — unchanged behaviour.
     """
     peer = _ws_peer_label(ws)
-    active_transport = transport
+    transport: WSTransport | None = None
     messages = 0
     parse_errors = 0
     dispatch_crashes = 0
@@ -365,7 +365,7 @@ async def handle_ws(
         # (#60800). The skin payload is small (a dict of strings/arrays),
         # so the to_thread overhead is negligible.
         skin_payload = await asyncio.to_thread(server.resolve_skin)
-        ready_ok = await active_transport.write_async(
+        ready_ok = await transport.write_async(
             {
                 "jsonrpc": "2.0",
                 "method": "event",
@@ -435,7 +435,7 @@ async def handle_ws(
                     exc,
                     line[:_WS_LOG_PAYLOAD_PREVIEW],
                 )
-                ok = await active_transport.write_async(
+                ok = await transport.write_async(
                     {
                         "jsonrpc": "2.0",
                         "error": {"code": -32700, "message": "parse error"},
@@ -473,7 +473,7 @@ async def handle_ws(
                 continue
 
             try:
-                resp = await asyncio.to_thread(server.dispatch, req, active_transport)
+                resp = await asyncio.to_thread(server.dispatch, req, transport)
             except Exception:
                 dispatch_crashes += 1
                 _log.exception(
@@ -482,7 +482,7 @@ async def handle_ws(
                     req_id,
                     req_method,
                 )
-                ok = await active_transport.write_async(
+                ok = await transport.write_async(
                     {
                         "jsonrpc": "2.0",
                         "error": {"code": -32603, "message": "internal error"},
@@ -500,7 +500,7 @@ async def handle_ws(
                     )
                     break
                 continue
-            if resp is not None and not await active_transport.write_async(resp):
+            if resp is not None and not await transport.write_async(resp):
                 disconnect_reason = "send_failed_after_response"
                 send_failures += 1
                 _log.warning(
@@ -540,7 +540,7 @@ async def handle_ws(
             transport.close()
 
             try:
-                await asyncio.to_thread(server._release_wake_for_transport, active_transport)
+                await asyncio.to_thread(server._release_wake_for_transport, transport)
             except Exception:
                 _log.exception("ws wake-word teardown failed peer=%s", peer)
 
@@ -559,7 +559,7 @@ async def handle_ws(
             try:
                 reaped_sessions, detached_sessions = await asyncio.to_thread(
                     server._close_sessions_for_transport,
-                    active_transport,
+                    transport,
                     end_reason="ws_disconnect",
                 )
             except Exception:
