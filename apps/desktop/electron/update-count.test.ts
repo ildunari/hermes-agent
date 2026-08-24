@@ -9,10 +9,47 @@ import { test } from 'vitest'
 import {
   compareApiUrl,
   parseCompareBehindCount,
+  resolveClientUpdateRef,
   resolveBehindCount,
   resolveCommitLogSelection,
   shouldCountCommits
 } from './update-count'
+
+const SHA_A = 'a'.repeat(40)
+const SHA_B = 'b'.repeat(40)
+
+test('packaged client freshness follows the installed stamp when the checkout contains it', () => {
+  assert.deepEqual(
+    resolveClientUpdateRef({
+      checkoutSha: SHA_A,
+      installedCommit: SHA_B,
+      installedCommitKnown: true
+    }),
+    { currentSha: SHA_B, sourceMismatch: true, supported: true }
+  )
+})
+
+test('packaged client freshness refuses a checkout that cannot prove the installed stamp', () => {
+  assert.deepEqual(
+    resolveClientUpdateRef({
+      checkoutSha: SHA_A,
+      installedCommit: SHA_B,
+      installedCommitKnown: false
+    }),
+    { currentSha: SHA_B, sourceMismatch: true, supported: false }
+  )
+})
+
+test('development and synchronized installs keep using the checkout head', () => {
+  assert.deepEqual(
+    resolveClientUpdateRef({ checkoutSha: SHA_A, installedCommit: null, installedCommitKnown: false }),
+    { currentSha: SHA_A, sourceMismatch: false, supported: true }
+  )
+  assert.deepEqual(
+    resolveClientUpdateRef({ checkoutSha: SHA_A, installedCommit: SHA_A, installedCommitKnown: true }),
+    { currentSha: SHA_A, sourceMismatch: false, supported: true }
+  )
+})
 
 function createTempGitRepo() {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-update-count-'))
@@ -223,9 +260,9 @@ test('shallow commit logs select only the fetched remote tip', () => {
 })
 
 test('full-clone commit logs keep the complete behind range', () => {
-  assert.deepEqual(resolveCommitLogSelection({ branch: 'release', isShallow: false }), {
+  assert.deepEqual(resolveCommitLogSelection({ branch: 'release', isShallow: false, currentSha: SHA_A }), {
     limit: 40,
-    revision: 'HEAD..origin/release'
+    revision: `${SHA_A}..origin/release`
   })
 })
 
@@ -253,9 +290,6 @@ test('skipped-count path resolves via SHA compare, never via empty countStr', ()
 })
 
 // --- compare-API recovery: the accuracy half of the class fix (#84591) ---
-
-const SHA_A = 'a'.repeat(40)
-const SHA_B = 'b'.repeat(40)
 
 test('compareApiUrl builds the GitHub compare URL for HTTPS origins', () => {
   assert.equal(

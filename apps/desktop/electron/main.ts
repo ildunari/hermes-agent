@@ -309,6 +309,7 @@ import {
   compareApiUrl,
   parseCompareBehindCount,
   resolveBehindCount,
+  resolveClientUpdateRef,
   resolveCommitLogSelection,
   shouldCountCommits
 } from './update-count'
@@ -2836,12 +2837,23 @@ async function checkUpdates() {
   if (isOfficialSshRemote(originUrl)) {
     const git = args => runGit(args, { cwd: updateRoot }).then(r => r.stdout.trim())
 
-    const [currentSha, target, dirtyStr, currentBranch] = await Promise.all([
+    const [checkoutSha, target, dirtyStr, currentBranch] = await Promise.all([
       git(['rev-parse', 'HEAD']),
       runGit(['ls-remote', OFFICIAL_REPO_HTTPS_URL, `refs/heads/${branch}`], { cwd: updateRoot }),
       git(['status', '--porcelain']),
       git(['rev-parse', '--abbrev-ref', 'HEAD'])
     ])
+    const installedCommit = IS_PACKAGED ? INSTALL_STAMP?.commit || null : null
+    const installedCommitKnown = installedCommit
+      ? (await runGit(['cat-file', '-e', `${installedCommit}^{commit}`], { cwd: updateRoot })).code === 0
+      : false
+    const clientRef = resolveClientUpdateRef({ checkoutSha, installedCommit, installedCommitKnown })
+
+    if (!clientRef.supported) {
+      return unsupportedInstalledSource(updateRoot, branch, installedCommit)
+    }
+
+    const { currentSha } = clientRef
 
     const targetSha = firstLine(target.stdout).split(/\s+/)[0] || ''
 
@@ -2907,26 +2919,39 @@ async function checkUpdates() {
 
   const git = args => runGit(args, { cwd: updateRoot }).then(r => r.stdout.trim())
 
-  const [currentSha, targetSha, dirtyStr, currentBranch, shallowStr] = await Promise.all([
+  const [checkoutSha, targetSha, dirtyStr, currentBranch, shallowStr] = await Promise.all([
     git(['rev-parse', 'HEAD']),
     git(['rev-parse', `origin/${branch}`]),
     git(['status', '--porcelain']),
     git(['rev-parse', '--abbrev-ref', 'HEAD']),
     git(['rev-parse', '--is-shallow-repository'])
   ])
+  const installedCommit = IS_PACKAGED ? INSTALL_STAMP?.commit || null : null
+  const installedCommitKnown = installedCommit
+    ? (await runGit(['cat-file', '-e', `${installedCommit}^{commit}`], { cwd: updateRoot })).code === 0
+    : false
+  const clientRef = resolveClientUpdateRef({ checkoutSha, installedCommit, installedCommitKnown })
+
+  if (!clientRef.supported) {
+    return unsupportedInstalledSource(updateRoot, branch, installedCommit)
+  }
+
+  const { currentSha } = clientRef
 
   const isShallow = shallowStr === 'true'
 
   // A shallow graph cannot provide a trustworthy exact count, even when it has
   // a visible merge-base. Skip the ancestry walk and use the SHA fallback.
-  const countStr = shouldCountCommits({ isShallow }) ? await git(['rev-list', `HEAD..origin/${branch}`, '--count']) : ''
+  const countStr = shouldCountCommits({ isShallow })
+    ? await git(['rev-list', `${currentSha}..origin/${branch}`, '--count'])
+    : ''
 
   // A positive directional ancestry result remains trustworthy in a shallow
   // graph and prevents a local commit on top of origin from looking outdated.
   const targetIsAncestorOfHead =
     isShallow &&
     currentSha !== targetSha &&
-    (await runGit(['merge-base', '--is-ancestor', `origin/${branch}`, 'HEAD'], { cwd: updateRoot })).code === 0
+    (await runGit(['merge-base', '--is-ancestor', `origin/${branch}`, currentSha], { cwd: updateRoot })).code === 0
 
   let behind = resolveBehindCount({
     countStr,
@@ -2948,7 +2973,7 @@ async function checkUpdates() {
   // clone): still list what origin offers — resolveCommitLogSelection keeps
   // the shallow log to the fetched tip so the range walk can't enumerate the
   // contaminated ancestry — so "See what's new" stays useful and honest.
-  const commits = behind !== 0 ? await readCommitLog(updateRoot, branch, isShallow) : []
+  const commits = behind !== 0 ? await readCommitLog(updateRoot, branch, isShallow, currentSha) : []
 
   return {
     supported: true,
@@ -2961,6 +2986,20 @@ async function checkUpdates() {
     commits,
     dirty: dirtyStr.length > 0,
     hermesRoot: updateRoot,
+    fetchedAt: Date.now()
+  }
+}
+
+function unsupportedInstalledSource(updateRoot, branch, installedCommit) {
+  return {
+    supported: false,
+    reason: 'installed-source-mismatch',
+    message:
+      `This desktop was built from ${String(installedCommit || 'an unknown commit').slice(0, 12)}, ` +
+      `but ${updateRoot} does not contain that source. Sync or reinstall the matching checkout before updating.`,
+    hermesRoot: updateRoot,
+    branch,
+    currentSha: installedCommit || null,
     fetchedAt: Date.now()
   }
 }
@@ -3019,10 +3058,10 @@ async function fetchCompareBehindCount({ currentSha, originUrl, targetSha }) {
   }
 }
 
-async function readCommitLog(cwd, branch, isShallow) {
+async function readCommitLog(cwd, branch, isShallow, currentSha) {
   const SEP = '\x1f'
   const REC = '\x1e'
-  const { limit, revision } = resolveCommitLogSelection({ branch, isShallow })
+  const { limit, revision } = resolveCommitLogSelection({ branch, isShallow, currentSha })
 
   const { stdout } = await runGit(
     ['log', revision, `--pretty=format:%H${SEP}%s${SEP}%an${SEP}%at${REC}`, '-n', String(limit)],
@@ -15024,12 +15063,18 @@ ipcMain.handle('hermes:updates:branch:set', async (_event, name) => {
   return { branch }
 })
 
-// Resolve the canonical Hermes version (the one `release.py` bumps in
-// hermes_cli/__init__.py + pyproject.toml) so the desktop About panel shows the
-// real Hermes version instead of the Electron app's own package.json version,
-// which historically drifted (stuck at 0.0.2). Falls back to app.getVersion()
-// when the source tree can't be read (e.g. a packaged build without the repo).
+// Packaged builds report their immutable bundle version. Development runs read
+// the canonical Hermes source version (the one `release.py` bumps in
+// hermes_cli/__init__.py + pyproject.toml), falling back to app.getVersion()
+// when the source tree cannot be read.
 function resolveHermesVersion() {
+  // A packaged client's version must describe the installed bundle. Reading
+  // the mutable source checkout here made an old client claim a newer backend
+  // version after app-only or deferred cross-host updates.
+  if (IS_PACKAGED) {
+    return app.getVersion()
+  }
+
   try {
     const root = resolveUpdateRoot()
     const initPath = path.join(root, 'hermes_cli', '__init__.py')

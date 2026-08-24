@@ -2270,8 +2270,15 @@ def macbook_activation_command(
     remote_ref: str,
     result_commit: str,
     dependency_sensitive_paths: list[str],
+    desktop_changed: bool = False,
 ) -> str:
-    """Build the idempotent remote activation command for the MacBook checkout."""
+    """Build the idempotent remote activation command for the MacBook.
+
+    Desktop artifacts are architecture- and host-local: when Desktop source
+    changed, package and verify the signed replacement on the MacBook before
+    its one quit/swap/relaunch cycle. Never restart an older installed bundle
+    merely because its adjacent source checkout advanced.
+    """
     marker_dir = "$HOME/.hermes/state/update-service"
     marker = f"$HOME/.hermes/state/update-service/macbook-activated-{run_id}"
     commands = [
@@ -2301,19 +2308,67 @@ def macbook_activation_command(
                 "refresh(strict=True)\"; done",
             ]
         )
-    commands.extend(
-        [
-            "if pgrep -x Hermes >/dev/null; then "
-            "osascript -e 'tell application \"Hermes\" to quit' >/dev/null 2>&1 || true; "
-            "for attempt in $(seq 1 60); do pgrep -x Hermes >/dev/null || break; sleep 1; done; "
-            "test -z \"$(pgrep -x Hermes || true)\"; "
-            "open -a /Applications/Hermes.app; "
-            "for attempt in $(seq 1 60); do pgrep -x Hermes >/dev/null && break; sleep 1; done; "
-            "pgrep -x Hermes >/dev/null; fi",
-            f'mkdir -p "{marker_dir}"',
-            f'printf \'%s\\n\' {result_commit} > "{marker}"',
-        ]
-    )
+    if desktop_changed:
+        staging = f"/Applications/.Hermes.update-staging-{run_id}.app"
+        prior = f"/Applications/.Hermes.update-prior-{run_id}.app"
+        commands.extend(
+            [
+                "cd apps/desktop",
+                "npm run dist:mac",
+                'artifact="release/mac-arm64/Hermes.app"',
+                'test -d "$artifact"',
+                '/usr/bin/codesign --verify --deep --strict "$artifact"',
+                f'/usr/bin/codesign -dv --verbose=4 "$artifact" 2>&1 | '
+                f'/usr/bin/grep -q "TeamIdentifier={EXPECTED_DESKTOP_TEAM}"',
+                f'test "$(/usr/bin/python3 -c \'import json,sys; '
+                f'print(json.load(open(sys.argv[1]))["commit"])\' '
+                f'"$artifact/Contents/Resources/install-stamp.json")" = {result_commit}',
+                f'/bin/rm -rf "{staging}"',
+                f'/usr/bin/ditto "$artifact" "{staging}"',
+                "cd ../..",
+            ]
+        )
+    if desktop_changed:
+        staging = f"/Applications/.Hermes.update-staging-{run_id}.app"
+        prior = f"/Applications/.Hermes.update-prior-{run_id}.app"
+        commands.extend(
+            [
+                "was_running=0",
+                "if pgrep -x Hermes >/dev/null; then was_running=1; "
+                "osascript -e 'tell application \"Hermes\" to quit' >/dev/null 2>&1 || true; "
+                "for attempt in $(seq 1 60); do pgrep -x Hermes >/dev/null || break; sleep 1; done; "
+                "test -z \"$(pgrep -x Hermes || true)\"; fi",
+                f'/bin/rm -rf "{prior}"',
+                f'if test -d /Applications/Hermes.app; then /bin/mv /Applications/Hermes.app "{prior}"; fi',
+                f'/bin/mv "{staging}" /Applications/Hermes.app',
+                "if test \"$was_running\" = 1; then open -a /Applications/Hermes.app; "
+                "for attempt in $(seq 1 60); do pgrep -x Hermes >/dev/null && break; sleep 1; done; "
+                "pgrep -x Hermes >/dev/null; fi",
+                "/usr/bin/codesign --verify --deep --strict /Applications/Hermes.app",
+                f'/usr/bin/codesign -dv --verbose=4 /Applications/Hermes.app 2>&1 | '
+                f'/usr/bin/grep -q "TeamIdentifier={EXPECTED_DESKTOP_TEAM}"',
+                f'test "$(/usr/bin/python3 -c \'import json,sys; '
+                f'print(json.load(open(sys.argv[1]))["commit"])\' '
+                f'/Applications/Hermes.app/Contents/Resources/install-stamp.json)" = {result_commit}',
+                f'mkdir -p "{marker_dir}"',
+                f'printf \'%s\\n\' {result_commit} > "{marker}"',
+                f'/bin/rm -rf "{prior}"',
+            ]
+        )
+    else:
+        commands.extend(
+            [
+                "if pgrep -x Hermes >/dev/null; then "
+                "osascript -e 'tell application \"Hermes\" to quit' >/dev/null 2>&1 || true; "
+                "for attempt in $(seq 1 60); do pgrep -x Hermes >/dev/null || break; sleep 1; done; "
+                "test -z \"$(pgrep -x Hermes || true)\"; "
+                "open -a /Applications/Hermes.app; "
+                "for attempt in $(seq 1 60); do pgrep -x Hermes >/dev/null && break; sleep 1; done; "
+                "pgrep -x Hermes >/dev/null; fi",
+                f'mkdir -p "{marker_dir}"',
+                f'printf \'%s\\n\' {result_commit} > "{marker}"',
+            ]
+        )
     return "; ".join(commands)
 
 
@@ -2550,6 +2605,7 @@ def deploy(
                 remote_ref,
                 result_commit,
                 dependency_paths,
+                desktop_changed=desktop_changed,
             )
             worker_command(
                 root,
@@ -2793,6 +2849,27 @@ def deploy(
         runtime_action,
     )
     advance(root, run_id, "RUNTIME_VERIFIED")
+    finalize_deployment(root, repo, run_id, prior)
+
+
+def finalize_deployment(
+    root: Path,
+    repo: Path,
+    run_id: str,
+    prior: Path,
+) -> dict[str, Any]:
+    """Finish a deployment only after every required host has converged.
+
+    Runtime verification on Studio is a durable checkpoint, but an offline
+    MacBook remains outstanding work. Keep the run active, its integration
+    worktree, and the rollback app until a later resume stages and verifies the
+    MacBook. This prevents a deferred cross-host update from being recorded as
+    fully complete.
+    """
+    ledger = read_json(ledger_path(root, run_id))
+    if ledger.get("macbook_deferred"):
+        return record(root, run_id, completion_state="runtime-verified")
+
     if prior.exists():
         shutil.rmtree(prior)
     worktree = worktree_for(root, run_id)
@@ -2802,7 +2879,13 @@ def deploy(
         # interrupted-update detection.
         git(repo, "worktree", "remove", "--force", str(worktree), check=False)
         git(repo, "worktree", "prune", check=False)
-    transition(root, run_id, "COMPLETED", completed_at=utc_now())
+    return transition(
+        root,
+        run_id,
+        "COMPLETED",
+        completed_at=utc_now(),
+        completion_state="complete",
+    )
 
 
 def run_worker(args: argparse.Namespace) -> int:

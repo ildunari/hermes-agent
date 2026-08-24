@@ -325,6 +325,8 @@ features:
     class: keep-core
     owner_paths:
       - apps/desktop/README.md  # local signing doc note (CSC_NAME hazard), formerly owned by browser-workspace
+      - apps/desktop/electron/update-count.test.ts
+      - apps/desktop/electron/update-count.ts
       - apps/desktop/vitest.config.ts
       - hermes_cli/memory_setup.py
       - hermes_cli/_startup_fast.py
@@ -364,6 +366,7 @@ features:
         - scripts/setup_update_service.py
         - check
     tests:
+      - apps/desktop/electron/update-count.test.ts
       - tests/scripts/test_hermes_checkpoint.py
       - tests/scripts/test_carry_v2.py
       - tests/scripts/test_hermes_update_service.py
@@ -386,8 +389,12 @@ features:
         description: hooks validate the exact staged and pushed trees
       - id: futureproof-update-service
         path: scripts/hermes_update_service.py
-        needles: [PREPARED, COMPLETED, start_new_session, FD_LIMIT, nonce_valid, preflight_assessment, FAST_PATH_TARGET_SECONDS, remove_rehearsal_worktree]
+        needles: [PREPARED, COMPLETED, start_new_session, FD_LIMIT, nonce_valid, preflight_assessment, FAST_PATH_TARGET_SECONDS, remove_rehearsal_worktree, completion_state]
         description: detached update supervision and receipted deployment
+      - id: futureproof-installed-client-ref
+        path: apps/desktop/electron/update-count.ts
+        needles: [resolveClientUpdateRef, installedCommitKnown, sourceMismatch]
+        description: packaged Desktop freshness follows its installed build stamp instead of an independently advanced source checkout
       - id: futureproof-notarization
         path: scripts/setup_update_service.py
         needles: [APPLE_NOTARY_PROFILE, my-notary-profile]

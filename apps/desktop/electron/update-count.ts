@@ -9,6 +9,26 @@ function shouldCountCommits({ isShallow }) {
   return !isShallow
 }
 
+// A packaged desktop's visible client was compiled from its install stamp,
+// which can legitimately differ from the source checkout used by the backend.
+// Use that stamp for freshness comparisons only when the checkout can prove it
+// has the commit; otherwise refuse to publish a misleading count or update
+// action against unrelated source.
+function resolveClientUpdateRef({ checkoutSha, installedCommit, installedCommitKnown }) {
+  const installed = typeof installedCommit === 'string' ? installedCommit.trim() : ''
+  const sourceMismatch = Boolean(installed && installed !== checkoutSha)
+
+  if (!sourceMismatch) {
+    return { currentSha: checkoutSha, sourceMismatch: false, supported: true }
+  }
+
+  return {
+    currentSha: installed,
+    sourceMismatch: true,
+    supported: Boolean(installedCommitKnown)
+  }
+}
+
 // Resolve how many commits the local checkout is behind origin for the desktop
 // update indicator. Shallow checkouts use SHA equality plus any positively
 // proven local-ahead ancestry; exact counts remain exclusive to full clones.
@@ -31,10 +51,10 @@ function resolveBehindCount({ countStr, currentSha, targetSha, isShallow, target
 // Shallow history can also contaminate the changelog range. Trust the fetched
 // remote tip itself, but do not walk its ancestry. Full clones retain the
 // detailed range used by the existing update overlay.
-function resolveCommitLogSelection({ branch, isShallow }) {
+function resolveCommitLogSelection({ branch, isShallow, currentSha = 'HEAD' }) {
   const remote = `origin/${branch}`
 
-  return isShallow ? { limit: 1, revision: remote } : { limit: 40, revision: `HEAD..${remote}` }
+  return isShallow ? { limit: 1, revision: remote } : { limit: 40, revision: `${currentSha}..${remote}` }
 }
 
 // When the local graph can't count (behind === null), the GitHub compare API
@@ -89,4 +109,11 @@ function parseCompareBehindCount(payload) {
   return ahead
 }
 
-export { compareApiUrl, parseCompareBehindCount, resolveBehindCount, resolveCommitLogSelection, shouldCountCommits }
+export {
+  compareApiUrl,
+  parseCompareBehindCount,
+  resolveBehindCount,
+  resolveClientUpdateRef,
+  resolveCommitLogSelection,
+  shouldCountCommits
+}

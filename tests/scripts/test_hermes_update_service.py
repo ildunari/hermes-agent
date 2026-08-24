@@ -840,6 +840,46 @@ def test_macbook_deferral_paths_exist_in_deploy() -> None:
     assert 'remote_state: Any = "deferred"' in source
 
 
+def test_deferred_macbook_stays_runtime_verified_and_resumable(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_id = "20260824T120000Z-abcdefabcdef"
+    make_ledger(tmp_path, run_id)
+    for phase in (
+        "PREFLIGHT",
+        "MERGED",
+        "VERIFIED",
+        "BUILT",
+        "MACBOOK_STAGED",
+        "STUDIO_ACTIVATED",
+        "ARTIFACT_INSTALLED",
+        "RESTARTED",
+        "RUNTIME_VERIFIED",
+    ):
+        SERVICE.transition(tmp_path, run_id, phase)
+    SERVICE.record(
+        tmp_path,
+        run_id,
+        macbook_deferred=True,
+        macbook_deferred_reason="macbook ssh unreachable at stage time",
+    )
+    worktree = SERVICE.worktree_for(tmp_path, run_id)
+    worktree.mkdir(parents=True)
+    prior = tmp_path / "prior.app"
+    prior.mkdir()
+
+    ledger = SERVICE.finalize_deployment(tmp_path, repo, run_id, prior)
+
+    assert ledger["phase"] == "RUNTIME_VERIFIED"
+    assert ledger["status"] == "RUNNING"
+    assert ledger["completion_state"] == "runtime-verified"
+    assert SERVICE.active_run(tmp_path) == run_id
+    assert worktree.is_dir()
+    assert prior.is_dir()
+
+
 def test_macbook_activation_command_fast_forwards_refreshes_and_restarts() -> None:
     command = SERVICE.macbook_activation_command(
         "20260820T120000Z-abcdefabcdef",
@@ -870,6 +910,32 @@ def test_macbook_activation_command_skips_unaffected_dependency_refresh() -> Non
 
     assert "npm ci" not in command
     assert "uv sync" not in command
+
+
+def test_macbook_activation_builds_signed_desktop_before_single_restart() -> None:
+    commit = "c" * 40
+    command = SERVICE.macbook_activation_command(
+        "20260824T120000Z-abcdefabcdef",
+        "refs/hermes/update-runs/20260824T120000Z-abcdefabcdef",
+        commit,
+        ["apps/desktop/electron/main.ts"],
+        desktop_changed=True,
+    )
+
+    assert command.count('tell application "Hermes" to quit') == 1
+    assert command.index("npm run dist:mac") < command.index('tell application "Hermes" to quit')
+    assert command.index('tell application "Hermes" to quit') < command.index('/bin/mv /Applications/Hermes.app')
+    assert command.index('/bin/mv /Applications/Hermes.app') < command.index('open -a /Applications/Hermes.app')
+    assert command.index('codesign --verify --deep --strict /Applications/Hermes.app') < command.index(
+        'macbook-activated-20260824T120000Z-abcdefabcdef'
+    )
+    assert "release/mac-arm64/Hermes.app" in command
+    assert "codesign --verify --deep --strict" in command
+    assert f"TeamIdentifier={SERVICE.EXPECTED_DESKTOP_TEAM}" in command
+    assert "install-stamp.json" in command
+    assert commit in command
+    assert "/Applications/Hermes.app" in command
+    assert ".Hermes.update-prior-20260824T120000Z-abcdefabcdef.app" in command
 
 
 def test_desktop_identity_match_is_exact() -> None:
