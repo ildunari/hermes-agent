@@ -45,6 +45,50 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class ConfigContext:
+    """Snapshot of the model + provider config every inventory caller
+    needs. Built once via ``load_picker_context()``; the TUI overlays
+    live agent state via ``with_overrides()`` before passing through.
+    """
+
+    current_provider: str
+    current_model: str
+    current_base_url: str
+    user_providers: dict
+    custom_providers: list
+    hidden_providers: tuple[str, ...] = ()
+    pinned_providers: tuple[str, ...] = ()
+    visible_models: dict[str, tuple[str, ...]] | None = None
+    hidden_models: dict[str, tuple[str, ...]] | None = None
+    provider_labels: dict[str, str] | None = None
+    model_labels: dict[str, dict[str, str]] | None = None
+    excluded_providers: list | None = None
+    opencodex_catalog: OpenCodexCatalog | None = None
+
+    def with_overrides(
+        self,
+        *,
+        current_provider: Optional[str] = None,
+        current_model: Optional[str] = None,
+        current_base_url: Optional[str] = None,
+    ) -> "ConfigContext":
+        """Return a copy with truthy overrides applied.
+
+        Truthy-only because the TUI reads agent attributes that may be
+        empty strings before an agent is spawned — empties must NOT
+        clobber the disk-config values.
+        """
+        kw: dict = {}
+        if current_provider:
+            kw["current_provider"] = current_provider
+        if current_model:
+            kw["current_model"] = current_model
+        if current_base_url:
+            kw["current_base_url"] = current_base_url
+        return replace(self, **kw) if kw else self
+
+
+
 # carry-stable picker helpers — parked above inventory class/defs so upstream rewrites cannot drop them.
 def _append_pinned_provider_rows(
     rows: list[dict], pinned: tuple[str, ...], ctx: ConfigContext
@@ -103,49 +147,6 @@ def _apply_picker_labels(
     from hermes_cli.model_switch import apply_model_picker_labels
 
     return apply_model_picker_labels(rows, provider_labels, model_labels)
-
-class ConfigContext:
-    """Snapshot of the model + provider config every inventory caller
-    needs. Built once via ``load_picker_context()``; the TUI overlays
-    live agent state via ``with_overrides()`` before passing through.
-    """
-
-    current_provider: str
-    current_model: str
-    current_base_url: str
-    user_providers: dict
-    custom_providers: list
-    hidden_providers: tuple[str, ...] = ()
-    pinned_providers: tuple[str, ...] = ()
-    visible_models: dict[str, tuple[str, ...]] | None = None
-    hidden_models: dict[str, tuple[str, ...]] | None = None
-    provider_labels: dict[str, str] | None = None
-    model_labels: dict[str, dict[str, str]] | None = None
-    excluded_providers: list | None = None
-    opencodex_catalog: OpenCodexCatalog | None = None
-
-    def with_overrides(
-        self,
-        *,
-        current_provider: Optional[str] = None,
-        current_model: Optional[str] = None,
-        current_base_url: Optional[str] = None,
-    ) -> "ConfigContext":
-        """Return a copy with truthy overrides applied.
-
-        Truthy-only because the TUI reads agent attributes that may be
-        empty strings before an agent is spawned — empties must NOT
-        clobber the disk-config values.
-        """
-        kw: dict = {}
-        if current_provider:
-            kw["current_provider"] = current_provider
-        if current_model:
-            kw["current_model"] = current_model
-        if current_base_url:
-            kw["current_base_url"] = current_base_url
-        return replace(self, **kw) if kw else self
-
 
 def load_picker_context() -> ConfigContext:
     """Load the disk-config snapshot every consumer needs.
