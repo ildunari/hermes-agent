@@ -224,6 +224,43 @@ checks:
     description: shareable rerere setup helper
 
 features:
+  - id: skills.session-visible-count-truth
+    title: Session-visible skill count truth and unambiguous inventory labels
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - hermes_cli/prompt_size.py
+      - hermes_cli/subcommands/prompt_size.py
+      - web/src/i18n/en.ts
+      - web/src/i18n/types.ts
+      - web/src/pages/ProfilesPage.tsx
+    tests:
+      - tests/hermes_cli/test_prompt_size.py
+      - tests/hermes_cli/test_subcommands_batch.py
+    checks:
+      - id: persisted-session-skill-count-source
+        path: hermes_cli/prompt_size.py
+        needles: [compute_session_prompt_breakdown, persisted_session, visible_count]
+        description: existing-chat counts come from the exact persisted system prompt rather than current inventory or slash-command scans
+      - id: persisted-session-skill-count-cli
+        path: hermes_cli/subcommands/prompt_size.py
+        needles: [--session, exact persisted system prompt]
+        description: prompt-size exposes an explicit existing-session inspection path
+      - id: profile-local-skill-count-label
+        path: web/src/pages/ProfilesPage.tsx
+        needles: [localSkillFiles, skill_count_scope]
+        description: profile cards label their filesystem count as local files instead of implying model visibility
+    consumer:
+      command:
+        - python3
+        - -c
+        - "from hermes_cli.prompt_size import compute_persisted_prompt_breakdown as f; assert f('<available_skills>\\n  x:\\n    - one: desc\\n</available_skills>', session_id='probe')['skills_index']['visible_count'] == 1"
+    runtime_probe:
+      command:
+        - python3
+        - -c
+        - "from hermes_cli.subcommands.prompt_size import build_prompt_size_parser; assert callable(build_prompt_size_parser)"
+
   - id: desktop.ssh-forward-lifetime
     title: Desktop SSH tunnel lifetime ownership
     owner: kosta

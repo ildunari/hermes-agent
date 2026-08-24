@@ -11,6 +11,7 @@ from hermes_cli.prompt_size import (
     _SKILLS_BLOCK_RE,
     _build_inspection_agent,
     _compute_skills_breakdown,
+    compute_persisted_prompt_breakdown,
     compute_prompt_breakdown,
     render_breakdown,
 )
@@ -52,6 +53,53 @@ def test_runs_offline_without_credentials(isolated_home, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     data = compute_prompt_breakdown("cli")
     assert data["system_prompt"]["bytes"] > 0
+    assert data["scope"] == "fresh_session"
+    assert data["skills_index"]["visible_count"] == len(data["skills_breakdown"])
+
+
+def test_persisted_prompt_count_is_the_session_truth_not_current_inventory():
+    """A saved chat reports the exact frozen catalog in its prompt."""
+    prompt = """prefix
+<available_skills>
+  general:
+    - one: first
+    - two: second
+</available_skills>
+suffix"""
+
+    data = compute_persisted_prompt_breakdown(
+        prompt,
+        session_id="session-123",
+        source="desktop",
+        profile_name="coding",
+    )
+
+    assert data["scope"] == "persisted_session"
+    assert data["session"] == {
+        "id": "session-123",
+        "source": "desktop",
+        "profile_name": "coding",
+    }
+    assert data["skills_index"]["visible_count"] == 2
+    assert {entry["name"] for entry in data["skills_breakdown"]} == {"one", "two"}
+    assert data["tools"]["available"] is False
+
+
+def test_render_labels_fresh_and_persisted_skill_counts(isolated_home):
+    fresh = compute_prompt_breakdown("cli")
+    assert "visible to a new session" in render_breakdown(fresh)
+
+    persisted = compute_persisted_prompt_breakdown(
+        "<available_skills>\n  general:\n    - frozen: saved\n</available_skills>",
+        session_id="saved-session",
+        source="ios",
+        profile_name="coding",
+    )
+    rendered = render_breakdown(persisted)
+    assert "frozen in saved-session" in rendered
+    assert "Tool schemas" not in rendered
+    assert "memory" not in rendered
+    assert "user profile" not in rendered
 
 
 
@@ -115,7 +163,5 @@ def test_skills_breakdown_attributes_demoted_category_shared_line(isolated_home)
         assert entry["index_line_total_bytes"] == shared_line_bytes
         assert entry["index_line_shared_bytes"] > 0
         assert entry["index_line_skill_count"] == 2
-
-
 
 

@@ -330,6 +330,7 @@ export const en: Translations = {
     hasEnv: "env",
     model: "Model",
     skills: "Skills",
+    localSkillFiles: "Local skill files",
     rename: "Rename",
     editSoul: "Edit SOUL.md",
     soulSection: "SOUL.md (personality / system prompt)",

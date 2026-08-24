@@ -232,6 +232,79 @@ def _compute_toolsets_breakdown(tools: List[Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def compute_persisted_prompt_breakdown(
+    prompt: str,
+    *,
+    session_id: str,
+    source: str = "",
+    profile_name: str = "",
+) -> Dict[str, Any]:
+    """Measure the exact system-prompt snapshot frozen into a saved session.
+
+    This deliberately does not inspect the current filesystem or profile
+    configuration. Existing conversations restore these bytes verbatim, so
+    this is the authoritative answer to "what skills does this chat see?".
+    Tool schemas are not stored with the system prompt and are therefore
+    reported as unavailable rather than guessed from current configuration.
+    """
+    prompt = prompt or ""
+    skills_match = _SKILLS_BLOCK_RE.search(prompt)
+    skills_index = skills_match.group(0) if skills_match else ""
+    skills_breakdown = _compute_skills_breakdown(skills_index)
+    return {
+        "scope": "persisted_session",
+        "session": {
+            "id": session_id,
+            "source": source or "",
+            "profile_name": profile_name or "",
+        },
+        "platform": source or "unknown",
+        "model": "",
+        "system_prompt": {"chars": len(prompt), "bytes": _bytes(prompt)},
+        "skills_index": {
+            "chars": len(skills_index),
+            "bytes": _bytes(skills_index),
+            "visible_count": len(skills_breakdown),
+        },
+        "memory": {"chars": 0, "bytes": 0, "available": False},
+        "user_profile": {"chars": 0, "bytes": 0, "available": False},
+        "tools": {"count": None, "json_bytes": None, "available": False},
+        "sections": [("persisted system prompt", len(prompt), _bytes(prompt))],
+        "skills_breakdown": skills_breakdown,
+        "toolsets_breakdown": [],
+    }
+
+
+def compute_session_prompt_breakdown(session_id: str) -> Dict[str, Any]:
+    """Load and measure one saved session from the active profile database."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(read_only=True)
+    try:
+        row = db.get_session(session_id)
+    finally:
+        db.close()
+    if row is None:
+        raise ValueError(f"Session not found in the active profile: {session_id}")
+    prompt = row.get("system_prompt")
+    if not prompt:
+        raise ValueError(f"Session has no persisted system prompt: {session_id}")
+    profile_name = str(row.get("profile_name") or "")
+    if not profile_name:
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            profile_name = str(get_active_profile_name() or "")
+        except Exception:
+            profile_name = ""
+    return compute_persisted_prompt_breakdown(
+        prompt,
+        session_id=session_id,
+        source=str(row.get("source") or ""),
+        profile_name=profile_name,
+    )
+
+
 def compute_prompt_breakdown(platform: str = "cli") -> Dict[str, Any]:
     """Return a dict of prompt-size measurements for a fresh session.
 
@@ -284,16 +357,35 @@ def compute_prompt_breakdown(platform: str = "cli") -> Dict[str, Any]:
         ("volatile (memory/profile/timestamp)", len(volatile), _bytes(volatile)),
     ]
 
+    skills_breakdown = _compute_skills_breakdown(skills_index)
     return {
+        "scope": "fresh_session",
+        "session": None,
         "platform": platform,
         "model": getattr(agent, "model", "") or "",
         "system_prompt": {"chars": len(full), "bytes": _bytes(full)},
-        "skills_index": {"chars": len(skills_index), "bytes": _bytes(skills_index)},
-        "memory": {"chars": len(memory_block), "bytes": _bytes(memory_block)},
-        "user_profile": {"chars": len(user_block), "bytes": _bytes(user_block)},
-        "tools": {"count": len(tools), "json_bytes": _bytes(tools_json)},
+        "skills_index": {
+            "chars": len(skills_index),
+            "bytes": _bytes(skills_index),
+            "visible_count": len(skills_breakdown),
+        },
+        "memory": {
+            "chars": len(memory_block),
+            "bytes": _bytes(memory_block),
+            "available": True,
+        },
+        "user_profile": {
+            "chars": len(user_block),
+            "bytes": _bytes(user_block),
+            "available": True,
+        },
+        "tools": {
+            "count": len(tools),
+            "json_bytes": _bytes(tools_json),
+            "available": True,
+        },
         "sections": sections,
-        "skills_breakdown": _compute_skills_breakdown(skills_index),
+        "skills_breakdown": skills_breakdown,
         "toolsets_breakdown": _compute_toolsets_breakdown(tools),
     }
 
@@ -306,7 +398,17 @@ def render_breakdown(data: Dict[str, Any]) -> str:
     """Render the breakdown as plain text suitable for a terminal."""
     lines: List[str] = []
     sp = data["system_prompt"]
-    lines.append(f"Prompt-size breakdown (platform={data['platform']}, model={data['model'] or 'unset'})")
+    scope = data.get("scope") or "fresh_session"
+    if scope == "persisted_session":
+        session = data.get("session") or {}
+        lines.append(
+            "Prompt-size breakdown "
+            f"(persisted session={session.get('id') or 'unknown'}, "
+            f"source={session.get('source') or 'unknown'}, "
+            f"profile={session.get('profile_name') or 'unknown'})"
+        )
+    else:
+        lines.append(f"Prompt-size breakdown (new session, platform={data['platform']}, model={data['model'] or 'unset'})")
     lines.append("")
     lines.append(f"  System prompt total : {sp['bytes']:>8,} B  ({_fmt_kb(sp['bytes'])}, {sp['chars']:,} chars)")
     lines.append("")
@@ -315,15 +417,28 @@ def render_breakdown(data: Dict[str, Any]) -> str:
     mem = data["memory"]
     up = data["user_profile"]
     lines.append(f"    skills index       : {si['bytes']:>8,} B  ({_fmt_kb(si['bytes'])})")
-    lines.append(f"    memory             : {mem['bytes']:>8,} B  ({_fmt_kb(mem['bytes'])})")
-    lines.append(f"    user profile       : {up['bytes']:>8,} B  ({_fmt_kb(up['bytes'])})")
+    if scope == "persisted_session":
+        lines.append(
+            f"    skills visible     : {si.get('visible_count', 0):>8,}  "
+            f"(frozen in {(data.get('session') or {}).get('id') or 'this session'})"
+        )
+    else:
+        lines.append(
+            f"    skills visible     : {si.get('visible_count', 0):>8,}  "
+            "(visible to a new session)"
+        )
+    if mem.get("available", True):
+        lines.append(f"    memory             : {mem['bytes']:>8,} B  ({_fmt_kb(mem['bytes'])})")
+    if up.get("available", True):
+        lines.append(f"    user profile       : {up['bytes']:>8,} B  ({_fmt_kb(up['bytes'])})")
     lines.append("")
     lines.append("  Prompt tiers:")
     for label, chars, byts in data["sections"]:
         lines.append(f"    {label:<36}: {byts:>8,} B  ({_fmt_kb(byts)})")
     lines.append("")
     tools = data["tools"]
-    lines.append(f"  Tool schemas         : {tools['json_bytes']:>8,} B  ({_fmt_kb(tools['json_bytes'])}, {tools['count']} tools)")
+    if tools.get("available", True):
+        lines.append(f"  Tool schemas         : {tools['json_bytes']:>8,} B  ({_fmt_kb(tools['json_bytes'])}, {tools['count']} tools)")
 
     # Per-toolset schema cost — which toolset's tools cost the most to ship.
     toolsets = data.get("toolsets_breakdown") or []
@@ -365,9 +480,14 @@ def render_breakdown(data: Dict[str, Any]) -> str:
 def cmd_prompt_size(args: Any) -> None:
     """Entry point for ``hermes prompt-size``."""
     platform = getattr(args, "platform", "cli") or "cli"
+    session_id = (getattr(args, "session", "") or "").strip()
     as_json = getattr(args, "json", False)
     try:
-        data = compute_prompt_breakdown(platform)
+        data = (
+            compute_session_prompt_breakdown(session_id)
+            if session_id
+            else compute_prompt_breakdown(platform)
+        )
     except Exception as e:
         print(f"Could not compute prompt-size breakdown: {e}")
         return

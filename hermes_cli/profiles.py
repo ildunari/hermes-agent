@@ -1680,7 +1680,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     if model:
         print(f"Model:   {model}" + (f" ({provider})" if provider else ""))
     if skill_count:
-        print(f"Skills:  {skill_count}")
+        print(f"Local skill files: {skill_count}")
     if dist_name:
         print(f"Distribution: {dist_name}@{dist_version or '?'}")
         if dist_source:

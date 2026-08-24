@@ -10590,7 +10590,7 @@ def cmd_profile(args):
             print(
                 f"Gateway:        {'running' if p.gateway_running else 'stopped'}"
             )
-            print(f"Skills:         {p.skill_count} installed")
+            print(f"Local skill files: {p.skill_count}")
             if p.alias_path:
                 alias_display = p.alias_name or p.name
                 print(f"Alias:          {alias_display} → hermes -p {p.name}")

@@ -74,6 +74,18 @@ SINGLE_HANDLER_CASES = [
 ]
 
 
+def test_prompt_size_session_snapshot_argument_parses():
+    parser = argparse.ArgumentParser(prog="hermes")
+    sub = parser.add_subparsers(dest="command")
+    handler = _h("prompt_size")
+    build_prompt_size_parser(sub, cmd_prompt_size=handler)
+
+    ns = parser.parse_args(["prompt-size", "--session", "session-123", "--json"])
+    assert ns.func is handler
+    assert ns.session == "session-123"
+    assert ns.json is True
+
+
 
 
 def test_config_get_unset_subcommands_parse():

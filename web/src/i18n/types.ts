@@ -432,6 +432,7 @@ export interface Translations {
     modelSelect?: string;
     actions?: string;
     manageSkills?: string;
+    localSkillFiles?: string;
     activeSetHint?: string;
   };
 

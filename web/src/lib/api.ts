@@ -2217,6 +2217,7 @@ export interface ProfileInfo {
   provider: string | null;
   has_env: boolean;
   skill_count: number;
+  skill_count_scope: "local_files";
   gateway_running: boolean;
   description: string;
   description_auto: boolean;

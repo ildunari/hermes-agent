@@ -306,6 +306,7 @@ export default function ProfilesPage() {
       modelSelect: p.modelSelect ?? "Select a model",
       actions: p.actions ?? "Actions",
       manageSkills: p.manageSkills ?? "Manage skills & tools",
+      localSkillFiles: p.localSkillFiles ?? "Local skill files",
       activeSetHint:
         p.activeSetHint ??
         "Dashboard switched to manage {name}. New CLI/gateway runs will use this profile too.",
@@ -1213,7 +1214,9 @@ export default function ProfilesPage() {
                         )}
 
                         <span>
-                          {t.profiles.skills}: {p.skill_count}
+                          {p.skill_count_scope === "local_files"
+                            ? L.localSkillFiles
+                            : t.profiles.skills}: {p.skill_count}
                         </span>
 
                         <span className="font-mono truncate">{p.path}</span>
