@@ -26,15 +26,15 @@ def client_loopback():
     # loopback aliases when bound_host is loopback.
     prev_host = getattr(web_server.app.state, "bound_host", None)
     prev_port = getattr(web_server.app.state, "bound_port", None)
-    prev_allowed_hosts = getattr(web_server.app.state, "dashboard_allowed_hosts", None)
+    prev_allowed_hosts = getattr(web_server.app.state, "trusted_public_hosts", None)
     web_server.app.state.bound_host = "127.0.0.1"
     web_server.app.state.bound_port = 9119
-    web_server.app.state.dashboard_allowed_hosts = frozenset()
+    web_server.app.state.trusted_public_hosts = frozenset()
     client = TestClient(web_server.app, base_url="http://127.0.0.1:9119")
     yield client
     web_server.app.state.bound_host = prev_host
     web_server.app.state.bound_port = prev_port
-    web_server.app.state.dashboard_allowed_hosts = prev_allowed_hosts
+    web_server.app.state.trusted_public_hosts = prev_allowed_hosts
 
 
 
@@ -43,7 +43,7 @@ def client_loopback():
 
 def test_loopback_configured_allowed_host_is_accepted(client_loopback):
     """Trusted reverse-proxy hostnames can be allowlisted exactly."""
-    web_server.app.state.dashboard_allowed_hosts = frozenset({
+    web_server.app.state.trusted_public_hosts = frozenset({
         "macstudio.tailf7342a.ts.net",
         "100.69.228.58",
     })
@@ -79,7 +79,6 @@ def test_dashboard_allowed_hosts_normalize_full_urls(monkeypatch):
     assert web_server._configured_dashboard_allowed_hosts() == frozenset({
         "macstudio.tailf7342a.ts.net",
         "100.69.228.58",
-        "hermes.example.test",
     })
 
 
@@ -104,9 +103,9 @@ def test_dashboard_allowed_hosts_accept_config_set_json_string(monkeypatch):
 def test_websocket_host_origin_uses_configured_allowed_hosts():
     """WebSocket upgrades need the same allowlist as HTTP middleware."""
     prev_host = getattr(web_server.app.state, "bound_host", None)
-    prev_allowed_hosts = getattr(web_server.app.state, "dashboard_allowed_hosts", None)
+    prev_allowed_hosts = getattr(web_server.app.state, "trusted_public_hosts", None)
     web_server.app.state.bound_host = "127.0.0.1"
-    web_server.app.state.dashboard_allowed_hosts = frozenset({"macstudio.tailf7342a.ts.net"})
+    web_server.app.state.trusted_public_hosts = frozenset({"macstudio.tailf7342a.ts.net"})
     try:
         ws = SimpleNamespace(headers={
             "host": "macstudio.tailf7342a.ts.net:9119",
@@ -126,7 +125,7 @@ def test_websocket_host_origin_uses_configured_allowed_hosts():
         assert reason and reason.startswith("host_mismatch")
     finally:
         web_server.app.state.bound_host = prev_host
-        web_server.app.state.dashboard_allowed_hosts = prev_allowed_hosts
+        web_server.app.state.trusted_public_hosts = prev_allowed_hosts
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +346,82 @@ def test_public_url_aware_gate_preserves_local_only_mode(monkeypatch):
         "http://localhost:9119",
     )
     assert should_require_dashboard_auth("127.0.0.1") is False
+
+
+def test_allowed_hosts_do_not_enable_auth_for_loopback_proxy(monkeypatch):
+    """A trusted Tailscale Host alias is not a public exposure declaration."""
+    from hermes_cli.dashboard_auth import clear_providers
+
+    monkeypatch.delenv("HERMES_DASHBOARD_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(
+        web_server,
+        "load_config",
+        lambda: {
+            "dashboard": {
+                "public_url": "",
+                "allowed_hosts": ["macstudio.tailnet.example"],
+            }
+        },
+    )
+    clear_providers()
+    captured = _stub_uvicorn_run(monkeypatch)
+    _restore_app_state_after_test(
+        monkeypatch,
+        "auth_required",
+        "bound_host",
+        "bound_port",
+        "trusted_public_hosts",
+    )
+
+    web_server.start_server(
+        host="127.0.0.1", port=9119,
+        open_browser=False, allow_public=False,
+    )
+
+    assert web_server.app.state.auth_required is False
+    assert web_server.app.state.trusted_public_hosts == frozenset(
+        {"macstudio.tailnet.example"}
+    )
+    assert captured["kwargs"].get("host") == "127.0.0.1"
+
+
+def test_malformed_public_url_is_not_trusted_as_a_host(monkeypatch):
+    """A rejected public URL cannot bypass Host/Origin validation."""
+    monkeypatch.delenv("HERMES_DASHBOARD_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(
+        web_server,
+        "load_config",
+        lambda: {
+            "dashboard": {
+                "public_url": "dashboard.example.test",
+                "allowed_hosts": [],
+            }
+        },
+    )
+
+    assert web_server._dashboard_public_hosts() == frozenset()
+    assert web_server._configured_dashboard_allowed_hosts() == frozenset()
+
+
+def test_effective_public_url_overrides_stale_config_host(monkeypatch):
+    """Only the validated effective URL joins the Host/Origin trust set."""
+    monkeypatch.setenv(
+        "HERMES_DASHBOARD_PUBLIC_URL",
+        "http://localhost:9119",
+    )
+    monkeypatch.setattr(
+        web_server,
+        "load_config",
+        lambda: {
+            "dashboard": {
+                "public_url": "https://stale.example.test",
+                "allowed_hosts": [],
+            }
+        },
+    )
+
+    assert web_server._dashboard_public_hosts() == frozenset({"localhost"})
+    assert web_server._configured_dashboard_allowed_hosts() == frozenset()
 
 
 def test_start_server_loopback_public_url_enables_gate(monkeypatch):

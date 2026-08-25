@@ -683,25 +683,24 @@ _LOOPBACK_HOST_VALUES: frozenset = frozenset({
 
 
 def _dashboard_public_hosts() -> frozenset[str]:
-    """Return hostnames the dashboard may accept as the browser-facing URL.
+    """Return the exact hostname declared by ``dashboard.public_url``.
 
-    Includes ``dashboard.public_url`` (OAuth/redirect source of truth) plus
-    any exact ``dashboard.allowed_hosts`` aliases so a loopback-bound
-    dashboard behind Tailscale Serve still passes Host/Origin checks.
-    Malformed or unset values fail closed as an empty set.
+    ``allowed_hosts`` is a Host/Origin allowlist, not a public-exposure
+    declaration. Keeping it out of this set prevents trusted Tailscale Serve
+    aliases from engaging the dashboard auth-provider gate.
     """
-    hosts = set(_configured_dashboard_allowed_hosts())
     from hermes_cli.dashboard_auth.prefix import resolve_public_url
 
     public_url = resolve_public_url()
-    if public_url:
-        try:
-            hostname = urllib.parse.urlparse(public_url).hostname
-        except ValueError:
-            hostname = None
-        if hostname:
-            hosts.add(hostname.lower())
-    return frozenset(hosts)
+    if not public_url:
+        return frozenset()
+    try:
+        hostname = urllib.parse.urlparse(public_url).hostname
+    except ValueError:
+        return frozenset()
+    if not hostname:
+        return frozenset()
+    return frozenset({hostname.lower()})
 
 
 def should_require_auth(host: str, allow_public: bool = False) -> bool:
@@ -786,11 +785,6 @@ def _configured_dashboard_allowed_hosts() -> frozenset[str]:
             host = _host_only(str(item))
             if host and host not in {"*", "."}:
                 hosts.add(host)
-    public_url = dashboard.get("public_url")
-    if isinstance(public_url, str):
-        host = _host_only(public_url)
-        if host:
-            hosts.add(host)
     return frozenset(hosts)
 
 def should_require_dashboard_auth(
@@ -19402,17 +19396,18 @@ def start_server(
     except Exception as exc:
         _log.debug("Nous auth keepalive did not start: %s", exc)
 
-    # A configured browser-facing URL is also the exact Host/Origin trust
-    # declaration for reverse-proxy deployments. Resolve it once at startup so
-    # request middleware never reloads config. Any non-loopback public hostname
-    # engages the auth gate even when the backend itself remains on loopback;
-    # otherwise the SPA's local session token would become remotely reachable.
-    app.state.trusted_public_hosts = _dashboard_public_hosts()
+    # Host/Origin trust and public exposure are related but distinct. Exact
+    # ``allowed_hosts`` aliases let a local proxy such as Tailscale Serve reach
+    # a loopback dashboard; only ``public_url`` engages the auth-provider gate.
+    public_url_hosts = _dashboard_public_hosts()
+    app.state.trusted_public_hosts = frozenset(
+        set(_configured_dashboard_allowed_hosts()) | set(public_url_hosts)
+    )
     # Stash the auth-gate flag on app.state so middleware / SPA-token injection /
     # WS-auth paths can branch on it consistently. It also decides whether to
     # refuse startup, log the gate-on banner, and enable uvicorn proxy_headers.
     app.state.auth_required = should_require_dashboard_auth(
-        host, app.state.trusted_public_hosts
+        host, public_url_hosts
     )
 
     # ``--insecure`` no longer disables the auth gate (June 2026 hardening:
