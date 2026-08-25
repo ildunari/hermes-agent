@@ -195,6 +195,65 @@ async def test_web_extract_preserves_order_when_provider_returns_final_url(monke
 
 
 @pytest.mark.asyncio
+async def test_web_extract_advanced_modes_bypass_basic_cache(monkeypatch):
+    async def fake_fast(urls, **kwargs):
+        return [], list(urls)
+
+    class FakeProvider:
+        name = "firecrawl"
+        display_name = "Firecrawl"
+
+        def __init__(self):
+            self.calls = []
+
+        def supports_extract(self):
+            return True
+
+        async def extract(self, urls, **kwargs):
+            self.calls.append(kwargs)
+            return [{
+                "url": urls[0],
+                "title": "Answer",
+                "content": kwargs.get("question", ""),
+                "raw_content": kwargs.get("question", ""),
+            }]
+
+    provider = FakeProvider()
+    monkeypatch.setattr(web_tools, "try_fast_extract_urls", fake_fast)
+    monkeypatch.setattr(web_tools, "is_safe_url", lambda url: True)
+    monkeypatch.setattr(web_tools, "_get_extract_backend", lambda: "firecrawl")
+    monkeypatch.setattr(web_tools, "_ensure_web_plugins_loaded", lambda: None)
+    monkeypatch.setattr("agent.web_search_registry.get_provider", lambda name: provider)
+
+    for question in ("first question", "second question"):
+        result = json.loads(
+            await web_tools.web_extract_tool(
+                ["https://example.com/article"],
+                mode="answer",
+                question=question,
+                use_llm_processing=False,
+            )
+        )
+        assert result["results"][0]["content"] == question
+
+    assert [call.get("question") for call in provider.calls] == [
+        "first question", "second question"
+    ]
+
+    for only_main_content in (True, False):
+        await web_tools.web_extract_tool(
+            ["https://example.com/article"],
+            mode="markdown",
+            only_main_content=only_main_content,
+            use_llm_processing=False,
+        )
+
+    assert [call.get("only_main_content") for call in provider.calls[-2:]] == [
+        True, False
+    ]
+
+
+@pytest.mark.asyncio
 async def test_jsonld_product_fast_path_from_html(monkeypatch):
     html = """
     <html><head><script type="application/ld+json">

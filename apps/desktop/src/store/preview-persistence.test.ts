@@ -50,6 +50,25 @@ describe('persisted preview migration', () => {
     expect(restored?.target.previewKind).toBe('binary')
   })
 
+  it('upgrades an extensionless MIME-typed PDF from binary to pdf', () => {
+    const source = '/remote/download/attachment'
+    const [restored] = decodePreviewTabs(JSON.stringify([{
+      id: `file:file://${source}`,
+      target: {
+        binary: true,
+        kind: 'file',
+        label: 'attachment',
+        mimeType: 'application/pdf; charset=binary',
+        path: source,
+        previewKind: 'binary',
+        source,
+        url: `file://${source}`
+      }
+    }]))
+
+    expect(restored?.target.previewKind).toBe('pdf')
+  })
+
   it.each(['report.pdf#notes', 'report.pdf?draft'])('treats %s as a literal filesystem path', sourceName => {
     const source = `/work/${sourceName}`
 

@@ -17,13 +17,23 @@ export function isVisualDocumentPath(value: string): boolean {
 }
 
 export function normalizeDocumentPreviewKind(target: PreviewTarget): PreviewTarget {
-  const candidate = target.path || target.source || target.url
+  if (target.previewKind !== 'binary') {
+    return target
+  }
 
+  if (target.mimeType?.split(';', 1)[0]?.trim().toLowerCase() === 'application/pdf') {
+    return { ...target, previewKind: 'pdf' }
+  }
+
+  const candidate = target.path || target.source || target.url
+  const candidateExtension = target.path
+    ? candidate.slice(candidate.lastIndexOf('.')).toLowerCase()
+    : extension(candidate)
   const documentKind = DOCUMENT_PREVIEW_KIND_BY_EXT[
-    extension(candidate) as keyof typeof DOCUMENT_PREVIEW_KIND_BY_EXT
+    candidateExtension as keyof typeof DOCUMENT_PREVIEW_KIND_BY_EXT
   ]
 
-  if (!documentKind || target.previewKind === documentKind) {
+  if (!documentKind) {
     return target
   }
 

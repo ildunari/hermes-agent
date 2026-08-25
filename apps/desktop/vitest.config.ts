@@ -7,7 +7,10 @@ const reactUi: TestProjectConfiguration = {
     name: 'ui',
     environment: 'jsdom',
     setupFiles: ['./vitest.setup.ts'],
-    include: ['src/**/*.test.{ts,tsx}'],
+    // carry.py's stable Desktop test contract routes declared carry tests
+    // through the ui project. Keep this one Electron-side carry sentinel here
+    // until the verifier supports project-aware Desktop test routing.
+    include: ['src/**/*.test.{ts,tsx}', 'electron/update-count.test.ts'],
     globals: true,
     // The first test in each file pays jsdom env init + full module transform,
     // which can exceed vitest's 5000ms default under CI/load. 15s gives the
@@ -25,6 +28,7 @@ const electronNative: TestProjectConfiguration = {
     exclude: [
       'electron/autoplay-policy.test.ts',
       'electron/runtime-paths.test.ts',
+      'electron/update-count.test.ts',
       'scripts/run-short-session-hang-repro.test.mjs'
     ]
   }

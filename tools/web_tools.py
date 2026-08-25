@@ -1040,28 +1040,67 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 "Web search via %s: '%s' (limit: %d)",
                 provider.name, query, limit,
             )
-            try:
-                response_data = provider.search(query, limit)
-            except Exception as exc:  # noqa: BLE001 — candidate for rescue
-                if _rescue_eligible(provider):
-                    response_data = _rescue_search(
-                        provider.name, str(exc), query, limit
-                    )
+            # ── TTL memo + single-flight (tools/web_result_cache.py) ──
+            # Sits after every safety/config check and directly around the
+            # paid vendor call. Identical queries within the TTL (subagent
+            # fan-outs, repeat lookups) are served from memory; concurrent
+            # identical queries share one request via the flight lock. The
+            # provider is asked for the BUCKETED count (10/20/50/100) so
+            # near-identical limits share an entry; the caller's requested
+            # count is sliced out below. Only successful responses cache.
+            from tools.web_result_cache import (
+                bucket_limit as _bucket_limit,
+                search_memo as _search_memo,
+                slice_search_response as _slice_search_response,
+            )
+
+            def _paid_search() -> tuple[dict, bool]:
+                _fetch_limit = _bucket_limit(limit)
+                _rescued = False
+                try:
+                    _resp = provider.search(query, _fetch_limit)
+                except Exception as exc:  # noqa: BLE001 — candidate for rescue
+                    if _rescue_eligible(provider):
+                        _rescued = True
+                        _resp = _rescue_search(
+                            provider.name, str(exc), query, _fetch_limit
+                        )
+                    else:
+                        raise
                 else:
-                    raise
-            else:
-                if (
-                    not response_data.get("success")
-                    and _rescue_eligible(provider)
-                ):
-                    # One-shot keyless rescue: THIS call rides the free-tier
-                    # ring; the next call attempts the chosen backend again.
-                    response_data = _rescue_search(
-                        provider.name,
-                        str(response_data.get("error", "")),
-                        query,
-                        limit,
+                    if not _resp.get("success") and _rescue_eligible(provider):
+                        # One-shot keyless rescue: THIS call rides the
+                        # free-tier ring; the next call attempts the chosen
+                        # backend again.
+                        _rescued = True
+                        _resp = _rescue_search(
+                            provider.name,
+                            str(_resp.get("error", "")),
+                            query,
+                            _fetch_limit,
+                        )
+                return _resp, _rescued
+
+            response_data = _search_memo.lookup(provider.name, query, limit)
+            if response_data is None:
+                with _search_memo.flight_lock(provider.name, query, limit):
+                    # Re-check inside the lock: a concurrent identical call
+                    # may have stored while this one waited.
+                    response_data = _search_memo.lookup(
+                        provider.name, query, limit
                     )
+                    if response_data is None:
+                        response_data, _was_rescued = _paid_search()
+                        # Never cache a rescue-served response: it came from
+                        # a ring vendor, not the chosen backend (wrong key),
+                        # and caching it would make the one-shot rescue
+                        # sticky for this query for a whole TTL — the next
+                        # call must attempt the chosen backend again.
+                        if not _was_rescued:
+                            _search_memo.store(
+                                provider.name, query, limit, response_data
+                            )
+            response_data = _slice_search_response(response_data, limit)
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
@@ -1344,9 +1383,6 @@ async def web_extract_tool(
                         ensure_ascii=False,
                     )
 
-            logger.info(
-                "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
-            )
 
             requested_mode = (mode or format or "markdown").lower()
             if requested_mode not in {"markdown", "html"} and provider.name != "firecrawl":
@@ -1362,51 +1398,139 @@ async def web_extract_tool(
                     ensure_ascii=False,
                 )
 
-            # Async-or-sync dispatch: parallel + firecrawl have async
-            # extract(); exa + tavily are sync.
-            import inspect
-            extract_kwargs = {
-                "mode": mode,
-                "question": question,
-                "only_main_content": only_main_content,
-                "wait_for": wait_for,
-                "schema": schema,
-            }
-            if format is not None:
-                extract_kwargs["format"] = format
-            extract_kwargs = {k: v for k, v in extract_kwargs.items() if v is not None}
-            try:
-                if inspect.iscoroutinefunction(provider.extract):
-                    provider_results = await provider.extract(safe_urls, **extract_kwargs)
-                else:
-                    # Run sync extract() in a thread so we don't block the
-                    # event loop on network I/O.
-                    provider_results = await asyncio.to_thread(
-                        provider.extract, safe_urls, **extract_kwargs
-                    )
-            except Exception as exc:  # noqa: BLE001 — candidate for rescue
-                if _rescue_eligible(provider):
-                    failed = [
-                        {"url": u, "title": "", "content": "", "error": str(exc)}
-                        for u in safe_urls
-                    ]
-                    provider_results = await asyncio.to_thread(
-                        _rescue_extract, provider.name, safe_urls, failed
-                    )
-                else:
-                    raise
-
-            # One-shot keyless rescue when the WHOLE batch failed
-            # (backend-level outage, not per-page problems). Stateless:
-            # the next web_extract call uses the chosen backend again.
-            if (
-                provider_results
-                and all(r.get("error") for r in provider_results)
-                and _rescue_eligible(provider)
-            ):
-                provider_results = await asyncio.to_thread(
-                    _rescue_extract, provider.name, safe_urls, provider_results
+            # Cache only basic extraction. Advanced Firecrawl modes depend on
+            # question/schema/options that are deliberately absent from the
+            # cache key and therefore must always reach the provider.
+            cache_enabled = (
+                requested_mode in {"markdown", "html"}
+                and only_main_content is None
+                and wait_for is None
+            )
+            cached_results: Dict[int, Dict[str, Any]] = {}
+            fetch_urls: List[str] = []
+            fetch_positions: List[int] = []
+            if cache_enabled:
+                from tools.web_result_cache import (
+                    extract_cache_get as _extract_cache_get,
+                    extract_cache_put as _extract_cache_put,
                 )
+                from tools.website_policy import check_website_access as _check_site
+
+                for position, url in enumerate(safe_urls):
+                    hit = None
+                    try:
+                        policy_block = _check_site(url)
+                    except Exception:  # noqa: BLE001 — dispatch remains the policy authority
+                        policy_block = None
+                    if policy_block is None:
+                        hit = _extract_cache_get(
+                            url,
+                            format=requested_mode,
+                            provider=provider.name,
+                        )
+                    if hit is not None:
+                        cached_results[position] = hit
+                    else:
+                        fetch_urls.append(url)
+                        fetch_positions.append(position)
+            else:
+                fetch_urls = list(safe_urls)
+                fetch_positions = list(range(len(safe_urls)))
+
+            provider_results: List[Dict[str, Any]]
+            if not fetch_urls:
+                provider_results = [cached_results[i] for i in range(len(safe_urls))]
+            else:
+                logger.info(
+                    "Web extract via %s: %d URL(s)", provider.name, len(fetch_urls)
+                )
+
+                # Async-or-sync dispatch: parallel + firecrawl have async
+                # extract(); exa + tavily are sync.
+                import inspect
+                extract_kwargs = {
+                    "mode": mode,
+                    "question": question,
+                    "only_main_content": only_main_content,
+                    "wait_for": wait_for,
+                    "schema": schema,
+                }
+                if format is not None:
+                    extract_kwargs["format"] = format
+                extract_kwargs = {
+                    key: value for key, value in extract_kwargs.items()
+                    if value is not None
+                }
+                extract_rescued = False
+                try:
+                    if inspect.iscoroutinefunction(provider.extract):
+                        fetched_results = await provider.extract(fetch_urls, **extract_kwargs)
+                    else:
+                        fetched_results = await asyncio.to_thread(
+                            provider.extract, fetch_urls, **extract_kwargs
+                        )
+                except Exception as exc:  # noqa: BLE001 — candidate for rescue
+                    if not _rescue_eligible(provider):
+                        raise
+                    extract_rescued = True
+                    failed = [
+                        {"url": url, "title": "", "content": "", "error": str(exc)}
+                        for url in fetch_urls
+                    ]
+                    fetched_results = await asyncio.to_thread(
+                        _rescue_extract, provider.name, fetch_urls, failed
+                    )
+                else:
+                    if (
+                        fetched_results
+                        and all(result.get("error") for result in fetched_results)
+                        and _rescue_eligible(provider)
+                    ):
+                        extract_rescued = True
+                        fetched_results = await asyncio.to_thread(
+                            _rescue_extract, provider.name, fetch_urls, fetched_results
+                        )
+
+                if cache_enabled and not extract_rescued:
+                    for fetched_position, fetched in enumerate(fetched_results):
+                        if fetched_position >= len(fetch_urls) or fetched.get("error"):
+                            continue
+                        content = fetched.get("raw_content", "") or fetched.get("content", "")
+                        if content:
+                            _extract_cache_put(
+                                fetch_urls[fetched_position],
+                                content,
+                                title=fetched.get("title", ""),
+                                format=requested_mode,
+                                provider=provider.name,
+                            )
+
+                merged_results: List[Dict[str, Any]] = []
+                fetched_by_position = {
+                    position: (
+                        fetched_results[fetched_position]
+                        if fetched_position < len(fetched_results)
+                        else {
+                            "url": safe_urls[position],
+                            "title": "",
+                            "content": "",
+                            "error": "Extract backend returned no result for this URL",
+                        }
+                    )
+                    for fetched_position, position in enumerate(fetch_positions)
+                }
+                for position, url in enumerate(safe_urls):
+                    merged_results.append(
+                        cached_results.get(position)
+                        or fetched_by_position.get(position)
+                        or {
+                            "url": url,
+                            "title": "",
+                            "content": "",
+                            "error": "Extract backend returned no result for this URL",
+                        }
+                    )
+                provider_results = merged_results
 
             for requested_url, item in zip(safe_urls, provider_results):
                 if isinstance(item, dict):

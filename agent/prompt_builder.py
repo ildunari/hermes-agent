@@ -169,6 +169,20 @@ HERMES_AGENT_HELP_GUIDANCE = (
     "two differ."
 )
 
+# Variant injected when the skill tools are not in the session's toolset
+# (e.g. a Blank Slate install with the skills toolset disabled). Pointing the
+# model at skill_view() there would be a dangling reference — the docs URL is
+# the only actionable pointer.
+HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = (
+    "You run on Hermes Agent (by Nous Research). When the user needs help with "
+    "Hermes itself — configuring, setting up, using, extending, or troubleshooting "
+    "it — or when you need to understand your own features, tools, or capabilities, "
+    "the documentation at https://hermes-agent.nousresearch.com/docs is the "
+    "authoritative reference and always holds the latest, most up-to-date "
+    "information. Point the user there (or read it yourself if you have a way to "
+    "fetch web content)."
+)
+
 MEMORY_GUIDANCE = (
     "You have persistent memory across sessions. Save durable facts using the memory "
     "tool: user preferences, environment details, tool quirks, and stable conventions. "
@@ -571,6 +585,26 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- If you must proceed with incomplete information, label assumptions explicitly.\n"
     "</missing_context>"
 )
+
+
+def execution_guidance_text(valid_tool_names=None) -> str:
+    """Render OPENAI_MODEL_EXECUTION_GUIDANCE for the session's toolset.
+
+    The block names ``web_search`` as the lookup tool for current facts; on
+    sessions without web tools (e.g. Blank Slate) that's a dangling
+    reference, so the web_search lines are dropped/adjusted. Deterministic
+    per-session (toolset is fixed at construction), so cache-safe.
+    """
+    text = OPENAI_MODEL_EXECUTION_GUIDANCE
+    if valid_tool_names is not None and "web_search" not in valid_tool_names:
+        text = text.replace(
+            "- Current facts (weather, news, versions) → use web_search\n", ""
+        )
+        text = text.replace(
+            "(search_files, web_search, read_file, etc.)",
+            "(search_files, read_file, etc.)",
+        )
+    return text
 
 # Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
 # Injected alongside TOOL_USE_ENFORCEMENT_GUIDANCE when the model is Gemini or Gemma.
@@ -1204,6 +1238,35 @@ _REMOTE_TERMINAL_BACKENDS = frozenset({
 # Only states what we know from the backend choice itself (container type,
 # likely OS family). Does NOT invent cwd, user, or $HOME — the agent is
 # told to probe those directly if it needs them.
+def _plugin_backend_is_remote(backend: str) -> bool:
+    """Whether a plugin-registered terminal backend runs commands remotely.
+
+    Fail-soft: unknown names return False (treated as local, matching the
+    historical behavior for unrecognized TERMINAL_ENV values).
+    """
+    if not backend or backend in _REMOTE_TERMINAL_BACKENDS or backend == "local":
+        return False
+    try:
+        from agent.terminal_env_registry import provider_flag
+
+        return bool(provider_flag(backend, "is_remote", False))
+    except Exception:
+        return False
+
+
+def _plugin_backend_description(backend: str) -> str | None:
+    """Prompt fallback description declared by a plugin backend, if any."""
+    try:
+        from agent.terminal_env_registry import get_provider
+
+        provider = get_provider(backend)
+        if provider is not None:
+            return provider.env_description
+    except Exception:
+        pass
+    return None
+
+
 _BACKEND_FALLBACK_DESCRIPTIONS: dict[str, str] = {
     "docker": "a Docker container (Linux)",
     "singularity": "a Singularity container (Linux)",
@@ -1318,7 +1381,9 @@ def _probe_remote_backend(env_type: str) -> str | None:
             }
 
         container_config = None
-        if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
+        from tools.terminal_tool import _is_container_backend as _is_container
+
+        if _is_container(env_type):
             container_config = {
                 "container_cpu": config.get("container_cpu", 1),
                 "container_memory": config.get("container_memory", 5120),
@@ -1333,6 +1398,7 @@ def _probe_remote_backend(env_type: str) -> str | None:
                 "docker_extra_args": config.get("docker_extra_args", []),
                 "docker_shm_size": config.get("docker_shm_size", "1g"),
                 "docker_persist_across_processes": config.get("docker_persist_across_processes", True),
+                "docker_shared_container_key": config.get("docker_shared_container_key", ""),
                 "docker_orphan_reaper": config.get("docker_orphan_reaper", True),
             }
 
@@ -1422,7 +1488,7 @@ def build_environment_hints() -> str:
     hints: list[str] = []
 
     backend = (os.getenv("TERMINAL_ENV") or "local").strip().lower()
-    is_remote_backend = backend in _REMOTE_TERMINAL_BACKENDS
+    is_remote_backend = backend in _REMOTE_TERMINAL_BACKENDS or _plugin_backend_is_remote(backend)
 
     if not is_remote_backend:
         # --- Host info block (local backend: host == where tools run) ---
@@ -1470,7 +1536,9 @@ def build_environment_hints() -> str:
             )
         else:
             description = _BACKEND_FALLBACK_DESCRIPTIONS.get(
-                backend, f"a {backend} environment (likely Linux)"
+                backend,
+            ) or _plugin_backend_description(backend) or (
+                f"a {backend} environment (likely Linux)"
             )
             hints.append(
                 f"Terminal backend: {backend}. Your `terminal`, `read_file`, "
@@ -2153,6 +2221,11 @@ def _build_skills_system_prompt_inner(
     if not skills_by_category:
         result = ""
     else:
+        # "basic tools like web_search or terminal" — don't name web_search
+        # when the session has no web tools (dangling reference otherwise).
+        _basic_tools = "web_search or terminal"
+        if available_tools is not None and "web_search" not in available_tools:
+            _basic_tools = "terminal"
         index_lines = []
         for category in sorted(skills_by_category.keys()):
             # Deduplicate and sort skills within each category
@@ -2181,8 +2254,9 @@ def _build_skills_system_prompt_inner(
             "to the task, then load it once with skill(action='view', name=name) and follow its instructions. "
             "Do not load skills speculatively or repeatedly; unnecessary loads add latency and context. "
             "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. When a skill is clearly relevant, load it "
-            "once, before substantive work, even if you could handle the task with basic tools like web_search or terminal. "
+            "and proven workflows that outperform general-purpose approaches. "
+            "When a skill is clearly relevant, load it once, before substantive work, "
+            f"even if you could handle the task with basic tools like {_basic_tools}. "
             "Skills also encode the user's preferred approach, conventions, and quality standards "
             "for tasks like code review, planning, and testing. When such a skill is clearly relevant, "
             "load it even if you already know the domain, because it defines how the task should be done here.\n"

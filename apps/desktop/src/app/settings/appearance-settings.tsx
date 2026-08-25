@@ -47,6 +47,7 @@ import {
   TRANSLUCENCY_STEP,
   TRANSLUCENCY_SUPPORTED
 } from '@/store/translucency'
+import { $vibeHeartsEnabled, setVibeHeartsEnabled } from '@/store/vibe-hearts-enabled'
 import { $zoomPercent, setZoomPercent } from '@/store/zoom'
 import { getBaseColors, useTheme } from '@/themes/context'
 import { installVscodeThemeFromMarketplace } from '@/themes/install'
@@ -359,6 +360,7 @@ export function AppearanceSettings() {
   const translucency = useStore($translucency)
   const glassMode = translucency.mode === 'glass' && GLASS_SUPPORTED
   const reactionsEnabled = useStore($reactionsEnabled)
+  const vibeHeartsEnabled = useStore($vibeHeartsEnabled)
   const backdrop = useStore($backdrop)
   const chatWidth = useStore($chatWidth)
   const tableLayout = useStore($tableLayout)
@@ -769,6 +771,24 @@ export function AppearanceSettings() {
             }
             description={a.reactionsDesc}
             title={a.reactionsTitle}
+          />
+
+          <ListRow
+            action={
+              <SegmentedControl
+                onChange={id => {
+                  triggerHaptic('selection')
+                  setVibeHeartsEnabled(id === 'on')
+                }}
+                options={[
+                  { id: 'off', label: t.common.off },
+                  { id: 'on', label: t.common.on }
+                ]}
+                value={vibeHeartsEnabled ? 'on' : 'off'}
+              />
+            }
+            description={a.vibeHeartsDesc}
+            title={a.vibeHeartsTitle}
           />
 
           <ListRow

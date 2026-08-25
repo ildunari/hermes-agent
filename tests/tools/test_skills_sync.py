@@ -22,6 +22,16 @@ from tools.skills_sync import (
 )
 
 
+def test_fast_manifest_tracks_active_profile_at_call_time(tmp_path):
+    import tools.skills_sync as skills_sync
+
+    profile_skills = tmp_path / "profile-b" / "skills"
+    with patch.object(skills_sync, "_skills_dir", return_value=profile_skills):
+        assert skills_sync._bundled_skills_fast_manifest_file() == (
+            profile_skills.parent / ".bundled_skills_manifest.json"
+        )
+
+
 class TestReadWriteManifest:
     def test_write_and_read_roundtrip_v2(self, tmp_path):
         manifest_file = tmp_path / ".bundled_manifest"

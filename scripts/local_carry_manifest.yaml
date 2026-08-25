@@ -1103,6 +1103,7 @@ features:
       - apps/desktop/src/lib/local-preview.test.ts
       - apps/desktop/src/lib/local-preview.ts
       - apps/desktop/src/lib/preview-target.ts
+      - apps/desktop/src/store/preview-persistence.test.ts
       - apps/desktop/src/store/preview.test.ts
       - apps/desktop/src/store/preview.ts
       - apps/desktop/src/vite-env.d.ts
@@ -1117,6 +1118,7 @@ features:
       - apps/desktop/src/app/chat/right-rail/preview-file.document.test.tsx
       - apps/desktop/src/components/assistant-ui/markdown-text.media.test.tsx
       - apps/desktop/src/lib/local-preview.test.ts
+      - apps/desktop/src/store/preview-persistence.test.ts
       - apps/desktop/src/store/preview.test.ts
     checks:
       - id: desktop-document-preview-kinds

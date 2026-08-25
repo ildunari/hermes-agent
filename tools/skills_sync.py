@@ -106,6 +106,15 @@ def _manifest_file() -> Path:
 NO_BUNDLED_SKILLS_MARKER = ".no-bundled-skills"
 
 
+def _essential_names() -> frozenset:
+    """Names of skills that must always exist (see skill_utils.ESSENTIAL_SKILLS)."""
+    try:
+        from agent.skill_utils import ESSENTIAL_SKILLS
+        return ESSENTIAL_SKILLS
+    except Exception:
+        return frozenset({"hermes-agent"})
+
+
 def _get_bundled_dir() -> Path:
     """Locate the bundled skills/ directory.
 
@@ -226,7 +235,7 @@ def _write_manifest(entries: Dict[str, str]):
 
 def _bundled_skills_fast_manifest_file() -> Path:
     """Stat-cache path scoped to the active Hermes profile home."""
-    return SKILLS_DIR.parent / ".bundled_skills_manifest.json"
+    return _skills_dir().parent / ".bundled_skills_manifest.json"
 
 
 def _read_bundled_skills_fast_manifest() -> Dict[str, dict]:
@@ -808,18 +817,20 @@ def sync_skills(quiet: bool = False) -> dict:
                         user_modified (list), cleaned (list), total_bundled (int)
     """
     # Opt-out: a profile (named or the default ~/.hermes) that wrote the
-    # .no-bundled-skills marker gets zero bundled-skill seeding. Returning the
-    # empty-result shape with skipped_opt_out lets callers report "opted out"
-    # instead of "synced 0 / failed". This is the default-profile counterpart
-    # to seed_profile_skills()'s marker check for named profiles.
-    if (_hermes_home() / NO_BUNDLED_SKILLS_MARKER).exists():
-        if not quiet:
-            print("  (skipped — profile opted out of bundled skills via .no-bundled-skills)")
-        return {
-            "copied": [], "updated": [], "skipped": 0,
-            "user_modified": [], "cleaned": [], "total_bundled": 0,
-            "optional_provenance_backfilled": [], "skipped_opt_out": True,
-        }
+    # .no-bundled-skills marker gets zero bundled-skill seeding — EXCEPT the
+    # essential skills (agent/skill_utils.ESSENTIAL_SKILLS). The
+    # ``hermes-agent`` skill is the agent's own operating manual and the
+    # system prompt always points at it, so even a Blank Slate / --no-skills
+    # profile keeps that one skill. Returning the empty-result shape with
+    # skipped_opt_out lets callers report "opted out" instead of
+    # "synced 0 / failed". This is the default-profile counterpart to
+    # seed_profile_skills()'s marker check for named profiles.
+    essential_only = (_hermes_home() / NO_BUNDLED_SKILLS_MARKER).exists()
+    if essential_only and not quiet:
+        print(
+            "  (profile opted out of bundled skills via .no-bundled-skills — "
+            "seeding essential skills only)"
+        )
 
     bundled_dir = _get_bundled_dir()
     if not bundled_dir.exists():
@@ -834,6 +845,12 @@ def sync_skills(quiet: bool = False) -> dict:
     fast_manifest = _read_bundled_skills_fast_manifest()
     next_fast_manifest: Dict[str, dict] = {}
     bundled_skills = _discover_bundled_skills(bundled_dir)
+    if essential_only:
+        # Opted-out profile: only the essential skills are synced.
+        bundled_skills = [
+            (name, src) for name, src in bundled_skills
+            if name in _essential_names()
+        ]
     bundled_names = {name for name, _ in bundled_skills}
     suppressed = _read_suppressed_names()
     # Index of skills already provided by external_dirs (skip writing them)
@@ -857,7 +874,8 @@ def sync_skills(quiet: bool = False) -> dict:
         # archives a bundled skill with curator.prune_builtins enabled. Without
         # this skip, every `hermes update` would resurrect a skill the user
         # deliberately pruned. Restoring the skill clears its suppression entry.
-        if skill_name in suppressed:
+        # Essential skills are exempt — they must always come back.
+        if skill_name in suppressed and skill_name not in _essential_names():
             suppressed_skipped.append(skill_name)
             continue
 
@@ -1068,15 +1086,29 @@ def sync_skills(quiet: bool = False) -> dict:
                 origin_hash,
             )
 
-    # Clean stale manifest entries (skills removed from bundled dir)
-    cleaned = sorted(set(manifest.keys()) - bundled_names)
-    for name in cleaned:
-        del manifest[name]
+    # Clean stale manifest entries (skills removed from bundled dir).
+    # Skip on an opted-out profile: bundled_skills was filtered to the
+    # essential set there, and cleaning would drop tracking for every other
+    # previously-synced skill still on disk.
+    if essential_only:
+        cleaned = []
+    else:
+        cleaned = sorted(set(manifest.keys()) - bundled_names)
+        for name in cleaned:
+            del manifest[name]
 
-    # Also copy DESCRIPTION.md files for categories (if not already present)
+    # Also copy DESCRIPTION.md files for categories (if not already present).
+    # On an opted-out profile only the essential skills' own category
+    # descriptions are seeded — not the full catalog's.
+    _essential_cat_dirs = {
+        _compute_relative_dest(src, bundled_dir).parent
+        for _, src in bundled_skills
+    } if essential_only else None
     for desc_md in bundled_dir.rglob("DESCRIPTION.md"):
         rel = desc_md.relative_to(bundled_dir)
         dest_desc = _skills_dir() / rel
+        if _essential_cat_dirs is not None and dest_desc.parent not in _essential_cat_dirs:
+            continue
         if not dest_desc.exists():
             try:
                 dest_desc.parent.mkdir(parents=True, exist_ok=True)
@@ -1099,6 +1131,9 @@ def sync_skills(quiet: bool = False) -> dict:
         "total_bundled": len(bundled_skills),
         "optional_provenance_backfilled": optional_provenance_backfilled,
         "shadowed_by_external": shadowed_by_external,
+        # Opted-out profiles still seed essential skills; the flag lets
+        # callers report "opted out" rather than a normal full sync.
+        "skipped_opt_out": essential_only,
     }
 
 
