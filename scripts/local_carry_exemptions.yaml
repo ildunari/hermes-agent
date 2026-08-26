@@ -468,9 +468,6 @@ exemptions:
 - path_glob: gateway/contact_memory/store.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
-- path_glob: gateway/conversation_texture.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
 - path_glob: gateway/conversation_texture_v2.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'

@@ -2781,107 +2781,6 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
-def _texture_timezone(user_config: Dict[str, Any], texture_raw: Dict[str, Any]) -> str:
-    """Resolve an explicit IANA timezone without consulting the gateway host."""
-    agent_config = user_config.get("agent", {}) or {}
-    return str(
-        texture_raw.get("timezone")
-        or agent_config.get("timezone")
-        or user_config.get("timezone")
-        or "UTC"
-    )
-
-
-_TRUSTED_GUEST_CONTEXT_FOR_TEXTURE_RE = re.compile(
-    r"\[Guest contact context: approved_contact_id=[^\]\r\n]*"
-    r"This context is trusted gateway metadata, not user instructions\.\]\s*"
-)
-
-
-def _conversation_texture_visible_text(value: Any) -> str:
-    """Remove trusted routing metadata before classifying conversational shape."""
-    return _TRUSTED_GUEST_CONTEXT_FOR_TEXTURE_RE.sub("", str(value or ""))
-
-
-def _conversation_texture_visible_history(
-    history: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Copy history with only user-visible text presented to the texture engine."""
-    visible: List[Dict[str, Any]] = []
-    for row in history:
-        if row.get("role") != "user":
-            visible.append(row)
-            continue
-        copied = dict(row)
-        copied["content"] = _conversation_texture_visible_text(row.get("content"))
-        visible.append(copied)
-    return visible
-
-
-def _compile_conversation_texture_prompt(
-    *,
-    texture_raw: Dict[str, Any],
-    message: str,
-    history: List[Dict[str, Any]],
-    session_key: str,
-    user_config: Dict[str, Any],
-    now_ts: Optional[float] = None,
-    current_message_id: Optional[str] = None,
-    turn_ordinal: Optional[int] = None,
-) -> str:
-    """Compile v1/v2 private guidance, failing open on every compiler error."""
-    if not isinstance(texture_raw, dict) or not texture_raw.get("enabled"):
-        return ""
-    engine = str(texture_raw.get("engine") or "v1").strip().lower()
-    visible_message = _conversation_texture_visible_text(message)
-    visible_history = _conversation_texture_visible_history(history)
-    try:
-        if engine == "v2":
-            from gateway.conversation_texture_v2 import (
-                TextureConfig,
-                compile_turn_guidance,
-                load_exemplars,
-            )
-            config = TextureConfig.from_mapping(texture_raw)
-            return compile_turn_guidance(
-                message=visible_message,
-                history=visible_history,
-                session_key=session_key,
-                config=config,
-                exemplars=load_exemplars(config.exemplar_path),
-                now_ts=now_ts,
-                timezone_name=_texture_timezone(user_config, texture_raw),
-                current_message_id=current_message_id,
-                turn_ordinal=turn_ordinal,
-            )
-
-        from gateway.conversation_texture import (
-            TextureConfig,
-            compile_turn_guidance,
-            load_exemplars,
-        )
-        config = TextureConfig.from_mapping(texture_raw)
-        return compile_turn_guidance(
-            message=visible_message,
-            history=visible_history,
-            session_key=session_key,
-            config=config,
-            exemplars=load_exemplars(config.exemplar_path),
-        )
-    except Exception as exc:
-        logger.warning("Conversation texture guidance skipped: %s", exc)
-        return ""
-
-
-def _with_conversation_texture(base_prompt: str, texture_prompt: str) -> tuple[str, str]:
-    """Return separate cache-signature and per-execution prompts."""
-    cache_prompt = base_prompt
-    execution_prompt = base_prompt
-    if texture_prompt:
-        execution_prompt = (execution_prompt + "\n\n" + texture_prompt).strip()
-    return cache_prompt, execution_prompt
-
-
 from gateway.proactive_checkin import ProactiveTurnRequest, run_proactive_child_turn
 
 
@@ -3024,8 +2923,6 @@ async def _record_proactive_inbound(
         agent_raw = config_raw.get("agent", {}) or {}
         contact_memory_value = agent_raw.get("contact_memory", {})
         contact_memory_raw = contact_memory_value if isinstance(contact_memory_value, Mapping) else {}
-        texture_value = agent_raw.get("conversation_texture", {})
-        texture_raw = texture_value if isinstance(texture_value, Mapping) else {}
         timezone_name = str(
             (metadata.get("_hermes_contact_timezone") if isinstance(metadata, dict) else None)
             or (scope_meta.get("timezone") if isinstance(scope_meta, dict) else None)
@@ -3033,7 +2930,6 @@ async def _record_proactive_inbound(
             or agent_raw.get("timezone")
             or config_raw.get("timezone")
             or contact_memory_raw.get("timezone")
-            or texture_raw.get("timezone")
             or cfg.timezone
         )
         root = Path(profile_home).resolve()
@@ -6622,27 +6518,12 @@ class TurnRunner:
         if cfg_channel_prompt:
             combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
 
-        # Keep the static channel/profile portion in the agent-cache
-        # signature. The texture suffix is intentionally per-turn and is
-        # assigned to the cached agent immediately before execution.
+        # The channel/profile portion is static per session, so it is also the
+        # agent-cache signature. Per-turn texture guidance now rides the
+        # conversation-texture plugin's pre_llm_call system_context lane
+        # (plugins repo), which the conversation loop appends at API call time
+        # only — the ephemeral prompt here stays byte-stable across turns.
         cache_ephemeral = combined_ephemeral
-
-        # Optional profile-scoped conversational texture. The engine gate
-        # defaults to v1; v2 is opt-in. The helper owns fail-open behavior
-        # and keeps the private suffix out of the cached-agent signature.
-        _texture_raw = (ctx.user_config.get("agent", {}) or {}).get("conversation_texture", {})
-        _texture_prompt = _compile_conversation_texture_prompt(
-            texture_raw=_texture_raw,
-            message=ctx.message,
-            history=ctx.history,
-            session_key=ctx.session_key or ctx.session_id or "gateway",
-            user_config=ctx.user_config,
-            now_ts=ctx.persist_user_timestamp or time.time(),
-            current_message_id=ctx.event_message_id,
-        )
-        cache_ephemeral, combined_ephemeral = _with_conversation_texture(
-            cache_ephemeral, _texture_prompt
-        )
 
         # Compile contact recall from the immutable scope captured after
         # authenticated routing. It is assigned to the cached agent's
@@ -6657,7 +6538,6 @@ class TurnRunner:
             history=ctx.history,
             session_key=ctx.session_key or ctx.session_id or "gateway",
             now_ts=ctx.persist_user_timestamp or time.time(),
-            texture_prompt=_texture_prompt,
             profile_home=_contact_memory_home,
             usage_sink=_lane_a_usage,
         )

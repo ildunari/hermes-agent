@@ -14,7 +14,6 @@ from gateway.run import (
     _clear_interest_digest_snapshots,
     _join_contact_turn_context,
     _snapshot_interest_digest,
-    _with_conversation_texture,
 )
 from gateway.contact_memory import interest_maintenance as maintenance
 from gateway.contact_memory.interest_maintenance import (
@@ -105,26 +104,22 @@ def test_digest_requires_trusted_scope(tmp_path: Path):
 def test_real_per_turn_context_keeps_stable_system_prefix_byte_identical():
     """Exercise the same context join used immediately before agent assignment."""
     base = "STABLE SYSTEM PROMPT"
-    cache_no_suffix, exec_no_suffix = _with_conversation_texture(base, "")
-    cache_with_suffix, exec_with_suffix = _with_conversation_texture(base, "texture")
-    assert cache_no_suffix == cache_with_suffix == base
-    assert exec_no_suffix == base
-    assert exec_with_suffix.startswith(base) and "texture" in exec_with_suffix
 
     turn_context = _join_contact_turn_context(
         '<contact_memory private="true">recall</contact_memory>',
         '<contact_interest_digest private="true">cars</contact_interest_digest>',
     )
     assert "recall" in turn_context and "cars" in turn_context
-    assert cache_no_suffix.encode() == cache_with_suffix.encode() == base.encode()
     transcript_user = {"role": "user", "content": "hello"}
     assembled_user = transcript_user.copy()
     append_api_only_user_context(assembled_user, [turn_context])
     assert transcript_user["content"] == "hello"
     assert "cars" in assembled_user["content"]
     # Actual request assembly adds only to the user copy; stable system bytes
-    # remain exactly the same across turns.
-    assert base.encode() == cache_with_suffix.encode()
+    # remain exactly the same across turns. (Per-turn texture guidance moved to
+    # the conversation-texture plugin's system_context lane, which the loop
+    # appends at API call time without touching these bytes.)
+    assert base == "STABLE SYSTEM PROMPT"
 
 
 def test_live_digest_snapshots_are_not_ttl_or_lru_evicted(tmp_path: Path):
