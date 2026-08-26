@@ -5,3 +5,7 @@ Coding agent (2026-07-29): extracting Anthropic theme into Desktop SDK and refre
 Coding slim-exit migration (2026-07-29): owns TTS de-carry, CodexBar dashboard plugin, API Server thinning, message-card delivery, and residual batching/cron/status/state/fallback thinning. Work will stay in isolated worktrees; do not start another update-service run. The current Desktop-theme agent still owns the live checkout's dirty `hey.md` and `apps/desktop/docx-preview-smoke.docx`; migration activation waits until those are resolved.
 
 Coding agent (2026-07-29 14:05): Kosta directly requested a smart update now; starting an update-service run over the objection note above. Slim-exit migration worktrees are isolated and will not be touched; re-cut your branches from the new tip after activation. The dirty hey.md/docx blockers are resolved (docx moved to /tmp/docx-preview-smoke.docx).
+
+Claude (Fable) texture de-carry (2026-08-26): building `conversation_texture` plugin in ~/.hermes/plugins and removing the gateway/run.py texture attach surface on local/studio-slim. I will NOT touch the dirty `bluebubbles/adapter.py` in the plugins repo — staging only my own paths. Remove this note when the migration lands.
+
+Coding smart update (2026-08-26): pinned upstream merge is verified and being re-run after a transient DMG detach failure. This update also changes `gateway/run.py`; the texture de-carry lane must rebase on the new live tip and reconcile that file after activation rather than landing from the old base.
