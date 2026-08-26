@@ -1167,7 +1167,6 @@ features:
       - gateway/run.py
       - gateway/turn_context.py
       - gateway/guest_access.py
-      - gateway/conversation_texture.py
       - gateway/conversation_texture_v2.py
       - gateway/proactive_checkin.py
       - hermes_state.py
@@ -1196,10 +1195,6 @@ features:
         path: gateway/platforms/base.py
         needles: [classify_send_error, bad_format, "not a formatting error; skipping"]
         description: only positively classified formatting failures may trigger a second outbound send under the plain-text fallback label
-      - id: texture-callsite-wiring
-        path: gateway/run.py
-        needles: []
-        description: "RETIRED 2026-08-26: texture attach migrated to the plugins-repo conversation-texture plugin (pre_llm_call system_context lane); delete this entry once gateway/run.py drops out of changed_paths"
       - id: guest-identity-and-contact-memory-wiring
         path: gateway/run.py
         needles: [_prepend_guest_profile_identity_prompt, _compile_contact_memory_prompt, _trusted_contact_scope_from_metadata, _snapshot_interest_digest]

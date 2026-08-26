@@ -56,7 +56,10 @@ platform overrides (bluebubbles, telegram_override, discord_override) and the
 vibeproxy model provider. Default for ANY new customization: plugin first;
 read the `hermes-plugin-hygiene` skill before touching core. A core patch is
 the exception and must register in `scripts/local_carry_manifest.yaml` — it is
-collision debt every `hermes update` pays for. The gateway loads user plugins
-from the ROOT `~/.hermes/config.yaml` `plugins.enabled`; per-profile enables
-only cover standalone CLI/cron contexts. De-carry and update mechanics:
+collision debt every `hermes update` pays for. The gateway loads *platform
+adapters* from the ROOT `~/.hermes/config.yaml` `plugins.enabled` (they
+materialize at process start under the root home); *per-turn hook plugins*
+resolve the dispatching profile's home, so they must also be enabled in each
+profile's own `plugins.enabled` (verified 2026-08-26, conversation-texture
+de-carry). De-carry and update mechanics:
 `slim-carry-update-path` skill.
