@@ -147,6 +147,9 @@ def test_direct_session_db_flushes_share_marker_claim(agent):
                 self.rows.append(m["content"])
             return list(range(1, len(messages) + 1))
 
+        def flush_token_counts(self):
+            pass
+
     db = _BarrierDB()
     agent._session_db = db
     agent._session_db_created = True
@@ -1038,11 +1041,6 @@ class TestBuildSystemPrompt:
             return next(ln for ln in p.splitlines()
                         if ln.startswith("Conversation started:"))
         assert _line(agent._build_system_prompt()) == _line(agent._build_system_prompt())
-
-    def test_includes_nous_subscription_prompt(self, agent, monkeypatch):
-        monkeypatch.setattr(run_agent, "build_nous_subscription_prompt", lambda tool_names: "NOUS SUBSCRIPTION BLOCK")
-        prompt = agent._build_system_prompt()
-        assert "NOUS SUBSCRIPTION BLOCK" in prompt
 
     def test_skills_prompt_derives_available_toolsets_from_loaded_tools(self):
         tools = _make_tool_defs("web_search", "skills_list", "skill_view", "skill_manage")

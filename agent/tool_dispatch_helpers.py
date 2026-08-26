@@ -115,6 +115,25 @@ def _is_mcp_tool_parallel_safe(tool_name: str) -> bool:
         return False
 
 
+# Read-only bridge lookups are stateless catalog reads and may run together.
+_PARALLEL_SAFE_BRIDGE_LOOKUPS = frozenset({"tool_search", "tool_describe"})
+
+
+def _peel_bridge_call(tool_name: str, function_args: dict) -> tuple[str, dict]:
+    """Resolve a deferred ``tool_call`` wrapper to its underlying tool."""
+    try:
+        from tools.tool_search import TOOL_CALL_NAME, resolve_underlying_call
+
+        if tool_name != TOOL_CALL_NAME:
+            return tool_name, function_args
+        underlying, underlying_args, err = resolve_underlying_call(function_args)
+        if err is not None or not underlying:
+            return tool_name, function_args
+        return underlying, underlying_args
+    except Exception:
+        return tool_name, function_args
+
+
 def _should_parallelize_tool_batch(
     tool_calls, *, execution_cwd: Optional[Path] = None
 ) -> bool:
@@ -153,20 +172,23 @@ def _parallel_safety_for_tool(
     argument-sensitive: listing tracked processes is observational, while every
     other action mutates lifecycle/observation state and must remain serial.
     """
-    if tool_name in _NEVER_PARALLEL_TOOLS:
+    effective_name, effective_args = _peel_bridge_call(tool_name, function_args)
+    if effective_name in _NEVER_PARALLEL_TOOLS:
         return False, None
-    if tool_name == "process":
-        return function_args.get("action") == "list", None
-    if tool_name in _PATH_SCOPED_TOOLS:
+    if effective_name == "process":
+        return effective_args.get("action") == "list", None
+    if effective_name in _PATH_SCOPED_TOOLS:
         scoped_paths = _extract_parallel_scope_paths(
-            tool_name, function_args, execution_cwd=execution_cwd
+            effective_name, effective_args, execution_cwd=execution_cwd
         )
         if not scoped_paths:
             return False, None
-        return True, (scoped_paths, tool_name in _PATH_SCOPED_WRITERS)
-    if tool_name in _PARALLEL_SAFE_TOOLS:
+        return True, (scoped_paths, effective_name in _PATH_SCOPED_WRITERS)
+    if effective_name in _PARALLEL_SAFE_TOOLS:
         return True, None
-    return _is_mcp_tool_parallel_safe(tool_name), None
+    if effective_name in _PARALLEL_SAFE_BRIDGE_LOOKUPS:
+        return True, None
+    return _is_mcp_tool_parallel_safe(effective_name), None
 
 
 def _plan_tool_execution_groups_for_specs(
@@ -261,7 +283,6 @@ def _plan_tool_execution_groups(
     return _plan_tool_execution_groups_for_specs(
         effective_specs, execution_cwd=execution_cwd
     )
-
 
 def _plan_tool_batch_segments(
     tool_calls, *, execution_cwd: Optional[Path] = None

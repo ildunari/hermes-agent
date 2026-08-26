@@ -900,6 +900,10 @@ export const en: Translations = {
       plainTextStoredTitle: 'Token stored in plain text',
       plainTextStoredDesc:
         'Secure storage is unavailable, so the saved token is stored unencrypted in the app’s connection settings file on this machine. Install or enable GNOME Keyring or KWallet to encrypt it.',
+      keychainEncryptionTitle: 'Encrypt saved secrets with the OS keychain',
+      keychainEncryptionDesc:
+        'Off by default. When on, gateway tokens and sign-in credentials are encrypted with your system keychain (Keychain Access, GNOME Keyring, or Windows DPAPI) — your system may ask for permission or a password. When off, they are stored as plain files readable only by your user account.',
+      keychainEncryptionFailed: 'Could not change secret encryption',
       testRemote: 'Test remote',
       saveForRestart: 'Save for next restart',
       saveAndReconnect: 'Save and reconnect',
@@ -1834,6 +1838,14 @@ export const en: Translations = {
     switchConnectionFailed: name => `Could not connect to ${name}`,
     manageProfiles: 'Manage profiles…',
     connectGateway: 'Manage gateways…',
+    fleet: {
+      allOnGateway: 'All profiles on this gateway',
+      gateway: gateway => `Profiles on ${gateway}`,
+      gatewayUnreachable: gateway => `${gateway} · unreachable`,
+      onGateway: (name, gateway) => `${name} · ${gateway}`,
+      switchTo: (name, gateway) => `Switch to ${name} on ${gateway}`,
+      deleteOn: gateway => ` on ${gateway}`
+    },
     remoteOverride: {
       menuItem: 'Connect to a remote host…',
       badge: (host: string) => `Runs on ${host}`,
@@ -2985,6 +2997,9 @@ export const en: Translations = {
     hide: 'Hide',
     openPreview: 'Open preview',
     openInBrowser: 'Open in browser',
+    openInExternal: 'Open in external',
+    popIn: 'Pop in',
+    popOut: 'Pop out',
     linkHint: '⌘/Ctrl-click for preview pane',
     sourceLineTitle: 'Click to select · shift-click to extend · drag to composer',
     source: 'SOURCE',
@@ -3408,6 +3423,7 @@ export const en: Translations = {
     cwdStagedTitle: 'Working directory staged',
     cwdStagedMessage: 'Restart the desktop backend to apply cwd changes to this active session.',
     modelSwitchFailed: 'Model switch failed',
+    hydrationSyncing: (profile: string) => `Syncing ${profile}\u2026`,
     sessionExported: 'Session exported',
     sessionExportFailed: 'Could not export session',
     imageSaved: 'Image saved',
