@@ -4742,7 +4742,7 @@ def test_session_close_settles_active_turn_before_teardown(monkeypatch):
     assert response["result"] == {"closed": True}
 
 
-def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
+def test_ws_orphan_reap_preserves_isolated_turn_then_reaps_when_settled(monkeypatch):
     callbacks = []
     interrupted = []
     torn_down = []
@@ -4754,10 +4754,6 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
 
         def start(self):
             return None
-
-    class _Supervisor:
-        def interrupt(self, sid, *, request_id=None):
-            interrupted.append((sid, request_id))
 
     session = _session(
         agent=None,
@@ -4772,12 +4768,6 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
     monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0.01)
     monkeypatch.setattr(server.threading, "Timer", _Timer)
     monkeypatch.setattr(
-        server, "_load_cfg", lambda: {"dashboard": {"turn_isolation": True}}
-    )
-    monkeypatch.setattr(
-        server, "_get_compute_host_supervisor", lambda _cfg=None: _Supervisor()
-    )
-    monkeypatch.setattr(
         server,
         "_teardown_popped_session",
         lambda claimed, *, end_reason: torn_down.append((claimed, end_reason)) or True,
@@ -4787,15 +4777,15 @@ def test_ws_orphan_reap_interrupts_isolated_turn_then_reaps(monkeypatch):
         server._schedule_ws_orphan_reap("isolated-sid")
         callbacks.pop(0)()
 
-        assert interrupted == [("isolated-sid", "client-gone-isolated-sid")]
-        assert session["_turn_cancel_requested"] is True
-        assert session["queued_prompt"] is None
+        assert interrupted == []
+        assert session.get("_turn_cancel_requested") is not True
+        assert session["queued_prompt"] == {"text": "must not run"}
         assert session["history"] == [{"role": "assistant", "content": "partial"}]
         assert len(callbacks) == 1
 
         callbacks.pop(0)()
 
-        assert interrupted == [("isolated-sid", "client-gone-isolated-sid")]
+        assert interrupted == []
         assert len(callbacks) == 1
 
         session["running"] = False
@@ -4854,7 +4844,7 @@ def test_ws_orphan_reap_spares_turn_reattached_within_grace(monkeypatch):
         server._sessions.pop("reattached-sid", None)
 
 
-def test_session_resume_does_not_rebind_after_client_gone_interrupt_claim(monkeypatch):
+def test_session_resume_rebinds_preserved_detached_turn(monkeypatch):
     class _DB:
         def get_session(self, session_id):
             assert session_id == "stored-sid"
@@ -4868,7 +4858,7 @@ def test_session_resume_does_not_rebind_after_client_gone_interrupt_claim(monkey
         session_key="stored-sid",
         transport=server._detached_ws_transport,
         running=True,
-        _client_gone_interrupt_requested=True,
+        _ws_orphan_preserved_running=True,
     )
     server._sessions["live-sid"] = session
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
@@ -4884,14 +4874,14 @@ def test_session_resume_does_not_rebind_after_client_gone_interrupt_claim(monkey
         )
 
         assert response is not None
-        assert response["error"]["code"] == 4009
-        assert response["error"]["message"] == "session disconnect interrupt settling"
-        assert session["transport"] is server._detached_ws_transport
+        assert "error" not in response
+        assert session["transport"] is live_transport
+        assert "_ws_orphan_preserved_running" not in session
     finally:
         server._sessions.pop("live-sid", None)
 
 
-def test_ws_orphan_reap_defers_running_turn_for_active_delegation(monkeypatch):
+def test_ws_orphan_reap_preserves_running_turn_after_delegation_settles(monkeypatch):
     callbacks = []
     interrupted = []
     delegation_active = iter((True, False, False))
@@ -4907,12 +4897,8 @@ def test_ws_orphan_reap_defers_running_turn_for_active_delegation(monkeypatch):
         def is_alive(self):
             return True
 
-    def _interrupt():
-        interrupted.append("interrupted")
-        session["running"] = False
-
     session = _session(
-        agent=types.SimpleNamespace(interrupt=_interrupt),
+        agent=types.SimpleNamespace(interrupt=lambda: interrupted.append("interrupted")),
         transport=server._detached_ws_transport,
         running=True,
         _run_thread=_LiveThread(),
@@ -4937,16 +4923,17 @@ def test_ws_orphan_reap_defers_running_turn_for_active_delegation(monkeypatch):
 
         callbacks.pop(0)()
 
-        assert interrupted == ["interrupted"]
+        assert interrupted == []
         assert len(callbacks) == 1
 
+        session["running"] = False
         callbacks.pop(0)()
         assert "delegating-turn" not in server._sessions
     finally:
         server._sessions.pop("delegating-turn", None)
 
 
-def test_ws_orphan_reap_interrupts_in_process_turn(monkeypatch):
+def test_ws_orphan_reap_preserves_in_process_turn(monkeypatch):
     callbacks = []
     interrupted = []
 
@@ -4980,8 +4967,9 @@ def test_ws_orphan_reap_interrupts_in_process_turn(monkeypatch):
         server._schedule_ws_orphan_reap("inline-sid")
         callbacks.pop(0)()
 
-        assert interrupted == ["interrupted"]
-        assert session["_turn_cancel_requested"] is True
+        assert interrupted == []
+        assert session.get("_turn_cancel_requested") is not True
+        assert "inline-sid" in server._sessions
         assert len(callbacks) == 1
     finally:
         server._sessions.pop("inline-sid", None)

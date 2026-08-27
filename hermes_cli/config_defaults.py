@@ -1613,6 +1613,8 @@ DEFAULT_CONFIG = {
         # HERMES_TUI_WS_ORPHAN_REAP_GRACE_S env var remains an internal
         # override for backward compatibility. 0 disables the reap
         # (park forever).
+        # Idle cleanup and running-turn recheck interval for WS-detached
+        # dashboard sessions. Disconnect alone never interrupts an active turn.
         "ws_orphan_reap_grace_s": 20.0,
         # Startup sweep of session rows orphaned by a dead gateway process
         # (#65194).  The ws-orphan grace timer above is in-process, so a

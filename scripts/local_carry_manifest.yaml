@@ -224,6 +224,33 @@ checks:
     description: shareable rerere setup helper
 
 features:
+  - id: runtime.detached-turn-preservation
+    title: Preserve active dashboard turns across WebSocket disconnects
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - tui_gateway/methods_session.py
+      - website/docs/user-guide/configuration.md
+    collision_paths:
+      - tui_gateway/server.py
+      - tui_gateway/methods_session.py
+      - hermes_cli/config_defaults.py
+      - tests/test_tui_gateway_server.py
+    tests:
+      - tests/test_tui_gateway_server.py
+      - tests/test_ws_keepalive_config.py
+    checks:
+      - id: detached-running-turn-preserved
+        path: tui_gateway/server.py
+        needles: [_ws_orphan_preserved_running, action=preserve_running, action=reap_idle]
+        forbidden_needles: [action=interrupt]
+        description: a lost dashboard socket rechecks active work without converting transport loss into a turn interruption
+      - id: detached-turn-reconnect-rebind
+        path: tui_gateway/methods_session.py
+        needles: [_cancel_ws_orphan_reap, _reuse_live_payload]
+        forbidden_needles: [session disconnect interrupt settling]
+        description: session.resume may reattach a turn preserved after a mobile transport loss
+
   - id: skills.session-visible-count-truth
     title: Session-visible skill count truth and unambiguous inventory labels
     owner: kosta
