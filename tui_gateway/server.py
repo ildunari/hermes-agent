@@ -1135,10 +1135,9 @@ def _interrupt_session_turn(
 ) -> bool:
     """Apply the shared ``session.interrupt`` contract to one claimed session.
 
-    Returns whether the interrupt used the compute-host control channel. The WS
-    orphan reaper calls this same helper after its reconnect grace expires, so a
-    dead client gets the same partial-history and queued-prompt semantics as an
-    explicit user interrupt.
+    Returns whether the interrupt used the compute-host control channel. This is
+    reserved for explicit interruption paths; a detached WebSocket transport is
+    preserved by the orphan reaper until its turn settles normally.
     """
     use_compute_host = _session_uses_compute_host(session)
     should_interrupt = bool(session.get("running"))
@@ -1332,9 +1331,13 @@ def _schedule_ws_orphan_reap(sid: str, *, delay_s: float | None = None) -> None:
                 # Mobile clients routinely lose their socket while locked,
                 # suspended, or changing networks. Preserve the turn and let
                 # its ordinary completion path persist the result.
+                first_preservation_check = not current.get(
+                    "_ws_orphan_preserved_running"
+                )
                 current["_ws_orphan_preserved_running"] = True
                 reschedule_delay = _WS_ORPHAN_REAP_GRACE_S
-                logger.info("ws_orphan sid=%s action=preserve_running", sid)
+                if first_preservation_check:
+                    logger.info("ws_orphan sid=%s action=preserve_running", sid)
             else:
                 settled_after_running = bool(
                     current.pop("_ws_orphan_preserved_running", False)
