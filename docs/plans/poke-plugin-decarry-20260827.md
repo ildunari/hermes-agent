@@ -41,7 +41,7 @@ Core must not import `hermes_plugins.poke`, `plugins.poke`, or any other user-pl
 7. **Current public session semantics stay intact.** Proactive initiated children, parent links, model metadata, session routing, compression/recovery, and delivery visibility must not regress.
 8. **Core owns the required-extension declaration.** A profile cannot declare the requirement only inside the plugin that may be missing. Core validates extension ID, API version, capabilities, and health before adapter connection and again before required ingress or delivery.
 9. **Transport authorization and runtime routing remain separate trust domains.** The transport profile/home is immutable; extension routing is a typed proposal validated by core before entering the runtime-profile scope.
-10. **Tool policy is enforced at final dispatch.** Filtered schemas and request-scoped tools are not sufficient. Every direct, deferred, bridge, and MCP dispatch passes the generic authorization capability; missing or malformed required policy denies.
+10. **Tool policy is enforced at final dispatch.** Filtered schemas and request-scoped tools are not sufficient. Every direct, deferred, bridge, and MCP dispatch passes the generic authorization capability; missing or malformed required policy denies. Core issues an immutable request-policy token after validated routing and explicitly propagates it across executor/thread boundaries.
 11. **Code ownership moves without moving durable data.** Existing profile `state.db`, contact-memory SQLite trees, private queues, and root-shared ownership registry remain in place for this program.
 
 ## 4. Target architecture
@@ -73,9 +73,10 @@ Core continues to own:
 - platform authorization primitives and adapter transport;
 - plugin discovery/activation and capability gates;
 - final-dispatch authorization invocation for every tool path;
+- eager startup enumeration and activation of every served profile, not lazy first-message registration;
 - lifecycle scheduling/cancellation and health aggregation;
-- generic turn composition and agent-loop execution.
-- a capability-gated `send_authenticated_existing_dm` platform action that cannot create chats or fall back and returns `sent`, `definitive_failure`, or `unknown` plus a receipt when available.
+- generic turn composition and agent-loop execution;
+- a capability-gated `send_authenticated_existing_dm` platform action that cannot create chats or fall back, accepts a correlation/idempotency key only after the plugin durably reserves the attempt, and returns `sent`, `definitive_failure`, or `unknown` plus a receipt when available.
 
 These capabilities must contain no hard-coded `poke`, `guest`, contact IDs, relationship names, or proactive policy.
 
@@ -151,6 +152,7 @@ Plugin repository:
 Verification:
 
 - Core contract tests for registration, unload/reload, profile isolation, sync/async callbacks, exception policy, cancellation, and no-plugin behavior.
+- Per-dispatch-path bypass tests for direct, deferred, bridge, and MCP execution, including executor/thread hops.
 - Differential parity tests for Guest routing/tool decisions and pure contact/proactive decisions. Stateful tests assert unchanged live database hashes/counters and zero outbound calls while using snapshot/shadow stores.
 - Full existing Guest/contact/proactive focused suite.
 
@@ -184,7 +186,7 @@ Stop after clean commits. Run an independent P0/P1 review against both repositor
 ### Checkpoint 4 — Core deletion and final de-carry
 
 - Only after Checkpoint 3 evidence is accepted, delete `gateway/contact_memory/`, `gateway/proactive_*`, `gateway/guest_access.py`, and `gateway/conversation_texture_v2.py` and all Poke-specific blocks/imports/helpers from shared core.
-- Retain only generic extension invocations, final-dispatch policy enforcement, required-extension readiness, platform action capability, and generic initiated-session/storage primitives.
+- Retain only generic extension invocations, final-dispatch policy enforcement, required-extension readiness, platform action capability, and generic initiated-session/storage primitives. Do not remove `enforce_guest_tool_call` until direct, deferred, bridge, and MCP bypass tests all pass, including executor/thread propagation.
 - Migrate remaining policy tests and operational tooling, then prove no consumers remain.
 - Rewrite carry manifest, exemptions, residual matrix, and thinning baseline from actual residual generic seams.
 - Require zero core imports/references to removed modules, zero hard-coded Poke/Guest policy, all migrated policy tests passing, and zero Poke-specific symbols in `gateway/run.py` outside generic extension terms.

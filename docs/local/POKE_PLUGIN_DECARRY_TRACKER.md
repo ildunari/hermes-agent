@@ -33,8 +33,8 @@
 | 0. Plan | pending | n/a | evidence audit | pending | in progress |
 | 1. Portable plugin libraries | pending | pending | pending | pending | not started |
 | 2. Generic seams + dark parity | pending | pending | pending | pending | not started |
-| 3. Authoritative cutover + deletion | pending | pending | pending | pending | not started |
-| 4. Integrated landing/activation | pending | pending | pending | pending | not started |
+| 3. Authoritative activation, legacy fallback retained | pending | pending | pending | pending | not started |
+| 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
 
 ## Evidence log
 
