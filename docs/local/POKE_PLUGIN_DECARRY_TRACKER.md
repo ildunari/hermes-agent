@@ -6,7 +6,7 @@
 
 ## Current state
 
-- Phase: Checkpoint 1 — first review rejected; P0/P1 fixes complete; closure review pending.
+- Phase: Checkpoint 2 — generic extension seams and dark validation.
 - Live runtime changed: no.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
@@ -31,12 +31,20 @@
 | Checkpoint | Core commit | Plugin commit | Tests | Independent review | State |
 |---|---|---|---|---|---|
 | 0. Plan | `e063360820`, `a0e701869d`, `906aca5b98` | n/a | evidence audit + diff checks | approved | complete |
-| 1. Portable plugin libraries | pending | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | first review rejected; closure pending | review pending |
+| 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
 | 2. Generic seams + dark parity | pending | pending | pending | pending | not started |
 | 3. Authoritative activation, legacy fallback retained | pending | pending | pending | pending | not started |
 | 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
 
 ## Evidence log
+
+### 2026-08-27 — Checkpoint 1 closure approved
+
+- Narrow independent Claude Opus closure review: `CHECKPOINT_APPROVED`.
+- Reviewer independently loaded the root plus all 46 submodules through the production `hermes_plugins.poke` loader shape with bare `poke` unavailable.
+- Reviewer executed all six operator files directly from `/tmp` with isolated import behavior and confirmed 6/6 exit successfully for `--help`.
+- Reviewer confirmed all six original P0/P1 findings closed, no forbidden core imports, no hooks, no registration side effects, and no live state/config changes.
+- Full review record: `/Users/Kosta/.hermes/profiles/coding/cache/delegation/subagent-summary-0-20260827_234515_638898.txt`.
 
 ### 2026-08-27 — Checkpoint 1 first review and P0/P1 closure
 
