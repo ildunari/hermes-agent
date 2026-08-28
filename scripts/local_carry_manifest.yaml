@@ -1188,6 +1188,52 @@ features:
         path: agent/conversation_loop.py
         needles: [_plugin_system_context]
         description: hook system_context is appended after the stable cached prompt at API call time only, never persisted and never part of the cache signature
+  - id: gateway.conversation-extension-runtime
+    title: Generic profile-scoped conversation extension runtime
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - gateway/conversation_extensions.py
+      - gateway/conversation_extension_runtime.py
+      - gateway/authenticated_dm.py
+      - gateway/readiness.py
+      - gateway/run.py
+      - hermes_cli/plugins.py
+      - model_tools.py
+      - agent/tool_executor.py
+    collision_paths:
+      - gateway/conversation_extensions.py
+      - gateway/conversation_extension_runtime.py
+      - gateway/authenticated_dm.py
+      - gateway/readiness.py
+      - gateway/run.py
+      - hermes_cli/plugins.py
+      - model_tools.py
+      - agent/tool_executor.py
+    tests:
+      - tests/gateway/test_conversation_extensions.py
+      - tests/gateway/test_conversation_extension_registration.py
+      - tests/gateway/test_conversation_extension_lifecycle.py
+      - tests/gateway/test_conversation_extension_dispatch.py
+      - tests/gateway/test_authenticated_dm.py
+      - tests/gateway/test_poke_plugin_parity.py
+    checks:
+      - id: conversation-extension-atomic-registry
+        path: gateway/conversation_extensions.py
+        needles: [reserve_generation, expected_previous_generation, unregister]
+        description: profile-scoped bundles start before atomic publication and stale teardown cannot clear a newer generation
+      - id: conversation-extension-final-tool-gate
+        path: model_tools.py
+        needles: [authorize_tool_dispatch, current_request_policy, Extension tool policy guard failed closed]
+        description: request-scoped extension authorization runs at final tool dispatch and fails closed only when a policy is bound
+      - id: conversation-extension-production-fire-sites
+        path: gateway/run.py
+        needles: [conversation_extension_runtime, turn_policy_scope, observe_turn_completion]
+        description: authenticated ingress, admission, whole-turn policy scope, and post-turn observation are wired into the real gateway path
+      - id: authenticated-existing-dm-contract
+        path: gateway/authenticated_dm.py
+        needles: [AuthenticatedDmRequest, AuthenticatedDmResult, DmSendOutcome.UNKNOWN]
+        description: bounded DM delivery exposes tri-state receipts without chat creation or fallback
   - id: gateway.poke-guest-runtime-infrastructure
     title: Generic delivery and initiated-session durability used by Poke/Guest
     owner: kosta
@@ -1222,7 +1268,6 @@ features:
     owner: kosta
     class: keep-core
     owner_paths:
-      - gateway/run.py
       - gateway/turn_context.py
       - gateway/guest_access.py
       - gateway/conversation_texture_v2.py

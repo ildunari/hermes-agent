@@ -658,6 +658,38 @@ def _run_agent_tool_execution_middleware(
         block_message = scope_block
         block_error_type = "tool_scope_block"
         if block_message is None:
+            # Final-dispatch extension authorization for the *inline* executor
+            # tools (todo, memory, delegate_task, message_agent, ...). Those
+            # never reach ``model_tools.handle_function_call``, so without this
+            # gate they would be a bypass of the request policy that every
+            # other dispatch path honors. No-op when no policy token is bound.
+            block_error_type = "extension_policy_block"
+            try:
+                from gateway.conversation_extensions import (
+                    authorize_tool_dispatch,
+                    current_request_policy,
+                )
+
+                _extension_block = authorize_tool_dispatch(function_name, final_args)
+                if _extension_block is not None:
+                    block_message = _extension_block
+            except Exception:
+                try:
+                    from gateway.conversation_extensions import current_request_policy
+
+                    _policy_bound = current_request_policy() is not None
+                except Exception:
+                    _policy_bound = False
+                if _policy_bound:
+                    block_message = json.dumps(
+                        {
+                            "error": "Extension tool policy guard failed closed",
+                            "extension_policy": True,
+                        },
+                        ensure_ascii=False,
+                    )
+
+        if block_message is None:
             block_error_type = "plugin_block"
 
             def _resolve_pre_tool_block():

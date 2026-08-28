@@ -1,6 +1,6 @@
 # Poke/Guest Plugin De-Carry Plan
 
-**Status:** Checkpoint 1 approved and complete; Checkpoint 2 in progress
+**Status:** Checkpoint 2 implementation complete; independent review pending
 **Date:** 2026-08-27  
 **Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`  
 **Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`  

@@ -14298,6 +14298,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         Returns True if at least one adapter connected successfully.
         """
         logger.info("Starting Hermes Gateway...")
+        # Install the bounded host operations behind GatewayRuntimeFacade so
+        # registered conversation extensions get real lifecycle scheduling and
+        # session lookup instead of the deny-by-default stub. Nothing here
+        # exposes the runner, a session store, an SDK client, or credentials.
+        try:
+            self._install_conversation_extension_host()
+        except Exception:
+            logger.debug("could not install extension host operations", exc_info=True)
         # Enable faulthandler for stack dumps on freezes/crashes (#70344).
         # Falls back to a log file when sys.stderr is None (Windows VBS /
         # pythonw / detached service) — otherwise the gateway would die
@@ -19495,6 +19503,112 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
 
+        # ── Generic conversation-extension seam ──────────────────────────
+        # The sender is authenticated and the transport profile/home are
+        # settled, so this is the correct place for the generic admission and
+        # ingress-observation fire sites. The transport trust domain captured
+        # here is immutable; an extension may only propose a *runtime* route,
+        # which core validates against served profiles below.
+        #
+        # No-op when no conversation extension is registered for this profile.
+        _extension_route_context = None
+        _extension_scope = None
+        try:
+            from gateway import conversation_extension_runtime as _ce_runtime
+            from hermes_constants import hermes_home_key as _hermes_home_key
+
+            _transport_profile = str(getattr(source, "profile", None) or "default")
+            _transport_home = str(self._resolve_profile_home_for_source(source))
+            _extension_scope = _hermes_home_key(_transport_home)
+
+            # Fail-closed admission gate. A profile that declares required
+            # conversation extensions may not serve a single message until
+            # every requirement resolves in its own scope. Profiles with no
+            # requirements are unaffected.
+            try:
+                _requirements_config = _load_gateway_config_for_profile(
+                    getattr(source, "profile", None)
+                )
+                _requirements_ok, _requirements_reason = (
+                    _ce_runtime.profile_requirements_satisfied(
+                        scope=_extension_scope,
+                        config_raw=_requirements_config,
+                    )
+                )
+            except Exception:
+                # Cannot prove the requirement is satisfied -> do not serve.
+                logger.error(
+                    "Refusing inbound message: could not evaluate required "
+                    "conversation extensions for profile %s",
+                    _transport_profile,
+                    exc_info=True,
+                )
+                return None
+            if not _requirements_ok:
+                logger.error(
+                    "Refusing inbound message: profile %s requires a conversation "
+                    "extension that is not available (%s)",
+                    _transport_profile,
+                    _requirements_reason,
+                )
+                return None
+
+            _extension_route_context = _ce_runtime.build_route_context(
+                event,
+                transport_profile=_transport_profile,
+                transport_home=_transport_home,
+            )
+            if _extension_route_context is not None:
+                _served = tuple(self._served_profile_names())
+                _route_decision = _ce_runtime.admit_and_route(
+                    _extension_route_context,
+                    scope=_extension_scope,
+                    served_profiles=_served,
+                    permitted_routes=self._permitted_extension_routes(),
+                )
+                if _route_decision is not None and not _route_decision.admitted:
+                    logger.warning(
+                        "Conversation extension denied inbound message (%s)",
+                        _route_decision.reason or "denied",
+                    )
+                    return None
+                _ce_runtime.observe_authenticated_ingress(
+                    _extension_route_context, scope=_extension_scope
+                )
+        except Exception:
+            # The seam itself failed. Route/admission is a fail-closed domain,
+            # but we can only fail closed for profiles that actually declare a
+            # requirement — otherwise a bug here would take down every ordinary
+            # profile. Re-evaluate the requirement declaration defensively; if
+            # the profile requires an extension and we cannot prove it is
+            # satisfied, drop the message.
+            logger.debug("conversation extension ingress seam error", exc_info=True)
+            try:
+                from gateway import conversation_extension_runtime as _ce_runtime_fc
+                from hermes_constants import hermes_home_key as _hhk_fc
+
+                _fc_scope = _hhk_fc(self._resolve_profile_home_for_source(source))
+                _fc_ok, _fc_reason = _ce_runtime_fc.profile_requirements_satisfied(
+                    scope=_fc_scope,
+                    config_raw=_load_gateway_config_for_profile(
+                        getattr(source, "profile", None)
+                    ),
+                )
+                if not _fc_ok:
+                    logger.error(
+                        "Refusing inbound message after extension seam failure: "
+                        "profile requires a conversation extension (%s)",
+                        _fc_reason,
+                    )
+                    return None
+            except Exception:
+                logger.error(
+                    "Refusing inbound message: conversation extension "
+                    "requirement state is unknown",
+                    exc_info=True,
+                )
+                return None
+
         # The sender and routed contact scope are now authenticated. Establish
         # the durable arrival fence before command handling, session lookup, or
         # any other await can let a proactive sender pass it. Carry this exact
@@ -20988,13 +21102,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _agent_kwargs["proactive_arrival"] = proactive_arrival
                 if canonical_event_ids:
                     _agent_kwargs["canonical_event_ids"] = canonical_event_ids
-                _agent_result = await self._handle_message_with_agent(
-                    event,
-                    source,
-                    _quick_key,
-                    _run_generation,
-                    **_agent_kwargs,
+                # Bind the request-policy token for the whole agent turn. This
+                # is what makes final-dispatch tool authorization mandatory
+                # rather than advisory: the ContextVar is carried into every
+                # tool-executor worker thread by
+                # ``tools.thread_context.propagate_context_to_thread``.
+                #
+                # No token is bound when no extension declares tool
+                # authorization for this profile, so ordinary turns are
+                # completely unaffected.
+                from gateway.conversation_extension_runtime import (
+                    AmbiguousToolAuthorizationOwner as _AmbiguousToolOwner,
+                    turn_policy_scope as _turn_policy_scope,
                 )
+                from hermes_constants import hermes_home_key as _hhk
+
+                _policy_scope_key = _extension_scope or _hhk(
+                    self._resolve_profile_home_for_source(source)
+                )
+                _policy_route_id = str(
+                    getattr(event, "message_id", None) or _quick_key or "turn"
+                )
+                try:
+                    _policy_ctx = _turn_policy_scope(
+                        scope=_policy_scope_key, route_id=_policy_route_id
+                    )
+                except _AmbiguousToolOwner:
+                    logger.error(
+                        "Refusing turn: multiple conversation extensions claim "
+                        "tool authorization for this profile"
+                    )
+                    return None
+                with _policy_ctx:
+                    _agent_result = await self._handle_message_with_agent(
+                        event,
+                        source,
+                        _quick_key,
+                        _run_generation,
+                        **_agent_kwargs,
+                    )
             except TurnLeaseTimeoutError as exc:
                 # This is a rejected message, not a completed agent turn. Return
                 # before the /goal judge below so it cannot consume the resend
@@ -21020,6 +21166,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             except Exception as _goal_exc:
                 logger.debug("post-turn hook failed: %s", _goal_exc)
+            # Post-turn completion fire site with trusted route identity. This
+            # is the only place the extension sees an authenticated, completed
+            # turn; failures here never affect the reply that already went out.
+            try:
+                if _extension_route_context is not None and _extension_scope:
+                    from gateway.conversation_extension_runtime import (
+                        observe_turn_completion as _observe_turn_completion,
+                    )
+
+                    _assistant_text = (
+                        _agent_result if isinstance(_agent_result, str) else ""
+                    )
+                    _observe_turn_completion(
+                        scope=_extension_scope,
+                        session_key=str(_quick_key or ""),
+                        runtime_profile=_extension_route_context.transport_profile,
+                        platform=_extension_route_context.platform,
+                        sender_identity=_extension_route_context.sender_identity,
+                        user_text=str(getattr(event, "text", "") or ""),
+                        assistant_text=_assistant_text,
+                        delivered=bool(_assistant_text),
+                        user_message_id=str(getattr(event, "message_id", "") or "")
+                        or None,
+                    )
+            except Exception:
+                logger.debug("conversation extension post-turn seam error", exc_info=True)
             return _agent_result
         finally:
             # MoA one-shot restore must run on EVERY exit path, not just
@@ -31322,6 +31494,136 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             getattr(source, "thread_id", None), getattr(source, "parent_chat_id", None),
         )
         return None
+
+    def _install_conversation_extension_host(self) -> None:
+        """Install the bounded host operations behind ``GatewayRuntimeFacade``.
+
+        Only these narrow capabilities are exposed. Notably absent: the
+        ``GatewayRunner`` itself, mutable session stores, raw platform/SDK
+        clients, credentials, and any private callback.
+        """
+        from gateway.conversation_extensions import (
+            GatewayHostOperations,
+            install_gateway_host_operations,
+            lifecycle_task_registry,
+        )
+
+        def _spawn(task) -> None:
+            # Host owns the task object; the extension only ever holds the
+            # immutable descriptor. Cancellation is keyed by full generation
+            # identity so a stale teardown cannot touch a newer generation.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.warning(
+                    "No running loop; refusing to start extension task %s",
+                    task.task_key,
+                )
+                raise
+            handle = loop.create_task(
+                _coerce_awaitable(task.factory()),
+                name=f"ext:{task.extension_id}:{task.task_key}:{task.generation}",
+            )
+            lifecycle_task_registry.record(task, handle)
+
+        def _coerce_awaitable(value):
+            if asyncio.iscoroutine(value):
+                return value
+
+            async def _wrap():
+                return value
+
+            return _wrap()
+
+        def _lookup_session(session_key: str):
+            """Return an immutable snapshot, never the live store.
+
+            Reads under the store's own lock and copies out only two scalar
+            fields; the extension never receives the entry object or the store.
+            """
+            if not session_key:
+                return None
+            try:
+                store = self.session_store
+                with store._lock:  # noqa: SLF001 — read-only snapshot
+                    store._ensure_loaded_locked()  # noqa: SLF001
+                    entry = store._entries.get(session_key)  # noqa: SLF001
+                    if entry is None:
+                        return None
+                    return {
+                        "session_id": getattr(entry, "session_id", None),
+                        "profile": getattr(entry, "profile", None),
+                    }
+            except Exception:
+                logger.debug("extension session lookup failed", exc_info=True)
+                return None
+
+        install_gateway_host_operations(
+            GatewayHostOperations(
+                spawn_task=_spawn,
+                cancel_tasks=lifecycle_task_registry.cancel,
+                lookup_session=_lookup_session,
+            )
+        )
+
+    def _served_profile_names(self) -> tuple[str, ...]:
+        """Return every profile this gateway process actually serves.
+
+        Used to validate a conversation extension's proposed runtime route: a
+        route to a profile this process does not serve is refused before it can
+        enter any runtime scope.
+        """
+        names: set[str] = set()
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            names.add(get_active_profile_name() or "default")
+        except Exception:
+            names.add("default")
+        try:
+            for profile in (getattr(self, "_profile_adapters", None) or {}):
+                if isinstance(profile, str) and profile:
+                    names.add(profile)
+        except Exception:
+            logger.debug("could not enumerate served profiles", exc_info=True)
+        return tuple(sorted(names))
+
+    def _permitted_extension_routes(self) -> Dict[str, tuple[str, ...]]:
+        """Return the core-owned permitted runtime-route map.
+
+        Shape: ``{transport_profile: (allowed_runtime_profile, ...)}``. Read
+        from ``gateway.permitted_conversation_routes``. Absent or malformed
+        config means *no* cross-profile routing is permitted — an extension can
+        then only keep a message in its own transport profile, which is the
+        fail-closed default.
+        """
+        try:
+            raw = getattr(self.config, "permitted_conversation_routes", None)
+            if raw is None:
+                raw = (getattr(self.config, "raw", None) or {}).get(
+                    "permitted_conversation_routes"
+                )
+            if not isinstance(raw, Mapping):
+                return {}
+            permitted: Dict[str, tuple[str, ...]] = {}
+            for source_profile, targets in raw.items():
+                if not isinstance(source_profile, str) or not source_profile:
+                    continue
+                if isinstance(targets, str):
+                    targets = [targets]
+                if not isinstance(targets, (list, tuple)):
+                    continue
+                cleaned = tuple(
+                    target
+                    for target in targets
+                    if isinstance(target, str) and target
+                )
+                if cleaned:
+                    permitted[source_profile] = cleaned
+            return permitted
+        except Exception:
+            logger.debug("could not read permitted conversation routes", exc_info=True)
+            return {}
 
     def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
         """Resolve which profile's HERMES_HOME should serve this inbound source.

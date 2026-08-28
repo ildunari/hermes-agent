@@ -1250,6 +1250,40 @@ def handle_function_call(
         if os.environ.get("HERMES_GUEST_POLICY") or _guest_policy_active:
             return json.dumps({"error": "Guest policy guard failed closed", "guest_policy": True}, ensure_ascii=False)
 
+    # Final-dispatch authorization for the generic gateway conversation
+    # extension seam. This is the *last* gate before a tool runs, so it covers
+    # direct calls, deferred (tool_search bridge) calls, the recursive bridge
+    # unwrap below, and MCP-server dispatch — all of which funnel through this
+    # function. Filtered schemas and request-scoped tool lists are NOT
+    # sufficient on their own: a model can name any tool it remembers.
+    #
+    # It is a no-op unless a request-policy token is bound for this request,
+    # so ordinary no-extension traffic keeps normal behavior. When a token IS
+    # bound, a vanished extension, a raising callback, or a malformed decision
+    # all deny.
+    try:
+        from gateway.conversation_extensions import (
+            authorize_tool_dispatch,
+            current_request_policy,
+        )
+        _extension_block = authorize_tool_dispatch(function_name, function_args)
+        if _extension_block is not None:
+            return _extension_block
+    except Exception as extension_policy_error:
+        logger.debug("extension tool policy guard error: %s", extension_policy_error)
+        # Fail closed only when a policy token was actually in scope. If the
+        # import itself failed we cannot know, so re-check defensively.
+        try:
+            from gateway.conversation_extensions import current_request_policy
+            _policy_bound = current_request_policy() is not None
+        except Exception:
+            _policy_bound = False
+        if _policy_bound:
+            return json.dumps(
+                {"error": "Extension tool policy guard failed closed", "extension_policy": True},
+                ensure_ascii=False,
+            )
+
     # ── Tool Search bridge dispatch ──────────────────────────────────
     # tool_search and tool_describe are pure catalog reads — handle them
     # inline. tool_call is unwrapped to the underlying tool so that every

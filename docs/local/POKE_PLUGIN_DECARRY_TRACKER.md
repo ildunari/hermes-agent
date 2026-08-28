@@ -6,7 +6,7 @@
 
 ## Current state
 
-- Phase: Checkpoint 2 — generic extension seams and dark validation.
+- Phase: Checkpoint 2 — implementation complete; independent review pending.
 - Live runtime changed: no.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
@@ -32,11 +32,31 @@
 |---|---|---|---|---|---|
 | 0. Plan | `e063360820`, `a0e701869d`, `906aca5b98` | n/a | evidence audit + diff checks | approved | complete |
 | 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
-| 2. Generic seams + dark parity | pending | pending | pending | pending | not started |
+| 2. Generic seams + dark parity | pending | pending | 438 plugin + 175 CP2/parity; broader core regression pending | pending | review pending |
 | 3. Authoritative activation, legacy fallback retained | pending | pending | pending | pending | not started |
 | 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
 
 ## Evidence log
+
+### 2026-08-28 — Checkpoint 2 implementation
+
+- Added a generic, profile-scoped conversation-extension runtime with immutable contracts, core-owned requirements/readiness, two-phase generation publication, stale-safe unload, and bounded host capabilities.
+- Wired authenticated ingress/admission, whole-turn request-policy scope, final tool authorization, and post-turn observation into production gateway dispatch. Direct, deferred bridge, MCP, and inline executor paths are covered.
+- Added authenticated-existing-DM tri-state delivery (`sent`, `definitive_failure`, `unknown`) with no chat creation and no fallback transport.
+- Poke registers only dark capabilities: tool decision observation, ingress/post-turn observation, and health. It cannot route, start lifecycle tasks, send, create initiated children, or write durable state.
+- Frozen cross-repository corpus: 54/54 copied-vs-legacy Guest route/tool and proactive policy comparisons pass with no skips. Standalone plugin suite: 438 passed. CP2/core suite: 175 passed.
+- Atomic replacement race tests prove the outgoing generation remains visible until replacement start succeeds; failed replacement start preserves the prior generation.
+
+## Residual owner matrix after Checkpoint 2
+
+| Surface | Current authority | Plugin state | Next checkpoint |
+|---|---|---|---|
+| Guest route/admission and identity/context | Core legacy owner | copied; dark comparison only | Checkpoint 3 activation with fallback |
+| Final Guest tool decision | Core legacy guard remains authoritative | dark observer; generic final-dispatch seam is live | Checkpoint 3 activation with fallback |
+| Contact-memory ingress and durable stores | Core and BlueBubbles platform override | portable libraries copied; data stays in place | Checkpoint 3 adapter/facade activation |
+| Proactive watcher, scheduler, initiated children, delivery | Core legacy owner | copied libraries; no dark runtime capability | Checkpoint 3 activation; Checkpoint 4 deletion |
+| Delivery ledger and initiated-session persistence | Generic core infrastructure | consumed only through bounded contracts | Remains core |
+| Conversation-texture `pre_llm_call` attachment | Plugin authoritative | core engine still consumed by proactive leaves | Engine deletion waits for remaining consumers |
 
 ### 2026-08-27 — Checkpoint 1 closure approved
 
@@ -90,8 +110,8 @@
 
 ## Documentation debt discovered
 
-- `scripts/local_carry_manifest.yaml` still groups retired texture attachment with the remaining Poke/Guest stack.
-- Plugin `docs/plugin-hygiene.md` says restarts require fresh approval; current repository policy pre-authorizes the detached safe-restart mechanism.
+- Resolved: carry manifest now separates retired texture attachment, generic extension/runtime infrastructure, and temporary policy leaves.
+- Resolved: plugin restart documentation now matches the detached safe-restart policy; VibeProxy restarts still require explicit approval.
 - Existing historical Poke plans do not distinguish current core owner, plugin owner, and retired surfaces.
 
 ## Activation guard

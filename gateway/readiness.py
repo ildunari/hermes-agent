@@ -100,6 +100,61 @@ def _probe_session_store(
     return _check("ok" if state_db_probe.get("status") == "ok" else "unavailable")
 
 
+def _probe_conversation_extensions(home: Path) -> dict[str, Any]:
+    """Fail-closed probe for this profile's required conversation extensions.
+
+    A profile that declares ``gateway.required_conversation_extensions`` is
+    only ready when every requirement resolves to a registered, API-compatible,
+    capability-complete, healthy extension in *this* profile's scope. A profile
+    with no requirements is always ok, so ordinary Hermes profiles keep normal
+    no-extension behavior.
+
+    A malformed declaration is itself unready: a profile that *tried* to
+    require an extension must never silently start without one.
+    """
+    try:
+        from gateway.conversation_extensions import (
+            evaluate_extension_readiness,
+            parse_required_extensions,
+        )
+        from hermes_constants import hermes_home_key
+    except Exception:
+        return _check("ok", "extension seam unavailable")
+
+    path = home / "config.yaml"
+    raw: Any = None
+    if path.exists():
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                gateway_cfg = loaded.get("gateway")
+                if isinstance(gateway_cfg, dict):
+                    raw = gateway_cfg.get("required_conversation_extensions")
+        except Exception:
+            # Config unreadability is already reported by ``_probe_config``;
+            # here it means we cannot prove requirements are satisfied.
+            return _check("degraded", "requirements unreadable")
+
+    try:
+        required = parse_required_extensions(raw)
+    except Exception:
+        return _check("degraded", "malformed requirement declaration")
+
+    if not required:
+        return _check("ok")
+
+    report = evaluate_extension_readiness(
+        required=required, scope=hermes_home_key(home)
+    )
+    if report.ready:
+        return _check("ok", required=len(required))
+    return _check(
+        "degraded",
+        "required extension unavailable",
+        extensions=report.as_dict()["extensions"],
+    )
+
+
 def collect_runtime_readiness(
     *,
     configured_model: str,
@@ -124,6 +179,7 @@ def collect_runtime_readiness(
         "model": _check("ok" if str(configured_model or "").strip() else "degraded"),
         "disk": _probe_disk(home),
         "gateway": _probe_gateway(runtime),
+        "conversation_extensions": _probe_conversation_extensions(home),
         "background_queues": _check(
             "ok",
             active_api_runs=max(0, int(active_api_runs)),
