@@ -19190,18 +19190,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # every ordinary Hermes profile — are always ready, so this is a no-op
         # for them and the no-plugin path is byte-identical.
         try:
-            if not self._extension_profile_is_ready(getattr(source, "profile", None)):
+            from hermes_constants import hermes_home_key as _admission_home_key
+
+            _admission_scope = _admission_home_key(
+                self._resolve_profile_home_for_source(source)
+            )
+            if not self._extension_profile_is_ready(_admission_scope):
                 logger.error(
                     "Dropping inbound message: profile %s requires a "
                     "conversation extension that is not available (%s)",
                     getattr(source, "profile", None) or "default",
-                    self._extension_profile_unready_reason(
-                        getattr(source, "profile", None)
-                    ),
+                    self._extension_profile_unready_reason(_admission_scope),
                 )
                 return None
         except Exception:
             logger.debug("extension admission gate check failed", exc_info=True)
+            # Once startup has recorded profile verdicts, inability to resolve
+            # this message to the same canonical profile-home scope must not
+            # bypass a hard requirement.
+            if getattr(self, "_extension_profile_readiness", None):
+                return None
 
         # Ignored-channel guard runs FIRST — before startup-restore queueing,
         # plugin hooks, auth, and session setup — so a configured ignored
@@ -19640,13 +19648,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # the per-message re-check below is a defence-in-depth refresh for
             # a requirement that regressed after startup (a plugin unloaded
             # mid-run), not the primary gate.
-            if not self._extension_profile_is_ready(_transport_profile):
+            if not self._extension_profile_is_ready(_extension_scope):
                 logger.error(
                     "Refusing inbound message: profile %s was marked unready at "
                     "startup because a required conversation extension is not "
                     "available (%s)",
                     _transport_profile,
-                    self._extension_profile_unready_reason(_transport_profile),
+                    self._extension_profile_unready_reason(_extension_scope),
                 )
                 return None
             try:
@@ -32075,7 +32083,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 profile_name,
                 exc_info=True,
             )
-            readiness[profile_name] = {"ready": False, "reason": "scope_unresolvable"}
+            readiness[f"unresolved:{profile_name}"] = {
+                "ready": False,
+                "reason": "scope_unresolvable",
+            }
             return False
         scope_profiles[scope] = profile_name
 
@@ -32101,13 +32112,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 profile_name,
                 exc_info=True,
             )
-            readiness[profile_name] = {
+            readiness[scope] = {
                 "ready": False,
                 "reason": "requirements_unevaluable",
             }
             return False
 
-        readiness[profile_name] = {"ready": bool(ok), "reason": reason}
+        readiness[scope] = {"ready": bool(ok), "reason": reason}
         if not ok:
             logger.error(
                 "Profile %s requires a conversation extension that is not "
@@ -32155,23 +32166,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     exc_info=True,
                 )
 
-    def _extension_profile_is_ready(self, profile_name: Optional[str]) -> bool:
-        """Return the startup readiness verdict for *profile_name*.
+    def _extension_profile_is_ready(self, profile_scope: str) -> bool:
+        """Return the startup readiness verdict for a canonical home scope.
 
-        Profiles never evaluated (no requirements, or a single-profile gateway
-        that recorded nothing) are ready — the no-plugin path is unchanged.
+        Profiles never evaluated are ready, preserving the no-plugin path. The
+        key is always ``hermes_home_key(profile_home)``; profile display names
+        are not stable identity in single-profile or custom-home deployments.
         """
         readiness = getattr(self, "_extension_profile_readiness", None)
         if not readiness:
             return True
-        state = readiness.get(str(profile_name or "default"))
+        state = readiness.get(str(profile_scope))
         if not isinstance(state, Mapping):
             return True
         return bool(state.get("ready", True))
 
-    def _extension_profile_unready_reason(self, profile_name: Optional[str]) -> str:
+    def _extension_profile_unready_reason(self, profile_scope: str) -> str:
         readiness = getattr(self, "_extension_profile_readiness", None) or {}
-        state = readiness.get(str(profile_name or "default"))
+        state = readiness.get(str(profile_scope))
         if isinstance(state, Mapping):
             return str(state.get("reason") or "required_extension_unavailable")
         return "required_extension_unavailable"

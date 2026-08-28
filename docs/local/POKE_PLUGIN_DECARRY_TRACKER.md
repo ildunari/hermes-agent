@@ -6,7 +6,7 @@
 
 ## Current state
 
-- Phase: Checkpoint 2 — first review rejected; P0/P1 closure implemented; closure review pending.
+- Phase: Checkpoint 2 — closure review found one residual P1; home-scoped fix implemented; final narrow verification pending.
 - Live runtime changed: no.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
@@ -32,11 +32,18 @@
 |---|---|---|---|---|---|
 | 0. Plan | `e063360820`, `a0e701869d`, `906aca5b98` | n/a | evidence audit + diff checks | approved | complete |
 | 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
-| 2. Generic seams + dark parity | `23de9414be` + closure commit | `96026ea` | 438 plugin + 214 CP2/parity + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | first review rejected; closure review pending | in progress |
+| 2. Generic seams + dark parity | `23de9414be`, `50df8641f9` + final closure commit | `96026ea` | 438 plugin + 293 closure/integration + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | first review rejected; closure review found one residual P1; final check pending | in progress |
 | 3. Authoritative activation, legacy fallback retained | pending | pending | pending | pending | not started |
 | 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
 
 ## Evidence log
+
+### 2026-08-28 — Checkpoint 2 closure review residual fixed
+
+- Narrow closure review verified nine of ten original findings closed, then rejected on one residual P1: a named single-profile gateway stored readiness by profile name while an unstamped `SessionSource.profile=None` looked up `default`, allowing early control paths to bypass an unready `coding` profile.
+- Readiness is now keyed exclusively by canonical `hermes_home_key(profile_home)`, matching extension registration and request-policy scope. Both early admission and the deep defence-in-depth gate resolve the source to that same home scope.
+- Added the exact regression shape (`active profile=coding`, `source.profile=None`, unsatisfied requirement); the full closure set passes 293 tests and all carry gates.
+- Review record: `/Users/Kosta/.hermes/profiles/coding/cache/delegation/subagent-summary-0-20260828_161805_223252.txt`.
 
 ### 2026-08-28 — Checkpoint 2 first review rejected, P0/P1 closure implemented
 

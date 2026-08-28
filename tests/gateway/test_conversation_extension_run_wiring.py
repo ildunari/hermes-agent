@@ -330,7 +330,9 @@ def test_eager_activation_marks_profile_unready_when_requirement_missing(tmp_pat
 
     runner._activate_conversation_extensions_for_profile("guest", home)
 
-    state = runner._extension_profile_readiness["guest"]
+    from hermes_constants import hermes_home_key
+
+    state = runner._extension_profile_readiness[hermes_home_key(home)]
     assert state["ready"] is False
     assert "poke" in state["reason"]
 
@@ -357,7 +359,7 @@ def test_eager_activation_marks_profile_ready_when_requirement_satisfied(tmp_pat
     )
 
     runner._activate_conversation_extensions_for_profile("guest", home)
-    assert runner._extension_profile_readiness["guest"]["ready"] is True
+    assert runner._extension_profile_readiness[hermes_home_key(home)]["ready"] is True
 
 
 def test_eager_activation_no_requirements_is_ready(tmp_path):
@@ -370,17 +372,42 @@ def test_eager_activation_no_requirements_is_ready(tmp_path):
     _write_profile_config(home, None)
 
     runner._activate_conversation_extensions_for_profile("plain", home)
-    assert runner._extension_profile_readiness["plain"]["ready"] is True
+    from hermes_constants import hermes_home_key
+
+    assert runner._extension_profile_readiness[hermes_home_key(home)]["ready"] is True
 
 
 def test_unready_profile_refuses_ingress_before_first_message(tmp_path):
     """The startup verdict — not a lazy per-message probe — gates ingress."""
+    from hermes_constants import hermes_home_key
+
     runner = _bare_runner()
+    home = tmp_path / "profiles" / "guest"
+    scope = hermes_home_key(home)
     runner._extension_profile_readiness = {
-        "guest": {"ready": False, "reason": "poke:missing"}
+        scope: {"ready": False, "reason": "poke:missing"}
     }
-    assert runner._extension_profile_is_ready("guest") is False
-    assert runner._extension_profile_is_ready("default") is True
+    assert runner._extension_profile_is_ready(scope) is False
+    assert runner._extension_profile_is_ready(hermes_home_key(tmp_path / "default")) is True
+
+
+def test_named_single_profile_without_source_stamp_uses_home_readiness(tmp_path):
+    """A named single-profile source with profile=None cannot bypass readiness."""
+    from hermes_constants import hermes_home_key
+
+    runner = _bare_runner()
+    home = tmp_path / "profiles" / "coding"
+    scope = hermes_home_key(home)
+    runner._extension_profile_readiness = {
+        scope: {"ready": False, "reason": "missing_ext:missing"}
+    }
+    source = SimpleNamespace(profile=None)
+    runner._resolve_profile_home_for_source = lambda _source: home
+
+    resolved_scope = hermes_home_key(runner._resolve_profile_home_for_source(source))
+    assert resolved_scope == scope
+    assert runner._extension_profile_is_ready(resolved_scope) is False
+    assert runner._extension_profile_unready_reason(resolved_scope) == "missing_ext:missing"
 
 
 def test_readiness_probe_reports_hard_unready_for_missing_requirement(
