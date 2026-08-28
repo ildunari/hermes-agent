@@ -183,8 +183,11 @@ def test_profile_requiring_missing_extension_is_unready(monkeypatch, tmp_path):
     _write_config(home, [{"id": "probe", "api_version": 1}])
     report = _readiness(monkeypatch, home)
     check = report["checks"]["conversation_extensions"]
-    assert check["status"] == "degraded"
-    assert report["status"] == "degraded"
+    # ``unready``, not ``degraded``: a degraded gateway is still serving,
+    # whereas this profile has a hard requirement it cannot satisfy and must
+    # not receive traffic at all.
+    assert check["status"] == "unready"
+    assert report["status"] == "unready"
 
 
 def test_profile_requiring_present_extension_is_ready(monkeypatch, tmp_path):
@@ -203,7 +206,9 @@ def test_malformed_requirement_declaration_is_unready(monkeypatch, tmp_path):
     home = tmp_path / "home"
     _write_config(home, [{"api_version": 1}])  # missing id
     report = _readiness(monkeypatch, home)
-    assert report["checks"]["conversation_extensions"]["status"] == "degraded"
+    # A profile that *tried* to require an extension must never silently serve
+    # without one, so a malformed declaration is a hard unready.
+    assert report["checks"]["conversation_extensions"]["status"] == "unready"
 
 
 def test_requirement_satisfied_only_in_another_profile_is_unready(monkeypatch, tmp_path):
@@ -211,7 +216,7 @@ def test_requirement_satisfied_only_in_another_profile_is_unready(monkeypatch, t
     _write_config(home, [{"id": "probe", "api_version": 1}])
     ce.conversation_extension_registry.register(_bundle(), scope="/home/somewhere-else")
     report = _readiness(monkeypatch, home)
-    assert report["checks"]["conversation_extensions"]["status"] == "degraded"
+    assert report["checks"]["conversation_extensions"]["status"] == "unready"
 
 
 def test_readiness_payload_does_not_leak_config_or_messages(monkeypatch, tmp_path):

@@ -48,8 +48,28 @@ def test_gateway_forwards_canonical_event_ids_to_post_turn_extraction() -> None:
     signature = inspect.signature(GatewayRunner._handle_message_with_agent)
     assert signature.parameters["canonical_event_ids"].default == ()
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(GatewayRunner._handle_message)))
+    # The ingress handler builds ``_agent_kwargs`` and the agent turn runs
+    # inside ``_run_agent_turn_with_policy`` (extracted so the conversation-
+    # extension ambiguous-authorizer refusal is reachable through the real
+    # wiring). The invariant is unchanged and spans the pair: exactly ONE call
+    # to ``_handle_message_with_agent`` exists across the seam, and the
+    # canonical event ids reach it.
+    handle_source = textwrap.dedent(inspect.getsource(GatewayRunner._handle_message))
+    policy_source = textwrap.dedent(
+        inspect.getsource(GatewayRunner._run_agent_turn_with_policy)
+    )
+    tree = ast.parse(handle_source)
+    policy_tree = ast.parse(policy_source)
+
     calls = [
+        node
+        for node in ast.walk(policy_tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_handle_message_with_agent"
+    ]
+    # No stray second dispatch may hide in the ingress handler.
+    assert not [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
@@ -62,15 +82,27 @@ def test_gateway_forwards_canonical_event_ids_to_post_turn_extraction() -> None:
         value = forwarded["canonical_event_ids"]
         assert isinstance(value, ast.Name) and value.id == "canonical_event_ids"
     else:
-        # Opt-in kwargs seam: the handler forwards via
-        # ``_agent_kwargs["canonical_event_ids"] = canonical_event_ids`` and
-        # splats ``**_agent_kwargs`` so test doubles written against the
+        # Opt-in kwargs seam: the ingress handler forwards via
+        # ``_agent_kwargs["canonical_event_ids"] = canonical_event_ids``, hands
+        # the dict to ``_run_agent_turn_with_policy``, which splats
+        # ``**agent_kwargs`` — so test doubles written against the
         # four-positional upstream contract stay compatible.
         assert any(
             keyword.arg is None
             and isinstance(keyword.value, ast.Name)
-            and keyword.value.id == "_agent_kwargs"
+            and keyword.value.id == "agent_kwargs"
             for keyword in calls[0].keywords
+        )
+        # ``_agent_kwargs`` must actually be the dict that is handed over.
+        assert any(
+            keyword.arg == "agent_kwargs"
+            and isinstance(keyword.value, ast.Name)
+            and keyword.value.id == "_agent_kwargs"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_run_agent_turn_with_policy"
+            for keyword in node.keywords
         )
         assigns = [
             node

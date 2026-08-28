@@ -4692,6 +4692,29 @@ def _load_gateway_config_for_profile(profile: str | None) -> dict:
     return {}
 
 
+def _load_gateway_config_from_home(home: "Path") -> dict:
+    """Load a profile's ``config.yaml`` from its HERMES_HOME directly.
+
+    The profile *home* is the authoritative identity wherever a scope key is
+    derived from it (conversation-extension activation, readiness). Resolving
+    by profile *name* instead would read the conventional
+    ``~/.hermes/profiles/<name>/config.yaml``, which is a different file for any
+    profile whose home is not at that path — including every test fixture.
+    """
+    try:
+        config_path = Path(home) / "config.yaml"
+        if config_path.exists():
+            import yaml
+
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.debug(
+            "Could not load gateway config from home %s", home, exc_info=True
+        )
+    return {}
+
+
 def _load_guest_profile_identity_prompt(profile: str | None, config: dict | None = None) -> str:
     """Load the guest profile's explicit identity and safety instructions."""
     if not profile or not str(profile).strip():
@@ -6566,6 +6589,34 @@ class TurnRunner:
         _recall_prompt = _join_contact_turn_context(
             _recall_prompt, _interest_digest
         )
+
+        # Turn-preparation fire site. A registered conversation extension may
+        # contribute optional per-turn context; it rides the same API-only
+        # current-user-message lane as contact recall, never the cached system
+        # prefix, so per-conversation prompt caching stays byte-stable.
+        # Fails open and returns "" when no extension declares ``turn_policy``,
+        # so ordinary turns are unchanged.
+        try:
+            from hermes_constants import hermes_home_key as _ce_home_key
+
+            _extension_turn_context = self._runner._collect_extension_turn_context(
+                scope=_ce_home_key(_contact_memory_home),
+                session_key=ctx.session_key or ctx.session_id or "gateway",
+                runtime_profile=str(getattr(ctx.source, "profile", None) or "default"),
+                platform=platform_key,
+                sender_identity=str(getattr(ctx.source, "user_id", "") or ""),
+                chat_type=str(getattr(ctx.source, "chat_type", "") or ""),
+                user_text=str(ctx.message or ""),
+            )
+        except Exception:
+            logger.debug(
+                "conversation extension turn augmentation site failed", exc_info=True
+            )
+            _extension_turn_context = ""
+        if _extension_turn_context:
+            _recall_prompt = _join_contact_turn_context(
+                _recall_prompt, _extension_turn_context
+            )
 
         max_iterations = _current_max_iterations()
 
@@ -15065,6 +15116,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self.delivery_router.adapters = self.adapters
         self._wire_teams_pipeline_runtime()
 
+        # ── Eager conversation-extension startup activation ──────────────
+        # Runs AFTER plugin discovery for every served profile (primary above,
+        # secondaries inside _start_one_profile_adapters) and BEFORE the
+        # gateway is marked running, so a profile that declares
+        # ``gateway.required_conversation_extensions`` it cannot satisfy is
+        # known unready before it serves its first message — not lazily at
+        # first-message time. Also fires the gateway-start lifecycle site for
+        # each profile scope.
+        #
+        # Entirely a no-op for profiles with no requirements and no registered
+        # extension, which is every ordinary Hermes profile.
+        try:
+            self._activate_conversation_extensions_for_served_profiles()
+        except Exception:
+            logger.error(
+                "conversation extension startup activation failed", exc_info=True
+            )
+
         self._running = True
         self._install_plugin_message_injector()
         self._update_runtime_status("running")
@@ -16782,6 +16851,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             self._running = False
             self._clear_plugin_message_injector()
+            # Gateway-stop lifecycle fire site. Registered conversation
+            # extensions get their ``on_stop`` and their generation-scoped
+            # lifecycle tasks cancelled here; without this a shutdown left
+            # extension watchers running, because ``on_stop`` otherwise only
+            # fires on plugin *unload*. No-op with no extension registered.
+            try:
+                self._fire_extension_gateway_stop()
+            except Exception:
+                logger.debug(
+                    "conversation extension gateway-stop teardown failed",
+                    exc_info=True,
+                )
             self._draining = True
 
             # A to_thread research call cannot be safely cancelled: its worker
@@ -19095,6 +19176,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # are system-generated and must skip user authorization.
         is_internal = bool(getattr(event, "internal", False))
 
+        # ── Hard conversation-extension admission gate ───────────────────
+        # A profile that declares ``gateway.required_conversation_extensions``
+        # and could not satisfy them at startup must not serve ANY inbound
+        # traffic — not just agent turns. Placing this above the ~16 early
+        # returns below means slash-command dispatch, pause handling, confirm
+        # resolution, and busy-slash dispatch are all covered; previously the
+        # gate sat after them, so an unready profile still processed its whole
+        # control plane.
+        #
+        # The verdict is the eager startup one, so this is a dictionary lookup
+        # on the hot path, not a config read. Profiles with no requirements —
+        # every ordinary Hermes profile — are always ready, so this is a no-op
+        # for them and the no-plugin path is byte-identical.
+        try:
+            if not self._extension_profile_is_ready(getattr(source, "profile", None)):
+                logger.error(
+                    "Dropping inbound message: profile %s requires a "
+                    "conversation extension that is not available (%s)",
+                    getattr(source, "profile", None) or "default",
+                    self._extension_profile_unready_reason(
+                        getattr(source, "profile", None)
+                    ),
+                )
+                return None
+        except Exception:
+            logger.debug("extension admission gate check failed", exc_info=True)
+
         # Ignored-channel guard runs FIRST — before startup-restore queueing,
         # plugin hooks, auth, and session setup — so a configured ignored
         # channel can never reach pairing/auth/session state (#51899).
@@ -19513,6 +19621,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # No-op when no conversation extension is registered for this profile.
         _extension_route_context = None
         _extension_scope = None
+        _extension_route_decision = None
         try:
             from gateway import conversation_extension_runtime as _ce_runtime
             from hermes_constants import hermes_home_key as _hermes_home_key
@@ -19525,6 +19634,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # conversation extensions may not serve a single message until
             # every requirement resolves in its own scope. Profiles with no
             # requirements are unaffected.
+            #
+            # The authoritative verdict is the one computed *eagerly at
+            # startup* by ``_activate_conversation_extensions_for_profile``;
+            # the per-message re-check below is a defence-in-depth refresh for
+            # a requirement that regressed after startup (a plugin unloaded
+            # mid-run), not the primary gate.
+            if not self._extension_profile_is_ready(_transport_profile):
+                logger.error(
+                    "Refusing inbound message: profile %s was marked unready at "
+                    "startup because a required conversation extension is not "
+                    "available (%s)",
+                    _transport_profile,
+                    self._extension_profile_unready_reason(_transport_profile),
+                )
+                return None
             try:
                 _requirements_config = _load_gateway_config_for_profile(
                     getattr(source, "profile", None)
@@ -19560,16 +19684,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             if _extension_route_context is not None:
                 _served = tuple(self._served_profile_names())
-                _route_decision = _ce_runtime.admit_and_route(
+                _extension_route_decision = _ce_runtime.admit_and_route(
                     _extension_route_context,
                     scope=_extension_scope,
                     served_profiles=_served,
                     permitted_routes=self._permitted_extension_routes(),
                 )
-                if _route_decision is not None and not _route_decision.admitted:
+                if (
+                    _extension_route_decision is not None
+                    and not _extension_route_decision.admitted
+                ):
                     logger.warning(
                         "Conversation extension denied inbound message (%s)",
-                        _route_decision.reason or "denied",
+                        _extension_route_decision.reason or "denied",
                     )
                     return None
                 _ce_runtime.observe_authenticated_ingress(
@@ -21108,39 +21235,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # tool-executor worker thread by
                 # ``tools.thread_context.propagate_context_to_thread``.
                 #
+                # An ambiguous authorizer (two extensions claiming tool
+                # authorization for one profile) is refused inside the helper
+                # and returns None — a clean refusal, not a crash.
+                #
                 # No token is bound when no extension declares tool
                 # authorization for this profile, so ordinary turns are
                 # completely unaffected.
-                from gateway.conversation_extension_runtime import (
-                    AmbiguousToolAuthorizationOwner as _AmbiguousToolOwner,
-                    turn_policy_scope as _turn_policy_scope,
+                _agent_result = await self._run_agent_turn_with_policy(
+                    event=event,
+                    source=source,
+                    quick_key=_quick_key,
+                    run_generation=_run_generation,
+                    agent_kwargs=_agent_kwargs,
+                    policy_scope=_extension_scope,
                 )
-                from hermes_constants import hermes_home_key as _hhk
-
-                _policy_scope_key = _extension_scope or _hhk(
-                    self._resolve_profile_home_for_source(source)
-                )
-                _policy_route_id = str(
-                    getattr(event, "message_id", None) or _quick_key or "turn"
-                )
-                try:
-                    _policy_ctx = _turn_policy_scope(
-                        scope=_policy_scope_key, route_id=_policy_route_id
-                    )
-                except _AmbiguousToolOwner:
-                    logger.error(
-                        "Refusing turn: multiple conversation extensions claim "
-                        "tool authorization for this profile"
-                    )
-                    return None
-                with _policy_ctx:
-                    _agent_result = await self._handle_message_with_agent(
-                        event,
-                        source,
-                        _quick_key,
-                        _run_generation,
-                        **_agent_kwargs,
-                    )
             except TurnLeaseTimeoutError as exc:
                 # This is a rejected message, not a completed agent turn. Return
                 # before the /goal judge below so it cannot consume the resend
@@ -21181,7 +21290,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _observe_turn_completion(
                         scope=_extension_scope,
                         session_key=str(_quick_key or ""),
-                        runtime_profile=_extension_route_context.transport_profile,
+                        # The *validated* route, not the transport profile.
+                        # The whole admission sequence exists to produce this
+                        # value; reporting the transport profile instead would
+                        # silently misreport identity under any permitted
+                        # cross-profile route.
+                        runtime_profile=self._extension_runtime_profile(
+                            _extension_route_context, _extension_route_decision
+                        ),
                         platform=_extension_route_context.platform,
                         sender_identity=_extension_route_context.sender_identity,
                         user_text=str(getattr(event, "text", "") or ""),
@@ -31558,11 +31674,200 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("extension session lookup failed", exc_info=True)
                 return None
 
+        def _create_initiated_child(request) -> Dict[str, Any]:
+            """Create a bounded agent-initiated child turn for an existing session.
+
+            Deliberately narrow. The extension supplies a session key and the
+            assistant content; core resolves the *existing* session itself and
+            refuses if there is none. Nothing here creates a chat, invents a
+            recipient, or hands back a store handle — the return value is a
+            plain dict of scalars.
+            """
+            from gateway.conversation_extensions import InitiatedTurnRequest
+
+            if not isinstance(request, InitiatedTurnRequest):
+                return {"created": False, "reason": "malformed_request"}
+            prompt = str(request.prompt or "").strip()
+            if not prompt:
+                return {"created": False, "reason": "empty_content"}
+
+            try:
+                entry = self.session_store.lookup_by_session_key(request.session_key)
+            except Exception:
+                logger.debug(
+                    "extension initiated-child session lookup failed", exc_info=True
+                )
+                return {"created": False, "reason": "session_lookup_failed"}
+            if entry is None:
+                # No existing session: refuse rather than fabricate a lineage.
+                return {"created": False, "reason": "unknown_session"}
+
+            parent_session_id = getattr(entry, "session_id", None)
+            if not parent_session_id:
+                return {"created": False, "reason": "unknown_session"}
+
+            session_db = getattr(self, "_session_db", None)
+            if session_db is None:
+                return {"created": False, "reason": "session_db_unavailable"}
+
+            child_session_id = f"ext-{request.origin or 'extension'}-{uuid.uuid4().hex}"
+            try:
+                session_db.create_initiated_assistant_child(
+                    parent_session_id=str(parent_session_id),
+                    child_session_id=child_session_id,
+                    assistant_content=prompt,
+                    initiated_kind="checkin",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "extension initiated-child creation failed: %s", exc, exc_info=True
+                )
+                return {"created": False, "reason": "creation_failed"}
+            return {
+                "created": True,
+                "session_id": child_session_id,
+                "parent_session_id": str(parent_session_id),
+            }
+
+        def _inject_turn(session_key: str, text: str) -> bool:
+            """Schedule a safe, authorization-checked turn on an existing session.
+
+            Reuses the existing plugin message-injection path, which re-runs
+            ``_is_user_authorized`` against the session's stored origin and
+            refuses when the gateway is not running or is draining. The
+            injected event is marked internal with ``allow_gateway_control``
+            off, so an extension cannot drive gateway control commands.
+            """
+            if not isinstance(session_key, str) or not session_key.strip():
+                return False
+            content = str(text or "").strip()
+            if not content:
+                return False
+            try:
+                return bool(
+                    self._schedule_plugin_message_injection(
+                        session_key=session_key,
+                        content=content,
+                        plugin_id="conversation_extension",
+                    )
+                )
+            except Exception:
+                logger.warning("extension turn injection failed", exc_info=True)
+                return False
+
+        def _send_authenticated_existing_dm(request):
+            """Send to an existing, already-authorized DM. Never creates, never falls back.
+
+            The extension supplies only ``(platform, chat_id, text,
+            reservation_key)``. It never receives an adapter, a client, or a
+            credential: core resolves the transport itself and verifies the
+            target is an existing authorized DM before sending.
+            """
+            from gateway.authenticated_dm import (
+                send_authenticated_existing_dm as _send_impl,
+            )
+            from gateway.conversation_extensions import (
+                AuthenticatedDmResult,
+                DmSendOutcome,
+            )
+
+            def _resolve_transport(platform_name: str):
+                """Resolve the live adapter for exactly this platform. No fallback."""
+                try:
+                    platform = Platform(platform_name)
+                except Exception:
+                    return None
+                adapter = (getattr(self, "adapters", None) or {}).get(platform)
+                if adapter is not None:
+                    return adapter
+                # Secondary-profile adapters are equally valid transports, but
+                # we still only ever return an adapter for the SAME platform.
+                for profile_map in (
+                    getattr(self, "_profile_adapters", None) or {}
+                ).values():
+                    candidate = (profile_map or {}).get(platform)
+                    if candidate is not None:
+                        return candidate
+                return None
+
+            def _is_authorized_existing_dm(platform_name: str, chat_id: str) -> bool:
+                """True only for a DM that already exists and is already authorized.
+
+                Requires a persisted session whose origin is a DM on this exact
+                platform/chat, and re-runs the live authorization check against
+                that stored origin. A chat we have never served, or one whose
+                authorization has since been revoked, is refused.
+                """
+                try:
+                    platform = Platform(platform_name)
+                except Exception:
+                    return False
+                try:
+                    store = self.session_store
+                    with store._lock:  # noqa: SLF001 — read-only scan
+                        store._ensure_loaded_locked()  # noqa: SLF001
+                        entries = list(store._entries.values())  # noqa: SLF001
+                except Exception:
+                    logger.debug(
+                        "authenticated DM authorization scan failed", exc_info=True
+                    )
+                    return False
+
+                for entry in entries:
+                    origin = getattr(entry, "origin", None)
+                    if origin is None:
+                        continue
+                    if getattr(origin, "platform", None) != platform:
+                        continue
+                    if str(getattr(origin, "chat_id", "") or "") != str(chat_id):
+                        continue
+                    if str(getattr(origin, "chat_type", "") or "") != "dm":
+                        continue
+                    try:
+                        return bool(
+                            self._is_user_authorized(
+                                origin, allow_adapter_delegation=False
+                            )
+                        )
+                    except Exception:
+                        logger.debug(
+                            "authenticated DM authorization check failed",
+                            exc_info=True,
+                        )
+                        return False
+                return False
+
+            def _run_coroutine(coro):
+                loop = getattr(self, "_gateway_loop", None)
+                if loop is None or loop.is_closed():
+                    coro.close()
+                    return None
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+                return future.result(timeout=30)
+
+            try:
+                return _send_impl(
+                    request,
+                    resolve_transport=_resolve_transport,
+                    is_authorized_existing_dm=_is_authorized_existing_dm,
+                    run_coroutine=_run_coroutine,
+                )
+            except Exception:
+                # An unclassifiable failure is UNKNOWN, never a definitive
+                # failure: a wrong definitive verdict invites a duplicate send.
+                logger.warning("authenticated DM send raised in host op", exc_info=True)
+                return AuthenticatedDmResult(
+                    DmSendOutcome.UNKNOWN, detail="host_error"
+                )
+
         install_gateway_host_operations(
             GatewayHostOperations(
                 spawn_task=_spawn,
                 cancel_tasks=lifecycle_task_registry.cancel,
                 lookup_session=_lookup_session,
+                create_initiated_child=_create_initiated_child,
+                inject_turn=_inject_turn,
+                send_authenticated_existing_dm=_send_authenticated_existing_dm,
             )
         )
 
@@ -31572,6 +31877,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         Used to validate a conversation extension's proposed runtime route: a
         route to a profile this process does not serve is refused before it can
         enter any runtime scope.
+
+        "Served" is a *configuration* property, not an adapter-connect outcome.
+        Deriving it from ``_profile_adapters`` alone made a legitimate route
+        fail as ``route_not_served`` whenever that profile's adapter happened
+        to be down — coupling routing validity to transient connectivity. The
+        set comes from the same ``_multiplex_profile_homes`` chokepoint
+        ``_start_secondary_profile_adapters`` and profile-route validation use,
+        so all three agree.
         """
         names: set[str] = set()
         try:
@@ -31580,6 +31893,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             names.add(get_active_profile_name() or "default")
         except Exception:
             names.add("default")
+        # Config-declared served profiles, including any whose adapters failed
+        # to connect. Single-profile gateways return just the active profile.
+        try:
+            config = getattr(self, "config", None)
+            if getattr(config, "multiplex_profiles", False):
+                for profile_name, _home in _multiplex_profile_homes(config):
+                    if isinstance(profile_name, str) and profile_name:
+                        names.add(profile_name)
+        except Exception:
+            logger.debug(
+                "could not enumerate config-declared served profiles", exc_info=True
+            )
+        # Union with live adapter profiles so a profile brought up by another
+        # path is never dropped.
         try:
             for profile in (getattr(self, "_profile_adapters", None) or {}):
                 if isinstance(profile, str) and profile:
@@ -31592,17 +31919,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Return the core-owned permitted runtime-route map.
 
         Shape: ``{transport_profile: (allowed_runtime_profile, ...)}``. Read
-        from ``gateway.permitted_conversation_routes``. Absent or malformed
-        config means *no* cross-profile routing is permitted — an extension can
-        then only keep a message in its own transport profile, which is the
+        from the ``gateway.permitted_conversation_routes`` config field, which
+        ``GatewayConfig`` normalizes and validates. Absent or malformed config
+        means *no* cross-profile routing is permitted — an extension can then
+        only keep a message in its own transport profile, which is the
         fail-closed default.
         """
         try:
             raw = getattr(self.config, "permitted_conversation_routes", None)
-            if raw is None:
-                raw = (getattr(self.config, "raw", None) or {}).get(
-                    "permitted_conversation_routes"
-                )
             if not isinstance(raw, Mapping):
                 return {}
             permitted: Dict[str, tuple[str, ...]] = {}
@@ -31624,6 +31948,349 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             logger.debug("could not read permitted conversation routes", exc_info=True)
             return {}
+
+    # -- conversation-extension lifecycle + eager activation ----------------
+
+    def _extension_runtime_profile(
+        self, context, decision
+    ) -> str:
+        """Return the *validated* runtime profile for observation fire sites.
+
+        The whole admission sequence exists to produce
+        ``decision.runtime_profile``; reporting the transport profile instead
+        would silently misreport identity to the observer under any permitted
+        cross-profile route.
+        """
+        if decision is not None:
+            runtime_profile = getattr(decision, "runtime_profile", "")
+            if isinstance(runtime_profile, str) and runtime_profile:
+                return runtime_profile
+        return str(getattr(context, "transport_profile", "") or "default")
+
+    def _fire_extension_gateway_start(
+        self, *, scope: str, profile_name: str
+    ) -> tuple[str, ...]:
+        """Run the gateway-start lifecycle fire site for one profile scope.
+
+        Idempotent per scope: a profile activated twice (e.g. a retry path)
+        must not double-fire ``on_start`` and double-spawn watchers.
+        """
+        started = getattr(self, "_extension_lifecycle_started", None)
+        if started is None:
+            started = set()
+            self._extension_lifecycle_started = started
+        if scope in started:
+            return ()
+        try:
+            from gateway import conversation_extension_runtime as _ce_runtime
+
+            ids = _ce_runtime.fire_gateway_start(
+                scope=scope, profile_name=profile_name
+            )
+        except Exception:
+            logger.warning(
+                "conversation extension gateway-start fire site failed for %s",
+                profile_name,
+                exc_info=True,
+            )
+            return ()
+        # Record the scope even when nothing was registered: a later
+        # registration fires on_start through the registration path itself, and
+        # re-running the gateway-start site would double-start it.
+        started.add(scope)
+        if ids:
+            logger.info(
+                "Started %d conversation extension(s) for profile %s: %s",
+                len(ids),
+                profile_name,
+                ", ".join(ids),
+            )
+        return ids
+
+    def _fire_extension_gateway_stop(self) -> None:
+        """Run the gateway-stop lifecycle fire site for every started scope.
+
+        Without this, a gateway shutdown left extension lifecycle tasks running
+        through the extension's own contract — ``on_stop`` only fired on plugin
+        *unload*, which a process shutdown does not perform.
+        """
+        started = getattr(self, "_extension_lifecycle_started", None)
+        if not started:
+            return
+        profiles = getattr(self, "_extension_scope_profiles", None) or {}
+        for scope in sorted(started):
+            try:
+                from gateway import conversation_extension_runtime as _ce_runtime
+
+                _ce_runtime.fire_gateway_stop(
+                    scope=scope, profile_name=profiles.get(scope, "default")
+                )
+            except Exception:
+                logger.debug(
+                    "conversation extension gateway-stop fire site failed for %s",
+                    scope,
+                    exc_info=True,
+                )
+        started.clear()
+
+    def _activate_conversation_extensions_for_profile(
+        self, profile_name: str, profile_home: "Path"
+    ) -> bool:
+        """Eagerly enumerate, activate, and hard-gate one served profile.
+
+        Runs at *startup*, before the profile's adapters serve traffic — not
+        lazily on the first inbound message. Concretely:
+
+        1. Discovery has already run under this profile's home, so the
+           registry holds whatever that profile registered.
+        2. Fire the gateway-start lifecycle site for the profile's scope.
+        3. Evaluate the profile's ``required_conversation_extensions``
+           declaration and record a hard ready/unready verdict.
+
+        Returns the readiness verdict. A profile that declares a requirement it
+        cannot satisfy is recorded unready and its ingress is refused by
+        ``_extension_profile_is_ready`` — so it never serves a single message,
+        rather than discovering the problem per-inbound-message.
+
+        A profile with no requirements is always ready, so ordinary Hermes
+        profiles are completely unaffected.
+        """
+        from hermes_constants import hermes_home_key
+
+        readiness = getattr(self, "_extension_profile_readiness", None)
+        if readiness is None:
+            readiness = {}
+            self._extension_profile_readiness = readiness
+        scope_profiles = getattr(self, "_extension_scope_profiles", None)
+        if scope_profiles is None:
+            scope_profiles = {}
+            self._extension_scope_profiles = scope_profiles
+
+        try:
+            scope = hermes_home_key(profile_home)
+        except Exception:
+            logger.error(
+                "Could not resolve extension scope for profile %s; refusing to "
+                "mark it ready",
+                profile_name,
+                exc_info=True,
+            )
+            readiness[profile_name] = {"ready": False, "reason": "scope_unresolvable"}
+            return False
+        scope_profiles[scope] = profile_name
+
+        self._fire_extension_gateway_start(scope=scope, profile_name=profile_name)
+
+        try:
+            from gateway import conversation_extension_runtime as _ce_runtime
+
+            # Read the requirement declaration from the profile home we were
+            # given, not by re-resolving the profile *name*. The home is the
+            # authoritative identity here (it is what the scope key is derived
+            # from), and name-based resolution would read a different file for
+            # any profile whose home is not the conventional
+            # ``~/.hermes/profiles/<name>``.
+            config_raw = _load_gateway_config_from_home(Path(profile_home))
+            ok, reason = _ce_runtime.profile_requirements_satisfied(
+                scope=scope, config_raw=config_raw
+            )
+        except Exception:
+            logger.error(
+                "Could not evaluate required conversation extensions for "
+                "profile %s at startup; refusing its ingress",
+                profile_name,
+                exc_info=True,
+            )
+            readiness[profile_name] = {
+                "ready": False,
+                "reason": "requirements_unevaluable",
+            }
+            return False
+
+        readiness[profile_name] = {"ready": bool(ok), "reason": reason}
+        if not ok:
+            logger.error(
+                "Profile %s requires a conversation extension that is not "
+                "available (%s). Its ingress is refused until the requirement "
+                "resolves; other profiles are unaffected.",
+                profile_name,
+                reason,
+            )
+        return bool(ok)
+
+    def _activate_conversation_extensions_for_served_profiles(self) -> None:
+        """Eager startup enumeration of every served profile.
+
+        This is the startup counterpart to the per-message admission gate: it
+        runs once, after plugin discovery and before adapters serve, so a
+        profile with an unsatisfied hard requirement is known unready *before*
+        its first message rather than at first-message time.
+        """
+        try:
+            config = getattr(self, "config", None)
+            if getattr(config, "multiplex_profiles", False):
+                profiles = _multiplex_profile_homes(config)
+            else:
+                from hermes_cli.profiles import get_active_profile_name, get_profile_dir
+
+                active = get_active_profile_name() or "default"
+                profiles = [(active, get_profile_dir(active))]
+        except Exception:
+            logger.warning(
+                "could not enumerate served profiles for conversation "
+                "extension activation",
+                exc_info=True,
+            )
+            return
+
+        for profile_name, profile_home in profiles:
+            try:
+                self._activate_conversation_extensions_for_profile(
+                    profile_name, Path(profile_home)
+                )
+            except Exception:
+                logger.error(
+                    "Conversation extension activation failed for profile %s",
+                    profile_name,
+                    exc_info=True,
+                )
+
+    def _extension_profile_is_ready(self, profile_name: Optional[str]) -> bool:
+        """Return the startup readiness verdict for *profile_name*.
+
+        Profiles never evaluated (no requirements, or a single-profile gateway
+        that recorded nothing) are ready — the no-plugin path is unchanged.
+        """
+        readiness = getattr(self, "_extension_profile_readiness", None)
+        if not readiness:
+            return True
+        state = readiness.get(str(profile_name or "default"))
+        if not isinstance(state, Mapping):
+            return True
+        return bool(state.get("ready", True))
+
+    def _extension_profile_unready_reason(self, profile_name: Optional[str]) -> str:
+        readiness = getattr(self, "_extension_profile_readiness", None) or {}
+        state = readiness.get(str(profile_name or "default"))
+        if isinstance(state, Mapping):
+            return str(state.get("reason") or "required_extension_unavailable")
+        return "required_extension_unavailable"
+
+    def _collect_extension_turn_context(
+        self,
+        *,
+        scope: str,
+        session_key: str,
+        runtime_profile: str,
+        platform: str,
+        sender_identity: str,
+        chat_type: str,
+        user_text: str,
+    ) -> str:
+        """Production turn-augmentation call site.
+
+        Returns the extension-contributed per-turn user context as a single
+        string, ready to ride the same API-only current-user-message lane the
+        gateway already uses for contact recall. That lane is deliberate:
+        appending to the *system* prompt would break per-conversation prompt
+        caching, which is sacred (AGENTS.md).
+
+        Fails open — augmentation is optional enrichment and must never break
+        a turn — and returns ``""`` when no extension declares ``turn_policy``,
+        so ordinary turns are byte-identical.
+        """
+        if not scope:
+            return ""
+        try:
+            from gateway import conversation_extension_runtime as _ce_runtime
+
+            augmentation = _ce_runtime.augment_turn(
+                scope=scope,
+                session_key=session_key,
+                runtime_profile=runtime_profile,
+                platform=platform,
+                sender_identity=sender_identity,
+                chat_type=chat_type,
+                user_text=user_text,
+            )
+        except Exception:
+            logger.debug("conversation extension turn augmentation failed", exc_info=True)
+            return ""
+        parts = [part for part in augmentation.user_context if part]
+        if augmentation.degraded:
+            logger.debug(
+                "conversation extension turn augmentation degraded for scope %s", scope
+            )
+        return "\n\n".join(parts)
+
+    async def _run_agent_turn_with_policy(
+        self,
+        *,
+        event,
+        source,
+        quick_key: str,
+        run_generation: int,
+        agent_kwargs: dict,
+        policy_scope: Optional[str] = None,
+    ):
+        """Run one agent turn bound to the extension request policy.
+
+        The policy token is what makes final-dispatch tool authorization
+        mandatory rather than advisory: the ContextVar is carried into every
+        tool-executor worker thread by
+        ``tools.thread_context.propagate_context_to_thread``.
+
+        Extracted from ``_handle_message`` so the ambiguous-authorizer refusal
+        is reachable in tests through the real wiring. ``turn_policy_scope``
+        resolves the owner eagerly *at call time*, so an ambiguous owner raises
+        here — where it is caught and converted into a clean refusal — instead
+        of at ``__enter__``, where the previous guard could never fire.
+
+        No token is bound when no extension declares tool authorization for
+        this profile, so ordinary turns are completely unaffected.
+        """
+        from gateway.conversation_extension_runtime import (
+            AmbiguousToolAuthorizationOwner as _AmbiguousToolOwner,
+            turn_policy_scope as _turn_policy_scope,
+        )
+        from hermes_constants import hermes_home_key as _hhk
+
+        scope_key = policy_scope
+        if not scope_key:
+            try:
+                scope_key = _hhk(self._resolve_profile_home_for_source(source))
+            except Exception:
+                logger.debug("could not resolve policy scope", exc_info=True)
+                scope_key = ""
+        route_id = str(getattr(event, "message_id", None) or quick_key or "turn")
+
+        try:
+            policy_ctx = _turn_policy_scope(scope=scope_key, route_id=route_id)
+        except _AmbiguousToolOwner:
+            # Two extensions claim tool authorization for this profile.
+            # Choosing one would let its *allow* bypass the other's *deny*, so
+            # the turn is refused rather than run unauthorized.
+            logger.error(
+                "Refusing turn: multiple conversation extensions claim tool "
+                "authorization for this profile"
+            )
+            return None
+        except Exception:
+            logger.error(
+                "Refusing turn: conversation extension tool-authorization "
+                "owner could not be resolved",
+                exc_info=True,
+            )
+            return None
+
+        with policy_ctx:
+            return await self._handle_message_with_agent(
+                event,
+                source,
+                quick_key,
+                run_generation,
+                **agent_kwargs,
+            )
 
     def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
         """Resolve which profile's HERMES_HOME should serve this inbound source.

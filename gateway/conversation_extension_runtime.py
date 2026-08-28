@@ -30,15 +30,21 @@ from contextlib import contextmanager
 from typing import Any, Mapping, Optional, Sequence
 
 from gateway.conversation_extensions import (
+    GatewayRequestPolicy,
     GatewayRouteContext,
     GatewayRouteDecision,
+    GatewayRuntimeFacade,
     GatewayTurnAugmentation,
     GatewayTurnContext,
     GatewayTurnResult,
     collect_turn_augmentation,
     conversation_extension_registry,
     evaluate_extension_readiness,
+    gateway_host_operations,
     issue_request_policy,
+    lifecycle_task_registry,
+    notify_gateway_start,
+    notify_gateway_stop,
     notify_ingress,
     notify_turn_result,
     parse_required_extensions,
@@ -119,13 +125,22 @@ def observe_authenticated_ingress(
 
 
 @contextmanager
+def _bound_policy_scope(policy: Optional[GatewayRequestPolicy]):
+    """Inner context manager over an already-resolved policy."""
+    if policy is None:
+        yield None
+        return
+    with request_policy_scope(policy):
+        yield policy
+
+
 def turn_policy_scope(
     *,
     scope: str,
     route_id: str,
     extension_id: Optional[str] = None,
 ):
-    """Bind the request-policy token for the whole turn.
+    """Resolve the turn's tool-authorization owner and return a bound scope.
 
     The token is what makes final-dispatch tool authorization mandatory. It is
     bound with a ContextVar, so every executor/thread hop that uses
@@ -136,6 +151,15 @@ def turn_policy_scope(
     When no extension with tool authorization is registered for *scope*, no
     token is bound and behavior is exactly as before.
 
+    **This is deliberately a plain function, not a ``@contextmanager``.** The
+    owner is resolved *eagerly, at call time*, so
+    :class:`AmbiguousToolAuthorizationOwner` propagates from the call itself
+    rather than from ``__enter__``. A generator-based context manager defers
+    its whole body until ``with``, which made every caller-side
+    ``try/except AmbiguousToolAuthorizationOwner`` around the call dead code
+    and turned an ambiguous authorizer into an unhandled per-message crash
+    instead of the intended clean refusal.
+
     Raises :class:`AmbiguousToolAuthorizationOwner` when more than one
     extension claims tool authorization for the profile. Picking one would
     silently bypass the other authorizer, so this is fail-closed by design;
@@ -143,13 +167,11 @@ def turn_policy_scope(
     """
     resolved = extension_id or _tool_authorization_owner(scope)
     if not resolved:
-        yield None
-        return
+        return _bound_policy_scope(None)
     policy = issue_request_policy(
         extension_id=resolved, profile_home=scope, route_id=route_id
     )
-    with request_policy_scope(policy):
-        yield policy
+    return _bound_policy_scope(policy)
 
 
 class AmbiguousToolAuthorizationOwner(RuntimeError):
@@ -186,6 +208,68 @@ def _tool_authorization_owner(scope: str) -> Optional[str]:
             f"{len(owners)} extensions claim tool authorization in {scope}"
         )
     return owners[0]
+
+
+def build_profile_facades(
+    *, scope: str, profile_name: str
+) -> tuple[GatewayRuntimeFacade, ...]:
+    """Build one facade per registered extension in *scope*.
+
+    Used by the gateway's eager per-profile activation and by the gateway-stop
+    teardown, so the lifecycle callbacks see the same bounded facade the
+    registration path hands out (identity + capabilities only; never the
+    runner, a store, a client, or credentials).
+    """
+    host = gateway_host_operations()
+    facades: list[GatewayRuntimeFacade] = []
+    for extension_id, generation, bundle in conversation_extension_registry.snapshot(
+        scope=scope
+    ):
+        facades.append(
+            GatewayRuntimeFacade(
+                extension_id=extension_id,
+                profile_name=profile_name,
+                profile_home=scope,
+                generation=generation,
+                capabilities=bundle.capabilities,
+                host=host,
+            )
+        )
+    return tuple(facades)
+
+
+def fire_gateway_start(*, scope: str, profile_name: str) -> tuple[str, ...]:
+    """Gateway-start lifecycle fire site. Returns the extension ids started."""
+    facades = build_profile_facades(scope=scope, profile_name=profile_name)
+    if not facades:
+        return ()
+    notify_gateway_start(facades, scope=scope)
+    return tuple(facade.extension_id for facade in facades)
+
+
+def fire_gateway_stop(*, scope: str, profile_name: str) -> tuple[str, ...]:
+    """Gateway-stop lifecycle fire site plus generation-scoped task teardown.
+
+    Without this, a gateway shutdown left every extension's lifecycle tasks
+    running through the extension's own contract: ``on_stop`` only fired on
+    plugin *unload*, which a process shutdown does not perform.
+    """
+    facades = build_profile_facades(scope=scope, profile_name=profile_name)
+    if not facades:
+        return ()
+    notify_gateway_stop(facades, scope=scope)
+    for facade in facades:
+        try:
+            lifecycle_task_registry.cancel(
+                facade.extension_id, scope, facade.generation
+            )
+        except Exception:
+            logger.debug(
+                "failed to cancel lifecycle tasks for %s at gateway stop",
+                facade.extension_id,
+                exc_info=True,
+            )
+    return tuple(facade.extension_id for facade in facades)
 
 
 def augment_turn(
@@ -292,7 +376,10 @@ def profile_requirements_satisfied(
 __all__ = [
     "admit_and_route",
     "augment_turn",
+    "build_profile_facades",
     "build_route_context",
+    "fire_gateway_start",
+    "fire_gateway_stop",
     "observe_authenticated_ingress",
     "observe_turn_completion",
     "profile_requirements_satisfied",

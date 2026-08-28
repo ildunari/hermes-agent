@@ -111,6 +111,11 @@ def _probe_conversation_extensions(home: Path) -> dict[str, Any]:
 
     A malformed declaration is itself unready: a profile that *tried* to
     require an extension must never silently start without one.
+
+    Unsatisfied requirements report ``unready`` rather than ``degraded``.
+    ``degraded`` means "serving, with reduced capability"; a profile whose hard
+    requirement is missing is explicitly *not permitted to serve*, and the
+    readiness surface has to say so or an orchestrator will keep routing to it.
     """
     try:
         from gateway.conversation_extensions import (
@@ -131,14 +136,18 @@ def _probe_conversation_extensions(home: Path) -> dict[str, Any]:
                 if isinstance(gateway_cfg, dict):
                     raw = gateway_cfg.get("required_conversation_extensions")
         except Exception:
-            # Config unreadability is already reported by ``_probe_config``;
-            # here it means we cannot prove requirements are satisfied.
+            # Config unreadability is already reported by ``_probe_config``.
+            # Deliberately ``degraded``, not ``unready``: we cannot even
+            # establish that this profile declares a requirement, and a YAML
+            # syntax error must not take an ordinary no-requirement gateway
+            # out of service. ``unready`` is reserved for a requirement we
+            # actually read and could not satisfy.
             return _check("degraded", "requirements unreadable")
 
     try:
         required = parse_required_extensions(raw)
     except Exception:
-        return _check("degraded", "malformed requirement declaration")
+        return _check("unready", "malformed requirement declaration")
 
     if not required:
         return _check("ok")
@@ -149,7 +158,7 @@ def _probe_conversation_extensions(home: Path) -> dict[str, Any]:
     if report.ready:
         return _check("ok", required=len(required))
     return _check(
-        "degraded",
+        "unready",
         "required extension unavailable",
         extensions=report.as_dict()["extensions"],
     )
@@ -187,7 +196,17 @@ def collect_runtime_readiness(
             active_delegations=max(0, int(active_delegations)),
         ),
     }
-    overall = "ok" if all(item.get("status") == "ok" for item in checks.values()) else "degraded"
+    # ``unready`` is strictly stronger than ``degraded``: a degraded gateway is
+    # still serving, whereas an unready one has a hard requirement that is not
+    # satisfied and must not receive traffic. Rank the overall status so a
+    # single unready check cannot be masked by the softer degraded verdict.
+    statuses = {str(item.get("status") or "") for item in checks.values()}
+    if "unready" in statuses:
+        overall = "unready"
+    elif statuses <= {"ok"}:
+        overall = "ok"
+    else:
+        overall = "degraded"
     return {"status": overall, "checks": checks}
 
 

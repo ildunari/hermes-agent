@@ -1,6 +1,6 @@
 # Poke/Guest Plugin De-Carry Plan
 
-**Status:** Checkpoint 2 implementation complete; independent review pending
+**Status:** Checkpoint 2 first review rejected (2026-08-28); every P0/P1 finding closed with real integration tests through the production wiring; closure review pending. Not complete — see `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for the itemized findings and the honest test classification (`tests/gateway/contact_memory` is NOT green: 47 pre-existing BlueBubbles-override failures, verified baseline-identical).
 **Date:** 2026-08-27  
 **Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`  
 **Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`  
