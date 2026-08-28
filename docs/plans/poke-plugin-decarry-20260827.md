@@ -1,6 +1,6 @@
 # Poke/Guest Plugin De-Carry Plan
 
-**Status:** Checkpoint 3 implemented in isolated worktrees with the complete legacy owner retained and config-selectable; independent P0/P1 review pending. Live Guest/Poke remains unchanged and no live configuration, database, gateway process, or transport was touched. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact evidence and the baseline failure classification.
+**Status:** Checkpoint 3 was **rejected** by independent Review 3 (three P0s, one P1) and has been repaired in the isolated worktrees; re-review pending. All four findings are closed with production-path tests, the complete legacy owner is retained and config-selectable, and authoritative mode now functionally owns every domain it claims. Live Guest/Poke remains unchanged and no live configuration, database, gateway process, or transport was touched. Live activation is **not** claimed. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact evidence and the baseline failure classification.
 **Date:** 2026-08-27  
 **Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`  
 **Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`  
@@ -183,27 +183,53 @@ Activation acceptance:
 
 Stop after clean commits. Run an independent P0/P1 review against both repositories and the authoritative single-owner contract.
 
-**Checkpoint 3 implementation notes (2026-08-28).** Two scope decisions were
-taken during implementation and are recorded here rather than left implicit:
+**Checkpoint 3 implementation notes (2026-08-28, revised after Review 3).**
+
+An earlier revision of this section recorded a second "scope decision" that
+declared two authoritative surfaces intentionally quiescent — `on_start`
+spawning no watcher and `authorize_route` proposing no runtime-profile change.
+**That note was invalid and has been removed rather than amended.** Independent
+review established that it did not describe a conservative scope choice but a
+functional outage: with all six domains resolved to `extension` and every
+legacy site gated off, a quiescent owner produces *zero* owners, so contact
+memory stops recording and proactive delivery stops silently. The acceptance
+criteria were not narrowed to match the implementation; the implementation was
+completed to meet the criteria.
+
+One scope decision remains, and it is about *evidence*, not behavior:
 
 1. **Activation acceptance is proved in an isolated harness, not live.** The
    plan's activation-acceptance bullet reads as a live restart. It was
-   executed instead as an in-process harness
-   (`tests/gateway/test_poke_authoritative_activation.py`) that loads the real
-   core modules and the real plugin package against temp-directory state with
-   zero outbound transport. That satisfies the safety invariants (no contact
+   executed instead as in-process harnesses
+   (`tests/gateway/test_poke_authoritative_activation.py` and
+   `tests/gateway/test_poke_functional_ownership.py`) that load the real core
+   modules and the real plugin package against temp-directory state with zero
+   outbound transport. That satisfies the safety invariants (no contact
    receives a message; no live database is opened for writing) and is labeled
    as isolated evidence throughout. **The live safe restart, the bounded soak,
    and naturally-occurring-traffic verification remain outstanding** and are
    explicitly not claimed.
-2. **Two authoritative surfaces are declared but intentionally quiescent.**
-   The activated extension declares `lifecycle` and `admission_policy` — which
-   is what lets core's selector name a single owner — but `on_start` spawns no
-   watcher and `authorize_route` proposes no runtime-profile change. Starting
-   a watcher beside the legacy one core still contains is the duplicate-claim
-   edge this checkpoint prevents, and route *mutation* has no accepted parity
-   evidence. Both activate in Checkpoint 4, after core deletion removes the
-   legacy counterpart.
+
+**Authoritative mode is functional (Review-3 P0-2 repair).** Every declared
+capability is backed by a real implementation in the plugin's `poke/owners.py`,
+driven through the bounded `GatewayRuntimeFacade`:
+
+- `authorize_route` runs the real owner/guest classification and returns the
+  runtime profile, principal, subject id, and trusted identity block; core
+  validates and applies them, so the guest session and policy scope are
+  actually established. An unapproved sender is denied.
+- `observe_ingress` persists the authenticated batch into contact memory and
+  deduplicates replays.
+- `observe_turn_result` submits contact-memory extraction and compiles the
+  turn's conversation texture exactly once.
+- `on_start` registers exactly one host-owned proactive watcher per generation,
+  which drives the unchanged `claim_due` / `reserve_delivery` /
+  `finish_delivery` sequence.
+- Delivery goes through `send_authenticated_existing_dm` and honors the
+  tri-state; `UNKNOWN` is recorded as `delivery_unknown` and never retried.
+
+Legacy routing and ingress sites are now gated on the ownership verdict too, so
+exactly one component classifies and exactly one writes.
 
 ### Checkpoint 4 — Core deletion and final de-carry
 

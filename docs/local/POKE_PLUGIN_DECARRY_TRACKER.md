@@ -33,10 +33,131 @@
 | 0. Plan | `e063360820`, `a0e701869d`, `906aca5b98` | n/a | evidence audit + diff checks | approved | complete |
 | 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
 | 2. Generic seams + dark parity | `23de9414be`, `50df8641f9`, `dc5d21bc58` | `96026ea` | 438 plugin + 293 closure/integration + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | closure approved | complete |
-| 3. Authoritative activation, legacy fallback retained | `f16961a5ff` (code) + docs commit | `8d36131` | 33 ownership + 24 wiring + 25 isolated activation harness + 297 CP2/CP3 seam + 197 legacy-owner + 122 focused core + 478 plugin; carry validate/doctor/contract pass; full `tests/gateway` failing node-ID set identical to base (70/70, zero branch-only) | pending | implemented, review pending |
+| 3. Authoritative activation, legacy fallback retained | `f16961a5ff` (code) + docs commit + Review-3 repair commit | `8d36131` + Review-3 repair commit | see "Review 3 repair" below | Review 3 **rejected**; repair complete, re-review pending | repaired, re-review pending |
 | 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
 
 ## Evidence log
+
+### 2026-08-28 — Review 3 repair (Checkpoint 3 rejected, then repaired)
+
+Independent Review 3 **rejected** Checkpoint 3 with three P0s and one P1. All
+four are closed. The repair did not narrow any claim or amend any acceptance
+criterion — the criteria stand as written and the implementation was completed
+to meet them.
+
+**P0-1 — Rollback silently disabled the Guest tool policy (security bypass).**
+
+The legacy guard stood down on *token presence*. `turn_policy_scope` binds a
+token whenever any registered bundle declares `tool_authorization`, and the
+dark/rolled-back Poke bundle declared it while its `authorize_tool` returned an
+unconditional allow. On the documented rollback path ("disable the setting +
+safe restart") a guest therefore got unsandboxed `terminal` / `execute_code`.
+The review's repro was reproduced here before fixing: the malicious
+`terminal {"command": "cat ~/.hermes/.env", "workdir": "/"}` call returned the
+real file contents through `handle_function_call`.
+
+Two independent fixes, either of which closes the hole:
+
+- `model_tools._legacy_tool_policy_owner_active` now keys off the **ownership
+  verdict** (`is_extension_owned(scope, ROUTING)`), not token presence. Legacy,
+  unowned, no-plan, and any lookup error all keep the legacy guard.
+- The dark bundle no longer declares `tool_authorization` and supplies no
+  `authorize_tool` callback, so it cannot bind a policy token or be asked the
+  question. Shadow parity decisions are still computed via
+  `observe_shadow_decision`, which answers no dispatch gate.
+
+Evidence: `tests/gateway/test_tool_guard_rollback_bypass.py` (11 tests) drives
+the shipped dark bundle through the production dispatcher on the direct,
+deferred/bridge, inline-recursive, and executor/thread-hop paths with both
+`terminal` and `execute_code`, and asserts a denial on each.
+
+**P0-2 — Authoritative mode was a zero-owner outage.**
+
+Activation resolved all six domains to `extension` and gated every legacy site
+off while the plugin performed no equivalent work: `observe_ingress` and
+`observe_turn_result` were counters and `on_start` spawned nothing. Contact
+memory would stop recording and proactive delivery would stop, silently.
+
+The plugin now implements every domain it claims, in `poke/owners.py`, through
+bounded host operations only:
+
+| Domain | Implementation | Durable effect |
+|---|---|---|
+| routing | `RoutingOwner` runs the real `classify_bluebubbles_route` | denies unapproved senders; returns principal/subject/context prefix/scope metadata |
+| ingress | `IngressOwner` calls `persist_live_communication_ingress` | one committed `communication_event` row per batch; replays deduplicate |
+| extraction | `ExtractionOwner.submit_extraction` | one extraction job per authenticated turn |
+| texture | `ExtractionOwner.compile_texture` | exactly one compile per `(session, turn)` |
+| claims/child/delivery | `ProactiveOwner` | one host-owned watcher per generation driving `claim_due` / `reserve_delivery` / `finish_delivery` |
+
+Core changes that make this reachable: the extension seam was **relocated
+before** the legacy BlueBubbles routing block (it previously ran after, so an
+extension owner could not classify); `GatewayRouteContext` now carries the
+adapter's frozen `ingress_records`; `GatewayRouteDirective` / `GatewayRouteDecision`
+carry the identity classification; `_apply_extension_route_decision` applies the
+validated directive; the legacy routing and ingress sites are gated on the
+ownership verdict; and a `run_blocking` host op keeps plugin SQLite work off
+the gateway loop.
+
+Trust boundaries preserved: the transport profile/home never move, `principal`
+is accepted only as `owner`/`guest`, only the two `_hermes_contact_*` metadata
+keys are applied, and a `/command` is never prefixed.
+
+Evidence: `tests/gateway/test_poke_functional_ownership.py` (27 tests) proves
+**positively** — one persisted ingress write in a temp production-shaped
+snapshot, replay dedupe, exactly one watcher (and its generation-scoped
+cancellation), a real claim-path tick, one texture compile per turn, the
+initiated-child path through the host op, the authenticated existing-DM
+tri-state with `UNKNOWN` never retried, runtime guest routing/policy
+establishment, and zero outbound transport across the whole sequence. A
+dedicated `test_activation_is_not_a_zero_owner_state` asserts the durable-effect
+counters are non-zero — the assertion whose absence let a zero-owner state pass.
+
+**P0-3 — The read-only preflight was vacuous against the real schemas.**
+
+Every table and path constant was fictional (`proactive_slot_claims`,
+`proactive_sends`, `contacts`, `contact-memory/*.db`), so all six checks failed
+open on real data — including the two duplicate-send gates. `row_counts`
+recorded `{}`.
+
+`poke/preflight.py` was rewritten against production:
+
+| Check | Production shape |
+|---|---|
+| `active_claims` | `proactive_slot WHERE status='claimed' AND claim_token IS NOT NULL` |
+| `terminal_ledger` | `proactive_delivery.state NOT IN (sent, suppressed, delivery_unknown, partial_delivery, failed)` |
+| `ownership` | `proactive_transport_owner` lease + `proactive_contact_owner` conflicts + `proactive_global_circuit`, at the root-shared `proactive-contact-ownership.db` |
+| contact memory | `contact-memory/contacts/<sha>.sqlite3` with `schema_meta`/`fact`/`communication_event`/`interest`, schema version validated |
+
+A missing expected table is now a **failure**, not `ok=True`, and an empty
+report is not `ok`. Connections remain `mode=ro` and refuse to create a missing
+file.
+
+Evidence: `tests/poke_plugin/test_preflight_production_schema.py` (38 tests).
+Crucially, `test_fixture_schema_matches_real_profile` and
+`test_contact_memory_fixture_matches_real_store` compare the fixtures against
+the **real** `~/.hermes/profiles/guest` column-for-column (both executed, not
+skipped), and `test_preflight_over_copied_live_snapshot_is_read_only` runs the
+whole preflight over a copy of the live profile and asserts source and copy
+hashes are unchanged. That breaks the self-referential trap the review
+identified.
+
+**P1-1 — `_legacy_owns` failed open to legacy on lookup error.**
+
+`gateway/run.py` now returns `False` (refuse) on any lookup error whenever a
+plan is installed, matching the `scope is None` branch and the module's
+documented fail-closed contract. `True` remains only for an empty registry —
+no plan anywhere, so nothing was activated and behavior is unchanged for CLI,
+tests, and any process that never ran gateway activation.
+
+**Tests updated rather than worked around.** Two pre-existing core tests and
+several plugin tests encoded the rejected behaviors (token-presence stand-down,
+"dark always allows", "start spawns no watcher", "route proposes no profile
+change", the invented preflight schema). They were rewritten to the corrected
+contract; none were deleted or skipped.
+
+**Docs.** The invalid "two authoritative surfaces are intentionally quiescent"
+note was **removed** from the plan, not amended — it described an outage as a
+scope decision.
 
 ### 2026-08-28 — Checkpoint 3 implementation
 
