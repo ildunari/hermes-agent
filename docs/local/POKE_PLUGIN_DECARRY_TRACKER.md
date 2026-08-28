@@ -6,7 +6,7 @@
 
 ## Current state
 
-- Phase: Checkpoint 2 — closure review found one residual P1; home-scoped fix implemented; final narrow verification pending.
+- Phase: Checkpoint 2 approved and complete; Checkpoint 3 implementation starting.
 - Live runtime changed: no.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
@@ -32,11 +32,17 @@
 |---|---|---|---|---|---|
 | 0. Plan | `e063360820`, `a0e701869d`, `906aca5b98` | n/a | evidence audit + diff checks | approved | complete |
 | 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
-| 2. Generic seams + dark parity | `23de9414be`, `50df8641f9` + final closure commit | `96026ea` | 438 plugin + 293 closure/integration + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | first review rejected; closure review found one residual P1; final check pending | in progress |
+| 2. Generic seams + dark parity | `23de9414be`, `50df8641f9`, `dc5d21bc58` | `96026ea` | 438 plugin + 293 closure/integration + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | closure approved | complete |
 | 3. Authoritative activation, legacy fallback retained | pending | pending | pending | pending | not started |
 | 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
 
 ## Evidence log
+
+### 2026-08-28 — Checkpoint 2 closure approved
+
+- Final narrow review verdict: `CHECKPOINT_APPROVED`; all original P0/P1 findings are closed.
+- Reviewer reran the 37-test production-wiring suite and verified canonical home-scoped readiness at both admission gates, including the named single-profile case.
+- Report: `/Users/Kosta/.hermes/profiles/coding/cache/delegation/subagent-summary-0-20260828_162727_728712.txt`.
 
 ### 2026-08-28 — Checkpoint 2 closure review residual fixed
 

@@ -1,6 +1,6 @@
 # Poke/Guest Plugin De-Carry Plan
 
-**Status:** Checkpoint 2 closure review verified nine of ten findings and found one residual named-single-profile readiness-key bug; that bug is fixed with canonical profile-home scoping and its exact regression test. Final narrow verification pending. Not complete — see `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for the itemized findings and the honest test classification (`tests/gateway/contact_memory` is NOT green: 47 pre-existing BlueBubbles-override failures, verified baseline-identical).
+**Status:** Checkpoint 2 independently approved after closing all P0/P1 findings; Checkpoint 3 authoritative-plugin activation with complete legacy fallback retained is starting. Live Guest/Poke remains unchanged. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact evidence and the baseline failure classification.
 **Date:** 2026-08-27  
 **Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`  
 **Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`  
