@@ -6,7 +6,7 @@
 
 ## Current state
 
-- Phase: Checkpoint 1 — implementation complete; independent review pending.
+- Phase: Checkpoint 1 — first review rejected; P0/P1 fixes complete; closure review pending.
 - Live runtime changed: no.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
@@ -31,12 +31,23 @@
 | Checkpoint | Core commit | Plugin commit | Tests | Independent review | State |
 |---|---|---|---|---|---|
 | 0. Plan | `e063360820`, `a0e701869d`, `906aca5b98` | n/a | evidence audit + diff checks | approved | complete |
-| 1. Portable plugin libraries | pending | `66219a6` | 408 plugin + 188 core focused; carry gates pass | pending | review pending |
+| 1. Portable plugin libraries | pending | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | first review rejected; closure pending | review pending |
 | 2. Generic seams + dark parity | pending | pending | pending | pending | not started |
 | 3. Authoritative activation, legacy fallback retained | pending | pending | pending | pending | not started |
 | 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
 
 ## Evidence log
+
+### 2026-08-27 — Checkpoint 1 first review and P0/P1 closure
+
+- Independent Claude Opus review: `CHECKPOINT_REJECTED`.
+- P0 fixed: all internal imports are package-relative; a clean subprocess now imports the root plus all 46 submodules as `hermes_plugins.poke` with the repository root absent from `sys.path`.
+- P0 fixed: all six operator modules support direct `--help` execution; tests no longer rely on pytest making bare `poke` importable.
+- P1 fixed: Guest policy defaults to multiplex-safe env isolation, while request-scoped Guest context remains authoritative; the enforcement path is covered.
+- P1 fixed: portability rejects `agent`, `cron`, `gateway`, `hermes_cli`, `hermes_state`, `model_tools`, `poke`, `scripts`, and `tools`; diagnostics and profile operations use explicit injected services/roots.
+- P1 fixed: missing model/cron host services return deterministic unavailable states and are tested rather than silently importing core.
+- P1 fixed: carry registry split into retired texture attachment, generic runtime infrastructure, temporary policy leaves, and the existing future-facing pre-LLM seam. Contact-memory and all proactive leaves are explicitly owned.
+- Closure evidence: 411 plugin tests, 188 core focused tests, compile, direct-CLI checks, diff checks, carry 364/364, doctor, and 145-surface contract all pass.
 
 ### 2026-08-27 — Checkpoint 1 implementation
 

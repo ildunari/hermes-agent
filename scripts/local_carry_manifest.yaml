@@ -37,6 +37,10 @@ checks:
     path: tools/send_message_tool.py
     needles: ["platform_registry.get(\"bluebubbles\")"]
     description: BlueBubbles plugin registry hook (adapter carry retired to hermes-kosta-plugins 2026-07-23)
+  - id: conversation-texture-gateway-attachment-retired
+    path: gateway/run.py
+    needles: []
+    description: RETIRED 2026-08-26 — the per-turn texture attachment moved to the plugins-repo conversation-texture pre_llm_call hook; temporary engine and proactive consumers are tracked separately below.
   - id: vibeproxy-alias-priority
     path: hermes_cli/models.py
     needles: [POSITION IS LOAD-BEARING, "\"vibeproxy\": ["]
@@ -1184,35 +1188,22 @@ features:
         path: agent/conversation_loop.py
         needles: [_plugin_system_context]
         description: hook system_context is appended after the stable cached prompt at API call time only, never persisted and never part of the cache signature
-  - id: gateway.poke-guest-conversation-stack
-    title: Temporary Poke/Guest policy leaves pending plugin cutover (texture, identity, contact memory, proactive)
+  - id: gateway.poke-guest-runtime-infrastructure
+    title: Generic delivery and initiated-session durability used by Poke/Guest
     owner: kosta
     class: keep-core
     owner_paths:
       - gateway/delivery_ledger.py
       - gateway/platforms/base.py
-      - gateway/run.py
-      - gateway/turn_context.py
-      - gateway/guest_access.py
-      - gateway/conversation_texture_v2.py
-      - gateway/proactive_checkin.py
       - hermes_state.py
-      - hermes_cli/config_defaults.py
-      - hermes_cli/env_loader.py
     collision_paths:
       - gateway/delivery_ledger.py
       - gateway/platforms/base.py
-      - gateway/run.py
-      - hermes_cli/config_defaults.py
       - hermes_state.py
     tests:
       - tests/gateway/test_delivery_ledger.py
       - tests/gateway/test_delivery_ledger_producer.py
-      - tests/gateway/test_conversation_texture_v2.py
-      - tests/gateway/test_bluebubbles_guest_policy.py
-      - tests/gateway/test_guest_access.py
-      - tests/gateway/test_proactive_watcher_integration.py
-      - tests/gateway/test_42039_duplicate_user_message.py
+      - tests/gateway/test_proactive_transport.py
     checks:
       - id: platform-scoped-delivery-ledger
         path: gateway/delivery_ledger.py
@@ -1222,6 +1213,42 @@ features:
         path: gateway/platforms/base.py
         needles: [classify_send_error, bad_format, "not a formatting error; skipping"]
         description: only positively classified formatting failures may trigger a second outbound send under the plain-text fallback label
+      - id: proactive-initiated-child-persistence
+        path: hermes_state.py
+        needles: [create_initiated_assistant_child, initiated child did not persist assistant first]
+        description: agent-initiated proactive child sessions persist assistant-first without synthetic user rows
+  - id: gateway.poke-guest-temporary-policy-leaves
+    title: Temporary Poke/Guest policy and engine leaves pending plugin cutover
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - gateway/run.py
+      - gateway/turn_context.py
+      - gateway/guest_access.py
+      - gateway/conversation_texture_v2.py
+      - gateway/contact_memory/**
+      - gateway/proactive_*.py
+      - hermes_cli/config_defaults.py
+      - hermes_cli/env_loader.py
+    collision_paths:
+      - gateway/run.py
+      - gateway/turn_context.py
+      - gateway/guest_access.py
+      - gateway/conversation_texture_v2.py
+      - gateway/contact_memory/**
+      - gateway/proactive_*.py
+      - hermes_cli/config_defaults.py
+      - hermes_cli/env_loader.py
+    tests:
+      - tests/gateway/test_conversation_texture_v2.py
+      - tests/gateway/test_bluebubbles_guest_policy.py
+      - tests/gateway/test_guest_access.py
+      - tests/gateway/contact_memory/test_broker_importer.py
+      - tests/gateway/test_proactive_scheduler.py
+      - tests/gateway/test_proactive_status.py
+      - tests/gateway/test_proactive_watcher_integration.py
+      - tests/gateway/test_42039_duplicate_user_message.py
+    checks:
       - id: guest-identity-and-contact-memory-wiring
         path: gateway/run.py
         needles: [_prepend_guest_profile_identity_prompt, _compile_contact_memory_prompt, _trusted_contact_scope_from_metadata, _snapshot_interest_digest]
@@ -1238,7 +1265,3 @@ features:
         path: hermes_cli/env_loader.py
         needles: [HERMES_GUEST_POLICY, HERMES_GUEST_SANDBOX_ROOT]
         description: inherited guest-policy env keys are scrubbed at startup when absent from the profile .env
-      - id: proactive-initiated-child-persistence
-        path: hermes_state.py
-        needles: [create_initiated_assistant_child, initiated child did not persist assistant first]
-        description: agent-initiated proactive child sessions persist assistant-first without synthetic user rows
