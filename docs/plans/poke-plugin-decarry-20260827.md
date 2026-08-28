@@ -1,6 +1,6 @@
 # Poke/Guest Plugin De-Carry Plan
 
-**Status:** Checkpoint 2 independently approved after closing all P0/P1 findings; Checkpoint 3 authoritative-plugin activation with complete legacy fallback retained is starting. Live Guest/Poke remains unchanged. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact evidence and the baseline failure classification.
+**Status:** Checkpoint 3 implemented in isolated worktrees with the complete legacy owner retained and config-selectable; independent P0/P1 review pending. Live Guest/Poke remains unchanged and no live configuration, database, gateway process, or transport was touched. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact evidence and the baseline failure classification.
 **Date:** 2026-08-27  
 **Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`  
 **Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`  
@@ -182,6 +182,28 @@ Activation acceptance:
 - Rollback is a config switch plus safe restart at this checkpoint.
 
 Stop after clean commits. Run an independent P0/P1 review against both repositories and the authoritative single-owner contract.
+
+**Checkpoint 3 implementation notes (2026-08-28).** Two scope decisions were
+taken during implementation and are recorded here rather than left implicit:
+
+1. **Activation acceptance is proved in an isolated harness, not live.** The
+   plan's activation-acceptance bullet reads as a live restart. It was
+   executed instead as an in-process harness
+   (`tests/gateway/test_poke_authoritative_activation.py`) that loads the real
+   core modules and the real plugin package against temp-directory state with
+   zero outbound transport. That satisfies the safety invariants (no contact
+   receives a message; no live database is opened for writing) and is labeled
+   as isolated evidence throughout. **The live safe restart, the bounded soak,
+   and naturally-occurring-traffic verification remain outstanding** and are
+   explicitly not claimed.
+2. **Two authoritative surfaces are declared but intentionally quiescent.**
+   The activated extension declares `lifecycle` and `admission_policy` — which
+   is what lets core's selector name a single owner — but `on_start` spawns no
+   watcher and `authorize_route` proposes no runtime-profile change. Starting
+   a watcher beside the legacy one core still contains is the duplicate-claim
+   edge this checkpoint prevents, and route *mutation* has no accepted parity
+   evidence. Both activate in Checkpoint 4, after core deletion removes the
+   legacy counterpart.
 
 ### Checkpoint 4 — Core deletion and final de-carry
 

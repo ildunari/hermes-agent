@@ -24,3 +24,25 @@ Baseline: current `origin/main` after the 2026-07-29 upstream merge. The rule fo
 - Cron jobs/scheduler/shutdown suite: 392 tests passed after upstream recovery convergence.
 - TTS normalization/preparation suite: 20 tests passed.
 - Carry registry: 463/463 managed paths covered, 20 features, 33 legacy surfaces.
+
+## Poke/Guest de-carry — Checkpoint 3 residual ownership (2026-08-28)
+
+Checkpoint 3 changed *ownership*, not file location. The legacy in-core
+implementation is still present and is still the default owner; a new generic
+selector (`gateway/conversation_ownership.py`) picks exactly one owner per
+domain per profile, so rollback is a configuration switch plus a safe restart
+rather than a revert. Deletion is Checkpoint 4.
+
+| Surface | Residual category | Current owner | Update-conflict effect |
+| --- | --- | --- | --- |
+| `gateway/conversation_ownership.py` | new generic core seam | core (provider-neutral) | New file; no upstream counterpart, so no merge conflict. Contains no product policy — a test asserts no `poke`/`guest` identifier appears in it. |
+| `gateway/run.py` ownership gates | generic core seam wired at legacy call sites | core | Small additive guards at four sites (ingress, extraction, proactive watcher, startup activation). Conflict surface is narrow but sits inside the already-hot `run.py` region. |
+| `model_tools.py` legacy tool guard | temporary policy leaf, now gated | core legacy owner, stands down under a bound policy token | One added conditional around the pre-existing guard. Removed entirely in Checkpoint 4. |
+| `gateway/guest_access.py`, `gateway/proactive_*.py`, `gateway/contact_memory/**`, `gateway/conversation_texture_v2.py` | temporary policy leaves | core legacy owner, retained for rollback | Unchanged from Checkpoint 2. Full carry cost persists until Checkpoint 4 deletion; this is the deliberate price of a config-only rollback. |
+| Poke policy/settings/preflight/authoritative extension | plugin-owned | user-plugin repository | Zero core conflict surface. |
+| Durable databases (`state.db`, `contact-memory/**`, ownership registry) | adopted in place | unchanged on disk | No migration, no copy, no schema change. Preflight opens `mode=ro` only. |
+
+Net effect on the thinning baseline: Checkpoint 3 *adds* a small generic core
+seam and does not yet remove any leaf. The carry reduction lands in Checkpoint
+4, when the gated legacy leaves are deleted and only the generic seams remain.
+

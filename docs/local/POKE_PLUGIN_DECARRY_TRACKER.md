@@ -6,8 +6,8 @@
 
 ## Current state
 
-- Phase: Checkpoint 2 approved and complete; Checkpoint 3 implementation starting.
-- Live runtime changed: no.
+- Phase: Checkpoint 3 implemented in isolated worktrees; independent review pending.
+- Live runtime changed: no. No live config, profile, database, gateway process, or transport was touched.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
 - Active writer: parent Coding agent only; reconnaissance agents were read-only.
@@ -33,10 +33,153 @@
 | 0. Plan | `e063360820`, `a0e701869d`, `906aca5b98` | n/a | evidence audit + diff checks | approved | complete |
 | 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
 | 2. Generic seams + dark parity | `23de9414be`, `50df8641f9`, `dc5d21bc58` | `96026ea` | 438 plugin + 293 closure/integration + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | closure approved | complete |
-| 3. Authoritative activation, legacy fallback retained | pending | pending | pending | pending | not started |
+| 3. Authoritative activation, legacy fallback retained | `f16961a5ff` (code) + docs commit | `8d36131` | 33 ownership + 24 wiring + 25 isolated activation harness + 297 CP2/CP3 seam + 197 legacy-owner + 122 focused core + 478 plugin; carry validate/doctor/contract pass; full `tests/gateway` failing node-ID set identical to base (70/70, zero branch-only) | pending | implemented, review pending |
 | 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
 
 ## Evidence log
+
+### 2026-08-28 — Checkpoint 3 implementation
+
+**What changed, in one line each.**
+
+Core gained a generic, provider-neutral single-owner selector
+(`gateway/conversation_ownership.py`) and gated its four legacy owner sites on
+it. The plugin gained an authoritative extension, a canonical settings resolver
+with a read-only legacy adapter, and a strictly read-only durable preflight.
+The complete legacy implementation was **not** removed — it is still the
+default owner, so rollback is a configuration switch plus a safe restart.
+
+**Core: the selector.**
+
+- Six generic domains (`routing`, `ingress`, `extraction`, `proactive_claims`,
+  `child_creation`, `delivery`), each mapped to the extension capability a
+  claimant must declare. No `poke`, `guest`, contact, or product identifier
+  appears in the module; a test asserts this against the file's source.
+- Default is legacy for every domain, so an ordinary profile is unaffected and
+  the current Poke/Guest behavior is unchanged until an operator opts in.
+- Exactly one owner, or nobody. Zero claimants and two claimants both resolve
+  to `UNOWNED`, as do an unhealthy owner, a raising health probe, an unknown
+  owner value, and a typo'd domain key.
+- **`UNOWNED` is not a fallback to legacy.** `_legacy_owns()` is true only for
+  a *proven* legacy verdict, so an ambiguous plan refuses both owners. Treating
+  "not extension-owned" as "run legacy" is the specific bug that produces two
+  live owners, and therefore a duplicate ingress write or a duplicate send.
+- Coupled domain groups (`ingress`+`extraction`;
+  `proactive_claims`+`child_creation`+`delivery`) may not be split across
+  owners. A split plan is a conflict, not a configuration.
+- Ownership is resolved **once at startup** and installed in a process
+  registry. The hot path is a dict read, and a mid-turn plugin unload cannot
+  move ownership between two halves of the same turn.
+
+**Core: production wiring (each has an AST test proving the call site exists).**
+
+- `_handle_communication_ingress` consults the gate and delegates to an
+  extracted `_classify_and_persist_legacy_ingress`; the legacy write is skipped
+  when the domain is extension-owned or unowned.
+- The post-turn extraction submit is gated on `_legacy_extraction_permitted`.
+- `_proactive_scheduler_watcher` skips a profile unless the legacy owner holds
+  all three coupled proactive domains.
+- `_activate_conversation_extensions_for_profile` installs the plan before the
+  profile serves traffic; a conflicted plan makes the profile **unready**
+  (`ownership_conflict:…`) rather than starting with two owners.
+- `model_tools.handle_function_call` runs the legacy Guest guard only when no
+  request-policy token is bound. Under a bound token the extension owns the
+  decision and the generic final-dispatch seam enforces it, so exactly one
+  guard decides — verified by a test that asserts the legacy guard is never
+  called while an owner denies.
+
+**Plugin: activation contract.**
+
+- Authoritative only when **enabled** (canonical setting or core ownership
+  config), **required** (core-owned `required_conversation_extensions`),
+  **healthy** (preflight passes), and **compatible** (API version + no settings
+  conflict). Short of all four it registers the Checkpoint 2 dark bundle.
+- `plugins.entries.poke.settings` is canonical; `agent.contact_memory` /
+  `agent.proactive` are read-only fallbacks for one window. Identical values in
+  both places are fine; **differing values fail readiness closed** rather than
+  being merged or silently preferred. No config is ever written.
+- Preflight opens SQLite `mode=ro` — a test asserts a write attempt raises —
+  and checks integrity, schema, row counts, no in-flight claim, terminal
+  ledger, and uncontested ownership. A test asserts every durable file is
+  byte-identical after a full preflight, and that no database is created.
+
+**Deliberately quiescent surfaces.** The authoritative bundle declares
+`lifecycle` and `admission_policy` (that is what lets core name a single
+owner) but `on_start` spawns no watcher and `authorize_route` proposes no
+runtime-profile change. Starting a watcher beside the legacy one core still
+contains is the duplicate-claim edge; route mutation has no accepted parity
+evidence. `turn_policy` is deliberately **not** declared, so the standalone
+conversation-texture plugin remains the single texture owner.
+
+**Verification (actually run; classification is honest).**
+
+- New core selector suites: `test_conversation_ownership.py` **33 passed**,
+  `test_conversation_ownership_wiring.py` **24 passed**. Both written
+  failing-first — the wiring suite failed 14/16 before implementation.
+- Isolated activation harness `test_poke_authoritative_activation.py`:
+  **25 passed**. Loads real core + real plugin in one process against
+  temp-directory state; asserts single ownership, legacy retention, fail-closed
+  conflicts (two claimants, split plan, unhealthy owner, in-flight claim,
+  settings conflict), one watcher / one ingress writer / one texture owner,
+  byte-identical durable files, **zero sends**, restart and reload stability,
+  and rollback.
+- CP2 + CP3 combined seam set (11 files): **297 passed, 0 failed**.
+- Legacy owner suites (guest access, BlueBubbles guest policy, proactive
+  scheduler/gate/status/transport/initiated-turn/watcher): **197 passed**.
+- Focused core regression set (config, profile resolution/routing, multiplex
+  lifecycle/authz/phase0, runner startup failures, pre-gateway dispatch, own
+  policy startup gate): **122 passed**.
+- Standalone plugin suite `tests/poke_plugin`: **478 passed** (438 at CP2 + 40
+  new).
+- Carry gates: registry validate **PASS** (368/368 managed paths, 39 features,
+  52 legacy surfaces); doctor **PASS**; local carry contract **PASS** (153
+  connected surfaces, 39 documented features). A real gate catch during this
+  work — a primary-owner collision on `gateway/run.py` — was fixed by scoping
+  the new feature's `owner_paths` to its own file.
+
+**Not green, and not claimed to be.**
+
+- **Whole-suite regression check by exact node-ID set.** `tests/gateway` was
+  run bare on this branch and on a clean detached worktree at base
+  `85a22d4bc2`. Branch: **70 failed / 7462 passed / 33 skipped / 1 xfailed**.
+  Base: **70 failed / 7380 passed / 33 skipped / 1 xfailed**. The failing
+  **node-ID sets are identical** — 70 shared, **zero branch-only, zero
+  base-only** — independently reparsed by the parent agent. The +82 passing
+  delta is exactly the tests this checkpoint adds (33 ownership + 24 wiring +
+  25 activation harness).
+  - Evidence files: `/tmp/cp3_gw_branch.txt`, `/tmp/cp3_gw_base.txt`.
+  - **Caveat on evidence hygiene:** those two runs were captured through a
+    wrapper ending in `echo`/`tail`, so the recorded shell exit status was `0`
+    and does **not** represent pytest's status. The verdict above comes from
+    the summary lines and the node-ID set diff, never from that exit code.
+- Failing families on both sides: `contact_memory/test_live_communication_ingress`
+  (46), `test_usage_command` (3), `test_status_owner_guard` (3),
+  `test_discord_send` (3), `test_cron_active_work_drain` (3),
+  `test_scale_to_zero` (2), and one each in `test_telegram_thread_fallback`,
+  `test_telegram_polling_health_confirmation`, `test_teams_dotenv_isolation`,
+  `test_systemd_notify`, `test_session_store_prune`, `test_session_model_reset`,
+  `test_send_multiple_images`, `test_bluebubbles`, `test_background_command`,
+  and `contact_memory/test_link_research_worker`.
+- `test_usage_command` was re-run **bare** on both sides (no pipe, real exit
+  code): 3 failed / 3 passed on branch *and* on base, same three node IDs. The
+  assertions expect a usage-rendering format the current renderer no longer
+  emits (`"30,000"`, `"API calls: 10"`, `"Context breakdown"`). This checkpoint
+  touches no usage, rendering, or context-breakdown code.
+- `tests/gateway/contact_memory` run in isolation: **47 failed / 292 passed**,
+  also verified baseline-identical by failing-test set (zero new, zero fixed).
+  These are the pre-existing BlueBubbles platform-override failures documented
+  at Checkpoint 2. (The whole-directory run attributes 46 of them to
+  `test_live_communication_ingress` plus one in `test_link_research_worker`.)
+- `carry.py verify` reports 15 failing features (desktop ×12, runtime
+  fallback-routing, update futureproof-system, webui session-defaults). The
+  failing-feature set is **identical to base**; none are attributable to this
+  range and none are claimed as green.
+
+**Explicitly NOT claimed.** No live activation evidence exists. The gateway was
+not restarted, no live config or profile was modified, no live database was
+opened, and no bounded soak or naturally-occurring-traffic verification was
+run. All evidence above is isolated in-process evidence against temp state.
+The live safe restart and soak remain outstanding work for this checkpoint.
 
 ### 2026-08-28 — Checkpoint 2 closure approved
 
@@ -171,7 +314,24 @@
 - Atomic replacement race tests prove the outgoing generation remains visible until replacement start succeeds; failed replacement start preserves the prior generation.
 - **Correction (2026-08-28):** this entry originally claimed the full existing Guest/contact/proactive focused suite was green. That was false — `tests/gateway/contact_memory` had 47 pre-existing BlueBubbles-override failures at the time and still does. See the closure entry above for the verified baseline-identical classification. The wiring gaps this entry implied were delivered are itemized as P0-1..P0-3 and P1-1..P1-7 there.
 
-## Residual owner matrix after Checkpoint 2
+## Residual owner matrix after Checkpoint 3
+
+Ownership below is what the *selector* assigns when a profile opts in. With no
+configuration — every ordinary profile, and Poke/Guest today — every row reads
+"Core legacy owner", unchanged.
+
+| Surface | Authority when activated | Authority by default / after rollback | Next checkpoint |
+|---|---|---|---|
+| Guest route/admission | Plugin (`admission_policy`), admits without route mutation | Core legacy owner | CP4: route mutation after core deletion |
+| Final Guest tool decision | Plugin, enforced through the generic final-dispatch seam; legacy guard stands down under a bound token | Core legacy guard | CP4: delete `enforce_guest_tool_call` |
+| Contact-memory ingress | Plugin owns the domain; core's legacy writer is gated off | Core + BlueBubbles override | CP4: delete legacy writer |
+| Post-turn extraction | Plugin (`post_turn_observer`); legacy submit gated off | Core legacy owner | CP4 |
+| Proactive claims / child creation / delivery | Plugin owns the coupled group; legacy watcher skips the profile. **No plugin watcher starts in CP3.** | Core legacy watcher | CP4: plugin watcher activates as legacy is deleted |
+| Delivery ledger + initiated-session persistence | Generic core infrastructure, consumed through bounded contracts | same | Remains core |
+| Conversation-texture `pre_llm_call` | Standalone texture plugin (Poke declares no `turn_policy`) | same | Engine deletion waits for remaining core consumers |
+| Durable databases | Adopted in place; read-only preflight only | same files, untouched | Physical relocation out of scope |
+
+### Residual owner matrix after Checkpoint 2
 
 | Surface | Current authority | Plugin state | Next checkpoint |
 |---|---|---|---|
