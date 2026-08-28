@@ -13361,7 +13361,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.debug("contact link research shutdown error: %s", exc)
 
     async def _proactive_scheduler_watcher(self) -> None:
-        """Drive isolated profile policy off-loop and Poke-owned transport on-loop."""
+        """Drive isolated profile policy off-loop and Poke-owned transport on-loop.
+
+        Checkpoint 3: this is the *legacy* proactive owner. It is gated per
+        profile on the legacy implementation still owning all three coupled
+        domains (claims, child creation, delivery). A profile whose plan hands
+        any of them to an extension is skipped entirely, so exactly one
+        component claims a slot and exactly one component delivers.
+        """
         from hermes_cli.profiles import get_active_profile_name
         runner_profile = get_active_profile_name() or os.getenv("HERMES_PROFILE") or "default"
         if (
@@ -13378,6 +13385,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             for profile in dict.fromkeys((active, "poke", "guest")):
                 correlation_id = uuid.uuid4().hex
                 try:
+                    if not self._legacy_proactive_permitted_for_profile(profile):
+                        logger.debug(
+                            "Legacy proactive tick skipped for profile=%s: the "
+                            "claim/child/delivery domains are not owned by the "
+                            "legacy implementation.",
+                            profile,
+                        )
+                        continue
                     from hermes_state import SessionDB
                     from gateway.proactive_scheduler import ProactiveConfig, ProactiveScheduler
                     from gateway.proactive_transport import BlueBubblesProactiveDelivery, deliver_prepared_exactly_once
@@ -18595,7 +18610,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         await self._edit_hygiene_compaction_status(status, content, finalize=True)
 
     async def _handle_communication_ingress(self, event: MessageEvent) -> tuple[str, ...]:
-        """Authenticate and persist BlueBubbles direct ingress before webhook ACK."""
+        """Authenticate and persist BlueBubbles direct ingress before webhook ACK.
+
+        Checkpoint 3: this is the *legacy* ingress owner. It runs only while
+        the legacy implementation still owns the ``ingress`` domain for this
+        profile. When an extension owns ingress — or when the domain is
+        unowned because the plan was ambiguous — this returns empty without
+        writing, so exactly one component ever writes the ingress row.
+        """
         source = getattr(event, "source", None)
         if (
             source is None
@@ -18609,6 +18631,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if isinstance(metadata, dict) and any(metadata.get(key) for key in (
             "forwarded", "is_forwarded", "forwarded_from", "gateway_session_id",
         )):
+            return ()
+
+        from gateway.conversation_ownership import OwnershipDomain
+
+        if not self._legacy_owns_for_source(source, OwnershipDomain.INGRESS):
+            logger.debug(
+                "Legacy communication ingress skipped: this profile's ingress "
+                "domain is not owned by the legacy implementation."
+            )
+            return ()
+
+        return await self._classify_and_persist_legacy_ingress(event)
+
+    async def _classify_and_persist_legacy_ingress(
+        self, event: MessageEvent
+    ) -> tuple[str, ...]:
+        """Legacy owner body for direct authenticated ingress.
+
+        Extracted verbatim from ``_handle_communication_ingress`` so the
+        ownership gate has a single seam to skip and so tests can assert
+        "this did not run" against production code rather than a mock.
+        """
+        source = getattr(event, "source", None)
+        if source is None:
             return ()
         platform_cfg = getattr(getattr(self, "config", None), "platforms", {}).get(
             Platform.BLUEBUBBLES
@@ -18652,6 +18698,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 isinstance(research_cfg, dict) and research_cfg.get("enabled") is True
             ),
         )
+
 
     async def _resolve_async_delegation_session(
         self,
@@ -24141,6 +24188,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _is_successful_completed_turn(agent_result, response)
                 and not getattr(event, "internal", False)
                 and not _is_forwarded
+                # Checkpoint 3: the legacy extraction owner runs only while it
+                # still owns the ``extraction`` domain for this profile. When
+                # an extension owns it (or the domain is unowned), skipping
+                # here is what keeps a single writer on the contact-memory
+                # tree.
+                and self._legacy_extraction_permitted(source)
             ):
                 _profile_home = self._resolve_profile_home_for_source(source)
                 _profile_cfg = _load_gateway_config_for_profile(
@@ -32127,7 +32180,37 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 profile_name,
                 reason,
             )
-        return bool(ok)
+            return False
+
+        # Checkpoint 3: resolve and install this profile's single-owner plan
+        # before it serves traffic. A conflicted plan (unowned domain,
+        # ambiguous claimant, or a coupled group split between the legacy and
+        # extension owner) makes the profile unready rather than starting it
+        # with two live owners. Default configuration is all-legacy, so an
+        # ordinary profile takes the same verdict it did before.
+        try:
+            _plan, _conflicts = self._activate_conversation_ownership(
+                profile_name=profile_name, scope=scope, config_raw=config_raw
+            )
+        except Exception:
+            logger.error(
+                "Conversation ownership activation raised for profile %s; "
+                "refusing its ingress",
+                profile_name,
+                exc_info=True,
+            )
+            readiness[scope] = {
+                "ready": False,
+                "reason": "ownership_unevaluable",
+            }
+            return False
+        if _conflicts:
+            readiness[scope] = {
+                "ready": False,
+                "reason": "ownership_conflict:" + ",".join(_conflicts),
+            }
+            return False
+        return True
 
     def _activate_conversation_extensions_for_served_profiles(self) -> None:
         """Eager startup enumeration of every served profile.
@@ -32187,6 +32270,123 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if isinstance(state, Mapping):
             return str(state.get("reason") or "required_extension_unavailable")
         return "required_extension_unavailable"
+
+    # -- single-owner selection (Checkpoint 3) -----------------------------
+    #
+    # The legacy in-core implementation is still present and is still the
+    # default owner. These helpers are what keep it from running *beside* an
+    # activated extension. The asymmetry is deliberate and load-bearing:
+    # ``_legacy_owns`` is true only for a proven legacy verdict, so an
+    # ambiguous or unowned domain refuses BOTH owners rather than quietly
+    # falling back to legacy. Two live owners is exactly the duplicate ingress
+    # write / duplicate proactive send failure this checkpoint prevents.
+
+    def _ownership_scope_for_source(self, source) -> Optional[str]:
+        """Canonical home-key scope for *source*, or ``None`` if unresolvable.
+
+        Uses the same ``hermes_home_key(profile_home)`` scope as extension
+        registration, request policy, and startup readiness. Returning ``None``
+        rather than a guess matters: ``_legacy_owns(None, ...)`` is False once
+        any ownership plan is installed in the process, so an unresolvable
+        scope cannot smuggle the legacy owner back in beside an activated one.
+        """
+        try:
+            from hermes_constants import hermes_home_key
+
+            return hermes_home_key(self._resolve_profile_home_for_source(source))
+        except Exception:
+            logger.debug("could not resolve ownership scope for source", exc_info=True)
+            return None
+
+    def _legacy_owns(self, scope: Optional[str], domain) -> bool:
+        """May the legacy in-core implementation run for *domain* at *scope*?"""
+        try:
+            from gateway.conversation_ownership import (
+                conversation_ownership_registry,
+                legacy_owns,
+            )
+
+            if scope is None:
+                # No plan installed anywhere -> nothing was ever activated, so
+                # the legacy owner is still the only owner and behavior is
+                # unchanged. Once a plan exists, an unresolvable scope is a
+                # refusal.
+                return not conversation_ownership_registry.scopes()
+            return legacy_owns(str(scope), domain)
+        except Exception:
+            logger.debug("ownership lookup failed; assuming legacy", exc_info=True)
+            return True
+
+    def _legacy_owns_for_source(self, source, domain) -> bool:
+        return self._legacy_owns(self._ownership_scope_for_source(source), domain)
+
+    def _legacy_extraction_permitted(self, source) -> bool:
+        """Gate the legacy post-turn contact-memory extraction submit."""
+        from gateway.conversation_ownership import OwnershipDomain
+
+        return self._legacy_owns_for_source(source, OwnershipDomain.EXTRACTION)
+
+    def _legacy_proactive_permitted(self, scope: Optional[str]) -> bool:
+        """Gate the legacy proactive watcher for one profile scope.
+
+        Claims, initiated-child creation, and delivery share one durable
+        claim/ledger sequence, so the watcher runs only when the legacy owner
+        holds *all three*. A partial handover would let both owners claim the
+        same slot.
+        """
+        from gateway.conversation_ownership import OwnershipDomain
+
+        return all(
+            self._legacy_owns(scope, domain)
+            for domain in (
+                OwnershipDomain.PROACTIVE_CLAIMS,
+                OwnershipDomain.CHILD_CREATION,
+                OwnershipDomain.DELIVERY,
+            )
+        )
+
+    def _legacy_proactive_permitted_for_profile(self, profile_name: str) -> bool:
+        """Profile-name variant used by the watcher, which iterates by name."""
+        try:
+            from hermes_cli.profiles import get_profile_dir
+            from hermes_constants import hermes_home_key
+
+            scope = hermes_home_key(get_profile_dir(profile_name))
+        except Exception:
+            logger.debug(
+                "could not resolve ownership scope for profile %s", profile_name,
+                exc_info=True,
+            )
+            scope = None
+        return self._legacy_proactive_permitted(scope)
+
+    def _activate_conversation_ownership(
+        self, *, profile_name: str, scope: str, config_raw
+    ):
+        """Resolve and install one profile's ownership plan at startup.
+
+        Ownership is decided once, here, before the profile serves traffic. A
+        conflicted plan (unowned domain, ambiguous claimant, or a coupled group
+        split between owners) is not installed and is reported to the caller,
+        which marks the profile unready.
+        """
+        from gateway.conversation_ownership import activate_plan, describe_plan
+
+        plan, conflicts = activate_plan(scope=scope, config_raw=config_raw)
+        if conflicts:
+            logger.error(
+                "Conversation ownership for profile %s is not activatable (%s); "
+                "refusing its ingress. Rollback is a config switch plus restart.",
+                profile_name,
+                ", ".join(conflicts),
+            )
+        else:
+            logger.info(
+                "Conversation ownership for profile %s: %s",
+                profile_name,
+                describe_plan(plan),
+            )
+        return plan, conflicts
 
     def _collect_extension_turn_context(
         self,

@@ -1234,6 +1234,37 @@ features:
         path: gateway/authenticated_dm.py
         needles: [AuthenticatedDmRequest, AuthenticatedDmResult, DmSendOutcome.UNKNOWN]
         description: bounded DM delivery exposes tri-state receipts without chat creation or fallback
+  - id: gateway.conversation-ownership-selector
+    title: Generic exactly-one conversation-ownership selector
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - gateway/conversation_ownership.py
+    collision_paths:
+      - gateway/conversation_ownership.py
+      - gateway/run.py
+      - model_tools.py
+    tests:
+      - tests/gateway/test_conversation_ownership.py
+      - tests/gateway/test_conversation_ownership_wiring.py
+      - tests/gateway/test_poke_authoritative_activation.py
+    checks:
+      - id: ownership-exactly-one-owner
+        path: gateway/conversation_ownership.py
+        needles: [ambiguous_owner, COUPLED_DOMAIN_GROUPS, plan_conflicts]
+        description: zero or multiple claimants resolve to UNOWNED and a coupled group split between owners is a refused plan, never a silent legacy fallback
+      - id: ownership-provider-neutral
+        path: gateway/conversation_ownership.py
+        needles: [OwnershipDomain, DOMAIN_REQUIRED_CAPABILITY]
+        description: the selector names generic gateway domains only; a test asserts no poke/guest/product identifier appears in the module
+      - id: ownership-legacy-gates
+        path: gateway/run.py
+        needles: [_legacy_owns, _legacy_extraction_permitted, _legacy_proactive_permitted_for_profile, _activate_conversation_ownership]
+        description: the legacy ingress, extraction, and proactive owners are gated on the startup-installed plan so exactly one owner is live
+      - id: ownership-single-tool-guard
+        path: model_tools.py
+        needles: [_legacy_tool_policy_owner_active]
+        description: the legacy Guest tool guard stands down when a request-policy token binds an extension owner, so only one guard decides
   - id: gateway.poke-guest-runtime-infrastructure
     title: Generic delivery and initiated-session durability used by Poke/Guest
     owner: kosta
