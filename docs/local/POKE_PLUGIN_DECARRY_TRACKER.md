@@ -6,7 +6,7 @@
 
 ## Current state
 
-- Phase: planning and adversarial architecture review.
+- Phase: plan correction after adversarial rejection; closure review pending.
 - Live runtime changed: no.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
@@ -37,6 +37,13 @@
 | 4. Integrated landing/activation | pending | pending | pending | pending | not started |
 
 ## Evidence log
+
+### 2026-08-27 — adversarial plan rejection
+
+- Verdict: `PLAN_REJECTED`; full report at `/Users/Kosta/.hermes/profiles/coding/cache/delegation/subagent-summary-0-20260827_224604_319414.txt`.
+- Corrected seven blockers: core-owned required-extension gate; immutable transport-home authorization sequence; final-dispatch Guest policy; side-effect-free dark mode; plugin-owned ledger with narrow platform action; activation before deletion; in-place durable data continuity; generation-safe per-profile lifecycle.
+- Resolved extension shape, delivery surface, config ownership, and standalone conversation-texture ownership.
+- No implementation or live runtime changes occurred before the plan correction.
 
 ### 2026-08-27 — baseline audit
 
