@@ -6,7 +6,7 @@
 
 ## Current state
 
-- Phase: Checkpoint 3 independently approved; Checkpoint 4 core deletion starting.
+- Phase: Checkpoint 4 partially delivered — operator tooling deleted; **runtime leaf deletion is blocked on a missing generic seam** (see "Checkpoint 4 blocker" below).
 - Live runtime changed: no. No live config, profile, database, gateway process, or transport was touched.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
@@ -34,9 +34,80 @@
 | 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
 | 2. Generic seams + dark parity | `23de9414be`, `50df8641f9`, `dc5d21bc58` | `96026ea` | 438 plugin + 293 closure/integration + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | closure approved | complete |
 | 3. Authoritative activation, legacy fallback retained | `f16961a5ff`, `a02e1325e7`, `81c590e99d` | `8d36131`, `fea92e8` | 518 plugin; 233 focused core; 234 Guest/proactive/contact passes; carry gates pass | closure approved | complete |
-| 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
+| 4. Core deletion and final de-carry | `e5fdf94cf7`, `7bc6a50aa7` | `cf8af2d` | 622 plugin poke + 1056 plugin full (failure set identical to baseline); 14 generic-enforcement (also green with the legacy guard sabotaged); 4 carry-coverage; carry validate/doctor/contract PASS | pending | **partial — operator tooling deleted; runtime leaves blocked** |
 
 ## Evidence log
+
+### 2026-08-28 — Checkpoint 4 partial: operator tooling deleted, runtime leaves blocked
+
+**Delivered.** Plugin `cf8af2d` migrates the operator tooling, evals, and policy
+tests. Core `e5fdf94cf7` lands the generic-enforcement precondition. Core
+`7bc6a50aa7` deletes 2,993 LOC of Kosta-specific operator tooling (25 files),
+20 dead carry exemptions, and 5 superseded core test files.
+
+**Blocker — the runtime leaves cannot be deleted yet.** `gateway/contact_memory/`
+(14,021 LOC), `gateway/proactive_*` (5,173), `gateway/guest_access.py` (679) and
+`gateway/conversation_texture_v2.py` (603) remain. Deleting them today would
+*remove capability*, not de-carry it, which is the zero-owner outage shape
+Review 3 already rejected. Three findings, each reproducible:
+
+1. **No owner for the per-turn lane.** Core runs `_compile_contact_memory_prompt`,
+   `_snapshot_interest_digest` and `_contact_memory_lane_b_tools` on every turn,
+   ungated by ownership — core is still the sole owner. The plugin declares no
+   `turn_policy` capability and implements no `augment_turn`, so nothing would
+   take over contact recall, the interest digest, or Lane B retrieval.
+2. **The generic seam cannot carry Lane B even if the plugin did.**
+   `GatewayTurnAugmentation.request_tools` is `tuple[str, ...]` and is filtered
+   by `_clean_strings`, which keeps only non-empty `str`. A real
+   `RequestScopedTool` (schema + handler) is silently dropped to `[]` —
+   confirmed by constructing both objects and running the real filter. Worse,
+   **no production code reads `augmentation.request_tools` at all**; it is an
+   unconsumed stub, so Lane B has no generic exit from core.
+3. **`guest_fs` would break.** `tools/guest_workspace_tools.py` imports
+   `default_guest_sandbox_root` and `resolve_under_sandbox` from
+   `gateway.guest_access`, and the plugin has no `guest_fs` replacement.
+   Separately, two *generic* modules reach into the Kosta-specific leaf:
+   `gateway/authz_mixin.py` (`load_contact_registry`, unguarded) and
+   `gateway/slash_access.py` (`normalize_identity`, already fallback-guarded).
+   Both need the small helper inlined first.
+
+These are pinned as executable gates in
+`tests/gateway/test_cp4_runtime_leaf_deletion_readiness.py` — `xfail(strict=True)`,
+so finishing the seam turns the run XPASS-as-failure and forces the deletion
+decision to be revisited rather than silently forgotten.
+
+**Prerequisite work before the runtime leaves can be deleted**
+
+1. Widen `GatewayTurnAugmentation.request_tools` to carry `RequestScopedTool`
+   objects, and consume it at the `_collect_extension_turn_context` call site
+   so `bind_request_scoped_tools` receives them.
+2. Implement `augment_turn` in the Poke plugin (declaring `turn_policy`) to own
+   recall, the interest digest, and Lane B; gate the legacy core lane on the
+   ownership verdict the way ingress/extraction/proactive already are.
+3. Move the guest sandbox tool surface to the plugin, and inline the two small
+   generic helpers into `authz_mixin` and `slash_access`.
+
+**Tool fix delivered on the way.** `scripts/carry.py` counted *deleted* paths as
+"unowned managed carry", so a de-carry commit failed the very gate that exists
+to drive de-carry, and the only green path was to keep a dead exemption for a
+deleted file. `changed_paths` now filters deletions on both the committed and
+staged queries. Pinned by `tests/scripts/test_carry_coverage_deletions.py`
+(4 tests, which also prove added/modified unowned paths are still reported).
+
+**Verification** (all via `~/.hermes/hermes-agent/.venv/bin/python`):
+
+| Check | Result |
+|---|---|
+| Plugin `tests/poke_plugin` | 622 passed, rc=0 |
+| Plugin full suite | 1056 passed / 15 failed — failure set **identical** to the fea92e8 baseline (`model_speed_*`, `personality_session_*`; unrelated, pre-existing) |
+| Generic tool-policy enforcement | 14 passed; **also 14 passed with `enforce_guest_tool_call` and `is_guest_policy_enabled` monkeypatched to raise** |
+| Carry coverage regression | 4 passed (2 failed before the fix) |
+| `carry.py validate` | PASS, 349/349 managed paths (was 369) |
+| `carry.py doctor` / `check_local_carry_contract.py` | PASS / PASS (153 surfaces, 39 features) |
+
+Not claimed: no live activation, no restart, no soak, no outbound transport.
+`test_message_cards_plugin.py` has a pre-existing worktree-namespace collection
+error at the baseline commit and is excluded identically on both sides.
 
 ### 2026-08-28 — Checkpoint 3 closure approved
 

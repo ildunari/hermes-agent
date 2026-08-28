@@ -242,6 +242,43 @@ exactly one component classifies and exactly one writes.
 - Land deletion separately, safely restart, and repeat readiness, authorization, replay, uncertainty, lifecycle, post-response, and no-duplicate verification.
 - After deletion, rollback requires reverting the deletion commit before disabling the plugin. Physical data relocation remains out of scope.
 
+**Checkpoint 4 implementation notes (2026-08-28).**
+
+Checkpoint 4 splits into two slices, because only one of them was safe to
+execute. The split is a finding, not a scope reduction.
+
+*Slice A — delivered.* Operator tooling, evals, and policy tests moved to the
+plugin, and the core copies were deleted (2,993 LOC, 25 files), along with 20
+carry exemptions that pointed at files that no longer exist. Every deleted path
+was checked for a plugin counterpart first, comparing bodies with import and
+`sys.path` bootstrap lines excluded.
+
+*Slice B — blocked, deliberately not executed.* The runtime leaves
+(`gateway/contact_memory/`, `gateway/proactive_*`, `gateway/guest_access.py`,
+`gateway/conversation_texture_v2.py`) stay. This checkpoint's own rule is that
+deletion may only remove carry, never capability, and three checks show
+deletion today would remove capability:
+
+1. The per-turn contact lane (recall, interest digest, Lane B) runs in core on
+   every turn and is *not* gated on ownership. The plugin declares no
+   `turn_policy` capability and implements no `augment_turn`, so deleting the
+   leaf leaves the domain with zero owners — precisely the outage shape Review 3
+   rejected for `on_start` and `authorize_route`.
+2. `GatewayTurnAugmentation.request_tools` is typed `tuple[str, ...]` and
+   filtered through `_clean_strings`, so an executable `RequestScopedTool` is
+   silently dropped; and no production code reads the field at all. The seam
+   that would carry Lane B out of core is an unconsumed stub.
+3. `tools/guest_workspace_tools.py` (`guest_fs`) depends on `guest_access`
+   sandbox helpers with no plugin replacement, and two *generic* modules
+   (`authz_mixin`, `slash_access`) import helpers out of the same
+   Kosta-specific leaf.
+
+The prerequisites are recorded in the tracker and pinned as `xfail(strict=True)`
+gates in `tests/gateway/test_cp4_runtime_leaf_deletion_readiness.py`, so
+completing the seam fails the suite loudly rather than leaving the deletion
+decision to memory. The acceptance criteria for this checkpoint are unchanged;
+the implementation is incomplete against them and is reported as such.
+
 ## 6. Edge-case matrix
 
 | Edge | Required behavior |
