@@ -1,0 +1,213 @@
+{
+  "comparison_trustworthy": true,
+  "identical_file_list": false,
+  "file_list_only_in_baseline": [
+    "tests/gateway/contact_memory/test_apply_reviewed_link_interests.py",
+    "tests/gateway/contact_memory/test_imessage_bootstrap.py",
+    "tests/gateway/contact_memory/test_imessage_communication_adapter.py",
+    "tests/gateway/contact_memory/test_imessage_link_review.py",
+    "tests/gateway/contact_memory/test_phase_e_enrichment.py",
+    "tests/gateway/contact_memory/test_reviewed_artifact_interests.py",
+    "tests/gateway/contact_memory/test_reviewed_communication_backfill.py",
+    "tests/gateway/test_interest_ledger.py",
+    "tests/gateway/test_interest_maintenance.py",
+    "tests/gateway/test_interest_maintenance_cron.py",
+    "tests/gateway/test_proactive_operator_smoke.py",
+    "tests/gateway/test_proactive_rollout_cron.py"
+  ],
+  "file_list_only_in_post": [
+    "tests/gateway/test_cp4_runtime_leaf_deletion_readiness.py",
+    "tests/gateway/test_generic_tool_policy_enforcement.py"
+  ],
+  "collect_errors_baseline": [],
+  "collect_errors_post": [],
+  "baseline": {
+    "label": "baseline",
+    "n_shards_present": 8,
+    "missing_shards": [],
+    "collect_returncode": 0,
+    "n_files_collected": 751,
+    "collected_tests": 7603,
+    "collect_errors": [],
+    "rc_by_shard": {
+      "0": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "1": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "2": {
+        "rc": 0,
+        "meaning": "all_passed"
+      },
+      "3": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "4": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "5": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "6": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "7": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      }
+    },
+    "harness_failures": [],
+    "totals": {
+      "passed": 7481,
+      "failed": 75,
+      "skipped": 32,
+      "xfailed": 1
+    },
+    "failed_count": 75
+  },
+  "post": {
+    "label": "post",
+    "n_shards_present": 8,
+    "missing_shards": [],
+    "collect_returncode": 0,
+    "n_files_collected": 741,
+    "collected_tests": 7388,
+    "collect_errors": [],
+    "rc_by_shard": {
+      "0": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "1": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "2": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "3": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "4": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "5": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "6": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      },
+      "7": {
+        "rc": 1,
+        "meaning": "tests_failed"
+      }
+    },
+    "harness_failures": [],
+    "totals": {
+      "passed": 7262,
+      "failed": 76,
+      "skipped": 32,
+      "xfailed": 4
+    },
+    "failed_count": 76
+  },
+  "failed_only_in_baseline": [
+    "tests/gateway/test_browser_control_broker_hardening.py::test_timeout_while_disconnected_flushes_cancel_before_new_dispatch"
+  ],
+  "failed_only_in_post": [
+    "tests/gateway/test_watchdog_review_76354.py::test_s1_contended_activity_write_gives_up_within_short_budget",
+    "tests/gateway/test_watchdog_review_76354.py::test_s1_contended_clear_gives_up_within_short_budget"
+  ],
+  "failed_in_both": [
+    "tests/gateway/contact_memory/test_link_research_worker.py::test_bluebubbles_normalization_persists_owner_reaction_without_dispatch",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_alias_boolean_reaction_and_timestamp_normalization",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_all_twelve_tapback_codes_normalize_and_persist_through_retraction",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_attachment_descriptor_is_persisted_before_failed_download",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_batch_members_persist_in_order_without_collapsing",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_cold_and_contended_attachment_ingress_are_bounded_without_media_or_model",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_contact_reply_to_authenticated_owner_outbound_is_preserved",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_direct_chat_identifier_remains_transport_identity_fallback",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_envelope_is_frozen_and_versioned",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_exact_integer_boolean_aliases_are_accepted[isFromMe-fromMe-inbound-outbound]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_exact_integer_boolean_aliases_are_accepted[isFromMe-isFromMe-inbound-outbound]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_exact_integer_boolean_aliases_are_accepted[isFromMe-is_from_me-inbound-outbound]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_exact_integer_boolean_aliases_are_accepted[isGroup-isGroup-dm-group]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_exact_integer_boolean_aliases_are_accepted[isGroup-is_group-dm-group]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_gateway_recovers_fully_durable_ingress_instead_of_dropping_turn",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_gateway_recovery_rejects_conflicting_transport_replay",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_live_reply_target_roles_match_historical_same_and_counterpart_semantics",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[-1-isFromMe]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[-1-isGroup]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[0.0-isFromMe]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[0.0-isGroup]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[1.0-isFromMe]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[1.0-isGroup]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[2-isFromMe]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[2-isGroup]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[malformed5-isFromMe]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[malformed5-isGroup]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[malformed6-isFromMe]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[malformed6-isGroup]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[maybe-isFromMe]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_malformed_boolean_values_fail_closed[maybe-isGroup]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_missing_and_foreign_live_targets_fail_before_any_batch_write[foreign-reaction]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_missing_and_foreign_live_targets_fail_before_any_batch_write[foreign-reply]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_missing_and_foreign_live_targets_fail_before_any_batch_write[missing-reaction]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_missing_and_foreign_live_targets_fail_before_any_batch_write[missing-reply]",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_no_guid_fallback_is_deterministic_and_unique_per_list_member",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_owner_outbound_webhook_persists_without_agent_dispatch",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_payload_wrappers_and_multi_record_lists_are_not_truncated",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_persistence_uses_original_facts_and_store_uniqueness",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_principal_selects_actor_identity_and_physical_store",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_reaction_ack_persists_without_download_or_agent",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_reviewed_url_survives_pre_ack_replay_with_late_batch_relation",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_same_speaker_live_reaction_target_is_rejected_like_historical_ingress",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_unsupported_associated_type_and_conflicting_reply_aliases_fail_closed",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_visible_urls_and_safe_attachment_descriptors_are_frozen_before_download",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_webhook_persists_all_list_members_before_reactive_dispatch",
+    "tests/gateway/contact_memory/test_live_communication_ingress.py::test_webhook_rejects_mixed_malformed_data_list_without_ack_or_ingress",
+    "tests/gateway/test_background_command.py::TestRunBackgroundTask::test_media_files_routed_by_type",
+    "tests/gateway/test_bluebubbles.py::TestBlueBubblesAttachmentSending::test_dm_attachment_uses_bare_address",
+    "tests/gateway/test_cron_active_work_drain.py::TestCronPersistsActiveAgentsOnClaimRelease::test_persist_failure_never_breaks_dispatch",
+    "tests/gateway/test_cron_active_work_drain.py::TestCronPersistsActiveAgentsOnClaimRelease::test_persists_on_claim_and_release",
+    "tests/gateway/test_cron_active_work_drain.py::TestCronPersistsActiveAgentsOnClaimRelease::test_persists_on_dispatch_failure_release",
+    "tests/gateway/test_gateway_command_dispatch_minimal.py::test_idle_queue_sends_payload_as_next_turn[/q",
+    "tests/gateway/test_gateway_command_dispatch_minimal.py::test_idle_queue_sends_payload_as_next_turn[/queue",
+    "tests/gateway/test_multiplex_busy_input_mode.py::test_secondary_profile_busy_mode_controls_priority_path[queue]",
+    "tests/gateway/test_multiplex_busy_input_mode.py::test_secondary_profile_busy_mode_controls_priority_restart_drain",
+    "tests/gateway/test_resume_command.py::TestHandleSessionsCommand::test_gateway_dispatches_sessions_command",
+    "tests/gateway/test_scale_to_zero.py::test_suspend_self_non_2xx_is_false_not_raise",
+    "tests/gateway/test_scale_to_zero.py::test_suspend_self_posts_suspend_for_this_machine",
+    "tests/gateway/test_session_model_reset.py::test_clear_command_response_reports_preserved_session_model",
+    "tests/gateway/test_session_store_prune.py::test_session_store_default_db_uses_runtime_hermes_home",
+    "tests/gateway/test_status_owner_guard.py::TestWriteRuntimeStatusOwnershipGuard::test_foreign_process_merges_platform_state_without_clobbering_identity",
+    "tests/gateway/test_status_owner_guard.py::TestWriteRuntimeStatusOwnershipGuard::test_non_owner_creating_file_leaves_identity_unset",
+    "tests/gateway/test_status_owner_guard.py::TestWriteRuntimeStatusOwnershipGuard::test_targeted_profile_platform_write_is_platform_only",
+    "tests/gateway/test_systemd_notify.py::test_notify_supports_systemd_abstract_socket",
+    "tests/gateway/test_telegram_photo_interrupts.py::test_handle_message_does_not_priority_interrupt_photo_followup",
+    "tests/gateway/test_telegram_polling_health_confirmation.py::TestPollingHealthConfirmation::test_subsequent_progress_is_silent",
+    "tests/gateway/test_telegram_thread_fallback.py::test_send_dm_topic_fallback_without_anchor_does_not_crash",
+    "tests/gateway/test_telegram_topic_mode.py::test_internal_root_telegram_dm_event_bypasses_topic_lobby[1]",
+    "tests/gateway/test_telegram_topic_mode.py::test_internal_root_telegram_dm_event_bypasses_topic_lobby[None]",
+    "tests/gateway/test_update_streaming.py::TestUpdatePromptInterception::test_recognized_slash_command_bypasses_pending_update_prompt",
+    "tests/gateway/test_usage_command.py::TestUsageCachedAgent::test_cached_agent_shows_detailed_usage",
+    "tests/gateway/test_usage_command.py::TestUsageCachedAgent::test_running_agent_preferred_over_cache",
+    "tests/gateway/test_usage_command.py::TestUsageContextBreakdown::test_breakdown_lines_rendered_for_live_agent"
+  ],
+  "NEW_FAILURES_INTRODUCED": [
+    "tests/gateway/test_watchdog_review_76354.py::test_s1_contended_activity_write_gives_up_within_short_budget",
+    "tests/gateway/test_watchdog_review_76354.py::test_s1_contended_clear_gives_up_within_short_budget"
+  ]
+}

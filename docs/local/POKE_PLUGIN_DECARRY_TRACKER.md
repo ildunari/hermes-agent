@@ -109,6 +109,61 @@ Not claimed: no live activation, no restart, no soak, no outbound transport.
 `test_message_cards_plugin.py` has a pre-existing worktree-namespace collection
 error at the baseline commit and is excluded identically on both sides.
 
+#### Post-deletion 8-shard comparison vs the pinned `cd8547ee7d` baseline
+
+Same runner (`/tmp/cp4/shard_run.py`), same interpreter, same fixed file list,
+one subprocess per shard, real return codes persisted, no pipelines and no
+`tail`. Compared by exact node-ID set.
+
+| | baseline | post |
+|---|---:|---:|
+| collect rc / collect errors | 0 / 0 | 0 / 0 |
+| files / tests collected | 751 / 7603 | 741 / 7388 |
+| shard return codes | all ≤1 | all =1 |
+| harness failures (rc≥2) | none | none |
+| passed / failed | 7481 / 75 | 7262 / 76 |
+
+`comparison_trustworthy: true` — no missing shards and no rc≥2 on either side.
+
+**Exact failure-set diff: 2 in post, 0 attributable to this work.** Both are
+`tests/gateway/test_watchdog_review_76354.py::test_s1_contended_*_gives_up_within_short_budget`,
+which assert a wall-clock budget under deliberate lock contention. They were
+re-run **on the untouched `cd8547ee7d` baseline worktree and fail there too**
+(2 failed / 5 passed), so they are load-sensitive timing tests, not regressions;
+the baseline shard run simply got a luckier scheduling window. One baseline-only
+failure disappeared (`test_browser_control_broker_hardening`), same cause.
+
+The 10-file / 215-test reduction is exactly the 12 deleted files minus the 2
+added ones, all accounted for above.
+
+**Two defects this comparison caught and forced fixed** (the reason it is run):
+
+- Deleting the operator scripts orphaned 7 core test files that imported them,
+  breaking `tests/gateway` collection (rc=2, 7 errors). Their plugin
+  counterparts were verified green (131 passed) and the orphans removed.
+- The new `request_tools` gate grepped the whole tree, so *documenting* the gap
+  created "consumers" in `docs/` and flipped it to `XPASS(strict)`. Narrowed to
+  `*.py` excluding `tests/` and `docs/`.
+
+#### Residual carry after this checkpoint (honest)
+
+| Surface | Before | After |
+|---|---:|---:|
+| Carry-managed paths | 369 | 349 |
+| Operator tooling LOC in core | 2,993 | 0 |
+| `gateway/contact_memory/` LOC | 14,021 | 14,021 (blocked) |
+| `gateway/proactive_*` + `guest_access` + `conversation_texture_v2` + `guest_workspace_tools` LOC | 6,575 | 6,575 (blocked) |
+| Poke/Guest/contact/proactive references in `gateway/run.py` | 171 | 172 |
+
+The `run.py` reference count did **not** go down, and is reported as-is rather
+than framed as progress: this checkpoint deleted operator tooling, which
+`run.py` never imported. The +1 is a comment added by the ownership note. Every
+one of those references belongs to the blocked runtime-leaf slice.
+
+`scripts/thinning_baseline.json` was checked and required no rewrite: it holds
+zero stale entries (no hotspot points at a deleted path) and zero
+Poke/contact/proactive-related hotspots.
+
 ### 2026-08-28 — Checkpoint 3 closure approved
 
 - Independent closure verdict: `CHECKPOINT_APPROVED`; all three P0s and the P1 are closed in production wiring.
