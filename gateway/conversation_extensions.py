@@ -96,6 +96,13 @@ class GatewayRouteContext:
     that authenticated the sender and are immutable for the life of the
     request — an extension may propose a *runtime* route, never a new
     transport identity.
+
+    ``ingress_records`` carries the adapter's frozen, transport-authenticated
+    per-message records for this event. It is what lets an extension that owns
+    the ingress domain actually *persist* the arrival rather than count it: an
+    owner with no access to the records could only ever be a no-op, which is a
+    zero-owner outage dressed up as a handover. The records are opaque to core
+    — it captures and forwards them without interpreting their contents.
     """
 
     platform: str
@@ -108,6 +115,10 @@ class GatewayRouteContext:
     text_preview: str = ""
     is_group: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    ingress_records: tuple[Any, ...] = ()
+    raw_message: Mapping[str, Any] | None = None
+    message_id: str = ""
+    text: str = ""
 
 
 @dataclass(frozen=True)
@@ -116,12 +127,26 @@ class GatewayRouteDirective:
 
     ``runtime_profile`` is validated by core against served profiles and the
     permitted route map before it takes effect.
+
+    ``principal`` / ``subject_id`` let an admission owner report the identity
+    classification it performed, and ``context_prefix`` / ``scope_metadata``
+    let it contribute the trusted metadata block core's own routing used to
+    build. Without these an extension could pick a profile but not establish
+    who the sender is, so the guest/owner session scope would never be created
+    — the cascade Review 3 recorded. Core validates and applies them; it never
+    interprets their meaning.
     """
 
     admit: bool
     runtime_profile: Optional[str] = None
     reason: str = ""
     tags: tuple[str, ...] = ()
+    principal: Optional[str] = None
+    subject_id: Optional[str] = None
+    subject_display_name: Optional[str] = None
+    context_prefix: str = ""
+    scope_metadata: Mapping[str, Any] = field(default_factory=dict)
+    suppress_turn: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,6 +160,12 @@ class GatewayRouteDecision:
     reason: str = ""
     extension_id: Optional[str] = None
     generation: Optional[int] = None
+    principal: Optional[str] = None
+    subject_id: Optional[str] = None
+    subject_display_name: Optional[str] = None
+    context_prefix: str = ""
+    scope_metadata: Mapping[str, Any] = field(default_factory=dict)
+    suppress_turn: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +364,11 @@ class GatewayHostOperations:
     send_authenticated_existing_dm: Optional[
         Callable[[AuthenticatedDmRequest], AuthenticatedDmResult]
     ] = None
+    #: Run a blocking callable off the gateway event loop. An owner of a
+    #: durable domain necessarily performs SQLite work, and doing it inline
+    #: would stall every other conversation. The host owns the thread pool;
+    #: the extension only supplies the callable.
+    run_blocking: Optional[Callable[..., Any]] = None
 
 
 class GatewayRuntimeFacade:
@@ -468,6 +504,17 @@ class GatewayRuntimeFacade:
                 DmSendOutcome.DEFINITIVE_FAILURE, detail="capability_unavailable"
             )
         return self._host.send_authenticated_existing_dm(request)
+
+    def run_blocking(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Run *func* on the host's worker pool, off the event loop.
+
+        Returns an awaitable when the host provides one. Falls back to running
+        inline only when no host implementation exists (CLI, tests), which is
+        correct there because those callers have no event loop to protect.
+        """
+        if self._host.run_blocking is None:
+            return func(*args, **kwargs)
+        return self._host.run_blocking(func, *args, **kwargs)
 
     def describe(self) -> dict[str, Any]:
         """Bounded status snapshot: identity and capabilities only."""
@@ -1042,6 +1089,34 @@ def resolve_route(
         reason=directive.reason,
         extension_id=extension_id,
         generation=generation,
+        # Identity classification performed by the admission owner. Core does
+        # not interpret these; it carries them so the routed turn can build the
+        # same trusted scope the legacy owner built. ``principal`` is
+        # constrained to the two authenticated values core knows how to scope.
+        principal=(
+            directive.principal
+            if directive.principal in ("owner", "guest")
+            else None
+        ),
+        subject_id=(
+            str(directive.subject_id) if directive.subject_id else None
+        ),
+        subject_display_name=(
+            str(directive.subject_display_name)
+            if directive.subject_display_name
+            else None
+        ),
+        context_prefix=(
+            directive.context_prefix
+            if isinstance(directive.context_prefix, str)
+            else ""
+        ),
+        scope_metadata=(
+            dict(directive.scope_metadata)
+            if isinstance(directive.scope_metadata, Mapping)
+            else {}
+        ),
+        suppress_turn=bool(directive.suppress_turn),
     )
 
 

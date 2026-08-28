@@ -477,19 +477,49 @@ def test_legacy_tool_guard_active_without_a_policy_token():
     assert model_tools._legacy_tool_policy_owner_active() is True
 
 
-def test_legacy_tool_guard_stands_down_under_a_bound_policy_token():
+def test_legacy_tool_guard_stands_down_only_for_a_proven_extension_owner():
+    """A bound token is necessary but **not sufficient** to disarm the legacy guard.
+
+    Review-3 P0-1: ``turn_policy_scope`` binds a token whenever any registered
+    bundle declares ``tool_authorization``, including a rolled-back/dark bundle
+    whose answer is an unconditional allow. Standing down on token presence
+    alone therefore left a guest unguarded on the documented rollback path. The
+    signal is the ownership verdict for the routing domain.
+    """
     import model_tools
 
+    scope = "/tmp/tool-owner"
     policy = ce.issue_request_policy(
-        extension_id="ext", profile_home="/tmp/tool-owner", route_id="r"
+        extension_id="ext", profile_home=scope, route_id="r"
     )
+
+    # Token bound, but no ownership plan installed -> legacy still owns.
+    with ce.request_policy_scope(policy):
+        assert model_tools._legacy_tool_policy_owner_active() is True
+
+    # Token bound and the plan says legacy owns routing -> legacy still owns.
+    _install(scope, routing=co.OwnerKind.LEGACY)
+    with ce.request_policy_scope(policy):
+        assert model_tools._legacy_tool_policy_owner_active() is True
+
+    # Token bound and an extension is the proven routing owner -> stand down.
+    co.conversation_ownership_registry.clear(scope)
+    _install(scope, routing=co.OwnerKind.EXTENSION)
     with ce.request_policy_scope(policy):
         assert model_tools._legacy_tool_policy_owner_active() is False
+
+    # Unowned is a refusal, not a handover: legacy keeps guarding.
+    co.conversation_ownership_registry.clear(scope)
+    _install(scope, routing=co.OwnerKind.UNOWNED)
+    with ce.request_policy_scope(policy):
+        assert model_tools._legacy_tool_policy_owner_active() is True
+
+    # Outside any bound policy, behavior is unchanged.
     assert model_tools._legacy_tool_policy_owner_active() is True
 
 
 def test_only_one_tool_guard_can_deny_a_dispatch(monkeypatch):
-    """With an owner bound, the legacy guard must not also run."""
+    """With a *proven* extension owner bound, the legacy guard must not also run."""
     import model_tools
 
     legacy_calls = []
@@ -513,6 +543,8 @@ def test_only_one_tool_guard_can_deny_a_dispatch(monkeypatch):
         health=lambda: ce.GatewayExtensionHealth(True),
     )
     ce.conversation_extension_registry.register(bundle, scope=scope)
+    # The extension must be the *proven* routing owner, not merely registered.
+    _install(scope, routing=co.OwnerKind.EXTENSION)
     policy = ce.issue_request_policy(
         extension_id="ext", profile_home=scope, route_id="r"
     )

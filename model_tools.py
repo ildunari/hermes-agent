@@ -1194,20 +1194,46 @@ def _legacy_tool_policy_owner_active() -> bool:
 
     Checkpoint 3 of the Poke/Guest de-carry moves tool policy behind a generic
     single-owner selector. The legacy guard remains present (rollback is a
-    config switch, not a revert) but must not run alongside an activated
+    config switch, not a revert) but must not run alongside an *activated*
     extension owner: two guards means one's *deny* can contradict the other's
     *allow*, and neither is authoritative.
 
-    The signal is the request-policy token core binds after validated routing.
-    When it is absent — every ordinary request, and every request on a profile
-    still on the legacy owner — this returns ``True`` and behavior is exactly
-    as before. When it is present, the bound extension owns the decision and
-    the generic ``authorize_tool_dispatch`` seam enforces it.
+    **The signal is the ownership verdict, not the presence of a token.** That
+    distinction is the Review-3 P0-1 fix. ``turn_policy_scope`` binds a token
+    whenever any registered bundle declares ``tool_authorization``, which
+    includes a rolled-back/dark bundle whose answer is an unconditional allow.
+    Keying the stand-down off token presence therefore disarmed the legacy
+    guard on the exact path the plan calls "rollback", handing a guest
+    unsandboxed ``terminal``/``execute_code``.
+
+    So the legacy guard stands down for exactly one proven state: a request
+    policy is bound *and* the ownership registry says an extension owns the
+    routing domain for that policy's profile scope. Every other state — no
+    token, no installed plan, a legacy verdict, an unowned/ambiguous verdict,
+    or any error resolving the verdict — keeps the legacy guard, which is the
+    stricter of the two.
     """
     try:
         from gateway.conversation_extensions import current_request_policy
 
-        return current_request_policy() is None
+        policy = current_request_policy()
+        if policy is None:
+            # Ordinary traffic, and every profile still on the legacy owner.
+            return True
+
+        from gateway.conversation_ownership import (
+            OwnershipDomain,
+            conversation_ownership_registry,
+        )
+
+        scope = str(getattr(policy, "profile_home", "") or "")
+        if not scope:
+            return True
+        # ``is_extension_owned`` is True only for a *proven* extension verdict;
+        # legacy and unowned both answer False, so both keep the legacy guard.
+        return not conversation_ownership_registry.is_extension_owned(
+            scope, OwnershipDomain.ROUTING
+        )
     except Exception:
         # Cannot prove an extension owner exists -> keep the legacy guard,
         # which is the stricter of the two states.

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import sqlite3
@@ -63,6 +64,28 @@ def _load_plugin_module(name: str):
         pytest.skip(f"cannot import {name} from plugin worktree: {exc}")
 
 
+def _load_production_fixtures():
+    """Load the plugin worktree's shared production-schema fixtures.
+
+    Imported by file path rather than package name: the plugin's ``tests``
+    package is not on this repo's import path, and shadowing this repo's own
+    ``tests`` package would break collection.
+    """
+    if not PLUGIN_ROOT.is_dir():
+        pytest.skip(f"poke plugin worktree not available at {PLUGIN_ROOT}")
+    path = PLUGIN_ROOT / "tests" / "poke_plugin" / "production_fixtures.py"
+    if not path.is_file():
+        pytest.skip(f"production fixtures not available at {path}")
+    cached = sys.modules.get("_poke_production_fixtures")
+    if cached is not None:
+        return cached
+    spec = importlib.util.spec_from_file_location("_poke_production_fixtures", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["_poke_production_fixtures"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture(scope="module")
 def poke_auth():
     return _load_plugin_module("poke.authoritative")
@@ -92,35 +115,31 @@ EXTENSION_ID = "poke"
 
 
 def _seed_profile(home: Path, *, claims: int = 0, pending: int = 0) -> Path:
-    """Create an isolated profile home with a realistic durable shape."""
-    home.mkdir(parents=True, exist_ok=True)
-    state_db = home / "state.db"
-    con = sqlite3.connect(state_db)
-    con.execute(
-        "CREATE TABLE proactive_slot_claims (id INTEGER PRIMARY KEY, released_at REAL)"
-    )
-    con.execute("CREATE TABLE proactive_sends (id INTEGER PRIMARY KEY, status TEXT)")
-    con.execute("INSERT INTO proactive_sends (status) VALUES ('sent')")
-    con.execute("INSERT INTO proactive_sends (status) VALUES ('definitive_failure')")
-    for _ in range(claims):
-        con.execute("INSERT INTO proactive_slot_claims (released_at) VALUES (NULL)")
-    for _ in range(pending):
-        con.execute("INSERT INTO proactive_sends (status) VALUES ('in_flight')")
-    con.commit()
-    con.close()
+    """Create an isolated profile home with the **production** durable shape.
 
-    cm_root = home / "contact-memory"
-    cm_root.mkdir(exist_ok=True)
-    cm_db = cm_root / "contact-a.db"
-    con = sqlite3.connect(cm_db)
-    con.execute("CREATE TABLE contacts (id INTEGER PRIMARY KEY, handle TEXT)")
-    con.execute("CREATE TABLE communication_events (id INTEGER PRIMARY KEY)")
-    con.execute("CREATE TABLE interests (id INTEGER PRIMARY KEY)")
-    con.execute("INSERT INTO contacts (handle) VALUES ('existing-contact')")
-    con.execute("INSERT INTO communication_events DEFAULT VALUES")
-    con.commit()
-    con.close()
-    return state_db
+    Review-3 P0-3: this previously created invented tables
+    (``proactive_slot_claims``, ``proactive_sends``, ``contacts``) and a
+    ``contact-memory/*.db`` layout that does not exist, so the harness
+    validated its own fixture rather than production. It now delegates to the
+    plugin's shared production fixtures, whose DDL is copied from
+    ``gateway/proactive_scheduler.py`` and the contact-memory store, and which
+    are themselves compared against a real profile when one is readable.
+    """
+    fixtures = _load_production_fixtures()
+    home.mkdir(parents=True, exist_ok=True)
+    fixtures.build_state_db(
+        home / "state.db",
+        claimed_slots=claims,
+        non_terminal_deliveries=pending,
+    )
+    fixtures.build_contact_memory(home / "contact-memory")
+    # The shared ownership registry lives one level above ``profiles/<name>/``.
+    registry_parent = home.parent.parent if home.parent.name == "profiles" else home
+    registry_parent.mkdir(parents=True, exist_ok=True)
+    fixtures.build_ownership_registry(
+        registry_parent / "proactive-contact-ownership.db"
+    )
+    return home / "state.db"
 
 
 def _digest(home: Path) -> dict[str, str]:
@@ -457,7 +476,16 @@ def test_preflight_records_existing_row_counts_as_continuity_evidence(
         if check.name.startswith("row_counts")
     }
     assert counts
-    assert any(data.get("contacts") == 1 for data in counts.values())
+    # Production tables, not invented ones. Both stores must contribute real
+    # numbers — an empty ``{}`` is the absence of continuity evidence, which is
+    # what the previous revision recorded (Review-3 P0-3).
+    assert counts["row_counts:state.db"]["proactive_slot"] >= 1
+    contact_counts = [
+        data for name, data in counts.items() if name.endswith(".sqlite3")
+    ]
+    assert contact_counts, "no contact-memory store was counted"
+    assert contact_counts[0]["communication_event"] >= 1
+    assert contact_counts[0]["fact"] >= 1
 
 
 def test_no_database_is_created_or_migrated(tmp_path, poke_auth):

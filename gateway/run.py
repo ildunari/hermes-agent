@@ -19293,9 +19293,167 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 metadata={k: v for k, v in event.metadata.items() if k != "_hermes_contact_scope"},
             )
 
+        # ── Generic conversation-extension seam ──────────────────────────
+        # The sender is authenticated and the transport profile/home are
+        # settled, so this is the correct place for the generic admission and
+        # ingress-observation fire sites. The transport trust domain captured
+        # here is immutable; an extension may only propose a *runtime* route,
+        # which core validates against served profiles below.
+        #
+        # No-op when no conversation extension is registered for this profile.
+        _extension_route_context = None
+        _extension_scope = None
+        _extension_route_decision = None
+        try:
+            from gateway import conversation_extension_runtime as _ce_runtime
+            from hermes_constants import hermes_home_key as _hermes_home_key
+
+            _transport_profile = str(getattr(source, "profile", None) or "default")
+            _transport_home = str(self._resolve_profile_home_for_source(source))
+            _extension_scope = _hermes_home_key(_transport_home)
+
+            # Fail-closed admission gate. A profile that declares required
+            # conversation extensions may not serve a single message until
+            # every requirement resolves in its own scope. Profiles with no
+            # requirements are unaffected.
+            #
+            # The authoritative verdict is the one computed *eagerly at
+            # startup* by ``_activate_conversation_extensions_for_profile``;
+            # the per-message re-check below is a defence-in-depth refresh for
+            # a requirement that regressed after startup (a plugin unloaded
+            # mid-run), not the primary gate.
+            if not self._extension_profile_is_ready(_extension_scope):
+                logger.error(
+                    "Refusing inbound message: profile %s was marked unready at "
+                    "startup because a required conversation extension is not "
+                    "available (%s)",
+                    _transport_profile,
+                    self._extension_profile_unready_reason(_extension_scope),
+                )
+                return None
+            try:
+                _requirements_config = _load_gateway_config_for_profile(
+                    getattr(source, "profile", None)
+                )
+                _requirements_ok, _requirements_reason = (
+                    _ce_runtime.profile_requirements_satisfied(
+                        scope=_extension_scope,
+                        config_raw=_requirements_config,
+                    )
+                )
+            except Exception:
+                # Cannot prove the requirement is satisfied -> do not serve.
+                logger.error(
+                    "Refusing inbound message: could not evaluate required "
+                    "conversation extensions for profile %s",
+                    _transport_profile,
+                    exc_info=True,
+                )
+                return None
+            if not _requirements_ok:
+                logger.error(
+                    "Refusing inbound message: profile %s requires a conversation "
+                    "extension that is not available (%s)",
+                    _transport_profile,
+                    _requirements_reason,
+                )
+                return None
+
+            _extension_route_context = _ce_runtime.build_route_context(
+                event,
+                transport_profile=_transport_profile,
+                transport_home=_transport_home,
+            )
+            if _extension_route_context is not None:
+                _served = tuple(self._served_profile_names())
+                _extension_route_decision = _ce_runtime.admit_and_route(
+                    _extension_route_context,
+                    scope=_extension_scope,
+                    served_profiles=_served,
+                    permitted_routes=self._permitted_extension_routes(),
+                )
+                if (
+                    _extension_route_decision is not None
+                    and not _extension_route_decision.admitted
+                ):
+                    logger.warning(
+                        "Conversation extension denied inbound message (%s)",
+                        _extension_route_decision.reason or "denied",
+                    )
+                    return None
+                # Apply the *validated* directive. This is what makes an
+                # extension the real routing owner rather than a rubber stamp:
+                # without applying the routed profile and the authenticated
+                # identity it reported, the guest/owner session scope is never
+                # established and every contact-scoped behavior downstream
+                # silently disappears. Core validated the runtime profile
+                # against the served set and the permitted route map above;
+                # the transport trust domain is untouched.
+                if _extension_route_decision is not None:
+                    source, event = self._apply_extension_route_decision_safe(
+                        source, event, _extension_route_decision
+                    )
+                    if event is None:
+                        return None
+                # The trusted contact scope itself is read once, below, from
+                # the event metadata whichever owner wrote it. Not re-derived
+                # here: one read of one owner's output is what keeps the
+                # authorization input single-sourced.
+                _ce_runtime.observe_authenticated_ingress(
+                    _extension_route_context, scope=_extension_scope
+                )
+        except Exception:
+            # The seam itself failed. Route/admission is a fail-closed domain,
+            # but we can only fail closed for profiles that actually declare a
+            # requirement — otherwise a bug here would take down every ordinary
+            # profile. Re-evaluate the requirement declaration defensively; if
+            # the profile requires an extension and we cannot prove it is
+            # satisfied, drop the message.
+            logger.debug("conversation extension ingress seam error", exc_info=True)
+            try:
+                from gateway import conversation_extension_runtime as _ce_runtime_fc
+                from hermes_constants import hermes_home_key as _hhk_fc
+
+                _fc_scope = _hhk_fc(self._resolve_profile_home_for_source(source))
+                _fc_ok, _fc_reason = _ce_runtime_fc.profile_requirements_satisfied(
+                    scope=_fc_scope,
+                    config_raw=_load_gateway_config_for_profile(
+                        getattr(source, "profile", None)
+                    ),
+                )
+                if not _fc_ok:
+                    logger.error(
+                        "Refusing inbound message after extension seam failure: "
+                        "profile requires a conversation extension (%s)",
+                        _fc_reason,
+                    )
+                    return None
+            except Exception:
+                logger.error(
+                    "Refusing inbound message: conversation extension "
+                    "requirement state is unknown",
+                    exc_info=True,
+                )
+                return None
+
         # BlueBubbles is the ingress owner for this surface. Classify before
         # hooks/auth and fail closed whenever registry routing is enabled.
-        if not is_internal and source.platform == Platform.BLUEBUBBLES:
+        #
+        # Checkpoint 3: this block is the *legacy* routing owner. When an
+        # extension owns the routing domain for this profile it performs the
+        # equivalent classification itself and core applies its validated
+        # directive below, so running this too would classify twice and could
+        # produce two different answers for one message.
+        _legacy_routing_owner = True
+        try:
+            from gateway.conversation_ownership import OwnershipDomain as _RouteDomain
+
+            _legacy_routing_owner = self._legacy_owns_for_source(
+                source, _RouteDomain.ROUTING
+            )
+        except Exception:
+            logger.debug("could not resolve routing ownership", exc_info=True)
+        if not is_internal and source.platform == Platform.BLUEBUBBLES and _legacy_routing_owner:
             try:
                 platform_cfg = getattr(getattr(self, "config", None), "platforms", {}).get(Platform.BLUEBUBBLES)
                 extra = getattr(platform_cfg, "extra", {}) if platform_cfg else {}
@@ -19503,6 +19661,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Freeze authenticated routing metadata before any plugin hook can touch
         # the event. This value, not SessionSource or model/user arguments, is the
         # sole authorization input to contact retrieval.
+        #
+        # Re-reading the metadata here is correct under either owner: the
+        # extension seam above already wrote its validated scope onto the event
+        # when it owns routing, and the legacy block wrote its own when it does,
+        # so this reads whichever single owner ran.
         trusted_contact_scope = _trusted_contact_scope_from_metadata(
             getattr(event, "metadata", None)
         )
@@ -19510,9 +19673,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Canonical ingress is frozen by the adapter and authenticated by the
         # owner/guest route above. Persist it before plugins, commands, model
         # dispatch, or any later suppression/failure path can mutate the turn.
+        #
+        # Checkpoint 3: this is the *legacy* ingress writer. When an extension
+        # owns the ingress domain it persisted the same batch at its own
+        # observation site above, so running this too is the duplicate-write
+        # this checkpoint exists to prevent.
         canonical_event_ids: tuple[str, ...] = ()
-        if trusted_contact_scope is not None and getattr(
-            event, "communication_ingress", ()
+        _legacy_ingress_owner = True
+        try:
+            from gateway.conversation_ownership import OwnershipDomain as _IngressDomain
+
+            _legacy_ingress_owner = self._legacy_owns_for_source(
+                source, _IngressDomain.INGRESS
+            )
+        except Exception:
+            logger.debug("could not resolve ingress ownership", exc_info=True)
+        if (
+            _legacy_ingress_owner
+            and trusted_contact_scope is not None
+            and getattr(event, "communication_ingress", ())
         ):
             try:
                 profile_home = self._resolve_profile_home_for_source(source)
@@ -19666,130 +19845,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
 
-        # ── Generic conversation-extension seam ──────────────────────────
-        # The sender is authenticated and the transport profile/home are
-        # settled, so this is the correct place for the generic admission and
-        # ingress-observation fire sites. The transport trust domain captured
-        # here is immutable; an extension may only propose a *runtime* route,
-        # which core validates against served profiles below.
-        #
-        # No-op when no conversation extension is registered for this profile.
-        _extension_route_context = None
-        _extension_scope = None
-        _extension_route_decision = None
-        try:
-            from gateway import conversation_extension_runtime as _ce_runtime
-            from hermes_constants import hermes_home_key as _hermes_home_key
-
-            _transport_profile = str(getattr(source, "profile", None) or "default")
-            _transport_home = str(self._resolve_profile_home_for_source(source))
-            _extension_scope = _hermes_home_key(_transport_home)
-
-            # Fail-closed admission gate. A profile that declares required
-            # conversation extensions may not serve a single message until
-            # every requirement resolves in its own scope. Profiles with no
-            # requirements are unaffected.
-            #
-            # The authoritative verdict is the one computed *eagerly at
-            # startup* by ``_activate_conversation_extensions_for_profile``;
-            # the per-message re-check below is a defence-in-depth refresh for
-            # a requirement that regressed after startup (a plugin unloaded
-            # mid-run), not the primary gate.
-            if not self._extension_profile_is_ready(_extension_scope):
-                logger.error(
-                    "Refusing inbound message: profile %s was marked unready at "
-                    "startup because a required conversation extension is not "
-                    "available (%s)",
-                    _transport_profile,
-                    self._extension_profile_unready_reason(_extension_scope),
-                )
-                return None
-            try:
-                _requirements_config = _load_gateway_config_for_profile(
-                    getattr(source, "profile", None)
-                )
-                _requirements_ok, _requirements_reason = (
-                    _ce_runtime.profile_requirements_satisfied(
-                        scope=_extension_scope,
-                        config_raw=_requirements_config,
-                    )
-                )
-            except Exception:
-                # Cannot prove the requirement is satisfied -> do not serve.
-                logger.error(
-                    "Refusing inbound message: could not evaluate required "
-                    "conversation extensions for profile %s",
-                    _transport_profile,
-                    exc_info=True,
-                )
-                return None
-            if not _requirements_ok:
-                logger.error(
-                    "Refusing inbound message: profile %s requires a conversation "
-                    "extension that is not available (%s)",
-                    _transport_profile,
-                    _requirements_reason,
-                )
-                return None
-
-            _extension_route_context = _ce_runtime.build_route_context(
-                event,
-                transport_profile=_transport_profile,
-                transport_home=_transport_home,
-            )
-            if _extension_route_context is not None:
-                _served = tuple(self._served_profile_names())
-                _extension_route_decision = _ce_runtime.admit_and_route(
-                    _extension_route_context,
-                    scope=_extension_scope,
-                    served_profiles=_served,
-                    permitted_routes=self._permitted_extension_routes(),
-                )
-                if (
-                    _extension_route_decision is not None
-                    and not _extension_route_decision.admitted
-                ):
-                    logger.warning(
-                        "Conversation extension denied inbound message (%s)",
-                        _extension_route_decision.reason or "denied",
-                    )
-                    return None
-                _ce_runtime.observe_authenticated_ingress(
-                    _extension_route_context, scope=_extension_scope
-                )
-        except Exception:
-            # The seam itself failed. Route/admission is a fail-closed domain,
-            # but we can only fail closed for profiles that actually declare a
-            # requirement — otherwise a bug here would take down every ordinary
-            # profile. Re-evaluate the requirement declaration defensively; if
-            # the profile requires an extension and we cannot prove it is
-            # satisfied, drop the message.
-            logger.debug("conversation extension ingress seam error", exc_info=True)
-            try:
-                from gateway import conversation_extension_runtime as _ce_runtime_fc
-                from hermes_constants import hermes_home_key as _hhk_fc
-
-                _fc_scope = _hhk_fc(self._resolve_profile_home_for_source(source))
-                _fc_ok, _fc_reason = _ce_runtime_fc.profile_requirements_satisfied(
-                    scope=_fc_scope,
-                    config_raw=_load_gateway_config_for_profile(
-                        getattr(source, "profile", None)
-                    ),
-                )
-                if not _fc_ok:
-                    logger.error(
-                        "Refusing inbound message after extension seam failure: "
-                        "profile requires a conversation extension (%s)",
-                        _fc_reason,
-                    )
-                    return None
-            except Exception:
-                logger.error(
-                    "Refusing inbound message: conversation extension "
-                    "requirement state is unknown",
-                    exc_info=True,
-                )
-                return None
 
         # The sender and routed contact scope are now authenticated. Establish
         # the durable arrival fence before command handling, session lookup, or
@@ -31712,6 +31767,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             return _wrap()
 
+        def _run_blocking(func, *args, **kwargs):
+            """Run a blocking extension callable on the host's thread pool.
+
+            An extension that owns a durable domain must do SQLite work, and
+            doing it on the gateway loop would stall every conversation. The
+            host owns the pool; the extension supplies only the callable.
+            Returns an awaitable, matching ``asyncio.to_thread``.
+            """
+            return asyncio.to_thread(func, *args, **kwargs)
+
         def _lookup_session(session_key: str):
             """Return an immutable snapshot, never the live store.
 
@@ -31929,6 +31994,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 create_initiated_child=_create_initiated_child,
                 inject_turn=_inject_turn,
                 send_authenticated_existing_dm=_send_authenticated_existing_dm,
+                run_blocking=_run_blocking,
             )
         )
 
@@ -32011,6 +32077,93 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return {}
 
     # -- conversation-extension lifecycle + eager activation ----------------
+
+    def _apply_extension_route_decision(self, source, event, decision):
+        """Apply a validated extension routing directive to the source/event.
+
+        This is what makes an admission extension the *real* routing owner
+        rather than a rubber stamp. Without it the extension could pick a
+        runtime profile that nothing acted on, the authenticated principal it
+        reported would be discarded, the trusted contact scope would never be
+        built, and every contact-scoped behavior downstream (guest session,
+        guest policy context, contact recall, extraction) would silently stop.
+
+        Trust boundaries preserved here:
+
+        * the **transport** profile/home are never changed — only the runtime
+          profile, and only to the value core already validated against the
+          served set and the permitted route map;
+        * ``principal`` is applied only for the two authenticated values core
+          knows how to scope, so an extension cannot invent a privilege level;
+        * the identity block is a *prefix*, never a replacement, and is not
+          applied to command-shaped text (a leading ``/``), because
+          ``get_command()`` only recognizes text whose first non-whitespace
+          character is ``/`` — prefixing would turn owner control commands into
+          model text.
+
+        Returns ``(source, event)``, or ``(source, None)`` when the directive
+        asks to suppress the turn.
+        """
+        if decision is None or not getattr(decision, "admitted", False):
+            return source, event
+        if getattr(decision, "suppress_turn", False):
+            return source, None
+
+        runtime_profile = str(getattr(decision, "runtime_profile", "") or "")
+        principal = getattr(decision, "principal", None)
+        subject_id = getattr(decision, "subject_id", None)
+        if principal not in ("owner", "guest"):
+            principal = None
+
+        # No identity claim and no route change: nothing to apply.
+        if not runtime_profile and principal is None:
+            return source, event
+
+        if runtime_profile and runtime_profile != getattr(source, "profile", None):
+            if principal == "owner":
+                user_id_alt = f"owner:{runtime_profile}"
+            elif principal == "guest" and subject_id:
+                user_id_alt = f"guest:{subject_id}"
+            else:
+                user_id_alt = getattr(source, "user_id_alt", None)
+            source = dataclasses.replace(
+                source,
+                profile=runtime_profile,
+                user_id_alt=user_id_alt,
+                chat_id_alt=f"hermes-profile:{runtime_profile}",
+            )
+
+        metadata = dict(getattr(event, "metadata", None) or {})
+        scope_metadata = getattr(decision, "scope_metadata", None)
+        if isinstance(scope_metadata, Mapping):
+            # Only the two keys core knows how to interpret. An extension
+            # cannot smuggle arbitrary trusted metadata onto the event.
+            for key in ("_hermes_contact_scope", "_hermes_contact_timezone"):
+                if key in scope_metadata:
+                    metadata[key] = scope_metadata[key]
+
+        prefix = str(getattr(decision, "context_prefix", "") or "")
+        text = str(getattr(event, "text", "") or "")
+        text_is_command = text.lstrip().startswith("/")
+        if prefix and not text_is_command and not getattr(event, "observed_only", False):
+            event = dataclasses.replace(
+                event, source=source, text=prefix + text, metadata=metadata
+            )
+        else:
+            event = dataclasses.replace(event, source=source, metadata=metadata)
+        return source, event
+
+    def _apply_extension_route_decision_safe(self, source, event, decision):
+        """``_apply_extension_route_decision`` that never raises into routing."""
+        try:
+            return self._apply_extension_route_decision(source, event, decision)
+        except Exception:
+            logger.error(
+                "Refusing inbound message: could not apply the extension's "
+                "validated route directive",
+                exc_info=True,
+            )
+            return source, None
 
     def _extension_runtime_profile(
         self, context, decision
@@ -32299,13 +32452,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return None
 
     def _legacy_owns(self, scope: Optional[str], domain) -> bool:
-        """May the legacy in-core implementation run for *domain* at *scope*?"""
-        try:
-            from gateway.conversation_ownership import (
-                conversation_ownership_registry,
-                legacy_owns,
-            )
+        """May the legacy in-core implementation run for *domain* at *scope*?
 
+        Fail-closed on error whenever any plan is installed. ``UNOWNED`` is a
+        refusal, not a fallback to legacy (see ``conversation_ownership``'s
+        module docstring), and an exception inside the lookup is strictly less
+        informative than ``UNOWNED`` — it cannot establish that legacy is the
+        owner. Returning ``True`` there re-enabled the legacy ingress writer /
+        extraction submit / proactive watcher *beside* an activated extension,
+        which is the duplicate-writer state the selector exists to prevent
+        (Review-3 P1-1).
+
+        The one state that still answers ``True`` is an empty registry: no plan
+        was ever installed anywhere in this process, so nothing was activated
+        and the legacy owner is the only owner — identical to the ``scope is
+        None`` branch below and to pre-checkpoint behavior for CLI, tests, and
+        any process that never ran gateway activation.
+        """
+        from gateway.conversation_ownership import (
+            conversation_ownership_registry,
+            legacy_owns,
+        )
+
+        try:
             if scope is None:
                 # No plan installed anywhere -> nothing was ever activated, so
                 # the legacy owner is still the only owner and behavior is
@@ -32314,8 +32483,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return not conversation_ownership_registry.scopes()
             return legacy_owns(str(scope), domain)
         except Exception:
-            logger.debug("ownership lookup failed; assuming legacy", exc_info=True)
-            return True
+            logger.error(
+                "Conversation ownership lookup failed for domain %s; refusing "
+                "the legacy owner unless no plan is installed",
+                getattr(domain, "value", domain),
+                exc_info=True,
+            )
+            try:
+                return not conversation_ownership_registry.scopes()
+            except Exception:
+                # Cannot even establish whether a plan exists -> refuse.
+                logger.error(
+                    "Conversation ownership registry is unreadable; refusing "
+                    "the legacy owner",
+                    exc_info=True,
+                )
+                return False
 
     def _legacy_owns_for_source(self, source, domain) -> bool:
         return self._legacy_owns(self._ownership_scope_for_source(source), domain)

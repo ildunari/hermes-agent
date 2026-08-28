@@ -71,6 +71,12 @@ def build_route_context(
 
     Returns ``None`` when the event does not carry enough identity to build a
     context; callers treat that as "no extension routing", not as an admit.
+
+    The adapter's frozen ``communication_ingress`` records are forwarded
+    verbatim. An extension that owns the ingress domain needs the records to
+    persist the arrival; without them "owning ingress" could only mean
+    counting it, which is the zero-owner outage this checkpoint must avoid.
+    Core does not interpret the records.
     """
     source = getattr(event, "source", None)
     if source is None:
@@ -79,6 +85,10 @@ def build_route_context(
     platform_name = getattr(platform, "value", None) or str(platform or "")
     if not platform_name:
         return None
+    records = getattr(event, "communication_ingress", ())
+    if not isinstance(records, tuple):
+        records = tuple(records) if isinstance(records, (list, tuple)) else ()
+    raw_message = getattr(event, "raw_message", None)
     try:
         return GatewayRouteContext(
             platform=platform_name,
@@ -91,6 +101,10 @@ def build_route_context(
             text_preview=_text_preview(getattr(event, "text", "")),
             is_group=str(getattr(source, "chat_type", "")) == "group",
             metadata={},
+            ingress_records=records,
+            raw_message=raw_message if isinstance(raw_message, Mapping) else None,
+            message_id=str(getattr(event, "message_id", "") or ""),
+            text=str(getattr(event, "text", "") or ""),
         )
     except Exception:
         logger.debug("could not build extension route context", exc_info=True)
