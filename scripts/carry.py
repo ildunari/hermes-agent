@@ -251,17 +251,36 @@ def is_managed(registry: Registry, path: str) -> bool:
 
 
 def changed_paths(registry: Registry, base: str | None = None) -> tuple[str, list[str]]:
+    """Managed paths this branch still carries, relative to *base*.
+
+    A path that was **deleted** is deliberately excluded. Coverage answers
+    "is every locally-carried path owned?", and removing a carried file is the
+    successful end of that question, not a violation of it. Counting deletions
+    made a de-carry commit report every file it removed as unowned carry, so
+    the only way to get a green run was to keep a dead exemption for a file
+    that no longer exists. ``--diff-filter=d`` (lowercase: exclude deletions)
+    is applied to both the committed range and the staged set.
+    """
     upstream = base or registry.upstream_ref
     merge_base = git(registry.root, "merge-base", "HEAD", upstream)
     paths = git(
         registry.root,
         "diff",
         "--name-only",
+        "--diff-filter=d",
         f"{merge_base}...HEAD",
     ).splitlines()
-    staged = git(registry.root, "diff", "--cached", "--name-only").splitlines()
+    staged = git(
+        registry.root, "diff", "--cached", "--name-only", "--diff-filter=d"
+    ).splitlines()
+    # A file deleted in the working tree but not yet staged is still gone.
+    existing = [
+        path
+        for path in set(paths + staged)
+        if (registry.root / path).exists()
+    ]
     return merge_base, sorted(
-        path for path in set(paths + staged) if is_managed(registry, path)
+        path for path in existing if is_managed(registry, path)
     )
 
 

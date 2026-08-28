@@ -648,49 +648,7 @@ exemptions:
 - path_glob: run_agent.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
-- path_glob: scripts/apply_reviewed_link_interests.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/benchmark_contact_memory_extractor.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/bootstrap_proactive_imessage.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
 - path_glob: scripts/check_local_carry_contract.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/contact_memory/benchmark_embeddinggemma.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/contact_memory/benchmark_model2vec.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/contact_memory/benchmark_qwen3_reranker.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/contact_memory/install_embeddinggemma.sh
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/contact_memory/install_model2vec.sh
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/contact_memory/install_qwen3_reranker.sh
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/contact_memory_interest_maintenance.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/import_reviewed_artifact_interests.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/install_contact_memory_maintenance_cron.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/install_proactive_profile_config.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/install_proactive_rollout_cron.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
 - path_glob: scripts/local_carry_manifest.yaml
@@ -702,21 +660,6 @@ exemptions:
 - path_glob: scripts/manage_guest_cron_launchd.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
-- path_glob: scripts/proactive_operator_smoke.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/proactive_status.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/review_canonical_communication_backfill.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/review_imessage_communication_signals.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/review_imessage_link_signals.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
 - path_glob: scripts/rich_cards/render-card.mjs
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
@@ -724,9 +667,6 @@ exemptions:
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
 - path_glob: scripts/session_hygiene.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: scripts/templates/proactive-rollout.yaml
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
 - path_glob: scripts/tool_workload_audit.py
