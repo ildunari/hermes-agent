@@ -1,6 +1,6 @@
 # Poke/Guest Plugin De-Carry Plan
 
-**Status:** Checkpoint 3 was **rejected** by independent Review 3 (three P0s, one P1) and has been repaired in the isolated worktrees; re-review pending. All four findings are closed with production-path tests, the complete legacy owner is retained and config-selectable, and authoritative mode now functionally owns every domain it claims. Live Guest/Poke remains unchanged and no live configuration, database, gateway process, or transport was touched. Live activation is **not** claimed. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact evidence and the baseline failure classification.
+**Status:** Checkpoint 3 is independently approved after closing three P0s and one P1; Checkpoint 4 core deletion and final de-carry is starting in isolated worktrees. The complete legacy owner remains config-selectable at the Checkpoint 3 boundary. Live Guest/Poke remains unchanged; live activation and soak are not claimed. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact evidence and baseline classification.
 **Date:** 2026-08-27  
 **Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`  
 **Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`  

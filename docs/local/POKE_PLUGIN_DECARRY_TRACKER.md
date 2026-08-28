@@ -6,7 +6,7 @@
 
 ## Current state
 
-- Phase: Checkpoint 3 implemented in isolated worktrees; independent review pending.
+- Phase: Checkpoint 3 independently approved; Checkpoint 4 core deletion starting.
 - Live runtime changed: no. No live config, profile, database, gateway process, or transport was touched.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
@@ -33,10 +33,18 @@
 | 0. Plan | `e063360820`, `a0e701869d`, `906aca5b98` | n/a | evidence audit + diff checks | approved | complete |
 | 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
 | 2. Generic seams + dark parity | `23de9414be`, `50df8641f9`, `dc5d21bc58` | `96026ea` | 438 plugin + 293 closure/integration + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | closure approved | complete |
-| 3. Authoritative activation, legacy fallback retained | `f16961a5ff` (code) + docs commit + Review-3 repair commit | `8d36131` + Review-3 repair commit | see "Review 3 repair" below | Review 3 **rejected**; repair complete, re-review pending | repaired, re-review pending |
+| 3. Authoritative activation, legacy fallback retained | `f16961a5ff`, `a02e1325e7`, `81c590e99d` | `8d36131`, `fea92e8` | 518 plugin; 233 focused core; 234 Guest/proactive/contact passes; carry gates pass | closure approved | complete |
 | 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
 
 ## Evidence log
+
+### 2026-08-28 — Checkpoint 3 closure approved
+
+- Independent closure verdict: `CHECKPOINT_APPROVED`; all three P0s and the P1 are closed in production wiring.
+- Reviewer independently reproduced the rollback exploit through `handle_function_call`, then verified denial under no-plan, legacy, and unowned states even with a foreign allow-all authorizer bound.
+- All six extension ownership domains perform real work through the bounded facade; legacy sites stand down, and proactive child/delivery preserves tri-state uncertainty without retrying `UNKNOWN`.
+- Production Poke databases were inspected read-only: 16 checks passed and SHA-256 hashes of all four files were unchanged. This is not live plugin activation evidence.
+- Closure report: `/Users/Kosta/.hermes/profiles/coding/cache/delegation/subagent-summary-0-20260828_184346_157589.txt`.
 
 ### 2026-08-28 — Review 3 repair (Checkpoint 3 rejected, then repaired)
 
