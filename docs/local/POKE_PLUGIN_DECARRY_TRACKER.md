@@ -6,7 +6,7 @@
 
 ## Current state
 
-- Phase: plan correction after adversarial rejection; closure review pending.
+- Phase: Checkpoint 1 — implementation complete; independent review pending.
 - Live runtime changed: no.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
@@ -30,13 +30,28 @@
 
 | Checkpoint | Core commit | Plugin commit | Tests | Independent review | State |
 |---|---|---|---|---|---|
-| 0. Plan | pending | n/a | evidence audit | pending | in progress |
-| 1. Portable plugin libraries | pending | pending | pending | pending | not started |
+| 0. Plan | `e063360820`, `a0e701869d`, `906aca5b98` | n/a | evidence audit + diff checks | approved | complete |
+| 1. Portable plugin libraries | pending | `66219a6` | 408 plugin + 188 core focused; carry gates pass | pending | review pending |
 | 2. Generic seams + dark parity | pending | pending | pending | pending | not started |
 | 3. Authoritative activation, legacy fallback retained | pending | pending | pending | pending | not started |
 | 4. Core deletion and final de-carry | pending | pending | pending | pending | not started |
 
 ## Evidence log
+
+### 2026-08-27 — Checkpoint 1 implementation
+
+- Plugin commit: `66219a6` (`feat: stage inert Poke policy libraries in plugin`).
+- Added an inert `poke` plugin with no hooks and a no-op `register`; no live profile/config/runtime changed.
+- Extracted neutral texture, Guest policy, contact-memory, proactive, and offline operation libraries. Host adapters remain in core; `lane_b` was intentionally not copied.
+- Portability gate proves zero `agent`, `gateway`, or `tools` imports under `poke/`; compile gate passes.
+- Verification: 408 plugin tests passed; 188 existing core texture/Guest/proactive tests passed; carry registry 364/364, carry doctor, and 144-surface carry contract passed.
+- Durable databases and profile state were not copied, opened, or migrated.
+
+### 2026-08-27 — plan approved
+
+- Final closure verdict: `PLAN_APPROVED`; no P0/P1 findings remain.
+- Closure review verified the checkpoint order, immutable final-dispatch policy token, thread/executor propagation, per-path bypass gates, eager profile activation, and reserve-before-send idempotency contract.
+- Review transcript: `/Users/Kosta/.hermes/profiles/coding/cache/delegation/live/deleg_a972c741/task-0.log`.
 
 ### 2026-08-27 — adversarial plan rejection
 

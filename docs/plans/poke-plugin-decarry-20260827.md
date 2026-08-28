@@ -1,6 +1,6 @@
 # Poke/Guest Plugin De-Carry Plan
 
-**Status:** Revised after adversarial rejection; pending closure review
+**Status:** Approved after adversarial review; Checkpoint 1 review pending
 **Date:** 2026-08-27  
 **Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`  
 **Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`  

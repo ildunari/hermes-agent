@@ -1185,7 +1185,7 @@ features:
         needles: [_plugin_system_context]
         description: hook system_context is appended after the stable cached prompt at API call time only, never persisted and never part of the cache signature
   - id: gateway.poke-guest-conversation-stack
-    title: Poke/Guest BlueBubbles conversation stack (texture, guest identity, contact memory, proactive)
+    title: Temporary Poke/Guest policy leaves pending plugin cutover (texture, identity, contact memory, proactive)
     owner: kosta
     class: keep-core
     owner_paths:
