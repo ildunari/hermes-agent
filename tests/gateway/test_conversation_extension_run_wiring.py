@@ -27,6 +27,7 @@ import pytest
 
 from gateway import conversation_extensions as ce
 from gateway import conversation_extension_runtime as ce_runtime
+from gateway import conversation_ownership as co
 from gateway.config import GatewayConfig, Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
@@ -38,16 +39,31 @@ def _clean_registry():
     ce.lifecycle_task_registry.reset_for_tests()
     ce.reset_request_policy_for_tests()
     ce.reset_gateway_host_operations()
+    co.conversation_ownership_registry.reset_for_tests()
     yield
     ce.conversation_extension_registry.reset_for_tests()
     ce.lifecycle_task_registry.reset_for_tests()
     ce.reset_request_policy_for_tests()
     ce.reset_gateway_host_operations()
+    co.conversation_ownership_registry.reset_for_tests()
 
 
 def _bare_runner() -> GatewayRunner:
     """A GatewayRunner without __init__ side effects (AGENTS.md test pattern)."""
     return object.__new__(GatewayRunner)
+
+
+def _install_turn_owner(scope: str, extension_id: str = "aug") -> None:
+    co.conversation_ownership_registry.install(
+        scope,
+        {
+            co.OwnershipDomain.TURN_POLICY: co.OwnerSelection(
+                co.OwnershipDomain.TURN_POLICY,
+                co.OwnerKind.EXTENSION,
+                extension_id=extension_id,
+            )
+        },
+    )
 
 
 def _tool_auth_bundle(extension_id: str) -> ce.GatewayConversationExtension:
@@ -464,6 +480,7 @@ def test_turn_augmentation_has_a_runner_call_site(tmp_path):
         ),
     )
     ce.conversation_extension_registry.register(bundle, scope=scope)
+    _install_turn_owner(scope)
 
     text = runner._collect_extension_turn_context(
         scope=scope,
@@ -508,6 +525,7 @@ def test_turn_augmentation_failure_is_fail_open(tmp_path):
         augment_turn=_boom,
     )
     ce.conversation_extension_registry.register(bundle, scope=scope)
+    _install_turn_owner(scope)
 
     assert (
         runner._collect_extension_turn_context(
@@ -521,6 +539,57 @@ def test_turn_augmentation_failure_is_fail_open(tmp_path):
         )
         == ""
     )
+
+
+def test_turn_augmentation_tool_binds_and_dispatches_through_production_collector(tmp_path):
+    from agent.request_scoped_tools import (
+        RequestScopedTool,
+        bind_request_scoped_tools,
+        get_request_scoped_handler,
+        record_request_scoped_usage,
+    )
+
+    runner = _bare_runner()
+    scope = str(tmp_path / "tool-augment")
+    committed = []
+    tool = RequestScopedTool(
+        schema={
+            "name": "request_lookup",
+            "parameters": {"type": "object"},
+        },
+        handler=lambda args: f"found:{args['query']}",
+        on_success=lambda values: committed.append(tuple(values)),
+    )
+    bundle = ce.GatewayConversationExtension(
+        extension_id="aug",
+        api_version=ce.EXTENSION_API_VERSION,
+        capabilities=frozenset({"turn_policy"}),
+        augment_turn=lambda _ctx: ce.GatewayTurnAugmentation(
+            request_tools=(tool,)
+        ),
+    )
+    ce.conversation_extension_registry.register(bundle, scope=scope)
+    _install_turn_owner(scope)
+
+    augmentation = runner._collect_extension_turn_augmentation(
+        scope=scope,
+        session_key="s",
+        runtime_profile="default",
+        platform="discord",
+        sender_identity="u",
+        chat_type="dm",
+        user_text="lookup",
+    )
+    assert augmentation.request_tools == (tool,)
+
+    agent = SimpleNamespace(tools=[], valid_tool_names=set())
+    with bind_request_scoped_tools(agent, augmentation.request_tools) as binding:
+        handler = get_request_scoped_handler(agent, "request_lookup")
+        assert handler is not None
+        assert handler({"query": "x"}) == "found:x"
+        record_request_scoped_usage(agent, "request_lookup", "fact-1")
+        binding.commit_success()
+    assert committed == [("fact-1",)]
 
 
 # ---------------------------------------------------------------------------

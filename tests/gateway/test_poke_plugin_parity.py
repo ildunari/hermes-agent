@@ -119,6 +119,51 @@ def _decision_tuple(decision):
     )
 
 
+def test_plugin_lane_b_executes_and_commits_through_core_binding(monkeypatch, tmp_path):
+    """The transferred schema is not enough: handler and on_success must run."""
+    from types import SimpleNamespace
+
+    from agent.request_scoped_tools import (
+        bind_request_scoped_tools,
+        get_request_scoped_handler,
+    )
+
+    lane_b = _load_plugin_module("poke.contact_memory.lane_b")
+    broker_module = _load_plugin_module("poke.contact_memory.broker")
+    schema_module = _load_plugin_module("poke.contact_memory.schema")
+    committed = []
+
+    class Broker:
+        def search(self, scope, query, **_kwargs):
+            assert scope.contact_id == "contact-a"
+            assert query == "door code"
+            return broker_module.RecallBundle("2468", ("fact-a",))
+
+        def record_usage(self, scope, fact_ids, **kwargs):
+            committed.append((scope.contact_id, tuple(fact_ids), kwargs))
+
+    monkeypatch.setattr(lane_b, "get_broker", lambda *_args, **_kwargs: Broker())
+    scope = broker_module.RetrievalScope(
+        schema_module.RetrievalPrincipal.OWNER,
+        "contact-a",
+        "session-a",
+    )
+    tool = lane_b.build_lane_b_tool(
+        root=tmp_path, config={}, scope=scope, turn_index=4
+    )
+    agent = SimpleNamespace(tools=[], valid_tool_names=set())
+
+    with bind_request_scoped_tools(agent, (tool,)) as binding:
+        handler = get_request_scoped_handler(agent, "contact_memory_search")
+        assert handler is not None
+        assert handler({"query": "door code"}) == "2468"
+        binding.commit_success()
+
+    assert committed == [
+        ("contact-a", ("fact-a",), {"turn_index": 4})
+    ]
+
+
 @pytest.mark.parametrize("function_name,function_args", GUEST_TOOL_CORPUS)
 def test_guest_tool_decision_parity(
     core_guest, plugin_guest, function_name, function_args, tmp_path

@@ -118,6 +118,44 @@ def test_explicit_legacy_stays_legacy_even_with_a_registered_extension():
     assert selection.kind is co.OwnerKind.LEGACY
 
 
+def test_turn_policy_has_exactly_one_owner_for_extension_rollback_and_no_plan():
+    scope = "/tmp/home-turn-owner"
+    capability = co.DOMAIN_REQUIRED_CAPABILITY[co.OwnershipDomain.TURN_POLICY]
+    ce.conversation_extension_registry.register(
+        _bundle("turn-ext", {capability}), scope=scope
+    )
+
+    no_plan = co.conversation_ownership_registry.owner(
+        scope, co.OwnershipDomain.TURN_POLICY
+    )
+    assert no_plan.kind is co.OwnerKind.LEGACY
+
+    extension = co.select_owner(
+        co.OwnershipDomain.TURN_POLICY,
+        scope=scope,
+        config_raw=_cfg(turn_policy="extension"),
+    )
+    assert extension.kind is co.OwnerKind.EXTENSION
+    assert extension.extension_id == "turn-ext"
+
+    rollback = co.select_owner(
+        co.OwnershipDomain.TURN_POLICY,
+        scope=scope,
+        config_raw=_cfg(turn_policy="legacy"),
+    )
+    assert rollback.kind is co.OwnerKind.LEGACY
+
+    ce.conversation_extension_registry.register(
+        _bundle("second-turn-ext", {capability}), scope=scope
+    )
+    ambiguous = co.select_owner(
+        co.OwnershipDomain.TURN_POLICY,
+        scope=scope,
+        config_raw=_cfg(turn_policy="extension"),
+    )
+    assert ambiguous.kind is co.OwnerKind.UNOWNED
+
+
 def test_unreadable_configuration_falls_back_to_legacy_not_unowned():
     """A malformed *shape* must not take an ordinary gateway out of service."""
     selection = co.select_owner(

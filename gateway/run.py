@@ -6548,75 +6548,92 @@ class TurnRunner:
         # only — the ephemeral prompt here stays byte-stable across turns.
         cache_ephemeral = combined_ephemeral
 
-        # Compile contact recall from the immutable scope captured after
-        # authenticated routing. It is assigned to the cached agent's
-        # API-only current-user-message lane below, never to system context.
+        # Resolve the turn-policy owner once for this request. The legacy
+        # contact lane and the extension augmentation are mutually exclusive;
+        # an unowned verdict runs neither rather than creating two owners.
+        from gateway.conversation_ownership import OwnershipDomain as _OwnershipDomain
+        from hermes_constants import hermes_home_key as _ce_home_key
+
         _contact_memory_raw = (ctx.user_config.get("agent", {}) or {}).get("contact_memory", {})
         _contact_memory_home = self._runner._resolve_profile_home_for_source(ctx.source)
+        _turn_policy_scope = _ce_home_key(_contact_memory_home)
+        _legacy_turn_policy = self._runner._legacy_owns(
+            _turn_policy_scope, _OwnershipDomain.TURN_POLICY
+        )
+        _turn_index = sum(row.get("role") == "user" for row in ctx.history)
         _lane_a_usage: list = []
-        _recall_prompt = _compile_contact_memory_prompt(
-            config_raw=_contact_memory_raw,
-            trusted_scope=ctx.trusted_contact_scope,
-            message=ctx.message,
-            history=ctx.history,
-            session_key=ctx.session_key or ctx.session_id or "gateway",
-            now_ts=ctx.persist_user_timestamp or time.time(),
-            profile_home=_contact_memory_home,
-            usage_sink=_lane_a_usage,
-        )
+        _recall_prompt = ""
+        _extension_augmentation = None
 
-        # Session-frozen interest digest (Phase 2). Read once per session and
-        # appended to the same API-only user-context lane as recall — never
-        # the cached system prefix — so prompt caching stays byte-stable and
-        # a mid-session maintenance regen cannot hot-swap it.
-        _digest_snapshots = getattr(self._runner, "_interest_digest_snapshots", None)
-        _digest_lock = getattr(self._runner, "_interest_digest_lock", None)
-        if _digest_snapshots is None or _digest_lock is None:
-            import threading as _threading
-            _digest_snapshots = OrderedDict()
-            _digest_lock = _threading.Lock()
-            self._runner._interest_digest_snapshots = _digest_snapshots
-            self._runner._interest_digest_lock = _digest_lock
-        _interest_digest = _snapshot_interest_digest(
-            config_raw=_contact_memory_raw,
-            trusted_scope=ctx.trusted_contact_scope,
-            profile_home=_contact_memory_home,
-            session_key=ctx.session_key or ctx.session_id or "gateway",
-            session_id=ctx.session_id,
-            snapshots=_digest_snapshots,
-            lock=_digest_lock,
-        )
-        _recall_prompt = _join_contact_turn_context(
-            _recall_prompt, _interest_digest
-        )
-
-        # Turn-preparation fire site. A registered conversation extension may
-        # contribute optional per-turn context; it rides the same API-only
-        # current-user-message lane as contact recall, never the cached system
-        # prefix, so per-conversation prompt caching stays byte-stable.
-        # Fails open and returns "" when no extension declares ``turn_policy``,
-        # so ordinary turns are unchanged.
-        try:
-            from hermes_constants import hermes_home_key as _ce_home_key
-
-            _extension_turn_context = self._runner._collect_extension_turn_context(
-                scope=_ce_home_key(_contact_memory_home),
+        if _legacy_turn_policy:
+            # Legacy rollback/no-plan owner. This is byte-identical to the
+            # pre-transfer contact recall and digest lane.
+            _recall_prompt = _compile_contact_memory_prompt(
+                config_raw=_contact_memory_raw,
+                trusted_scope=ctx.trusted_contact_scope,
+                message=ctx.message,
+                history=ctx.history,
                 session_key=ctx.session_key or ctx.session_id or "gateway",
-                runtime_profile=str(getattr(ctx.source, "profile", None) or "default"),
-                platform=platform_key,
-                sender_identity=str(getattr(ctx.source, "user_id", "") or ""),
-                chat_type=str(getattr(ctx.source, "chat_type", "") or ""),
-                user_text=str(ctx.message or ""),
+                now_ts=ctx.persist_user_timestamp or time.time(),
+                profile_home=_contact_memory_home,
+                usage_sink=_lane_a_usage,
             )
-        except Exception:
-            logger.debug(
-                "conversation extension turn augmentation site failed", exc_info=True
+
+            _digest_snapshots = getattr(self._runner, "_interest_digest_snapshots", None)
+            _digest_lock = getattr(self._runner, "_interest_digest_lock", None)
+            if _digest_snapshots is None or _digest_lock is None:
+                import threading as _threading
+                _digest_snapshots = OrderedDict()
+                _digest_lock = _threading.Lock()
+                self._runner._interest_digest_snapshots = _digest_snapshots
+                self._runner._interest_digest_lock = _digest_lock
+            _interest_digest = _snapshot_interest_digest(
+                config_raw=_contact_memory_raw,
+                trusted_scope=ctx.trusted_contact_scope,
+                profile_home=_contact_memory_home,
+                session_key=ctx.session_key or ctx.session_id or "gateway",
+                session_id=ctx.session_id,
+                snapshots=_digest_snapshots,
+                lock=_digest_lock,
             )
-            _extension_turn_context = ""
-        if _extension_turn_context:
             _recall_prompt = _join_contact_turn_context(
-                _recall_prompt, _extension_turn_context
+                _recall_prompt, _interest_digest
             )
+        else:
+            try:
+                trusted_scope = ctx.trusted_contact_scope
+                _extension_augmentation = self._runner._collect_extension_turn_augmentation(
+                    scope=_turn_policy_scope,
+                    session_key=ctx.session_key or ctx.session_id or "gateway",
+                    runtime_profile=str(getattr(ctx.source, "profile", None) or "default"),
+                    platform=platform_key,
+                    sender_identity=str(getattr(ctx.source, "user_id", "") or ""),
+                    chat_type=str(getattr(ctx.source, "chat_type", "") or ""),
+                    user_text=str(ctx.message or ""),
+                    profile_home=str(_contact_memory_home),
+                    session_id=str(ctx.session_id or ""),
+                    principal=str(getattr(trusted_scope, "principal", "") or ""),
+                    subject_id=str(getattr(trusted_scope, "contact_id", "") or ""),
+                    turn_index=_turn_index,
+                    now_timestamp=ctx.persist_user_timestamp or time.time(),
+                    current_message_id=str(ctx.event_message_id or "") or None,
+                    conversation_history=tuple(
+                        dict(row) for row in ctx.history if isinstance(row, dict)
+                    ),
+                )
+            except Exception:
+                logger.debug(
+                    "conversation extension turn augmentation site failed", exc_info=True
+                )
+                _extension_augmentation = None
+            if _extension_augmentation is not None:
+                _extension_turn_context = "\n\n".join(
+                    part for part in _extension_augmentation.user_context if part
+                )
+                if _extension_turn_context:
+                    _recall_prompt = _join_contact_turn_context(
+                        _recall_prompt, _extension_turn_context
+                    )
 
         max_iterations = _current_max_iterations()
 
@@ -7077,13 +7094,47 @@ class TurnRunner:
         # system prompt, tools, transports, or conversation state.
         setattr(agent, "ephemeral_system_prompt", combined_ephemeral or None)
         setattr(agent, "per_turn_user_context", _recall_prompt or "")
-        _lane_b_tools = _contact_memory_lane_b_tools(
-            config_raw=_contact_memory_raw,
-            trusted_scope=ctx.trusted_contact_scope,
-            session_key=ctx.session_key or ctx.session_id or "gateway",
-            turn_index=sum(row.get("role") == "user" for row in ctx.history),
-            profile_home=_contact_memory_home,
+        _lane_b_tools = (
+            _contact_memory_lane_b_tools(
+                config_raw=_contact_memory_raw,
+                trusted_scope=ctx.trusted_contact_scope,
+                session_key=ctx.session_key or ctx.session_id or "gateway",
+                turn_index=_turn_index,
+                profile_home=_contact_memory_home,
+            )
+            if _legacy_turn_policy
+            else []
         )
+        if _extension_augmentation is not None:
+            # Generic Lane-B contributions are executable RequestScopedTool
+            # objects. Merge them with any legacy tools before the one binding
+            # boundary; the owner gate above normally makes the lists exclusive.
+            _lane_b_tools.extend(_extension_augmentation.request_tools)
+        # A request-local tool may never replace a cached/base tool. Filter
+        # conflicts here, where the concrete agent toolset is known, and log
+        # the degradation instead of letting binding abort an otherwise valid
+        # turn.
+        _base_tool_names = set(getattr(agent, "valid_tool_names", None) or ())
+        _bound_tool_names: set[str] = set()
+        _safe_lane_b_tools = []
+        for _request_tool in _lane_b_tools:
+            try:
+                _request_tool_name = _request_tool.name
+            except Exception:
+                logger.warning("Ignoring malformed request-scoped tool")
+                continue
+            if (
+                _request_tool_name in _base_tool_names
+                or _request_tool_name in _bound_tool_names
+            ):
+                logger.warning(
+                    "Ignoring conflicting request-scoped tool %s",
+                    _request_tool_name,
+                )
+                continue
+            _bound_tool_names.add(_request_tool_name)
+            _safe_lane_b_tools.append(_request_tool)
+        _lane_b_tools = _safe_lane_b_tools
 
         # Per-message state — callbacks and reasoning config change every
         # turn and must not be baked into the cached agent constructor.
@@ -7722,6 +7773,15 @@ class TurnRunner:
                     result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
                 if _is_successful_completed_turn(result):
                     _tool_binding.commit_success()
+                    if _extension_augmentation is not None:
+                        for _callback in _extension_augmentation.on_success:
+                            try:
+                                _callback()
+                            except Exception as _callback_exc:
+                                logger.debug(
+                                    "conversation extension success callback failed: %s",
+                                    _callback_exc,
+                                )
                     for (_broker, _scope, _fact_ids, _rec_ids, _turn) in _lane_a_usage:
                         try:
                             _broker.record_usage(
@@ -32571,6 +32631,74 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         return plan, conflicts
 
+    def _collect_extension_turn_augmentation(
+        self,
+        *,
+        scope: str,
+        session_key: str,
+        runtime_profile: str,
+        platform: str,
+        sender_identity: str,
+        chat_type: str,
+        user_text: str,
+        profile_home: str = "",
+        session_id: str = "",
+        principal: str = "",
+        subject_id: str = "",
+        turn_index: int = 0,
+        now_timestamp: Optional[float] = None,
+        current_message_id: Optional[str] = None,
+        conversation_history: tuple = (),
+    ):
+        """Return the proven turn-policy owner's complete augmentation.
+
+        Legacy and unowned verdicts return an empty augmentation. Extension
+        errors remain fail-open and are surfaced through ``degraded`` when the
+        generic collector can construct a result.
+        """
+        from gateway.conversation_extensions import GatewayTurnAugmentation
+
+        if not scope:
+            return GatewayTurnAugmentation()
+        try:
+            from gateway import conversation_extension_runtime as _ce_runtime
+            from gateway.conversation_ownership import (
+                OwnershipDomain,
+                conversation_ownership_registry,
+            )
+
+            owner = conversation_ownership_registry.owner(
+                scope, OwnershipDomain.TURN_POLICY
+            )
+            if not owner.is_extension or not owner.extension_id:
+                return GatewayTurnAugmentation()
+            augmentation = _ce_runtime.augment_turn(
+                scope=scope,
+                session_key=session_key,
+                runtime_profile=runtime_profile,
+                platform=platform,
+                sender_identity=sender_identity,
+                chat_type=chat_type,
+                user_text=user_text,
+                profile_home=profile_home,
+                session_id=session_id,
+                principal=principal,
+                subject_id=subject_id,
+                turn_index=turn_index,
+                now_timestamp=now_timestamp,
+                current_message_id=current_message_id,
+                conversation_history=conversation_history,
+                extension_id=owner.extension_id,
+            )
+        except Exception:
+            logger.debug("conversation extension turn augmentation failed", exc_info=True)
+            return GatewayTurnAugmentation(degraded=True)
+        if augmentation.degraded:
+            logger.debug(
+                "conversation extension turn augmentation degraded for scope %s", scope
+            )
+        return augmentation
+
     def _collect_extension_turn_context(
         self,
         *,
@@ -32582,41 +32710,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         chat_type: str,
         user_text: str,
     ) -> str:
-        """Production turn-augmentation call site.
-
-        Returns the extension-contributed per-turn user context as a single
-        string, ready to ride the same API-only current-user-message lane the
-        gateway already uses for contact recall. That lane is deliberate:
-        appending to the *system* prompt would break per-conversation prompt
-        caching, which is sacred (AGENTS.md).
-
-        Fails open — augmentation is optional enrichment and must never break
-        a turn — and returns ``""`` when no extension declares ``turn_policy``,
-        so ordinary turns are byte-identical.
-        """
-        if not scope:
-            return ""
-        try:
-            from gateway import conversation_extension_runtime as _ce_runtime
-
-            augmentation = _ce_runtime.augment_turn(
-                scope=scope,
-                session_key=session_key,
-                runtime_profile=runtime_profile,
-                platform=platform,
-                sender_identity=sender_identity,
-                chat_type=chat_type,
-                user_text=user_text,
-            )
-        except Exception:
-            logger.debug("conversation extension turn augmentation failed", exc_info=True)
-            return ""
-        parts = [part for part in augmentation.user_context if part]
-        if augmentation.degraded:
-            logger.debug(
-                "conversation extension turn augmentation degraded for scope %s", scope
-            )
-        return "\n\n".join(parts)
+        """Compatibility wrapper returning only extension user context."""
+        augmentation = self._collect_extension_turn_augmentation(
+            scope=scope,
+            session_key=session_key,
+            runtime_profile=runtime_profile,
+            platform=platform,
+            sender_identity=sender_identity,
+            chat_type=chat_type,
+            user_text=user_text,
+        )
+        return "\n\n".join(part for part in augmentation.user_context if part)
 
     async def _run_agent_turn_with_policy(
         self,

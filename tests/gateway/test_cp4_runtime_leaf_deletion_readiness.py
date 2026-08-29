@@ -1,15 +1,14 @@
 """Checkpoint 4 deletion-readiness gates for the Kosta-specific runtime leaves.
 
 Checkpoint 4 deletes core leaves whose capability has moved to the Poke plugin.
-Operator tooling met that bar and was deleted. The *runtime* leaves did not,
-and these tests are the executable statement of why, so the gap is a failing
-contract rather than a paragraph in a handoff note.
+Operator tooling met that bar and was deleted. These tests are the executable
+transfer contract for the runtime capabilities that had blocked leaf deletion.
 
 Each test asserts the property that must hold **before**
 ``gateway/contact_memory/``, ``gateway/proactive_*``, ``gateway/guest_access.py``
-and ``gateway/conversation_texture_v2.py`` may be removed. They are written to
-pass the moment the seam is finished, so completing the work turns them green
-instead of requiring them to be rewritten.
+and ``gateway/conversation_texture_v2.py`` may be removed. They remain green
+only while the generic executable-tool seam is typed, consumed by production,
+and available to a turn-policy extension.
 
 The plan forbids deleting a leaf while its capability has no owner: Review 3
 already rejected the "resolved to extension, nothing actually runs" shape as a
@@ -28,35 +27,13 @@ from agent.request_scoped_tools import RequestScopedTool
 from gateway import conversation_extensions as ce
 
 
-# These three gates describe a seam that does not exist yet. They are marked
-# ``xfail(strict=True)`` rather than left red so the suite stays honest in both
-# directions: the gap cannot be ignored, and the day someone finishes the seam
-# the run turns XPASS-as-failure and forces this file (and the deletion
-# decision it blocks) to be revisited.
-NOT_YET_IMPLEMENTED = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "CP4 blocker: the generic turn seam cannot carry an executable "
-        "request-scoped tool, and no plugin owns augment_turn, so the "
-        "Kosta-specific runtime leaves cannot be deleted without dropping "
-        "contact recall, the interest digest, and Lane B retrieval."
-    ),
-)
-
-
-@NOT_YET_IMPLEMENTED
 def test_turn_augmentation_can_carry_an_executable_request_scoped_tool():
     """Lane B needs a *callable* tool to leave core; names cannot dispatch.
 
-    ``gateway/contact_memory/lane_b.py`` builds a ``RequestScopedTool``
+    Lane B builds a ``RequestScopedTool``
     (schema + handler + on_success) and ``bind_request_scoped_tools`` binds
-    exactly that object. The generic seam declares
-    ``request_tools: tuple[str, ...]`` and filters values through
-    ``_clean_strings``, which keeps only non-empty ``str``. A real tool is
-    therefore silently dropped: no error, no handler, no tool.
-
-    Until the seam carries the executable object, deleting contact_memory
-    removes Lane B with nothing able to replace it.
+    exactly that object. The generic seam must retain the executable object,
+    not reduce it to a name or silently discard it.
     """
     tool = RequestScopedTool(
         schema={"name": "contact_lane_b", "parameters": {}},
@@ -64,22 +41,20 @@ def test_turn_augmentation_can_carry_an_executable_request_scoped_tool():
     )
 
     augmentation = ce.GatewayTurnAugmentation(request_tools=(tool,))
-    collected = ce._clean_strings(augmentation.request_tools)
+    collected, degraded = ce._clean_request_tools(augmentation.request_tools)
 
     assert collected == [tool], (
         "the generic turn-augmentation seam discards executable request-scoped "
         "tools, so Lane B retrieval has no way out of core"
     )
+    assert degraded is False
 
 
-@NOT_YET_IMPLEMENTED
 def test_turn_augmentation_request_tools_is_consumed_in_production():
     """An unconsumed field cannot be an owner.
 
-    ``collect_turn_augmentation`` populates ``request_tools``, but nothing in
-    production reads it: ``_collect_extension_turn_context`` returns only the
-    joined ``user_context``. A field that is written and never read cannot take
-    ownership of Lane B, so the capability would simply vanish on deletion.
+    ``collect_turn_augmentation`` populates ``request_tools`` and production
+    must merge those objects into the request-scoped binding boundary.
 
     Scope note: only importable Python under the runtime packages counts. An
     earlier version grepped the whole tree, so writing *documentation* about
@@ -110,7 +85,6 @@ def test_turn_augmentation_request_tools_is_consumed_in_production():
     )
 
 
-@NOT_YET_IMPLEMENTED
 def test_augmentation_field_type_admits_tool_objects():
     """The declared type is the contract a plugin author codes against."""
     field = {f.name: f for f in dataclasses.fields(ce.GatewayTurnAugmentation)}[

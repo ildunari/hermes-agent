@@ -37,6 +37,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from agent.request_scoped_tools import (
+    RequestScopedTool,
+    record_current_request_scoped_usage,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -183,6 +188,14 @@ class GatewayTurnContext:
     sender_identity: str
     chat_type: str
     user_text: str
+    profile_home: str = ""
+    session_id: str = ""
+    principal: str = ""
+    subject_id: str = ""
+    turn_index: int = 0
+    now_timestamp: Optional[float] = None
+    current_message_id: Optional[str] = None
+    conversation_history: tuple[Mapping[str, Any], ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -197,7 +210,8 @@ class GatewayTurnAugmentation:
 
     user_context: tuple[str, ...] = ()
     system_context: tuple[str, ...] = ()
-    request_tools: tuple[str, ...] = ()
+    request_tools: tuple[RequestScopedTool, ...] = ()
+    on_success: tuple[Callable[[], Any], ...] = ()
     degraded: bool = False
 
 
@@ -1126,18 +1140,24 @@ def resolve_route(
 
 
 def collect_turn_augmentation(
-    context: GatewayTurnContext, *, scope: Optional[str] = None
+    context: GatewayTurnContext,
+    *,
+    scope: Optional[str] = None,
+    extension_id: Optional[str] = None,
 ) -> GatewayTurnAugmentation:
     """Collect optional per-turn context. Never raises into the turn."""
     active_scope = _current_scope(scope)
     user: list[str] = []
     system: list[str] = []
-    tools: list[str] = []
+    tools: list[RequestScopedTool] = []
+    success_callbacks: list[Callable[[], Any]] = []
     degraded = False
 
-    for extension_id, _generation, bundle in conversation_extension_registry.snapshot(
+    for registered_id, _generation, bundle in conversation_extension_registry.snapshot(
         scope=active_scope
     ):
+        if extension_id is not None and registered_id != extension_id:
+            continue
         if bundle.augment_turn is None:
             continue
         try:
@@ -1145,7 +1165,7 @@ def collect_turn_augmentation(
         except Exception:
             logger.warning(
                 "conversation extension %s raised during turn augmentation; continuing",
-                extension_id,
+                registered_id,
                 exc_info=True,
             )
             degraded = True
@@ -1153,18 +1173,23 @@ def collect_turn_augmentation(
         if not isinstance(augmentation, GatewayTurnAugmentation):
             logger.warning(
                 "conversation extension %s returned a malformed turn augmentation",
-                extension_id,
+                registered_id,
             )
             degraded = True
             continue
         user.extend(_clean_strings(augmentation.user_context))
         system.extend(_clean_strings(augmentation.system_context))
-        tools.extend(_clean_strings(augmentation.request_tools))
+        clean_tools, tools_degraded = _clean_request_tools(augmentation.request_tools)
+        clean_callbacks, callbacks_degraded = _clean_callbacks(augmentation.on_success)
+        tools.extend(clean_tools)
+        success_callbacks.extend(clean_callbacks)
+        degraded = degraded or tools_degraded or callbacks_degraded
 
     return GatewayTurnAugmentation(
         user_context=tuple(user),
         system_context=tuple(system),
         request_tools=tuple(tools),
+        on_success=tuple(success_callbacks),
         degraded=degraded,
     )
 
@@ -1173,6 +1198,49 @@ def _clean_strings(values: Any) -> list[str]:
     if not isinstance(values, (list, tuple)):
         return []
     return [value for value in values if isinstance(value, str) and value.strip()]
+
+
+def _clean_request_tools(
+    values: Any,
+) -> tuple[list[RequestScopedTool], bool]:
+    """Return executable request tools and flag malformed contributions.
+
+    Enrichment remains fail-open, but executable objects are never silently
+    converted to names or discarded. A malformed contribution marks the
+    augmentation degraded and is omitted before it reaches the binding layer.
+    """
+    if not isinstance(values, (list, tuple)):
+        return [], values not in (None, ())
+    clean: list[RequestScopedTool] = []
+    names: set[str] = set()
+    degraded = False
+    for value in values:
+        if not isinstance(value, RequestScopedTool):
+            degraded = True
+            continue
+        try:
+            name = value.name
+        except (TypeError, ValueError):
+            degraded = True
+            continue
+        if not callable(value.handler) or (
+            value.on_success is not None and not callable(value.on_success)
+        ):
+            degraded = True
+            continue
+        if name in names:
+            degraded = True
+            continue
+        names.add(name)
+        clean.append(value)
+    return clean, degraded
+
+
+def _clean_callbacks(values: Any) -> tuple[list[Callable[[], Any]], bool]:
+    if not isinstance(values, (list, tuple)):
+        return [], values not in (None, ())
+    clean = [value for value in values if callable(value)]
+    return clean, len(clean) != len(values)
 
 
 # ---------------------------------------------------------------------------
@@ -1390,6 +1458,7 @@ __all__ = [
     "KNOWN_CAPABILITIES",
     "LifecycleTaskRegistry",
     "RequiredExtension",
+    "RequestScopedTool",
     "authorize_tool_dispatch",
     "collect_turn_augmentation",
     "conversation_extension_registry",
@@ -1405,6 +1474,7 @@ __all__ = [
     "notify_turn_result",
     "parse_required_extensions",
     "request_policy_scope",
+    "record_current_request_scoped_usage",
     "reset_gateway_host_operations",
     "reset_request_policy_for_tests",
     "resolve_route",

@@ -64,11 +64,12 @@ DEFAULT_KEY = "default"
 class OwnershipDomain(str, Enum):
     """One independently selectable domain of conversation behavior.
 
-    These are the six places the plan identifies as needing a single owner.
+    These are the independently selectable places that need a single owner.
     They are named after generic gateway concerns, not after any product.
     """
 
     ROUTING = "routing"
+    TURN_POLICY = "turn_policy"
     INGRESS = "ingress"
     EXTRACTION = "extraction"
     PROACTIVE_CLAIMS = "proactive_claims"
@@ -79,6 +80,7 @@ class OwnershipDomain(str, Enum):
 #: The extension capability a claimant must declare to own each domain.
 DOMAIN_REQUIRED_CAPABILITY: dict[OwnershipDomain, str] = {
     OwnershipDomain.ROUTING: "admission_policy",
+    OwnershipDomain.TURN_POLICY: "turn_policy",
     OwnershipDomain.INGRESS: "ingress_observer",
     OwnershipDomain.EXTRACTION: "post_turn_observer",
     OwnershipDomain.PROACTIVE_CLAIMS: "lifecycle",
@@ -94,7 +96,11 @@ DOMAIN_REQUIRED_CAPABILITY: dict[OwnershipDomain, str] = {
 #: either group is the duplicate-writer / duplicate-send shape, so a plan that
 #: does it is reported as a conflict rather than started.
 COUPLED_DOMAIN_GROUPS: tuple[tuple[OwnershipDomain, ...], ...] = (
-    (OwnershipDomain.INGRESS, OwnershipDomain.EXTRACTION),
+    (
+        OwnershipDomain.TURN_POLICY,
+        OwnershipDomain.INGRESS,
+        OwnershipDomain.EXTRACTION,
+    ),
     (
         OwnershipDomain.PROACTIVE_CLAIMS,
         OwnershipDomain.CHILD_CREATION,

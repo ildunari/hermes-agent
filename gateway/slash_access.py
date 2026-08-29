@@ -36,13 +36,31 @@ included here — only the slash-command access split.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, FrozenSet, Iterable, Optional, Tuple
 
-try:
-    from gateway.guest_access import normalize_identity as _normalize_identity
-except Exception:  # pragma: no cover - defensive import fallback
-    def _normalize_identity(value: Any) -> str:
-        return str(value).strip() if value is not None else ""
+
+def _normalize_identity(value: Any) -> str:
+    """Conservative phone/email identity normalization for access lists."""
+    if value is None:
+        return ""
+    raw = str(value).strip().lower()
+    if not raw:
+        return ""
+    if "imessage;-;" in raw or "sms;-;" in raw:
+        raw = raw.split(";-;", 1)[1]
+    if ";+;" in raw:
+        return raw
+    if "@" in raw and not re.fullmatch(r"[+()\d\s.-]+", raw):
+        return raw
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    if raw.startswith("+") and digits:
+        return "+" + digits
+    return raw
 
 
 # Slash commands that MUST stay reachable for any allowed user, even when

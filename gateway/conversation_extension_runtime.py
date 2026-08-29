@@ -295,6 +295,15 @@ def augment_turn(
     sender_identity: str,
     chat_type: str,
     user_text: str,
+    profile_home: str = "",
+    session_id: str = "",
+    principal: str = "",
+    subject_id: str = "",
+    turn_index: int = 0,
+    now_timestamp: Optional[float] = None,
+    current_message_id: Optional[str] = None,
+    conversation_history: tuple[Mapping[str, Any], ...] = (),
+    extension_id: Optional[str] = None,
 ) -> GatewayTurnAugmentation:
     """Collect optional per-turn context. Never raises into the turn."""
     context = GatewayTurnContext(
@@ -304,8 +313,18 @@ def augment_turn(
         sender_identity=sender_identity,
         chat_type=chat_type,
         user_text=user_text,
+        profile_home=profile_home,
+        session_id=session_id,
+        principal=principal,
+        subject_id=subject_id,
+        turn_index=turn_index,
+        now_timestamp=now_timestamp,
+        current_message_id=current_message_id,
+        conversation_history=conversation_history,
     )
-    return collect_turn_augmentation(context, scope=scope)
+    return collect_turn_augmentation(
+        context, scope=scope, extension_id=extension_id
+    )
 
 
 def observe_turn_completion(

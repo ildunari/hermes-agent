@@ -18,8 +18,9 @@ import time -> no import cycle. The lazy import preserves the exact logger name
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 from gateway.config import Platform
 from gateway.session import SessionSource
@@ -85,6 +86,64 @@ def _coerce_allow_set(raw) -> set[str]:
     return {part.strip() for part in str(raw).split(",") if part.strip()}
 
 
+def _shared_bluebubbles_profiles_from_registry(path: Path) -> frozenset[str]:
+    """Read only the transport-sharing facts from a contact registry.
+
+    This generic authorization module deliberately does not import the carried
+    Guest policy leaf. It needs profile names and the presence of configured
+    identities only; route classification remains extension-owned.
+    """
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        data = json.loads(text)
+    else:
+        import yaml
+
+        data = yaml.safe_load(text) or {}
+    if not isinstance(data, Mapping):
+        return frozenset()
+
+    profiles: set[str] = set()
+    owner_profile = str(data.get("owner_profile") or "gpt").strip()
+    owner_identities = data.get("owner_identities") or data.get("kosta_identities")
+    if (
+        owner_profile
+        and data.get("owner_contact_id") == "kosta-owner"
+        and bool(owner_identities)
+    ):
+        profiles.add(owner_profile)
+
+    contacts = data.get("contacts") or {}
+    if isinstance(contacts, Mapping):
+        values = list(contacts.values())
+    elif isinstance(contacts, (list, tuple)):
+        values = list(contacts)
+    else:
+        values = []
+    guest_configured = False
+    for raw in values:
+        if not isinstance(raw, Mapping):
+            continue
+        surfaces = raw.get("allowed_surfaces", ["bluebubbles"])
+        if "bluebubbles" not in {str(item).strip().lower() for item in surfaces or ()}:
+            continue
+        identities = raw.get("identities")
+        identities = identities if isinstance(identities, Mapping) else {}
+        blue = identities.get("bluebubbles") or raw.get("bluebubbles") or {}
+        if isinstance(blue, Mapping):
+            blue = blue.get("handles") or blue.get("ids") or ()
+        email = identities.get("email") or raw.get("email") or {}
+        if isinstance(email, Mapping):
+            email = email.get("addresses") or email.get("handles") or ()
+        if blue or email:
+            guest_configured = True
+            break
+    guest_profile = str(data.get("guest_profile") or "guest").strip()
+    if guest_profile and guest_configured:
+        profiles.add(guest_profile)
+    return frozenset(profiles)
+
+
 class GatewayAuthorizationMixin:
     """User/chat authorization methods for ``GatewayRunner``."""
 
@@ -119,27 +178,9 @@ class GatewayAuthorizationMixin:
         if cached and cached[0] == cache_key:
             return cached[1]
         try:
-            from gateway.guest_access import load_contact_registry
-
-            registry = load_contact_registry(path)
+            resolved = _shared_bluebubbles_profiles_from_registry(path)
         except Exception:
             return frozenset()
-        profiles: set[str] = set()
-        owner_profile = str(registry.owner_profile or "").strip()
-        if (
-            owner_profile
-            and registry.owner_contact_id == "kosta-owner"
-            and registry.owner_identities
-        ):
-            profiles.add(owner_profile)
-        guest_profile = str(registry.guest_profile or "").strip()
-        if guest_profile and any(
-            "bluebubbles" in contact.allowed_surfaces
-            and contact.bluebubbles_identity_set()
-            for contact in registry.contacts
-        ):
-            profiles.add(guest_profile)
-        resolved = frozenset(profiles)
         self._shared_bluebubbles_profiles_cache = (cache_key, resolved)
         return resolved
 
