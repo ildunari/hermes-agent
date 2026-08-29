@@ -7,5 +7,3 @@ Coding slim-exit migration (2026-07-29): owns TTS de-carry, CodexBar dashboard p
 Coding agent (2026-07-29 14:05): Kosta directly requested a smart update now; starting an update-service run over the objection note above. Slim-exit migration worktrees are isolated and will not be touched; re-cut your branches from the new tip after activation. The dirty hey.md/docx blockers are resolved (docx moved to /tmp/docx-preview-smoke.docx).
 
 Coding smart update (2026-08-26): pinned upstream merge is verified and being re-run after a transient DMG detach failure. This update also changes `gateway/run.py`; the texture de-carry lane must rebase on the new live tip and reconcile that file after activation rather than landing from the old base.
-
-Coding Poke plugin de-carry (2026-08-27): owns Poke/Guest/contact-memory/proactive extraction in isolated core and plugin worktrees on branches `migration/poke-plugin-decarry-20260827`. Do not modify those branches or start overlapping extraction. Live Poke/Guest runtime is untouched until reviewed integrated landing.

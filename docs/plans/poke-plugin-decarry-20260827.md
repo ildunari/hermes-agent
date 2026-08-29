@@ -1,337 +1,137 @@
 # Poke/Guest Plugin De-Carry Plan
 
-**Status:** Checkpoint 4 runtime deletion is implemented and locally verified in isolated worktrees. Product runtime leaves are physically absent from core; plugin migration commit `ccd99d26b7db04173d918732c2e3c0ed20f3a447` and core deletion commit `28e12493cac5d53f63aa611dfa8a295598ef638a` are recorded. Live Guest/Poke remains unchanged. Final independent approval, landing, safe restart, and bounded soak remain outstanding and are not claimed. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact fixed-shard evidence and residual classification.
+**Status:** **COMPLETE** as of 2026-08-29. Checkpoint 4 runtime deletion is landed on the live core branch, the compatible plugin migration is landed on plugin `main`, the gateway was restarted after the final BlueBubbles load-order fix, live startup/ownership/readiness was verified, the no-send validator probe passed, focused tests passed, and migration worktrees/branches were cleaned up.
 **Date:** 2026-08-27
-**Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`
-**Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`
-**Core base:** `240839a7aca0e25d7f1e67059a96da463b9f2038` (`local/studio-slim`)
-**Plugin base:** `62422c33bb6a93a41aef7e19c89371dbb451a69b` (`main`)
+**Core live branch:** `/Users/Kosta/.hermes/hermes-agent` on `local/studio-slim`.
+**Plugin live branch:** `/Users/Kosta/.hermes/plugins` on `main`.
+**Tracker:** `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md`.
 
 ## 1. Goal
 
-Move as much Kosta-specific Poke/Guest/contact-memory/proactive behavior as safely possible from Hermes Agent core into the user-plugin repository. Core should retain only reusable, provider-neutral extension contracts and generic persistence/runtime capabilities that would be reasonable upstream features.
+Move Kosta-specific Poke/Guest/contact-memory/proactive behavior from Hermes Agent core into the user-plugin repository. Core now retains only reusable, provider-neutral extension contracts and generic persistence/runtime capabilities that are reasonable upstream features.
 
-This is not a source-file relocation exercise. The final dependency direction must be:
+Final dependency direction:
 
 ```text
 Hermes core -> generic gateway extension contract
 Poke plugin -> implements that contract using plugin-owned policy and state
 ```
 
-Core must not import `hermes_plugins.poke`, `plugins.poke`, or any other user-plugin package. The plugin must not monkeypatch or import private (`_name`) core symbols.
+Core does not import `hermes_plugins.poke`, `plugins.poke`, or any other user-plugin package. The plugin does not monkeypatch or import private core policy leaves.
 
-## 2. Current evidence and baseline
+## 2. Final architecture
 
-- Local branch changes 670 files relative to upstream; 91 are changed on both sides.
-- Poke/Guest leaf code is about 19,873 lines across `gateway/contact_memory`, `gateway/proactive_*`, and `gateway/guest_access.py`.
-- `gateway/run.py` is the dominant collision surface: approximately 3,102 locally changed lines and 321 Poke/Guest/contact/proactive references.
-- Existing useful plugin surfaces: platform overrides, `pre_gateway_dispatch`, `pre_llm_call` user/system context lanes, request-scoped tools, slash/CLI commands, host-owned `ctx.llm`, background-task registration, profile-scoped plugin state, and safe gateway message injection.
-- Missing surfaces: a public gateway-runtime lifecycle, structured source-routing mutation, fail-closed request policy, post-turn completion with trusted route identity, and a host-owned initiated-assistant/delivery facade for proactive work.
-- Conversation texture glue is already in the plugin, but its 603-line engine remains carried in core and `gateway.proactive_fetch` imports it.
-- The carry manifest still groups texture, Guest, contact memory, and proactive work into one stale `gateway.poke-guest-conversation-stack` feature.
+### 2.1 Generic core contracts retained
 
-## 3. Safety invariants
+Core owns the provider-neutral gateway-extension surface:
 
-1. **Guest authorization fails closed.** Missing plugin, malformed registry, plugin exception, or ambiguous identity must not grant Guest access or tools.
-2. **Profile/contact isolation survives multiplexing.** No process-global mutable Guest or contact state may leak between root, Poke, Guest, or other profiles. Request-scoped policy remains `ContextVar`-backed.
-3. **Exactly-once proactive delivery remains durable.** Replay, partial commit, restart, and transport uncertainty retain the current ledger and claim semantics.
-4. **No contact receives a migration smoke message.** Live verification uses mocked transport, owner/self-authorized paths, health/status inspection, and naturally occurring traffic only.
-5. **Plugin absence is safe.** Core starts normally with no Poke extension. Profiles configured to require Poke must fail readiness closed rather than silently losing Guest/proactive behavior.
-6. **Two-repository rollout is atomic at behavior level.** The plugin lands first in an inert/compatible state; core seams land next; config activation happens only when both compatible revisions are present. Rollback order is the reverse.
-7. **Current public session semantics stay intact.** Proactive initiated children, parent links, model metadata, session routing, compression/recovery, and delivery visibility must not regress.
-8. **Core owns the required-extension declaration.** A profile cannot declare the requirement only inside the plugin that may be missing. Core validates extension ID, API version, capabilities, and health before adapter connection and again before required ingress or delivery.
-9. **Transport authorization and runtime routing remain separate trust domains.** The transport profile/home is immutable; extension routing is a typed proposal validated by core before entering the runtime-profile scope.
-10. **Tool policy is enforced at final dispatch.** Filtered schemas and request-scoped tools are not sufficient. Every direct, deferred, bridge, and MCP dispatch passes the generic authorization capability; missing or malformed required policy denies. Core issues an immutable request-policy token after validated routing and explicitly propagates it across executor/thread boundaries.
-11. **Code ownership moves without moving durable data.** Existing profile `state.db`, contact-memory SQLite trees, private queues, and root-shared ownership registry remain in place for this program.
+- immutable extension registration, generation-scoped lifecycle, unload/reload safety, and profile-scoped readiness;
+- typed route/admission directives, turn augmentation, request-scoped executable tools, final-dispatch authorization, and post-turn observation;
+- exactly-one conversation ownership across the seven domains: `routing`, `ingress`, `extraction`, `turn_policy`, `initiated_claims`, `child_creation`, and `delivery`;
+- bounded host capabilities for lifecycle tasks, safe current-profile/home resolution, initiated child creation, message injection, and authenticated existing-DM delivery.
 
-## 4. Target architecture
+Core still owns session storage, transport adapters, plugin discovery, readiness aggregation, generic initiated-session persistence, and the capability-gated authenticated existing-DM platform action. These are generic seams, not Poke product policy.
 
-### 4.1 Generic core contracts
+### 2.2 Plugin-owned Poke implementation
 
-Add a small public module, tentatively `gateway/conversation_extensions.py`, containing immutable dataclasses/protocols only:
+The user plugin repository owns:
 
-- `GatewayConversationExtension`: one atomically registered, generation-scoped bundle containing narrow typed admission/routing, turn augmentation, tool authorization, ingress/post-turn observation, and lifecycle subinterfaces.
-- `GatewayRuntimeFacade`: bounded host capabilities; no raw `GatewayRunner` handle.
-- `GatewayRouteContext` / `GatewayRouteDirective`: normalized pre-auth source routing and trusted metadata.
-- `GatewayTurnContext` / `GatewayTurnAugmentation`: per-turn user/system context, request-scoped tools, and policy scope.
-- `GatewayTurnResult`: authenticated source identity, user/assistant text, durable message IDs, and delivery outcome.
-- `GatewayBackgroundTask`: host-owned task registration and cancellation.
-- `InitiatedTurnRequest` / result facade: generic initiated-assistant child creation.
+- Guest contact registry, BlueBubbles route decisions, identity/context prompt policy, final tool policy, and guest filesystem/tool restrictions;
+- contact-memory schema/store, ingress persistence, extraction, interest maintenance, Lane A recall, Lane B retrieval, research workers, and operator tooling;
+- proactive scheduler, claim/reserve/finish ledger policy, lifecycle watcher, child creation, delivery policy, status, alarms, and cron tooling;
+- shared conversation texture engine consumed from the plugin repository;
+- canonical Poke settings, profile-home resolution under multiplex, and read-only compatibility with legacy config keys for the rollout window.
 
-Plugin registration should use a dedicated `PluginContext.register_gateway_conversation_extension(...)` method with tracked unload. Registration must be profile-aware and replacement-safe like platform registrations.
+BlueBubbles also registers as a plugin platform without requiring bare `poke` to be importable, and registers a `cron_delivery_validator_fn` when the current core supports the seam.
 
-Core also owns `gateway.required_conversation_extensions`, a per-profile requirement list containing extension ID, API version, and required capabilities. Missing, incompatible, ambiguous, or unhealthy required extensions make only that profile unready and deny its ingress/sends. Ordinary profiles retain normal no-extension behavior.
+## 3. Safety invariants — final result
 
-The routing order is immutable: core captures the trusted adapter identity and transport profile/home; the extension returns a typed route/admission decision without mutating the live source; core validates the target against served profiles and a permitted route map; transport authorization stays bound to the original home; only then does core enter the validated runtime-profile scope.
+1. Guest authorization fails closed on missing/incompatible/ambiguous extension, malformed registry, callback exception, or unresolved identity.
+2. Profile/contact isolation survives multiplexing: transport home remains immutable, runtime profile changes only after validated route directives, and Poke/Guest state resolves by canonical profile home.
+3. Exactly-once proactive delivery remains durable: claim/reserve/finish and unknown-delivery semantics are plugin-owned through generic host operations.
+4. No contact received a migration smoke message: final live verification used health/status logs and an in-process no-send probe only.
+5. Plugin absence is safe: ordinary profiles run unchanged; profiles requiring Poke fail readiness closed instead of silently losing Guest/proactive behavior.
+6. After CP4 deletion, rollback requires reverting the deletion commit before disabling Poke; a config-only rollback is no longer sufficient because the core policy leaves are intentionally gone.
 
-### 4.2 Core-owned capabilities
+## 4. Checkpoints — final disposition
 
-Core continues to own:
-
-- session database schema and generic initiated-assistant child transaction;
-- request-scoped tool binding mechanism;
-- platform authorization primitives and adapter transport;
-- plugin discovery/activation and capability gates;
-- final-dispatch authorization invocation for every tool path;
-- eager startup enumeration and activation of every served profile, not lazy first-message registration;
-- lifecycle scheduling/cancellation and health aggregation;
-- generic turn composition and agent-loop execution;
-- a capability-gated `send_authenticated_existing_dm` platform action that cannot create chats or fall back, accepts a correlation/idempotency key only after the plugin durably reserves the attempt, and returns `sent`, `definitive_failure`, or `unknown` plus a receipt when available.
-
-These capabilities must contain no hard-coded `poke`, `guest`, contact IDs, relationship names, or proactive policy.
-
-### 4.3 Plugin-owned Poke implementation
-
-Create a `poke` general plugin in the user-plugin repository. It owns:
-
-- Guest contact registry, route decisions, identity prompt policy, slash/tool restrictions, and workspace guards;
-- contact-memory schema/store, broker, extraction, ingress, retrieval, interest maintenance, research workers, backfill/review utilities;
-- proactive scheduler, gate/fetch/compose policy, exactly-once ownership/claims/ledger/retry decision, transport policy, status, and alarms;
-- conversation-texture engine plus existing per-turn texture hook;
-- Poke/Guest slash and CLI/operator commands;
-- Poke-specific configuration schema/defaults and profile names/contact allowlists;
-- operational scripts, eval fixtures, docs, and all tests that assert plugin-owned policy.
-
-The existing `conversation-texture` plugin remains independently loadable. Its engine moves to a stable neutral library in the plugin repository consumed by both `conversation-texture` and Poke proactive composition. Ordinary texture users do not load Poke. Exactly one texture hook owner is permitted per profile. No core import is allowed.
-
-## 5. Checkpoints
-
-### Checkpoint 1 — Pure portable extraction only
-
-Purpose: establish the destination and prove copied code/tests before changing live ownership.
-
-Plugin repository:
-
-- Add the `poke` plugin manifest/package and explicit public subpackages.
-- Copy/move texture engine, Guest policy, contact-memory, proactive libraries, operational scripts, and their policy tests.
-- Replace sibling `gateway.*` imports with plugin-relative imports or small public core contracts.
-- Establish a neutral shared texture library.
-- Keep all registration, watchers, live writes, initiated children, routing, and sends disabled.
-- Preserve existing database paths and schemas.
-- Add compatibility/version checks declaring the required future core extension API.
-- Do not switch the live `conversation-texture` plugin to the new engine in this checkpoint.
-
-Core repository:
-
-- Add no behavior-changing seam yet.
-- Correct stale texture ownership documentation and split the carry feature conceptually into retired texture attachment, temporary leaf carry, and future generic seam.
-- Add the migration tracker and explicit dual-run interlock requirements.
-
-Verification:
-
-- Plugin unit suites for texture, Guest policy, contact memory, proactive scheduler/gate/transport/status.
-- Structural import test: plugin package has no private-core imports and no imports from carried `gateway.contact_memory`, `gateway.proactive_*`, or `gateway.guest_access`.
-- Existing core focused suites remain green.
-
-Stop after clean commits in both repositories. Run an independent P0/P1 review of the exact two-repository checkpoint.
-
-### Checkpoint 2 — Generic seams and side-effect-free dark validation
-
-Purpose: add reusable core extension points and prove parity without making them authoritative.
-
-Core repository:
-
-- Implement atomic extension-bundle registration and generation-safe unload.
-- Add the core-owned required-extension declaration and fail-closed profile readiness gate.
-- Add the explicit transport-home/admission/runtime-route sequence.
-- Add final-dispatch tool authorization across direct, deferred, bridge, and MCP paths.
-- Add per-profile lifecycle activation and health aggregation; task identity includes extension ID, profile home, task key, and generation. Replacement cancels and joins the old generation before enabling the new one.
-- Add bounded host capabilities for lifecycle tasks, current profile/home, session lookup, initiated child creation, safe turn injection, and health/status reporting.
-- Add capability-gated `send_authenticated_existing_dm` to platform actions; do not expose prepared delivery through the runtime facade.
-- Add structured fire sites at pre-auth route, authenticated ingress, turn preparation, execution-policy scope, post-turn completion, gateway start, and gateway stop.
-- Ensure extension failure semantics are explicit per phase: route/policy fail closed; optional enrichment fail open; delivery/ledger failures remain visible and retry-safe.
-- Do not pass `GatewayRunner`, mutable session stores, raw SDK clients, credentials, or private callbacks into plugins.
-- Preserve normal behavior when no extension is registered.
-
-Plugin repository:
-
-- Register the Poke extension in dark/observe mode.
-- Compare only pure/read-only decisions in-process. Stateful parity uses immutable SQLite snapshots or isolated shadow stores and serialized write intents. The observe plugin has no live watcher or send capability and cannot create initiated children.
-- Add readiness probes for extension loaded, config compatible, state roots accessible, and platform ownership resolved.
-
-Verification:
-
-- Core contract tests for registration, unload/reload, profile isolation, sync/async callbacks, exception policy, cancellation, and no-plugin behavior.
-- Per-dispatch-path bypass tests for direct, deferred, bridge, and MCP execution, including executor/thread hops.
-- Differential parity tests for Guest routing/tool decisions and pure contact/proactive decisions. Stateful tests assert unchanged live database hashes/counters and zero outbound calls while using snapshot/shadow stores.
-- Full existing Guest/contact/proactive focused suite.
-
-Stop after clean commits. Run an independent P0/P1 review focused on isolation, auth, replay, cancellation, and unsafe capability leakage.
-
-### Checkpoint 3 — Authoritative plugin activation with legacy fallback retained
-
-Purpose: prove the plugin as the sole live owner while retaining a configuration-only rollback.
-
-Plugin repository:
-
-- Make the Poke extension authoritative when enabled, required, healthy, and compatible.
-- Move all remaining Poke/Guest commands, scripts, tests, docs, and configuration interpretation.
-- Make `plugins.entries.poke.settings` canonical. For one rollout window, use a read-only adapter for legacy `agent.contact_memory` / `agent.proactive`; conflicting values fail readiness closed and no config is rewritten automatically.
-- Adopt the existing durable paths and schemas in place. Verify schema versions, SQLite integrity, row counts, active claims, terminal ledgers, and ownership before activation.
-
-Core repository:
-
-- Add a single-owner selector without deleting the legacy implementation.
-- On startup, select exactly one owner for routing, ingress, extraction, proactive claims, child creation, and delivery.
-- Keep the complete legacy owner inactive but available for rollback.
-
-Activation acceptance:
-
-- Safely restart and prove required-extension readiness, transport-home authorization, runtime routing, final tool enforcement, existing data continuity, one watcher, one ingress write, one texture compilation, and zero outbound smoke sends.
-- Run bounded soak or naturally occurring traffic verification while legacy rollback remains available.
-- Rollback is a config switch plus safe restart at this checkpoint.
-
-Stop after clean commits. Run an independent P0/P1 review against both repositories and the authoritative single-owner contract.
-
-**Checkpoint 3 implementation notes (2026-08-28, revised after Review 3).**
-
-An earlier revision of this section recorded a second "scope decision" that
-declared two authoritative surfaces intentionally quiescent — `on_start`
-spawning no watcher and `authorize_route` proposing no runtime-profile change.
-**That note was invalid and has been removed rather than amended.** Independent
-review established that it did not describe a conservative scope choice but a
-functional outage: with all six domains resolved to `extension` and every
-legacy site gated off, a quiescent owner produces *zero* owners, so contact
-memory stops recording and proactive delivery stops silently. The acceptance
-criteria were not narrowed to match the implementation; the implementation was
-completed to meet the criteria.
-
-One scope decision remains, and it is about *evidence*, not behavior:
-
-1. **Activation acceptance is proved in an isolated harness, not live.** The
-   plan's activation-acceptance bullet reads as a live restart. It was
-   executed instead as in-process harnesses
-   (`tests/gateway/test_poke_authoritative_activation.py` and
-   `tests/gateway/test_poke_functional_ownership.py`) that load the real core
-   modules and the real plugin package against temp-directory state with zero
-   outbound transport. That satisfies the safety invariants (no contact
-   receives a message; no live database is opened for writing) and is labeled
-   as isolated evidence throughout. **The live safe restart, the bounded soak,
-   and naturally-occurring-traffic verification remain outstanding** and are
-   explicitly not claimed.
-
-**Authoritative mode is functional (Review-3 P0-2 repair).** Every declared
-capability is backed by a real implementation in the plugin's `poke/owners.py`,
-driven through the bounded `GatewayRuntimeFacade`:
-
-- `authorize_route` runs the real owner/guest classification and returns the
-  runtime profile, principal, subject id, and trusted identity block; core
-  validates and applies them, so the guest session and policy scope are
-  actually established. An unapproved sender is denied.
-- `observe_ingress` persists the authenticated batch into contact memory and
-  deduplicates replays.
-- `observe_turn_result` submits contact-memory extraction and compiles the
-  turn's conversation texture exactly once.
-- `on_start` registers exactly one host-owned proactive watcher per generation,
-  which drives the unchanged `claim_due` / `reserve_delivery` /
-  `finish_delivery` sequence.
-- Delivery goes through `send_authenticated_existing_dm` and honors the
-  tri-state; `UNKNOWN` is recorded as `delivery_unknown` and never retried.
-
-Legacy routing and ingress sites are now gated on the ownership verdict too, so
-exactly one component classifies and exactly one writes.
-
-### Checkpoint 4 — Core deletion and final de-carry
-
-- Only after Checkpoint 3 evidence is accepted, delete `gateway/contact_memory/`, `gateway/proactive_*`, `gateway/guest_access.py`, and `gateway/conversation_texture_v2.py` and all Poke-specific blocks/imports/helpers from shared core.
-- Retain only generic extension invocations, final-dispatch policy enforcement, required-extension readiness, platform action capability, and generic initiated-session/storage primitives. Do not remove `enforce_guest_tool_call` until direct, deferred, bridge, and MCP bypass tests all pass, including executor/thread propagation.
-- Migrate remaining policy tests and operational tooling, then prove no consumers remain.
-- Rewrite carry manifest, exemptions, residual matrix, and thinning baseline from actual residual generic seams.
-- Require zero core imports/references to removed modules, zero hard-coded Poke/Guest policy, all migrated policy tests passing, and zero Poke-specific symbols in `gateway/run.py` outside generic extension terms.
-- Rebase/cherry-pick onto fresh landing worktrees, preserve the unrelated live `bluebubbles/adapter.py` edit, run focused/broader suites and carry checks, and obtain final independent approval.
-- Land deletion separately, safely restart, and repeat readiness, authorization, replay, uncertainty, lifecycle, post-response, and no-duplicate verification.
-- After deletion, rollback requires reverting the deletion commit before disabling the plugin. Physical data relocation remains out of scope.
-
-**Checkpoint 4 implementation notes (2026-08-28).**
-
-The prerequisite gaps found in the first CP4 attempt were closed rather than
-waived: executable request-scoped tools are consumed by the production turn,
-Poke owns recall/digest/Lane B, Guest filesystem policy lives in the plugin,
-and generic core modules no longer import the product leaf. The final slice then
-physically deleted `gateway/contact_memory/`, `gateway/proactive_*`,
-`gateway/guest_access.py`, `gateway/conversation_texture_v2.py`, and
-`tools/guest_workspace_tools.py`, plus their superseded core tests and Guest
-cron operator. Poke now owns route/tool policy, ingress/extraction, proactive
-and link-research lifecycle, and Guest cron tooling. Core retains only generic
-registration/invocation/readiness, exactly-one ownership, final-dispatch auth,
-authenticated existing-DM action, and initiated-session/storage primitives.
-
-The first attempted slice remains important historical evidence: deletion was
-initially blocked because the turn lane had zero plugin owner, `request_tools`
-discarded executable objects, and `guest_fs` had no replacement. Those findings
-produced the readiness gates and were fixed before deletion; they were not
-retroactively erased or reclassified as harmless.
-
-Verification uses the same 713-file surviving list on pinned
-`cd8547ee7d8de3017b46fab4cdd44e17381100be` and deletion commit
-`28e12493cac5d53f63aa611dfa8a295598ef638a`: all 16 shard return codes are below
-2, the deletion side introduces zero failed node IDs, and all 38 deleted
-baseline test files have explicit migrated/replacement coverage recorded in
-`/tmp/cp4/deleted_baseline_test_coverage_map.json`. Final independent review,
-landing, live activation, restart, and soak remain separate outstanding gates.
-
-The final review then found two reachable P1 closure defects rather than
-approving the first final diff: deleting the core cron guard left internal
-maintenance output able to reach BlueBubbles when `delivery_profile` was
-absent, and one migrated test still imported a deleted core benchmark module.
-The closure revision adds a provider-neutral platform cron-validation seam,
-makes the BlueBubbles plugin the sole owner of the internal-job classifier,
-and repoints the benchmark test to the plugin operation. Plugin-first rollout
-remains backward-compatible because registration feature-detects the new seam.
-The corrected full plugin run explicitly resolved the reviewed core worktree
-and passed 668 tests; the earlier editable-live-core 667-pass claim is
-superseded. Independent closure approval is still required before landing.
-
-## 6. Edge-case matrix
-
-| Edge | Required behavior |
+| Checkpoint | Result |
 |---|---|
-| Plugin missing on Poke/Guest | readiness fails closed; no Guest authorization or proactive send |
-| Plugin missing on ordinary profile | ordinary Hermes behavior unchanged |
-| Plugin callback throws during route/policy | deny/drop safely and surface health alarm |
-| Optional recall/extraction throws | reply continues; error recorded; no corrupt partial state |
-| Restart during proactive claim | durable claim/ledger permits safe recovery without duplicate send |
-| Delivery result unknown | no blind retry; preserve uncertain state for operator review |
-| Multiplexed root process | transport home remains immutable; extension/config/state resolve only after validated admission into the routed profile |
-| Plugin reload while tasks active | old generation cancels and cannot clear/overwrite newer registration |
-| Conversation texture + proactive block | exactly one texture compilation; no duplicate markers |
-| Existing sessions from pre-cutover | parent links, profile route, and origin remain readable |
-| Legacy config only | read-only compatibility adapter; conflicting canonical/legacy values fail readiness closed |
-| Dark parity | pure decisions only in-process; stateful parity uses snapshots/shadow stores and no-send transport |
-| Existing durable databases | adopted in place with integrity/schema/claim checks; no physical migration |
-| Dirty live plugin checkout | landing preserves unrelated edit and verifies exact target commits |
+| 0. Plan | Approved after adversarial review corrected seven blockers. |
+| 1. Portable plugin libraries | Complete; plugin code imported portably and core focused tests/carry gates passed. |
+| 2. Generic seams + dark validation | Complete; registration/readiness/final-dispatch/lifecycle seams landed and closure review approved after wiring repairs. |
+| 3. Authoritative plugin activation | Complete; authoritative Poke became functional for all claimed domains and closure review approved after P0/P1 repair. |
+| 4. Core deletion + final de-carry | **Complete**; targeted runtime leaves deleted from core, plugin migration landed, load-order defects fixed, safe restart/soak/tests/probe/cleanup verified. |
 
-## 7. Documentation and tracking contract
+## 5. Checkpoint 4 final truth
 
-Update at every checkpoint, not only at the end:
+Checkpoint 4 physically deleted the targeted core leaves: `gateway/contact_memory/`, `gateway/proactive_*`, `gateway/guest_access.py`, `gateway/conversation_texture_v2.py`, `tools/guest_workspace_tools.py`, superseded Poke-specific core tests, and Guest cron operator carry. Core retains only generic seams: extension registration/invocation/readiness, exactly-one ownership, final-dispatch auth, authenticated existing-DM action, and initiated-session/storage primitives.
 
-- `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md`: current checkpoint, commits, tests, review report, residual carry metrics, blockers.
-- This plan: decisions and scope changes after adversarial review.
-- `scripts/local_carry_manifest.yaml` and exemptions: exact ownership only.
-- `docs/local/SLIM_EXIT_RESIDUAL_MATRIX_2026-07-29.md`: residual category and update-conflict effect.
-- Plugin `README.md`, `docs/plugin-hygiene.md`, and Poke plugin README: activation, contracts, rollback, tests.
-- Existing Poke/contact/proactive plans: mark superseded sections and link to current ownership; do not silently rewrite historical completion reports.
-- `hey.md`: only active coordination; remove this lane's note when landed.
+The first CP4 attempt found real blockers and did not delete through them: no plugin owner for the turn lane, executable `request_tools` were being discarded, and `guest_fs` had no replacement. Those blockers were fixed before deletion and are now regression-covered.
 
-## 8. Review prompts and evidence
+The final review then found two reachable P1s: internal maintenance cron output could reach BlueBubbles when `delivery_profile` was absent, and one migrated test still imported a deleted core benchmark module. The landed closure added a provider-neutral `PlatformEntry.cron_delivery_validator_fn` seam, made BlueBubbles own the internal-job classifier, and repointed the benchmark test to plugin-owned code.
 
-Each adversarial reviewer receives:
+Two deployment defects were fixed after landing:
 
-- exact core and plugin base/tip SHAs;
-- complete two-repository diff and checkpoint contract;
-- focused test outputs and real-config read-only probes;
-- explicit instruction to construct failures for auth, cross-profile isolation, restart/replay, partial persistence, cancellation, duplicate delivery, plugin absence, and activation order;
-- read-only constraint and required `CURRENT_FINAL_DIFF_APPROVED` / `REJECTED` verdict.
+- plugin `46b7e236e6` fixed Poke profile-home resolution under gateway multiplex;
+- plugin `e3103ad2b6e` fixed root BlueBubbles load order by removing the module-load dependency on separately scoped bare `poke` packages.
 
-## 9. Rollback
+## 6. Final evidence
 
-- Historical pre-CP4 checkpoints allowed a config switch because the complete core owner still existed.
-- After the deletion checkpoint, revert the deletion commit before disabling the plugin.
-- Never roll back by copying files between live checkouts, resetting dirty worktrees, or starting a second gateway.
+- Live gateway PID/start time after the post-`e3103ad` restart: `15497`, `Sat Aug 29 10:37:31 2026` EDT.
+- Health: `http://127.0.0.1:8787/health` -> `200`; `http://100.69.228.58:8642/health` -> `200`.
+- Fresh startup logs show BlueBubbles connected/registered without `No module named 'poke'`; no startup `ERROR`, `Traceback`, `ownership_conflict`, `missing_capability`, or `unready` appeared in the fresh window.
+- Guest and Poke each activated authoritative, each started exactly one proactive watcher generation, duplicate lifecycle starts were skipped, and all seven ownership domains resolved to `extension:poke`.
 
-## 10. Decisions resolved by adversarial review
+Focused test evidence at closure:
 
-1. Register one atomic, generation-scoped extension bundle with narrow typed subinterfaces; do not permit partial policy-generation replacement.
-2. Keep ledger/retry ownership in Poke and add a narrow capability-gated authenticated-existing-DM platform action; no prepared-delivery runtime facade.
-3. Make plugin settings canonical immediately, with one read-only legacy adapter and fail-closed conflict handling. Required-extension declaration is core-owned.
-4. Keep conversation texture independently loadable and move its engine to a neutral shared plugin-repository library.
+- Core: `tests/gateway/test_poke_authoritative_activation.py tests/cron/test_platform_delivery_validation.py` -> **30 passed**.
+- Plugin clean `e3103ad` tree with real core pre-import: `tests/plugins/test_bluebubbles_plugin.py tests/poke_plugin/test_authoritative_activation.py tests/poke_plugin/test_proactive_rollout_cron.py` -> **175 passed, 1 warning**.
+- Prior reviewed landing evidence remains: **108 BlueBubbles**, **67 activation/cron**, **668 plugin**, **177 core + 2 skipped**, **51 Poke policy/import**, fixed 8-shard comparison introduced **0** failed node IDs.
+- `git diff --check` passed in both repositories.
+
+No-send validator probe:
+
+- loaded/registered BlueBubbles in-process with real `hermes_cli` imported first and no `poke` module preloaded;
+- confirmed callable `cron_delivery_validator_fn` registration;
+- rejected an internal maintenance job targeting BlueBubbles;
+- allowed an ordinary reminder targeting BlueBubbles;
+- invoked no send path and mutated no profile database.
+
+## 7. Residual owner matrix
+
+| Surface | Final owner |
+|---|---|
+| Guest route/admission and identity/context | Poke plugin through `routing` / `admission_policy`; core validates typed route directives. |
+| Final Guest tool decision | Poke plugin through `turn_policy`; core enforces at final dispatch. |
+| Contact-memory ingress/extraction | Poke plugin through `ingress` and `extraction`. |
+| Lane A recall, interest digest, Lane B retrieval | Poke plugin through `turn_policy` augmentation. |
+| Proactive claims / child creation / delivery | Poke plugin through `initiated_claims`, `child_creation`, and `delivery`; one watcher per generation. |
+| Delivery ledger + initiated-session persistence | Generic core infrastructure consumed through bounded contracts. |
+| BlueBubbles internal cron delivery validation | BlueBubbles plugin via provider-neutral `cron_delivery_validator_fn`. |
+
+## 8. Edge-case matrix
+
+| Edge | Final behavior |
+|---|---|
+| Plugin missing on Poke/Guest | readiness fails closed; no Guest authorization or proactive send. |
+| Plugin missing on ordinary profile | ordinary Hermes behavior unchanged. |
+| Plugin callback throws during route/policy | deny/drop safely and surface health/readiness failure. |
+| Optional recall/extraction throws | reply continues; error recorded; no corrupt partial state. |
+| Restart during proactive claim | durable claim/ledger permits safe recovery without duplicate send. |
+| Delivery result unknown | no blind retry; preserve uncertain state for operator review. |
+| Multiplexed root process | transport home remains immutable; extension/config/state resolve after validated admission into the routed profile. |
+| Plugin reload while tasks active | old generation cancels and cannot clear/overwrite newer registration. |
+| Conversation texture + proactive block | exactly one texture compilation; no duplicate markers. |
+| Existing durable databases | adopted in place with integrity/schema/claim checks; no physical migration. |
+| Dirty live plugin checkout | unrelated `bluebubbles/adapter.py` attachment-target edit remains uncommitted and preserved exactly. |
+
+## 9. Documentation and tracking closure
+
+The tracker is the authoritative closure record. Historical checkpoint notes are preserved there only where they remain useful evidence; obsolete checkpoint-gate language has been replaced with final truth.
+
+`hey.md` no longer carries the Poke de-carry coordination line. Migration worktrees and migration/landing branches are removed only after clean-worktree and `git cherry` equivalence checks; live branches are never deletion targets.
+
+## 10. Rollback
+
+After CP4, rollback requires reverting the core deletion range before disabling the Poke plugin. Do not roll back by copying files between live checkouts, resetting dirty worktrees, or starting a second gateway.
