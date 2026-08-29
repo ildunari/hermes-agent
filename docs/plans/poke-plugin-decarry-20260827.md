@@ -1,6 +1,6 @@
 # Poke/Guest Plugin De-Carry Plan
 
-**Status:** Checkpoint 3 is independently approved after closing three P0s and one P1; Checkpoint 4 core deletion and final de-carry is starting in isolated worktrees. The complete legacy owner remains config-selectable at the Checkpoint 3 boundary. Live Guest/Poke remains unchanged; live activation and soak are not claimed. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact evidence and baseline classification.
+**Status:** Checkpoint 4 runtime deletion is implemented and locally verified in isolated worktrees. Product runtime leaves are physically absent from core; plugin migration commit `ccd99d26b7db04173d918732c2e3c0ed20f3a447` and core deletion commit `28e12493cac5d53f63aa611dfa8a295598ef638a` are recorded. Live Guest/Poke remains unchanged. Final independent approval, landing, safe restart, and bounded soak remain outstanding and are not claimed. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact fixed-shard evidence and residual classification.
 **Date:** 2026-08-27  
 **Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`  
 **Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`  
@@ -244,40 +244,31 @@ exactly one component classifies and exactly one writes.
 
 **Checkpoint 4 implementation notes (2026-08-28).**
 
-Checkpoint 4 splits into two slices, because only one of them was safe to
-execute. The split is a finding, not a scope reduction.
+The prerequisite gaps found in the first CP4 attempt were closed rather than
+waived: executable request-scoped tools are consumed by the production turn,
+Poke owns recall/digest/Lane B, Guest filesystem policy lives in the plugin,
+and generic core modules no longer import the product leaf. The final slice then
+physically deleted `gateway/contact_memory/`, `gateway/proactive_*`,
+`gateway/guest_access.py`, `gateway/conversation_texture_v2.py`, and
+`tools/guest_workspace_tools.py`, plus their superseded core tests and Guest
+cron operator. Poke now owns route/tool policy, ingress/extraction, proactive
+and link-research lifecycle, and Guest cron tooling. Core retains only generic
+registration/invocation/readiness, exactly-one ownership, final-dispatch auth,
+authenticated existing-DM action, and initiated-session/storage primitives.
 
-*Slice A — delivered.* Operator tooling, evals, and policy tests moved to the
-plugin, and the core copies were deleted (2,993 LOC, 25 files), along with 20
-carry exemptions that pointed at files that no longer exist. Every deleted path
-was checked for a plugin counterpart first, comparing bodies with import and
-`sys.path` bootstrap lines excluded.
+The first attempted slice remains important historical evidence: deletion was
+initially blocked because the turn lane had zero plugin owner, `request_tools`
+discarded executable objects, and `guest_fs` had no replacement. Those findings
+produced the readiness gates and were fixed before deletion; they were not
+retroactively erased or reclassified as harmless.
 
-*Slice B — blocked, deliberately not executed.* The runtime leaves
-(`gateway/contact_memory/`, `gateway/proactive_*`, `gateway/guest_access.py`,
-`gateway/conversation_texture_v2.py`) stay. This checkpoint's own rule is that
-deletion may only remove carry, never capability, and three checks show
-deletion today would remove capability:
-
-1. The per-turn contact lane (recall, interest digest, Lane B) runs in core on
-   every turn and is *not* gated on ownership. The plugin declares no
-   `turn_policy` capability and implements no `augment_turn`, so deleting the
-   leaf leaves the domain with zero owners — precisely the outage shape Review 3
-   rejected for `on_start` and `authorize_route`.
-2. `GatewayTurnAugmentation.request_tools` is typed `tuple[str, ...]` and
-   filtered through `_clean_strings`, so an executable `RequestScopedTool` is
-   silently dropped; and no production code reads the field at all. The seam
-   that would carry Lane B out of core is an unconsumed stub.
-3. `tools/guest_workspace_tools.py` (`guest_fs`) depends on `guest_access`
-   sandbox helpers with no plugin replacement, and two *generic* modules
-   (`authz_mixin`, `slash_access`) import helpers out of the same
-   Kosta-specific leaf.
-
-The prerequisites are recorded in the tracker and pinned as `xfail(strict=True)`
-gates in `tests/gateway/test_cp4_runtime_leaf_deletion_readiness.py`, so
-completing the seam fails the suite loudly rather than leaving the deletion
-decision to memory. The acceptance criteria for this checkpoint are unchanged;
-the implementation is incomplete against them and is reported as such.
+Verification uses the same 713-file surviving list on pinned
+`cd8547ee7d8de3017b46fab4cdd44e17381100be` and deletion commit
+`28e12493cac5d53f63aa611dfa8a295598ef638a`: all 16 shard return codes are below
+2, the deletion side introduces zero failed node IDs, and all 38 deleted
+baseline test files have explicit migrated/replacement coverage recorded in
+`/tmp/cp4/deleted_baseline_test_coverage_map.json`. Final independent review,
+landing, live activation, restart, and soak remain separate outstanding gates.
 
 ## 6. Edge-case matrix
 
@@ -322,8 +313,7 @@ Each adversarial reviewer receives:
 
 ## 9. Rollback
 
-- Before authoritative cutover, disable the Poke plugin entry; existing core implementation remains owner.
-- During activation, retain the complete legacy owner behind a single-owner selector; rollback is a config switch plus detached safe restart.
+- Historical pre-CP4 checkpoints allowed a config switch because the complete core owner still existed.
 - After the deletion checkpoint, revert the deletion commit before disabling the plugin.
 - Never roll back by copying files between live checkouts, resetting dirty worktrees, or starting a second gateway.
 

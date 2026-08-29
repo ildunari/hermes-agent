@@ -6,14 +6,14 @@
 
 ## Current state
 
-- Phase: Checkpoint 4 capability-transfer prerequisites implemented and verified;
-  runtime leaf deletion was deliberately not attempted in this slice.
+- Phase: Checkpoint 4 runtime deletion implemented and locally verified. Product
+  runtime leaves are physically absent from core; plugin migration is committed.
 - Live runtime changed: no. No live config, profile, database, gateway process, or transport was touched.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
 - Active writer: focused Coding subagent in the two isolated migration worktrees.
 
-## Baseline
+## Pre-program baseline (historical)
 
 | Metric | Value |
 |---|---:|
@@ -35,11 +35,119 @@
 | 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
 | 2. Generic seams + dark parity | `23de9414be`, `50df8641f9`, `dc5d21bc58` | `96026ea` | 438 plugin + 293 closure/integration + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | closure approved | complete |
 | 3. Authoritative activation, legacy fallback retained | `f16961a5ff`, `a02e1325e7`, `81c590e99d` | `8d36131`, `fea92e8` | 518 plugin; 233 focused core; 234 Guest/proactive/contact passes; carry gates pass | closure approved | complete |
-| 4. Core deletion and final de-carry | `e5fdf94cf7`, `7bc6a50aa7`, `35798e8081` | `cf8af2d`, `e4853a5` | capability transfer: 628 plugin poke; 109 BlueBubbles+texture against core; 254 generic extension/ownership/parity; 85 Guest enforcement; 40 contact-lane; carry validate/doctor/contract PASS | pending | **partial — transfer prerequisites complete; runtime leaves retained** |
+| 4. Core deletion and final de-carry | `e5fdf94cf7`, `7bc6a50aa7`, `35798e8081`, `28e12493ca` | `cf8af2d`, `e4853a5`, `ccd99d26` | 667 plugin; 147 BB+texture integration; 371 focused core + 2 skipped; 6810 current tests collected with no errors; fixed 8-shard exact-set comparison adds 0 failures; carry 310/310 | **final independent review pending** | **local implementation complete; landing/restart/soak outstanding** |
 
 ## Evidence log
 
-### 2026-08-28 — Checkpoint 4 capability-transfer prerequisites complete
+### 2026-08-28 — Checkpoint 4 runtime deletion verified and committed locally
+
+Plugin `ccd99d26b7db04173d918732c2e3c0ed20f3a447` owns the remaining
+BlueBubbles route handoff, authenticated ingress/extraction, proactive and
+link-research lifecycle, and Guest cron operator. Core
+`28e12493cac5d53f63aa611dfa8a295598ef638a` physically deletes the product
+runtime leaves and leaves only generic extension/readiness/ownership,
+final-dispatch authorization, authenticated-existing-DM action, and
+initiated-session/storage infrastructure.
+
+The final audit found and fixed three real integration defects before commit:
+
+- untrusted adapter metadata could still supply `_hermes_extension_identity`;
+  the cold path now strips it before only a validated directive can stamp it;
+- the adapter busy-session fast path bypassed generic extension admission and
+  still called the deleted BlueBubbles registry helper; busy admission is now
+  generic, required extensions fail closed, and ordinary traffic is unchanged;
+- the no-extension baseline route was mutating ordinary events to
+  `profile=default`, and a deleted helper remained referenced in runtime-model
+  resolution. Both were repaired; the fixed shards caught the broad failures.
+
+#### Exact fixed 8-shard comparison
+
+The pinned original collection contained 751 files / 7603 tests. CP4 deletes
+38 baseline test files, so `/tmp/cp4/fixed_surviving_files.json` explicitly
+records their set difference and the exact 713-file surviving list. That same
+JSON list and the same pytest arguments were used on pinned
+`cd8547ee7d8de3017b46fab4cdd44e17381100be` and deletion core
+`28e12493cac5d53f63aa611dfa8a295598ef638a`; no missing paths were tolerated.
+
+| | pinned baseline | deletion core |
+|---|---:|---:|
+| Fixed files | 713 | 713 |
+| Shard return codes | `1,1,1,1,1,0,1,1` | `1,1,1,1,0,0,1,0` |
+| Every shard rc < 2 | yes | yes |
+| Passed / failed / skipped / xfailed | 6725 / 31 / 32 / 1 | 6723 / 20 / 32 / 1 |
+| Exact failed IDs introduced | n/a | **0** |
+
+Exact-set result: 20 failed node IDs are shared, 11 are baseline-only, and 0
+are deletion-only. The shared 20 are the exact pre-existing/environment set:
+
+- `test_scale_to_zero.py::{test_suspend_self_non_2xx_is_false_not_raise,test_suspend_self_posts_suspend_for_this_machine}`;
+- `test_telegram_polling_health_confirmation.py::TestPollingHealthConfirmation::test_subsequent_progress_is_silent`;
+- `test_session_model_reset.py::test_clear_command_response_reports_preserved_session_model`;
+- `test_usage_command.py::TestUsageCachedAgent::test_cached_agent_shows_detailed_usage`;
+- `test_usage_command.py::TestUsageCachedAgent::test_running_agent_preferred_over_cache`;
+- `test_usage_command.py::TestUsageContextBreakdown::test_breakdown_lines_rendered_for_live_agent`;
+- `test_session_store_prune.py::test_session_store_default_db_uses_runtime_hermes_home`;
+- `test_bluebubbles.py::TestBlueBubblesAttachmentSending::test_dm_attachment_uses_bare_address`;
+- `test_status_owner_guard.py::TestWriteRuntimeStatusOwnershipGuard::test_foreign_process_merges_platform_state_without_clobbering_identity`;
+- `test_status_owner_guard.py::TestWriteRuntimeStatusOwnershipGuard::test_non_owner_creating_file_leaves_identity_unset`;
+- `test_status_owner_guard.py::TestWriteRuntimeStatusOwnershipGuard::test_targeted_profile_platform_write_is_platform_only`;
+- `test_systemd_notify.py::test_notify_supports_systemd_abstract_socket` and
+  `test_telegram_thread_fallback.py::test_send_dm_topic_fallback_without_anchor_does_not_crash`;
+- both `test_watchdog_review_76354.py::test_s1_contended_*_gives_up_within_short_budget` IDs;
+- `test_background_command.py::TestRunBackgroundTask::test_media_files_routed_by_type`;
+- `test_cron_active_work_drain.py::TestCronPersistsActiveAgentsOnClaimRelease::test_persist_failure_never_breaks_dispatch`;
+- `test_cron_active_work_drain.py::TestCronPersistsActiveAgentsOnClaimRelease::test_persists_on_claim_and_release`;
+- `test_cron_active_work_drain.py::TestCronPersistsActiveAgentsOnClaimRelease::test_persists_on_dispatch_failure_release`.
+
+The 11 baseline-only IDs are exact improvements/retirements, not environment
+classifications: nine generic gateway tests now pass after the no-extension
+route stopped mutating ordinary events, while the two old core Poke texture
+assertions are superseded by the plugin texture suites. The complete exact sets,
+per-shard reports, commands, and return codes are durable at
+`/tmp/cp4/fixed_comparison.json` and
+`/tmp/cp4/{baseline-surviving,deletion-surviving}.fixed.shard*.{status.json,report.txt}`.
+
+The exact baseline-only set is:
+
+- `test_gateway_command_dispatch_minimal.py::test_idle_queue_sends_payload_as_next_turn[/q`;
+- `test_gateway_command_dispatch_minimal.py::test_idle_queue_sends_payload_as_next_turn[/queue`;
+- `test_multiplex_busy_input_mode.py::test_secondary_profile_busy_mode_controls_priority_path[queue]`;
+- `test_multiplex_busy_input_mode.py::test_secondary_profile_busy_mode_controls_priority_restart_drain`;
+- `test_poke_authoritative_activation.py::test_exactly_one_texture_owner`;
+- `test_poke_functional_ownership.py::test_texture_is_compiled_exactly_once_per_turn`;
+- `test_resume_command.py::TestHandleSessionsCommand::test_gateway_dispatches_sessions_command`;
+- `test_telegram_photo_interrupts.py::test_handle_message_does_not_priority_interrupt_photo_followup`;
+- `test_telegram_topic_mode.py::test_internal_root_telegram_dm_event_bypasses_topic_lobby[1]`;
+- `test_telegram_topic_mode.py::test_internal_root_telegram_dm_event_bypasses_topic_lobby[None]`;
+- `test_update_streaming.py::TestUpdatePromptInterception::test_recognized_slash_command_bypasses_pending_update_prompt`.
+
+#### Deleted-test and moved-test accounting
+
+All 38 deleted baseline test files are individually mapped to an existing
+plugin or surviving generic-core replacement in
+`/tmp/cp4/deleted_baseline_test_coverage_map.json` (`all_entries_mapped: true`).
+All moved/new coverage ran: plugin standalone **667 passed**; plugin
+BlueBubbles + texture against deletion core **147 passed**; newly migrated
+extraction/live-ingress/Guest-cron/activation subset **80 passed**; final core
+extension/ownership/readiness/final-dispatch/busy/restart set **371 passed, 2
+skipped**. Final current `tests/gateway` collection is **6810 tests, rc=0, no
+collection errors**.
+
+#### Carry and residual truth
+
+- carry registry **PASS 310/310**, 38 features, 52 legacy surfaces;
+- carry doctor **PASS** and local carry contract **PASS**, 149 connected
+  surfaces;
+- deterministic thinning baseline: **402 hotspots, weighted score 132601**;
+  two generations were byte-identical and contain zero targeted product paths;
+- both worktree diffs pass `git diff --check`; plugin production imports zero
+  deleted leaves/private core policy.
+
+Rollback now requires reverting core `28e12493ca` before disabling Poke. Still
+outstanding and not claimed: final independent approval, landing to
+`local/studio-slim`, live activation, safe restart, and bounded soak.
+
+### 2026-08-28 — Historical: Checkpoint 4 capability-transfer prerequisites complete
 
 Core `35798e8081` and plugin `e4853a5` close the demonstrated transfer gaps
 without touching live config, profiles, databases, processes, or transports:
@@ -149,11 +257,14 @@ Not claimed: no live activation, no restart, no soak, no outbound transport.
 `test_message_cards_plugin.py` has a pre-existing worktree-namespace collection
 error at the baseline commit and is excluded identically on both sides.
 
-#### Post-deletion 8-shard comparison vs the pinned `cd8547ee7d` baseline
+#### Historical preliminary variable-list comparison (superseded)
 
-Same runner (`/tmp/cp4/shard_run.py`), same interpreter, same fixed file list,
-one subprocess per shard, real return codes persisted, no pipelines and no
-`tail`. Compared by exact node-ID set.
+This preliminary run used `shard_run.py`'s independently collected per-side
+lists (751 baseline files versus 741 post files), despite the original note
+calling them the same fixed list. It remains as historical debugging evidence,
+but it is superseded by the explicit 713-file set-difference comparison above.
+Return codes were persisted without pipelines and failures were compared by
+exact node-ID set.
 
 | | baseline | post |
 |---|---:|---:|

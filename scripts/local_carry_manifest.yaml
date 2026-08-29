@@ -1220,6 +1220,8 @@ features:
       - tests/gateway/test_conversation_extension_dispatch.py
       - tests/gateway/test_authenticated_dm.py
       - tests/gateway/test_generic_tool_policy_enforcement.py
+      - tests/gateway/test_busy_session_auth_bypass.py
+      - tests/gateway/test_cp4_runtime_leaf_deletion_readiness.py
     checks:
       - id: conversation-extension-atomic-registry
         path: gateway/conversation_extensions.py
