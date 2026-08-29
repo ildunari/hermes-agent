@@ -178,6 +178,14 @@ checks:
     path: cron/scheduler.py
     needles: [_persist_active_agents_for_cron, persist_active_agents_now]
     description: cron dispatch and release remain visible to safe restart drains
+  - id: platform-cron-delivery-validator-contract
+    path: gateway/platform_registry.py
+    needles: [cron_delivery_validator_fn]
+    description: generic platform metadata seam for plugin-owned cron target policy; callback absent preserves ordinary behavior
+  - id: cron-platform-delivery-validation
+    path: cron/scheduler.py
+    needles: [_cron_delivery_validation_errors, cron_delivery_validator_fn]
+    description: invoke platform-owned validation for every resolved cron target before live or standalone send; exceptions and malformed decisions fail closed
   - id: cron-memory-provider-tools-only-routing
     path: cron/scheduler.py
     needles: [_cron_job_needs_memory_provider, memory_provider_tools_only]

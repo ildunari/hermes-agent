@@ -270,6 +270,18 @@ baseline test files have explicit migrated/replacement coverage recorded in
 `/tmp/cp4/deleted_baseline_test_coverage_map.json`. Final independent review,
 landing, live activation, restart, and soak remain separate outstanding gates.
 
+The final review then found two reachable P1 closure defects rather than
+approving the first final diff: deleting the core cron guard left internal
+maintenance output able to reach BlueBubbles when `delivery_profile` was
+absent, and one migrated test still imported a deleted core benchmark module.
+The closure revision adds a provider-neutral platform cron-validation seam,
+makes the BlueBubbles plugin the sole owner of the internal-job classifier,
+and repoints the benchmark test to the plugin operation. Plugin-first rollout
+remains backward-compatible because registration feature-detects the new seam.
+The corrected full plugin run explicitly resolved the reviewed core worktree
+and passed 668 tests; the earlier editable-live-core 667-pass claim is
+superseded. Independent closure approval is still required before landing.
+
 ## 6. Edge-case matrix
 
 | Edge | Required behavior |

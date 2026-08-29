@@ -3108,6 +3108,76 @@ def _is_channel_dm_topic(
     return is_channel
 
 
+def _cron_delivery_validation_errors(
+    job: dict,
+    targets: list[dict],
+) -> list[Optional[str]]:
+    """Run platform-owned cron validation before any resolved target is sent.
+
+    A missing callback preserves ordinary scheduler behavior. A registered
+    callback has a strict contract: ``True`` allows, while ``False`` or a
+    non-empty string rejects. Exceptions and every other result fail closed for
+    that target. All callbacks run up front so a later broadcast target cannot
+    be sent before an earlier/later rejection is known.
+    """
+    try:
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()  # idempotent; materializes user platform overrides
+    except Exception:
+        # Plugin discovery already reports its own load failures. Platforms with
+        # no successfully registered validator retain ordinary behavior.
+        logger.debug("Cron delivery plugin discovery failed", exc_info=True)
+
+    try:
+        from gateway.platform_registry import platform_registry
+    except Exception:
+        logger.debug("Cron delivery platform registry is unavailable", exc_info=True)
+        return [None] * len(targets)
+
+    errors: list[Optional[str]] = []
+    for target in targets:
+        platform_name = str(target.get("platform") or "").strip().lower()
+        try:
+            entry = platform_registry.get(platform_name) if platform_name else None
+        except Exception:
+            logger.debug(
+                "Cron delivery platform lookup failed for %s",
+                platform_name or "<missing>",
+                exc_info=True,
+            )
+            entry = None
+        validator = getattr(entry, "cron_delivery_validator_fn", None) if entry else None
+        if validator is None:
+            errors.append(None)
+            continue
+
+        try:
+            result = validator(dict(job), dict(target))
+        except Exception as exc:
+            errors.append(
+                f"cron delivery validator for platform '{platform_name}' failed closed "
+                f"after raising {type(exc).__name__}"
+            )
+            continue
+
+        if result is True:
+            errors.append(None)
+        elif result is False:
+            errors.append(
+                f"cron delivery validator rejected target {platform_name}:"
+                f"{target.get('chat_id', '')}"
+            )
+        elif isinstance(result, str) and result.strip():
+            errors.append(result.strip())
+        else:
+            errors.append(
+                f"cron delivery validator for platform '{platform_name}' failed closed "
+                f"after returning malformed {type(result).__name__} result"
+            )
+    return errors
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -3121,6 +3191,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     """
     targets = _resolve_delivery_targets(job)
 
+    target_validation_errors = _cron_delivery_validation_errors(job, targets)
+    rejected_validation_errors = [
+        error for error in target_validation_errors if error is not None
+    ]
+    if targets and len(rejected_validation_errors) == len(targets):
+        message = "; ".join(rejected_validation_errors)
+        logger.error("Job '%s': %s", job.get("id", "?"), message)
+        return message
 
     if not targets:
         deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
@@ -3243,11 +3321,17 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     except Exception as e:
         msg = f"failed to load gateway config: {e}"
         logger.error("Job '%s': %s", job["id"], msg)
+        if rejected_validation_errors:
+            return "; ".join([*rejected_validation_errors, msg])
         return msg
 
-    delivery_errors = []
+    delivery_errors = list(rejected_validation_errors)
 
-    for target in targets:
+    for target_index, target in enumerate(targets):
+        validation_error = target_validation_errors[target_index]
+        if validation_error is not None:
+            logger.error("Job '%s': %s", job.get("id", "?"), validation_error)
+            continue
         platform_name = target["platform"]
         chat_id = target["chat_id"]
         thread_id = target.get("thread_id")

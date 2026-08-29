@@ -35,7 +35,7 @@
 | 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
 | 2. Generic seams + dark parity | `23de9414be`, `50df8641f9`, `dc5d21bc58` | `96026ea` | 438 plugin + 293 closure/integration + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | closure approved | complete |
 | 3. Authoritative activation, legacy fallback retained | `f16961a5ff`, `a02e1325e7`, `81c590e99d` | `8d36131`, `fea92e8` | 518 plugin; 233 focused core; 234 Guest/proactive/contact passes; carry gates pass | closure approved | complete |
-| 4. Core deletion and final de-carry | `e5fdf94cf7`, `7bc6a50aa7`, `35798e8081`, `28e12493ca` | `cf8af2d`, `e4853a5`, `ccd99d26` | 667 plugin; 147 BB+texture integration; 371 focused core + 2 skipped; 6810 current tests collected with no errors; fixed 8-shard exact-set comparison adds 0 failures; carry 310/310 | **final independent review pending** | **local implementation complete; landing/restart/soak outstanding** |
+| 4. Core deletion and final de-carry | `e5fdf94cf7`, `7bc6a50aa7`, `35798e8081`, `28e12493ca`, P1 closure in this revision | `cf8af2d`, `e4853a5`, `ccd99d26`, `c216833b41b666918b1a3237b414557f6b9ce767` | **668 plugin with explicit reviewed-core resolution (supersedes invalid 667 claim)**; 117 BB+texture; 177 focused cron/platform/plugin core + 2 skipped; fixed 8-shard comparison adds 0 failures; carry 311/311 | **P1 closure review pending; no independent approval claimed** | **local P1 closure complete; landing/restart/soak outstanding** |
 
 ## Evidence log
 
@@ -126,17 +126,32 @@ The exact baseline-only set is:
 All 38 deleted baseline test files are individually mapped to an existing
 plugin or surviving generic-core replacement in
 `/tmp/cp4/deleted_baseline_test_coverage_map.json` (`all_entries_mapped: true`).
-All moved/new coverage ran: plugin standalone **667 passed**; plugin
-BlueBubbles + texture against deletion core **147 passed**; newly migrated
+All moved/new coverage ran. The original **667 passed** plugin claim was
+invalid because the editable environment resolved the live pre-deletion core;
+the P1 closure rerun explicitly resolved `cron.scheduler` and `scripts` from
+this reviewed core worktree and completed at **668 passed**. Plugin
+BlueBubbles + texture against deletion core passed **147 tests** in the
+deletion run and **117 tests** in the focused P1 closure rerun; newly migrated
 extraction/live-ingress/Guest-cron/activation subset **80 passed**; final core
 extension/ownership/readiness/final-dispatch/busy/restart set **371 passed, 2
 skipped**. Final current `tests/gateway` collection is **6810 tests, rc=0, no
 collection errors**.
 
+The final review's two P1 findings are closed locally. A provider-neutral
+`PlatformEntry.cron_delivery_validator_fn` seam now runs before live or
+standalone cron sends, including jobs without `delivery_profile`; malformed or
+raising validators fail closed. The BlueBubbles plugin is the sole owner of
+the internal maintenance/watchdog/bootstrap/dry-run/probe classifier and
+feature-detects the seam, preserving plugin-first compatibility with the old
+core. The migrated benchmark test now imports the plugin-owned operation.
+Focused closure evidence is **177 passed, 2 skipped** for core cron/platform/
+plugin tests and **51 passed** for the Poke policy/import subset. Independent
+P0/P1 closure approval remains outstanding.
+
 #### Carry and residual truth
 
-- carry registry **PASS 310/310**, 38 features, 52 legacy surfaces;
-- carry doctor **PASS** and local carry contract **PASS**, 149 connected
+- carry registry **PASS 311/311**, 38 features, 54 legacy surfaces;
+- carry doctor **PASS** and local carry contract **PASS**, 151 connected
   surfaces;
 - deterministic thinning baseline: **402 hotspots, weighted score 132601**;
   two generations were byte-identical and contain zero targeted product paths;

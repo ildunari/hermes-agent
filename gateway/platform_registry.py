@@ -186,6 +186,17 @@ class PlatformEntry:
     # resolve the default chat/room ID.  Empty = no cron home-channel support.
     cron_deliver_env_var: str = ""
 
+    # Optional platform-owned validation for resolved cron targets. The
+    # scheduler calls this once per concrete target before any target is sent,
+    # on both live-adapter and standalone routes and with or without a delegated
+    # delivery profile. Return True to allow the target, False or a non-empty
+    # diagnostic string to reject it. Exceptions and malformed results fail
+    # closed for that target. Job/target dictionaries are shallow copies so a
+    # validator cannot replace the scheduler's top-level fields.
+    cron_delivery_validator_fn: Optional[
+        Callable[[dict, dict], bool | str]
+    ] = None
+
     # ── Target parsing ──
     # Optional: callable that parses a raw target string for this platform into
     # a (chat_id, thread_id) tuple, or None if the string is not a recognized
