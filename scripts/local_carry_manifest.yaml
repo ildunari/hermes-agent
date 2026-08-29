@@ -799,8 +799,8 @@ features:
     checks:
       - id: node-build-tool-lockfile
         path: package-lock.json
-        needles: ['node_modules/postcss/node_modules/nanoid', 'node_modules/undici']
-        description: lockfile checks, rather than an executable test-path entry, pin patched nanoid and undici releases used by the web and TUI build workspaces
+        needles: ['"version": "3.3.18"', 'node_modules/undici']
+        description: lockfile checks tolerate npm deduping nanoid beneath postcss or vite while pinning patched nanoid and undici releases used by the web and TUI build workspaces
 
   - id: runtime.codex-profile-wiring
     title: Codex app-server launch-scoped profile wiring
