@@ -601,6 +601,14 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         if group_id:
             return f"group:{group_id}", None, True
         return None, None, False
+    # WeCom: group IDs start with "wr" or "wc", user IDs start with "wo" or
+    # are bare alphanumeric strings. Treat any non-empty WeCom target_ref as
+    # an explicit chat_id — the adapter resolves whether to use APP_CMD_RESPONSE
+    # (groups) or APP_CMD_SEND (DMs) internally.
+    if platform_name == "wecom":
+        stripped = target_ref.strip()
+        if stripped:
+            return stripped, None, True
     if platform_name in _PHONE_PLATFORMS:
         match = _E164_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -871,41 +879,90 @@ async def _send_via_adapter(
                     metadata["publish_topic"] = chat_id
                 if not metadata:
                     metadata = None
+                gateway_loop = getattr(runner, "_gateway_loop", None)
+                try:
+                    current_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    current_loop = None
+
+                need_cross_loop = (
+                    gateway_loop is not None and current_loop is not gateway_loop
+                )
+
+                async def _dispatch_adapter(awaitable):
+                    if not need_cross_loop:
+                        return await awaitable
+                    if not gateway_loop.is_running():
+                        awaitable.close()
+                        raise RuntimeError(
+                            "Gateway loop is not running; cannot dispatch adapter send"
+                        )
+                    from agent.async_utils import safe_schedule_threadsafe
+
+                    fut = safe_schedule_threadsafe(
+                        awaitable,
+                        gateway_loop,
+                        logger=logger,
+                        log_message="send_message: failed to schedule on gateway loop",
+                    )
+                    if fut is None:
+                        awaitable.close()
+                        raise RuntimeError(
+                            "Gateway loop unavailable for send dispatch"
+                        )
+                    return await asyncio.shield(asyncio.wrap_future(fut))
+
                 result = None
                 if chunk.strip():
-                    result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
+                    result = await _dispatch_adapter(
+                        adapter.send(
+                            chat_id=chat_id,
+                            content=chunk,
+                            metadata=metadata,
+                        )
+                    )
                     if result and not result.success:
                         return {"error": f"Adapter send failed: {result.error}"}
+
                 for media_path, is_voice in media_files or []:
                     ext = os.path.splitext(media_path)[1].lower()
                     if ext in _IMAGE_EXTS and hasattr(adapter, "send_image_file"):
-                        result = await adapter.send_image_file(
+                        awaitable = adapter.send_image_file(
                             chat_id=chat_id,
                             image_path=media_path,
                             metadata=metadata,
                         )
                     elif ext in _VIDEO_EXTS and hasattr(adapter, "send_video"):
-                        result = await adapter.send_video(
+                        awaitable = adapter.send_video(
                             chat_id=chat_id,
                             video_path=media_path,
                             metadata=metadata,
                         )
                     elif ext in _AUDIO_EXTS and hasattr(adapter, "send_voice"):
-                        result = await adapter.send_voice(
+                        awaitable = adapter.send_voice(
                             chat_id=chat_id,
                             audio_path=media_path,
                             metadata=metadata,
                         )
                     elif hasattr(adapter, "send_document"):
-                        result = await adapter.send_document(
+                        awaitable = adapter.send_document(
                             chat_id=chat_id,
                             file_path=media_path,
                             metadata=metadata,
                         )
                     else:
-                        return {"error": f"Live adapter for {platform.value} cannot send media attachments"}
+                        return {
+                            "error": (
+                                f"Live adapter for {platform.value} cannot send "
+                                "media attachments"
+                            )
+                        }
+
+                    result = await _dispatch_adapter(awaitable)
                     if result and not result.success:
-                        return {"error": f"Adapter media send failed: {result.error}"}
+                        return {
+                            "error": f"Adapter media send failed: {result.error}"
+                        }
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -1323,6 +1380,25 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                     return result
                 last_result = result
             return last_result
+
+    # --- WeCom: native media attachment support via live gateway adapter ---
+    if platform == Platform.WECOM and media_files:
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            result = await _send_via_adapter(
+                platform,
+                pconfig,
+                chat_id,
+                chunk,
+                thread_id=thread_id,
+                media_files=media_files if is_last else None,
+                force_document=force_document,
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result
 
     # --- Non-media platforms ---
     if media_files and not message.strip():

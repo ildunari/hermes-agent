@@ -1971,15 +1971,15 @@ def _build_child_agent(
     import uuid as _uuid
 
     # ── Role resolution ─────────────────────────────────────────────────
-    # Honor the caller's role only when BOTH the kill switch and the
-    # child's depth allow it.  This is the single point where role
-    # degrades to 'leaf' — keeps the rule predictable.  Callers pass
-    # the normalised role (_normalize_role ran in delegate_task) so
-    # we only deal with 'leaf' or 'orchestrator' here.
+    # Depth-derived, not caller-declared: a child may delegate iff the
+    # kill switch is on and depth budget remains below max_spawn_depth.
+    # The legacy `role` arg no longer participates (it asked the caller
+    # to guess a fact the config already knows); it is still accepted and
+    # normalised for wire compat, but capability comes from depth alone.
     child_depth = getattr(parent_agent, "_delegate_depth", 0) + 1
     max_spawn = _get_max_spawn_depth()
     orchestrator_ok = _get_orchestrator_enabled() and child_depth < max_spawn
-    effective_role = role if (role == "orchestrator" and orchestrator_ok) else "leaf"
+    effective_role = "orchestrator" if orchestrator_ok else "leaf"
 
     # ── Subagent identity (stable across events, 0-indexed for TUI) ─────
     # subagent_id is generated here so the progress callback, the
@@ -3965,19 +3965,16 @@ def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
     """Validate a tasks=[...] batch beyond per-task goal presence.
 
     Returns an actionable error string, or None when the batch is valid.
-    Batch-only by design: the single-`goal` form legitimately uses short
-    goals, so these checks must never run on it.
+
+    A one-entry array is the canonical single-task shape (the advertised
+    interface is tasks-only; legacy top-level `goal` is wrapped into a
+    one-entry batch), so no minimum count is enforced. The placeholder/
+    template checks below still run on every entry.
 
     Duplicate goals are deliberately NOT rejected: identical-goal fan-outs
     are a legitimate pattern (best-of-N / ensemble sampling), and blocking
     them broke real workflows (post-merge audit of #81141).
     """
-    if len(task_list) < 2:
-        return (
-            "Batch mode requires at least 2 tasks. For a single task, use "
-            "the `goal` parameter instead of `tasks`: "
-            'delegate_task(goal="...", context="...").'
-        )
 
     for i, task in enumerate(task_list):
         goal = str(task.get("goal", "")).strip()
@@ -3997,7 +3994,11 @@ def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
                 "calling delegate_task — subagents cannot resolve "
                 "placeholders."
             )
-        if len(goal) < _MIN_BATCH_GOAL_LEN:
+        if len(goal) < _MIN_BATCH_GOAL_LEN and len(task_list) >= 2:
+            # Multi-task fan-outs with terse goals are usually unexpanded
+            # templates; a SINGLE task legitimately uses short goals
+            # ("Fix the tests"), so one-entry arrays keep the historical
+            # single-`goal` exemption.
             return (
                 f"Task {i} goal is too short ({goal!r}). Write a specific, "
                 "self-contained goal of at least "
@@ -4175,7 +4176,11 @@ def delegate_task(
             single_task["output_schema"] = output_schema
         task_list = [single_task]
     else:
-        return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
+        return tool_error(
+            "No tasks provided. Pass tasks=[{goal: '...', context: '...'}, "
+            "...] — one entry per subagent (a single task is a one-entry "
+            "array)."
+        )
 
     if not task_list:
         return tool_error("No tasks provided.")
@@ -5357,10 +5362,39 @@ def _build_top_level_description() -> str:
     top-level text stays static and duplication-free. If you add text
     here, check it is not already stated in a parameter description.
     """
+    try:
+        orchestration_available = _get_max_spawn_depth() >= 2 and _get_orchestrator_enabled()
+    except Exception:
+        orchestration_available = False
+
+    # The child-restrictions rule renders per config: on nesting-enabled
+    # installs the orchestrator clause is load-bearing; on depth-1/disabled
+    # installs (the default) it would describe an unreachable state — the
+    # role param already explains that 'orchestrator' is inert there.
+    # send_message is deliberately not named: it's gateway-internal
+    # vocabulary most sessions never see. The list below is the fail-safe
+    # superset; model_tools session-filters it to the tools the session
+    # actually has, dropping the whole line when none apply.
+    # Delegation capability is depth-derived (no role param): mention
+    # recursion only where it's actually available.
+    if orchestration_available:
+        restrictions_rule = (
+            "- Children cannot call clarify, memory, or cronjob.\n"
+            "- Children can themselves delegate while depth remains "
+            f"(max_spawn_depth={_get_max_spawn_depth()}); the runtime "
+            "derives this from depth automatically.\n"
+        )
+    else:
+        restrictions_rule = (
+            "- Children cannot call delegate_task, clarify, memory, or "
+            "cronjob.\n"
+        )
+
     return (
         "Spawn isolated subagents; each has its own conversation, terminal, and "
-        "toolset, and only its final summary returns. Use 'goal' for one task or "
-        "'tasks' for a parallel batch; limits and budgets are in the parameters.\n\n"
+        "toolset, and only its final summary returns. Pass every task in `tasks` — "
+        "one entry spawns one subagent, several run in parallel. Limits and "
+        "budgets are described in the parameters.\n\n"
         "Default execution is SYNCHRONOUS: delegate_task returns after children "
         "finish, consolidating batches. Set background=true only for detached "
         "work whose result will re-enter later; do NOT wait or poll on it.\n\n"
@@ -5385,10 +5419,9 @@ def _build_top_level_description() -> str:
         "require a verifiable handle (URL, ID, absolute path) and verify it "
         "yourself — fetch the URL, stat the file, read back the content — "
         "before telling the user the operation succeeded.\n"
-        "- Leaf children (the default) cannot call delegate_task, clarify, "
-        "memory, or send_message; orchestrators regain only delegate_task.\n"
-        "- Children inherit the parent model/fallbacks unless overridden per "
-        "call/task or pinned via delegation.provider / delegation.model. "
+        + restrictions_rule
+        + "- Children inherit the parent model/fallbacks unless overridden per "
+        "task or pinned via delegation.provider / delegation.model. "
         "enabled_toolsets is narrowing-only; omit 'profile' to inherit. "
         "Results are returned as an array, one entry per task."
     )
@@ -5401,47 +5434,31 @@ def _build_tasks_param_description() -> str:
     except Exception:
         max_children = _DEFAULT_MAX_CONCURRENT_CHILDREN
     return (
-        f"Batch mode: tasks to run in parallel (up to {max_children} for this "
-        f"user, set via delegation.max_concurrent_children). Each gets "
-        "its own subagent with isolated context and terminal session. "
-        "Per-task overrides beat top-level defaults."
+        f"The task(s), up to {max_children} in parallel for this user (set "
+        "via delegation.max_concurrent_children). Each entry spawns one "
+        "subagent with isolated context and terminal session; a single task "
+        "is a one-entry array. Per-task overrides beat top-level defaults."
     )
 
 
 def _build_role_param_description() -> str:
-    """Compose the 'role' parameter description with current spawn-depth limit."""
+    """Legacy helper — the `role` param is no longer advertised.
+
+    Delegation capability is depth-derived (see the role-resolution block in
+    _build_child_agent): a child may itself delegate iff
+    delegation.orchestrator_enabled and its depth < max_spawn_depth. The
+    handler still accepts role for wire compat (old transcripts, kanban
+    dispatcher) but ignores it. Kept because external callers import this
+    symbol; returns the depth story for any such use.
+    """
     try:
         max_depth = _get_max_spawn_depth()
     except Exception:
         max_depth = MAX_DEPTH
-    try:
-        orchestrator_on = _get_orchestrator_enabled()
-    except Exception:
-        orchestrator_on = True
-
-    if max_depth >= 2 and orchestrator_on:
-        nesting_note = (
-            f"Nesting IS enabled for this user (max_spawn_depth={max_depth}): "
-            f"orchestrator children can themselves delegate up to {max_depth - 1} "
-            "more level(s) deep."
-        )
-    elif max_depth >= 2 and not orchestrator_on:
-        nesting_note = (
-            "Nesting is currently disabled "
-            "(delegation.orchestrator_enabled=false); 'orchestrator' is "
-            "silently forced to 'leaf'."
-        )
-    else:
-        nesting_note = (
-            f"Nesting is OFF for this user (max_spawn_depth={max_depth}); "
-            "'orchestrator' is silently forced to 'leaf'. Raise "
-            "delegation.max_spawn_depth in config.yaml to enable."
-        )
-
     return (
-        "Role of the child agent. 'leaf' (default) = focused "
-        "worker, cannot delegate further. 'orchestrator' = can "
-        f"use delegate_task to spawn its own workers. {nesting_note}"
+        "Legacy parameter, ignored: whether a child can delegate is derived "
+        f"from delegation config (max_spawn_depth={max_depth}), not declared "
+        "by the caller."
     )
 
 
@@ -5468,11 +5485,12 @@ def _build_dynamic_schema_overrides() -> dict:
     """
     overrides_params = copy.deepcopy(DELEGATE_TASK_SCHEMA["parameters"])
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
-    overrides_params["properties"]["role"]["description"] = _build_role_param_description()
-    overrides_params["properties"]["budget_class"]["description"] = _build_budget_param_description()
-    overrides_params["properties"]["tasks"]["items"]["properties"]["budget_class"]["description"] = (
-        _build_budget_param_description(per_task=True)
+    overrides_params["properties"]["budget_class"]["description"] = (
+        _build_budget_param_description()
     )
+    overrides_params["properties"]["tasks"]["items"]["properties"][
+        "budget_class"
+    ]["description"] = _build_budget_param_description(per_task=True)
 
     return {
         "description": _build_top_level_description(),
@@ -5498,38 +5516,40 @@ DELEGATE_TASK_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "goal": {
+            # NOTE: the handler also accepts the legacy single-goal shape —
+            # top-level `goal` (string), `context` (string), `output_schema`
+            # (object) — wrapped into a one-entry batch at dispatch. Legacy,
+            # unadvertised (old transcripts/callers only); tasks=[...] is the
+            # only advertised shape. Do not re-add these to the schema.
+            "model": {
                 "type": "string",
-                "description": (
-                    "What the subagent should accomplish. Be specific and "
-                    "self-contained -- the subagent knows nothing about your "
-                    "conversation history."
-                ),
+                "description": "Optional child model override.",
             },
-            "context": {
-                "type": "string",
-                "description": (
-                    "Background information the subagent needs: file paths, "
-                    "error messages, project structure, constraints. The more "
-                    "specific you are, the better the subagent performs."
-                ),
-            },
-            "model": {"type": "string", "description": "Optional child model override."},
             "provider": {
                 "type": "string",
-                "description": "Optional configured provider override. Credentials are resolved by Hermes; API keys are not accepted.",
+                "description": (
+                    "Optional configured provider override. Credentials are "
+                    "resolved by Hermes; API keys are not accepted."
+                ),
             },
             "reasoning_effort": {
                 "oneOf": [{"type": "string"}, {"type": "boolean"}],
                 "description": "Optional child reasoning effort override.",
             },
             "enabled_toolsets": {
-                "type": "array", "items": {"type": "string"},
-                "description": "Optional narrowing-only toolset allowlist; cannot grant capabilities absent from the parent or bypass delegate blocks.",
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional narrowing-only toolset allowlist; cannot grant "
+                    "capabilities absent from the parent or bypass delegate blocks."
+                ),
             },
             "profile": {
                 "type": "string",
-                "description": "Optional requested profile. Currently returns a structured refusal; omit to inherit the parent profile.",
+                "description": (
+                    "Optional requested profile. Currently returns a structured "
+                    "refusal; omit to inherit the parent profile."
+                ),
             },
             "budget_class": {
                 "type": "string",
@@ -5538,32 +5558,50 @@ DELEGATE_TASK_SCHEMA = {
             },
             "tasks": {
                 "type": "array",
+                "minItems": 1,
                 "items": {
                     "type": "object",
                     "properties": {
-                        "goal": {"type": "string", "description": "Task goal"},
+                        "goal": {
+                            "type": "string",
+                            "description": (
+                                "What this subagent should accomplish. Be "
+                                "specific and self-contained — it knows "
+                                "nothing about your conversation history."
+                            ),
+                        },
                         "context": {
                             "type": "string",
-                            "description": "Task-specific context",
+                            "description": (
+                                "Background THIS child needs: file paths, "
+                                "error messages, constraints. Each child "
+                                "sees only its own context — repeat shared "
+                                "background in every task that needs it."
+                            ),
                         },
-                        "model": {"type": "string", "description": "Per-task model override."},
-                        "provider": {"type": "string", "description": "Per-task configured provider override."},
+                        "model": {
+                            "type": "string",
+                            "description": "Per-task model override.",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "Per-task configured provider override.",
+                        },
                         "reasoning_effort": {
                             "oneOf": [{"type": "string"}, {"type": "boolean"}],
                             "description": "Per-task reasoning effort override.",
                         },
                         "enabled_toolsets": {
-                            "type": "array", "items": {"type": "string"},
+                            "type": "array",
+                            "items": {"type": "string"},
                             "description": "Per-task narrowing-only toolset allowlist.",
                         },
                         "profile": {
                             "type": "string",
-                            "description": "Requested profile. Currently returns a structured refusal; omit to inherit parent.",
-                        },
-                        "role": {
-                            "type": "string",
-                            "enum": ["leaf", "orchestrator"],
-                            "description": "Per-task role override. See top-level 'role' for semantics.",
+                            "description": (
+                                "Requested profile. Currently returns a structured "
+                                "refusal; omit to inherit parent."
+                            ),
                         },
                         "budget_class": {
                             "type": "string",
@@ -5573,14 +5611,13 @@ DELEGATE_TASK_SCHEMA = {
                         "output_schema": {
                             "type": "object",
                             "description": (
-                                "Optional JSON Schema the subagent's final "
-                                "answer must validate against. The child is "
-                                "told the contract up front; the parent "
-                                "validates the final answer and allows one "
-                                "bounded correction retry. The result entry "
-                                "gains schema_valid (and schema_errors on "
-                                "final failure). Keep schemas forgiving: "
-                                "require only fields you will actually read."
+                                "Optional JSON Schema this child's final "
+                                "answer must validate against (told to the "
+                                "child up front; parent validates with one "
+                                "bounded correction retry; result gains "
+                                "schema_valid, plus schema_errors on "
+                                "failure). Keep it forgiving — require only "
+                                "fields you will read."
                             ),
                         },
                     },
@@ -5589,62 +5626,47 @@ DELEGATE_TASK_SCHEMA = {
                 # No maxItems — the runtime limit is configurable via
                 # delegation.max_concurrent_children (default 3) and
                 # enforced with a clear error in delegate_task().
+                # NOTE: the handler also accepts a per-task `role` — legacy,
+                # ignored: delegation capability is depth-derived, not
+                # caller-declared. Unadvertised on purpose; do not re-add.
                 "description": "(rebuilt at get_definitions() time)",
-            },
-            "role": {
-                "type": "string",
-                "enum": ["leaf", "orchestrator"],
-                "description": "(rebuilt at get_definitions() time)",
-            },
-            "output_schema": {
-                "type": "object",
-                "description": (
-                    "Optional JSON Schema for the single-goal form — the "
-                    "subagent's final answer must validate against it "
-                    "(same semantics as tasks[].output_schema)."
-                ),
             },
             "background": {
                 "type": "boolean",
                 "description": (
                     "Optional. Defaults to false. When false, delegation is "
-                    "synchronous: single tasks return their result directly; "
-                    "batch tasks run in parallel and return one consolidated "
-                    "results array after all children finish. When true, the "
-                    "whole delegation runs as a detached, process-local "
-                    "background unit and re-enters later."
+                    "synchronous: tasks run in parallel and return one consolidated "
+                    "results array after all children finish. When true, the whole "
+                    "delegation runs as a detached, process-local background unit "
+                    "and re-enters later."
                 ),
             },
             "action": {
                 "type": "string",
                 "enum": ["spawn", "list", "steer", "stop"],
                 "description": (
-                    "Default 'spawn' (omit for normal delegation). Live "
-                    "orchestration of running subagents: 'list' shows this "
-                    "conversation's live children (ids, goals, status, "
-                    "transcript paths); 'steer' queues course-correction text "
-                    "into one child (requires subagent_id + message) without "
-                    "stopping it; 'stop' ends one child early (requires "
-                    "subagent_id) — its partial result still returns as a "
-                    "completion message. Control actions return immediately; "
-                    "goal/tasks are ignored when action is not 'spawn'."
+                    "Default 'spawn'. Live control of running children: "
+                    "'list' = ids/goals/status/transcripts; 'steer' = queue "
+                    "course-correction text into one child (subagent_id + "
+                    "message) without stopping it; 'stop' = end one child "
+                    "early (subagent_id; partial result still returns). "
+                    "Control actions return immediately; goal/tasks are "
+                    "ignored unless spawning."
                 ),
             },
             "subagent_id": {
                 "type": "string",
                 "description": (
-                    "Target for action='steer'/'stop'. Ids are returned in the "
-                    "spawn dispatch response (subagent_ids) and by "
-                    "action='list'."
+                    "Target for action='steer'/'stop' (ids from the spawn "
+                    "response or action='list')."
                 ),
             },
             "message": {
                 "type": "string",
                 "description": (
-                    "For action='steer': the course correction. Be directive "
-                    "and specific — the child sees it appended to its next "
-                    "tool result mid-run (e.g. \"Stop exploring X; focus on Y "
-                    "and return early results\")."
+                    "For action='steer': the course correction, appended to "
+                    "the child's next tool result mid-run. Be directive and "
+                    "specific."
                 ),
             },
         },
