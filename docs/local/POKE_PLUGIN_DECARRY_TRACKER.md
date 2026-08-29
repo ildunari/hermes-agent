@@ -6,11 +6,12 @@
 
 ## Current state
 
-- Phase: Checkpoint 4 partially delivered — operator tooling deleted; **runtime leaf deletion is blocked on a missing generic seam** (see "Checkpoint 4 blocker" below).
+- Phase: Checkpoint 4 capability-transfer prerequisites implemented and verified;
+  runtime leaf deletion was deliberately not attempted in this slice.
 - Live runtime changed: no. No live config, profile, database, gateway process, or transport was touched.
 - Core worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`.
 - Plugin worktree: `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`.
-- Active writer: parent Coding agent only; reconnaissance agents were read-only.
+- Active writer: focused Coding subagent in the two isolated migration worktrees.
 
 ## Baseline
 
@@ -34,9 +35,48 @@
 | 1. Portable plugin libraries | `9182fb07f6`, `f30eafc74f` | `66219a6`, `d27abc6` | 411 plugin + 188 core focused; carry gates pass | closure approved | complete |
 | 2. Generic seams + dark parity | `23de9414be`, `50df8641f9`, `dc5d21bc58` | `96026ea` | 438 plugin + 293 closure/integration + 206 focused core; carry gates pass; contact_memory 47 pre-existing BlueBubbles failures (baseline-identical, classified) | closure approved | complete |
 | 3. Authoritative activation, legacy fallback retained | `f16961a5ff`, `a02e1325e7`, `81c590e99d` | `8d36131`, `fea92e8` | 518 plugin; 233 focused core; 234 Guest/proactive/contact passes; carry gates pass | closure approved | complete |
-| 4. Core deletion and final de-carry | `e5fdf94cf7`, `7bc6a50aa7` | `cf8af2d` | 622 plugin poke + 1056 plugin full (failure set identical to baseline); 14 generic-enforcement (also green with the legacy guard sabotaged); 4 carry-coverage; carry validate/doctor/contract PASS | pending | **partial — operator tooling deleted; runtime leaves blocked** |
+| 4. Core deletion and final de-carry | `e5fdf94cf7`, `7bc6a50aa7`, `35798e8081` | `cf8af2d`, `e4853a5` | capability transfer: 628 plugin poke; 109 BlueBubbles+texture against core; 254 generic extension/ownership/parity; 85 Guest enforcement; 40 contact-lane; carry validate/doctor/contract PASS | pending | **partial — transfer prerequisites complete; runtime leaves retained** |
 
 ## Evidence log
+
+### 2026-08-28 — Checkpoint 4 capability-transfer prerequisites complete
+
+Core `35798e8081` and plugin `e4853a5` close the demonstrated transfer gaps
+without touching live config, profiles, databases, processes, or transports:
+
+- `GatewayTurnAugmentation.request_tools` now carries validated executable
+  `RequestScopedTool` objects. Production selects the proven turn-policy owner,
+  merges its tools at the existing request-scoped binding boundary, dispatches
+  real handlers, and commits tool/turn success callbacks only after a completed
+  turn. The three strict-xfail readiness gates are ordinary green tests now.
+- Authoritative Poke declares `turn_policy` and owns Lane-A recall, the
+  session-frozen interest digest, and Lane-B search. `turn_policy` is an
+  exactly-one ownership domain coupled to ingress/extraction; legacy, extension,
+  unowned, no-plan, and rollback verdicts are tested. Poke does not compile
+  conversation texture.
+- Poke registers plugin-owned `guest_fs`, including default-root, traversal,
+  symlink, allowed-operation, and denial behavior. Generic `authz_mixin` and
+  `slash_access` no longer import `gateway.guest_access`.
+- The standalone conversation-texture plugin imports the authoritative shared
+  engine from `poke/shared/conversation_texture.py`, preserving config, exemplar
+  caching, history scrubbing, state, and fail-open behavior. BlueBubbles and all
+  other plugin production code have zero imports of the targeted core leaves.
+
+**Verified evidence** (all with
+`/Users/Kosta/.hermes/hermes-agent/.venv/bin/python`):
+
+| Check | Result |
+|---|---|
+| Plugin `tests/poke_plugin` | 628 passed |
+| Plugin BlueBubbles + conversation texture against this core worktree | 109 passed |
+| Core generic extension / ownership / CP4 readiness / plugin parity | 254 passed |
+| Core Guest access / slash / multiplex authz / generic enforcement | 85 passed |
+| Core Lane A / Lane B / interest digest | 40 passed |
+| `carry.py validate` / `doctor` / local carry contract | PASS / PASS / PASS |
+| Plugin production imports of targeted core leaves | 0 |
+
+Not claimed: runtime leaves were not deleted; CP4 is not final; no live
+activation, restart, soak, database mutation, or outbound send occurred.
 
 ### 2026-08-28 — Checkpoint 4 partial: operator tooling deleted, runtime leaves blocked
 
