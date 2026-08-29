@@ -1,7 +1,7 @@
 # Poke Plugin De-Carry Tracker
 
-**Program:** Move Poke/Guest/contact-memory/proactive policy from Hermes core to the user-plugin repository.  
-**Plan:** `docs/plans/poke-plugin-decarry-20260827.md`  
+**Program:** Move Poke/Guest/contact-memory/proactive policy from Hermes core to the user-plugin repository.
+**Plan:** `docs/plans/poke-plugin-decarry-20260827.md`
 **Started:** 2026-08-27
 
 ## Current state

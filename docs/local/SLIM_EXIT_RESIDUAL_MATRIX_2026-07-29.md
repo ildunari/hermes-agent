@@ -47,4 +47,3 @@ The deterministic post-deletion thinning baseline at core
 hotspots with weighted score 132601. Two independent generations were
 byte-identical. No hotspot path matches the deleted Poke/Guest/contact-memory,
 proactive runtime, texture-engine, Guest-workspace, or Guest-cron surfaces.
-

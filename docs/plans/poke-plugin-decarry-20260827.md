@@ -1,10 +1,10 @@
 # Poke/Guest Plugin De-Carry Plan
 
 **Status:** Checkpoint 4 runtime deletion is implemented and locally verified in isolated worktrees. Product runtime leaves are physically absent from core; plugin migration commit `ccd99d26b7db04173d918732c2e3c0ed20f3a447` and core deletion commit `28e12493cac5d53f63aa611dfa8a295598ef638a` are recorded. Live Guest/Poke remains unchanged. Final independent approval, landing, safe restart, and bounded soak remain outstanding and are not claimed. See `docs/local/POKE_PLUGIN_DECARRY_TRACKER.md` for exact fixed-shard evidence and residual classification.
-**Date:** 2026-08-27  
-**Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`  
-**Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`  
-**Core base:** `240839a7aca0e25d7f1e67059a96da463b9f2038` (`local/studio-slim`)  
+**Date:** 2026-08-27
+**Core worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-worktrees/poke-plugin-decarry`
+**Plugin worktree:** `/Users/Kosta/LocalDev/.studio-only/hermes-kosta-plugin-worktrees/poke-plugin-decarry`
+**Core base:** `240839a7aca0e25d7f1e67059a96da463b9f2038` (`local/studio-slim`)
 **Plugin base:** `62422c33bb6a93a41aef7e19c89371dbb451a69b` (`main`)
 
 ## 1. Goal
