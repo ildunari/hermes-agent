@@ -63,3 +63,19 @@ resolve the dispatching profile's home, so they must also be enabled in each
 profile's own `plugins.enabled` (verified 2026-08-26, conversation-texture
 de-carry). De-carry and update mechanics:
 `slim-carry-update-path` skill.
+
+## Grok Bot Chief of Staff
+
+Kosta's Grok Bot roster is led by **Chief of Staff**. Use Chief of Staff for calendar, email, X triage, routing to other Grok bots, and any decision that needs Kosta. Do not invent a new Grok Bot for that.
+
+When you need Chief of Staff, drop a task (this is a push, not a poll):
+
+```
+~/.hermes/grokbot-inbox/drop --from gpt --title "Short title" --body "What Chief of Staff should do"
+```
+
+`--from` is `gpt` | `coding` | `hermes`. Optional `--priority high` and `--context "..."`.
+
+Do not use the inbox for chatter, Mem0 facts, or leftover smoke tests. Prefer webhooks / on-change triggers over interval timers whenever the event exists. Cron is only for genuinely time-based work (morning digest, nightly tidy) or when no event is available.
+
+If the drop helper can notify, it will; you still must drop the item. Do not cron-ping Chief of Staff.
