@@ -59,8 +59,10 @@ def _store_paths() -> "tuple[Path, Optional[Path]]":
 
 
 def _connect() -> sqlite3.Connection:
+    from cron.jobs import _ensure_cron_dir
+
     db_path, _ = _store_paths()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_cron_dir(db_path.parent)
     return sqlite3.connect(db_path, timeout=5)
 
 

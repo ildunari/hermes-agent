@@ -85,11 +85,14 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
       clientPlacement: hudWindowing?.clientPlacement !== false,
       controlDrag: hudWindowing?.controlDrag === true,
       nativeDrag: hudNativeDrag,
+      solid: hudWindowing?.solid === true,
       workspaceTransfer: hudWindowing?.workspaceTransfer === true
     },
     open: request => ipcRenderer.invoke('hermes:hud:open', request),
     close: () => ipcRenderer.invoke('hermes:hud:close'),
     setIgnoreMouse: ignore => ipcRenderer.send('hermes:hud:ignore-mouse', ignore),
+    beginMove: () => ipcRenderer.send('hermes:hud:begin-move'),
+    endMove: () => ipcRenderer.send('hermes:hud:end-move'),
     moveBy: delta => ipcRenderer.send('hermes:hud:move-by', delta),
     setWorkspaceTransfer: transferring => ipcRenderer.send('hermes:hud:workspace-transfer', transferring),
     setBounds: bounds => ipcRenderer.send('hermes:hud:set-bounds', bounds),
@@ -186,6 +189,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     setLaunchMode: mode => ipcRenderer.invoke('hermes:connections:set-launch-mode', mode),
     setLastUsed: id => ipcRenderer.invoke('hermes:connections:set-last-used', id),
     test: id => ipcRenderer.invoke('hermes:connections:test', id),
+    updateManaged: id => ipcRenderer.invoke('hermes:connections:update-managed', id),
     // Fan out `hermes update` to every eligible registered connection.
     // Optional excludeIds skips rows the caller updates through another path.
     updateAll: options => ipcRenderer.invoke('hermes:connections:update-all', options),
