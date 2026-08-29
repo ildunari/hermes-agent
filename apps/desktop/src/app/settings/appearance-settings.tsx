@@ -25,7 +25,9 @@ import { $reasoningCollapsedByDefault, setReasoningCollapsedByDefault } from '@/
 import { $sessionListDensity, type SessionListDensity, setSessionListDensity } from '@/store/session-list-density'
 import { $tableLayout, setTableLayout } from '@/store/table-layout'
 import { $tabStripDefault, setTabStripDefault, type TabStripDefault } from '@/store/tabstrip-prefs'
+import { $retiredTips, $tipsEnabled, resetTips, setTipsEnabled } from '@/store/tips'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
+import { $toursEnabled, setToursEnabled } from '@/store/tours'
 import {
   $translucency,
   beginTranslucencyPeek,
@@ -360,6 +362,9 @@ export function AppearanceSettings() {
   const translucency = useStore($translucency)
   const glassMode = translucency.mode === 'glass' && GLASS_SUPPORTED
   const reactionsEnabled = useStore($reactionsEnabled)
+  const tipsEnabled = useStore($tipsEnabled)
+  const toursEnabled = useStore($toursEnabled)
+  const retiredTips = useStore($retiredTips)
   const vibeHeartsEnabled = useStore($vibeHeartsEnabled)
   const backdrop = useStore($backdrop)
   const chatWidth = useStore($chatWidth)
@@ -771,6 +776,58 @@ export function AppearanceSettings() {
             }
             description={a.reactionsDesc}
             title={a.reactionsTitle}
+          />
+
+          <ListRow
+            action={
+              <div className="flex flex-col items-end gap-1.5">
+                <SegmentedControl
+                  onChange={id => {
+                    triggerHaptic('selection')
+                    setTipsEnabled(id === 'on')
+                  }}
+                  options={[
+                    { id: 'off', label: t.common.off },
+                    { id: 'on', label: t.common.on }
+                  ]}
+                  value={tipsEnabled ? 'on' : 'off'}
+                />
+                {/* The ✕ on a tip is permanent, so this is the only way back.
+                    It appears once there is something to bring back. */}
+                {retiredTips.length > 0 && (
+                  <Button
+                    onClick={() => {
+                      triggerHaptic('selection')
+                      resetTips()
+                    }}
+                    size="inline"
+                    variant="text"
+                  >
+                    {a.tipsReset(retiredTips.length)}
+                  </Button>
+                )}
+              </div>
+            }
+            description={a.tipsDesc}
+            title={a.tipsTitle}
+          />
+
+          <ListRow
+            action={
+              <SegmentedControl
+                onChange={id => {
+                  triggerHaptic('selection')
+                  setToursEnabled(id === 'on')
+                }}
+                options={[
+                  { id: 'off', label: t.common.off },
+                  { id: 'on', label: t.common.on }
+                ]}
+                value={toursEnabled ? 'on' : 'off'}
+              />
+            }
+            description={a.toursDesc}
+            title={a.toursTitle}
           />
 
           <ListRow

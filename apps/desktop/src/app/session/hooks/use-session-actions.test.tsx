@@ -732,6 +732,7 @@ describe('createBackendSessionForSend profile routing', () => {
 function ResumeHarness({
   activeSessionIdRef,
   onStateUpdate,
+  onViewSync,
   onReady,
   requestGateway,
   runtimeIdByStoredSessionIdRef,
@@ -740,6 +741,7 @@ function ResumeHarness({
 }: {
   activeSessionIdRef?: MutableRefObject<null | string>
   onStateUpdate?: (sessionId: string, state: ClientSessionState) => void
+  onViewSync?: (sessionId: string, state: ClientSessionState) => void
   onReady: (
     resume: (storedSessionId: string, replaceRoute?: boolean, ownerRoute?: SessionProfileRoute) => Promise<unknown>
   ) => void
@@ -768,7 +770,7 @@ function ResumeHarness({
     selectedStoredSessionId,
     selectedStoredSessionIdRef: ref<string | null>(selectedStoredSessionId),
     sessionStateByRuntimeIdRef: stateMapRef,
-    syncSessionStateToView: vi.fn(),
+    syncSessionStateToView: (sessionId, state) => onViewSync?.(sessionId, state),
     updateSessionState: (sessionId, updater, storedSessionId) => {
       // Full default shape (not a bare {} cast) so seeded/derived fields like
       // turnStartedAt behave as in production state updates.
@@ -822,6 +824,7 @@ function ResumeTimerHarness({
     selectedStoredSessionId: null,
     selectedStoredSessionIdRef: cache.selectedStoredSessionIdRef,
     sessionStateByRuntimeIdRef: cache.sessionStateByRuntimeIdRef,
+    holdSessionTranscriptView: cache.holdSessionTranscriptView,
     syncSessionStateToView: cache.syncSessionStateToView,
     getRoutedStoredSessionId: () => null,
     updateSessionState: cache.updateSessionState
@@ -3610,6 +3613,105 @@ describe('resumeSession warm-cache mapping integrity', () => {
     expect(activeSessionIdRef.current).toBeNull()
     await switching
     expect(activeSessionIdRef.current).toBe('rt-A')
+  })
+
+  it('never publishes a tail-only warm cache before the full persisted history', async () => {
+    const cachedState = clientState('stored-1')
+    cachedState.messages = [
+      {
+        id: 'user-latest',
+        role: 'user',
+        parts: [{ type: 'text', text: 'latest question after long-context completion' }]
+      },
+      {
+        id: 'assistant-latest',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'latest answer after long-context completion' }]
+      }
+    ]
+
+    const runtimeIdByStoredSessionIdRef = {
+      current: new Map([['stored-1', 'runtime-warm']])
+    } satisfies MutableRefObject<Map<string, string>>
+
+    const sessionStateByRuntimeIdRef = {
+      current: new Map([['runtime-warm', cachedState]])
+    } satisfies MutableRefObject<Map<string, ClientSessionState>>
+
+    const persistedAuthority = deferred<{
+      messages: Array<{ content: string; role: 'assistant' | 'user'; timestamp: number }>
+      session_id: string
+    }>()
+
+    const publications: Array<{ older: boolean; latest: boolean }> = []
+
+    setSessions([storedSession({ message_count: 4 })])
+    vi.mocked(getLatestSessionMessages).mockReturnValue(persistedAuthority.promise as never)
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.activate') {
+        return {
+          info: {},
+          message_count: 2,
+          messages: [],
+          messages_omitted: true,
+          resumed: 'stored-1',
+          running: false,
+          session_id: 'runtime-warm',
+          session_key: 'stored-1'
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let resume: ((storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) | null = null
+    render(
+      <ResumeHarness
+        onReady={ready => (resume = ready)}
+        onViewSync={(_sessionId, state) => {
+          const snapshot = JSON.stringify(state.messages)
+          publications.push({
+            latest: snapshot.includes('latest question after long-context completion'),
+            older: snapshot.includes('earlier question before long-context completion')
+          })
+        }}
+        requestGateway={requestGateway}
+        runtimeIdByStoredSessionIdRef={runtimeIdByStoredSessionIdRef}
+        sessionStateByRuntimeIdRef={sessionStateByRuntimeIdRef}
+      />
+    )
+    await waitFor(() => expect(resume).not.toBeNull())
+
+    const resumePromise = resume!('stored-1', true)
+    await waitFor(() =>
+      expect(requestGateway).toHaveBeenCalledWith(
+        'session.activate',
+        expect.objectContaining({ omit_messages: true, session_id: 'runtime-warm' })
+      )
+    )
+
+    expect(
+      publications.filter(snapshot => snapshot.latest && !snapshot.older),
+      `Tail-only warm-cache publication escaped before persisted authority: ${JSON.stringify(publications)}`
+    ).toEqual([])
+
+    persistedAuthority.resolve({
+      messages: [
+        { content: 'earlier question before long-context completion', role: 'user', timestamp: 1 },
+        { content: 'earlier answer before long-context completion', role: 'assistant', timestamp: 2 },
+        { content: 'latest question after long-context completion', role: 'user', timestamp: 3 },
+        { content: 'latest answer after long-context completion', role: 'assistant', timestamp: 4 }
+      ],
+      session_id: 'stored-1'
+    })
+    await resumePromise
+
+    expect(publications.some(snapshot => snapshot.latest && snapshot.older)).toBe(true)
+    expect(
+      publications.filter(snapshot => snapshot.latest && !snapshot.older),
+      `Tail-only warm-cache publication escaped: ${JSON.stringify(publications)}`
+    ).toEqual([])
   })
 })
 
