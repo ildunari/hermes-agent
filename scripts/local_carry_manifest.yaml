@@ -406,6 +406,7 @@ features:
     class: keep-core
     owner_paths:
       - apps/desktop/README.md  # local signing doc note (CSC_NAME hazard), formerly owned by browser-workspace
+      - apps/desktop/electron/managed-ssh-update.test.ts
       - apps/desktop/electron/update-count.test.ts
       - apps/desktop/electron/update-count.ts
       - apps/desktop/vitest.config.ts
@@ -447,6 +448,7 @@ features:
         - scripts/setup_update_service.py
         - check
     tests:
+      - apps/desktop/electron/managed-ssh-update.test.ts
       - apps/desktop/electron/update-count.test.ts
       - tests/scripts/test_hermes_checkpoint.py
       - tests/scripts/test_carry_v2.py
