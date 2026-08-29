@@ -396,6 +396,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     ],
     "zai": [
         "glm-5.3",
+        "glm-5.3-flash",
         "glm-5.2",
         "glm-5.1",
         "glm-5",

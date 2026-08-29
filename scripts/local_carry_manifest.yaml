@@ -208,8 +208,12 @@ checks:
     description: the post-update helper transitions an old writer through its internal drain without inferring idle from stale telemetry
   - id: config-defaults-local-overrides
     path: hermes_cli/config_defaults.py
-    needles: [delivery_ledger_exclude_platforms, grok-4.6, 4YEC26S9KF]
-    description: locally retained generic delivery replay exclusion, model default, and signed CuaDriver identity defaults
+    needles: [delivery_ledger_exclude_platforms, grok-4.6]
+    description: locally retained generic delivery replay exclusion and model default
+  - id: signed-cuadriver-identity-defaults
+    path: tools/computer_use/cua_backend.py
+    needles: [4YEC26S9KF]
+    description: signed CuaDriver identity defaults follow the upstream relocation into the CUA backend
   - id: desktop-build-hooks
     path: apps/desktop/package.json
     needles: ['"afterPack"', '"entitlements"']
