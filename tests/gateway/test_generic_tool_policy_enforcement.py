@@ -1,18 +1,9 @@
-"""Checkpoint 4 precondition: the generic seam alone enforces tool policy.
+"""The generic extension seam enforces tool policy at final dispatch.
 
-Checkpoint 3 kept ``gateway.guest_access.enforce_guest_tool_call`` wired into
-``model_tools.handle_function_call`` as a second, Kosta-specific owner. The plan
-forbids deleting it until *generic* extension enforcement is proven mandatory on
-every dispatch path the gateway actually uses:
-
-    direct, deferred (tool-search bridge), recursive bridge unwrap, MCP-server
-    dispatch, inline/nested dispatch, and the executor/thread hop.
-
-These tests contain **no Poke, Guest, contact, or proactive symbol**. They use a
-throwaway extension registered against a temp scope, which is exactly what any
-third-party plugin would do. If they pass with the legacy guard deleted, the
-generic seam is the only enforcement needed and the Kosta-specific one is
-redundant carry rather than defence in depth.
+The policy decision is mandatory on every dispatch path the gateway uses:
+direct, deferred tool-search bridge, recursive bridge unwrap, MCP dispatch,
+inline/nested dispatch, and executor/thread propagation. No product-specific
+fallback participates in these tests or in production dispatch.
 
 Coverage note: the *deny* direction is the security property. The *allow*
 direction is asserted too, because a guard that denies everything would pass a
@@ -71,7 +62,7 @@ def _denying_extension(extension_id: str = "acme-policy"):
 def _register(scope: str, bundle=None, *, owner=True):
     bundle = bundle or _denying_extension()
     ce.conversation_extension_registry.register(bundle, scope=scope)
-    kind = co.OwnerKind.EXTENSION if owner else co.OwnerKind.LEGACY
+    kind = co.OwnerKind.EXTENSION if owner else co.OwnerKind.CORE
     co.conversation_ownership_registry.install(
         scope,
         {

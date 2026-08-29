@@ -156,11 +156,9 @@ def _fallback_chain_phrase() -> str:
 def _failure_streak_nudge(job: dict) -> str:
     """Return a review nudge when a recurring job keeps failing, else "".
 
-    Inspired by Poke (poke.com), which "encourages users to review recurring
-    automations that haven't been acted upon": once a recurring job has failed
-    several runs in a row, the per-run failure ping stops being information and
-    starts being noise — the useful message is "this automation needs your
-    attention (fix, pause, or remove it)".
+    Once a recurring job has failed several runs in a row, the per-run failure
+    ping stops being information and starts being noise — the useful message is
+    "this automation needs your attention (fix, pause, or remove it)".
 
     The streak counter (``failure_streak``) is persisted by
     ``cron.jobs.mark_job_run`` and reset on any successful run. Because the
@@ -3123,28 +3121,6 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     """
     targets = _resolve_delivery_targets(job)
 
-    # Fail closed before either the normal-profile or delegated-profile send
-    # path can load an adapter. Internal maintenance/probe/bootstrap output is
-    # operational telemetry, never conversation content. This also covers
-    # old/tampered records that predate ``delivery_profile``.
-    internal_names = {
-        "contact memory interest maintenance",
-        "proactive rollout health watchdog",
-        "proactive alarm sink end-to-end probe",
-    }
-    internal_script_markers = (
-        "maintenance", "watchdog", "bootstrap", "dry_run", "dry-run", "probe",
-    )
-    job_name = str(job.get("name") or "").strip().lower()
-    script_name = Path(str(job.get("script") or "")).name.lower()
-    is_internal = job_name in internal_names or any(
-        marker in script_name for marker in internal_script_markers
-    )
-    if is_internal:
-        if any(str(target.get("platform") or "").lower() == "bluebubbles" for target in targets):
-            msg = "internal maintenance/watchdog/bootstrap/dry-run delivery to BlueBubbles is forbidden"
-            logger.error("Job '%s': %s", job.get("id", "?"), msg)
-            return msg
 
     if not targets:
         deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
@@ -3247,19 +3223,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         if delivery_profile is None:
             config = load_gateway_config()
         else:
-            from gateway.cron_delivery_profile import validate_delegated_alarm_delivery
+            from gateway.cron_delivery_profile import validate_delegated_delivery
             source_home = _get_hermes_home().resolve()
-            if source_home.name not in {"poke", "guest"} or job.get("name") not in {
-                "Proactive rollout health watchdog",
-                "Proactive alarm sink end-to-end probe",
-            }:
-                raise ValueError("delivery_profile is restricted to installed Poke/Guest proactive alarms")
             if not targets:
                 raise ValueError("delegated delivery requires one explicit target")
             first = targets[0]
             if any(t.get("platform") != first.get("platform") or t.get("chat_id") != first.get("chat_id") for t in targets):
                 raise ValueError("delegated delivery cannot fan out across destinations")
-            _, config, _, _ = validate_delegated_alarm_delivery(
+            _, config, _, _ = validate_delegated_delivery(
                 source_home, str(delivery_profile), {
                     "platform": str(first["platform"]),
                     "address": str(first["chat_id"]),

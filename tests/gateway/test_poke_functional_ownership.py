@@ -23,7 +23,7 @@ against real modules and production-shaped state:
 6. the authenticated existing-DM **tri-state** is honored, with the transport
    home authorization enforced and ``UNKNOWN`` never retried;
 7. **zero outbound transport** occurs anywhere in the suite;
-8. full **config-only rollback** still restores the legacy owner.
+8. required-extension removal remains fail-closed after core deletion.
 
 Isolation: every database is created under ``tmp_path``. No adapter, socket,
 or transport client is constructed — the send host-op is a recording double,
@@ -428,6 +428,7 @@ def test_core_applies_the_validated_directive_to_the_event(tmp_path, poke_auth):
         transport_profile="poke",
         transport_home="/tmp/poke-home",
         runtime_profile=directive.runtime_profile,
+        extension_id=EXTENSION_ID,
         principal=directive.principal,
         subject_id=directive.subject_id,
         context_prefix=directive.context_prefix,
@@ -452,15 +453,19 @@ def test_core_applies_the_validated_directive_to_the_event(tmp_path, poke_auth):
         observed_only: bool = False
 
     source = _Source()
+    transport_ref = object()
+    source._transport_adapter_ref = transport_ref
     event = _Event(source=source, metadata={})
 
     new_source, new_event = runner._apply_extension_route_decision(
         source, event, decision
     )
     assert new_source.profile == "guest"
-    assert new_source.user_id_alt == f"guest:{CONTACT_ID}"
+    assert new_source.extension_route_admitted is True
+    assert new_source._transport_adapter_ref is transport_ref
+    assert new_source.user_id_alt == f"extension:{EXTENSION_ID}:{CONTACT_ID}"
     assert new_event.text.startswith("[Guest contact context:")
-    assert new_event.metadata["_hermes_contact_scope"]["principal"] == "guest"
+    assert new_event.metadata["_hermes_extension_identity"]["principal"] == "guest"
 
 
 def test_directive_never_prefixes_command_text(tmp_path, poke_auth):
@@ -474,6 +479,7 @@ def test_directive_never_prefixes_command_text(tmp_path, poke_auth):
         transport_profile="poke",
         transport_home="/tmp/h",
         runtime_profile="gpt",
+        extension_id=EXTENSION_ID,
         principal="owner",
         subject_id="kosta-owner",
         context_prefix="[Owner contact context: ...]\n\n",
@@ -499,8 +505,8 @@ def test_directive_never_prefixes_command_text(tmp_path, poke_auth):
     assert event.text == "/new"
 
 
-def test_extension_cannot_invent_a_privilege_level(tmp_path):
-    """An unrecognized principal must not be applied."""
+def test_core_carries_extension_identity_as_bounded_opaque_data(tmp_path):
+    """Core validates shape and leaves identity meaning to the extension."""
     context = ce.GatewayRouteContext(
         platform="bluebubbles",
         adapter_identity="bb",
@@ -522,7 +528,7 @@ def test_extension_cannot_invent_a_privilege_level(tmp_path):
     ce.conversation_extension_registry.register(bundle, scope="/tmp/rogue")
     decision = ce.resolve_route(context, scope="/tmp/rogue")
     assert decision.admitted is True
-    assert decision.principal is None, "core must not carry an unknown principal"
+    assert decision.principal == "superuser"
 
 
 # ---------------------------------------------------------------------------
@@ -601,18 +607,6 @@ def test_unauthenticated_ingress_is_not_persisted(tmp_path, poke_auth):
 # ---------------------------------------------------------------------------
 
 
-def test_texture_is_compiled_exactly_once_per_turn(tmp_path, poke_auth):
-    home = _seed_profile(tmp_path / "hermes" / "profiles" / "guest")
-    extension = _extension(poke_auth, home, _config(tmp_path))
-
-    first = extension.extraction.compile_texture(session_key="s1", turn_index=0)
-    second = extension.extraction.compile_texture(session_key="s1", turn_index=0)
-
-    assert extension.activity.textures_compiled <= 1
-    assert second is None, "a second compile for one turn must be refused"
-    # A different turn is a different compilation.
-    extension.extraction.compile_texture(session_key="s1", turn_index=1)
-    assert extension.activity.textures_compiled <= 2
 
 
 def test_extraction_requires_authenticated_identity(tmp_path, poke_auth):
@@ -964,52 +958,5 @@ def test_activation_is_not_a_zero_owner_state(tmp_path, poke_auth):
 
 
 # ---------------------------------------------------------------------------
-# 8. rollback remains a pure config switch
+# 8. rollback requires reverting CP4 before plugin disable
 # ---------------------------------------------------------------------------
-
-
-def test_full_config_only_rollback_restores_the_legacy_owner(tmp_path, poke_auth):
-    home = _seed_profile(tmp_path / "hermes" / "profiles" / "guest")
-    scope = _scope(home)
-    config = _config(tmp_path)
-
-    bundle, decision = poke_auth.build_extension(profile_home=home, config_raw=config)
-    ce.conversation_extension_registry.register(bundle, scope=scope)
-    plan, conflicts = co.activate_plan(scope=scope, config_raw=config)
-    assert conflicts == ()
-    assert all(plan[d].is_extension for d in co.OwnershipDomain)
-
-    # Roll back: change only the config value. No revert, no data move.
-    rolled_back = dict(config)
-    rolled_back["gateway"] = dict(config["gateway"])
-    rolled_back["gateway"]["conversation_ownership"] = {"default": "legacy"}
-
-    co.conversation_ownership_registry.clear(scope)
-    plan2, conflicts2 = co.activate_plan(scope=scope, config_raw=rolled_back)
-    assert conflicts2 == ()
-    assert all(plan2[d].is_legacy for d in co.OwnershipDomain)
-
-
-def test_rollback_leaves_durable_state_byte_identical(tmp_path, poke_auth):
-    home = _seed_profile(tmp_path / "hermes" / "profiles" / "guest")
-    scope = _scope(home)
-    config = _config(tmp_path)
-
-    def digest():
-        return {
-            str(p.relative_to(home)): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in sorted(home.rglob("*"))
-            if p.is_file()
-        }
-
-    before = digest()
-    bundle, _ = poke_auth.build_extension(profile_home=home, config_raw=config)
-    ce.conversation_extension_registry.register(bundle, scope=scope)
-    co.activate_plan(scope=scope, config_raw=config)
-    co.conversation_ownership_registry.clear(scope)
-    co.activate_plan(
-        scope=scope,
-        config_raw={**config, "gateway": {**config["gateway"],
-                                          "conversation_ownership": {"default": "legacy"}}},
-    )
-    assert digest() == before, "rollback must not touch durable state"

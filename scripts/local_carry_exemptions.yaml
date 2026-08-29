@@ -381,96 +381,6 @@ exemptions:
 - path_glob: gateway/config.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
-- path_glob: gateway/contact_memory/__init__.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/admin.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/broker.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/embeddinggemma_worker.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/embeddings.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/extractor.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/gating.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/imessage_bootstrap.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/imessage_communication_adapter.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/imessage_link_review.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/import_contacts.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/interest_maintenance.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/lane_b.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/link_research.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/link_research_worker.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/live_ingress.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/phase_e_enrichment.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/phase_e_link_enrichment.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/phase_e_taxonomy.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/private_link_queue.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/qwen3_extractor_worker.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/qwen3_reranker_worker.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/registry.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/rerankers.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/reviewed_backfill.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/runtime.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/schema.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/security.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/contact_memory/store.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/conversation_texture_v2.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
 - path_glob: gateway/cron_delivery_profile.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
@@ -493,21 +403,6 @@ exemptions:
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
 - path_glob: gateway/platforms/telegram.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/proactive_checkin.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/proactive_fetch.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/proactive_scheduler.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/proactive_status.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: gateway/proactive_transport.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
 - path_glob: gateway/rich_cards/__init__.py
@@ -657,9 +552,6 @@ exemptions:
 - path_glob: scripts/mac_studio_hermes_smoke.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
-- path_glob: scripts/manage_guest_cron_launchd.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
 - path_glob: scripts/rich_cards/render-card.mjs
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
@@ -685,9 +577,6 @@ exemptions:
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
 - path_glob: tools/file_tools.py
-  reason: grandfathered current slim carry pending classification
-  expires: '2026-10-01'
-- path_glob: tools/guest_workspace_tools.py
   reason: grandfathered current slim carry pending classification
   expires: '2026-10-01'
 - path_glob: tools/image_generation_tool.py

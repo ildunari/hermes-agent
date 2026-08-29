@@ -18,13 +18,13 @@ What the harness holds itself to:
 Proved here:
 
 1. the plugin becomes the single owner when all four conditions hold;
-2. the legacy owner is retained and reachable by a config switch alone;
+2. ordinary profiles retain the inert generic core path;
 3. conflicts (ambiguous, split, unowned) fail readiness closed;
 4. exactly one watcher / ingress write / texture compile can occur;
 5. existing durable data is byte-identical before and after activation;
 6. no send occurs anywhere in the sequence;
 7. ownership is stable across a simulated restart and reload;
-8. rollback restores the legacy owner exactly.
+8. a missing required plugin fails readiness closed.
 """
 
 from __future__ import annotations
@@ -238,34 +238,14 @@ def test_activated_owner_actually_enforces_tool_policy(tmp_path, poke_auth):
 
 
 # ---------------------------------------------------------------------------
-# 2. legacy retained and selectable
+# 2. ordinary core path
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_owner_is_still_present_and_selectable(tmp_path, poke_auth):
-    """Rollback must not require reverting code at this checkpoint."""
-    import gateway.guest_access as legacy_guest
-    import gateway.proactive_scheduler as legacy_scheduler
-    import gateway.proactive_transport as legacy_transport
-
-    assert callable(legacy_guest.enforce_guest_tool_call)
-    assert hasattr(legacy_scheduler, "ProactiveScheduler")
-    assert hasattr(legacy_transport, "deliver_prepared_exactly_once")
-
-    home = tmp_path / "poke"
-    _seed_profile(home)
-    scope = _scope(home)
-    _register(poke_auth, home, _activation_config(), scope)
-
-    legacy_config = _activation_config(authoritative=False, ownership="legacy")
-    plan, conflicts = co.activate_plan(scope=scope, config_raw=legacy_config)
-    assert conflicts == ()
-    for domain in co.OwnershipDomain:
-        assert plan[domain].is_legacy
 
 
 def test_default_profile_is_untouched_by_the_activation(tmp_path, poke_auth):
-    """An ordinary profile keeps the legacy owner with no configuration."""
+    """An ordinary profile keeps the generic core owner with no configuration."""
     home = tmp_path / "poke"
     other = tmp_path / "ordinary"
     other.mkdir()
@@ -275,7 +255,7 @@ def test_default_profile_is_untouched_by_the_activation(tmp_path, poke_auth):
 
     plan, conflicts = co.activate_plan(scope=_scope(other), config_raw={})
     assert conflicts == ()
-    assert all(selection.is_legacy for selection in plan.values())
+    assert all(selection.is_core for selection in plan.values())
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +335,7 @@ def test_unhealthy_owner_fails_the_plan_closed(tmp_path, poke_auth):
             set(co.DOMAIN_REQUIRED_CAPABILITY.values()) | {"health"}
         ),
         authorize_route=lambda ctx: ce.GatewayRouteDirective(admit=True),
+        augment_turn=lambda ctx: ce.GatewayTurnAugmentation(),
         observe_ingress=lambda ctx: None,
         observe_turn_result=lambda result: None,
         on_start=lambda facade: None,
@@ -391,53 +372,10 @@ def test_activated_plugin_starts_no_second_watcher(tmp_path, poke_auth):
     assert spawned == [], "the activated plugin must not start a second watcher"
 
 
-def test_legacy_watcher_stands_down_when_the_plugin_owns_proactive(tmp_path, poke_auth):
-    home = tmp_path / "poke"
-    _seed_profile(home)
-    scope = _scope(home)
-    config = _activation_config()
-    _register(poke_auth, home, config, scope)
-    co.activate_plan(scope=scope, config_raw=config)
-
-    runner = object.__new__(GatewayRunner)
-    assert runner._legacy_proactive_permitted(scope) is False
 
 
-def test_exactly_one_ingress_writer(tmp_path, poke_auth):
-    """Core's legacy writer stands down exactly when the plugin owns ingress."""
-    home = tmp_path / "poke"
-    _seed_profile(home)
-    scope = _scope(home)
-    config = _activation_config()
-    _register(poke_auth, home, config, scope)
-    co.activate_plan(scope=scope, config_raw=config)
-
-    runner = object.__new__(GatewayRunner)
-    assert runner._legacy_owns(scope, co.OwnershipDomain.INGRESS) is False
-
-    # And after rollback exactly one writer is live again — the legacy one.
-    co.activate_plan(
-        scope=scope,
-        config_raw=_activation_config(authoritative=False, ownership="legacy"),
-    )
-    assert runner._legacy_owns(scope, co.OwnershipDomain.INGRESS) is True
 
 
-def test_exactly_one_texture_owner(tmp_path, poke_auth):
-    """Texture compilation must have one owner, never two.
-
-    The standalone conversation-texture plugin owns the per-turn hook. The
-    activated Poke extension must not also declare turn augmentation, or a
-    profile running both would compile texture twice.
-    """
-    home = tmp_path / "poke"
-    _seed_profile(home)
-    bundle, decision = poke_auth.build_extension(
-        profile_home=home, config_raw=_activation_config()
-    )
-    assert decision.authoritative
-    assert "turn_policy" not in bundle.capabilities
-    assert bundle.augment_turn is None
 
 
 # ---------------------------------------------------------------------------
@@ -632,24 +570,6 @@ def test_reload_replaces_the_generation_without_splitting_ownership(
     assert all(selection.is_extension for selection in plan.values())
 
 
-def test_ownership_survives_the_extension_vanishing_mid_run(tmp_path, poke_auth):
-    """A mid-run unload must not hand the domain back to the legacy owner."""
-    home = tmp_path / "poke"
-    _seed_profile(home)
-    scope = _scope(home)
-    config = _activation_config()
-    _register(poke_auth, home, config, scope)
-    co.activate_plan(scope=scope, config_raw=config)
-
-    generation = ce.conversation_extension_registry.active_generation(
-        EXTENSION_ID, scope=scope
-    )
-    ce.conversation_extension_registry.unregister(
-        EXTENSION_ID, generation=generation, scope=scope
-    )
-
-    runner = object.__new__(GatewayRunner)
-    assert runner._legacy_owns(scope, co.OwnershipDomain.INGRESS) is False
 
 
 # ---------------------------------------------------------------------------
@@ -657,52 +577,8 @@ def test_ownership_survives_the_extension_vanishing_mid_run(tmp_path, poke_auth)
 # ---------------------------------------------------------------------------
 
 
-def test_rollback_is_config_plus_restart_with_no_data_effect(tmp_path, poke_auth):
-    home = tmp_path / "poke"
-    _seed_profile(home)
-    scope = _scope(home)
-    before = _digest(home)
-
-    _register(poke_auth, home, _activation_config(), scope)
-    co.activate_plan(scope=scope, config_raw=_activation_config())
-    assert co.extension_owns(scope, co.OwnershipDomain.DELIVERY)
-
-    # Rollback = flip config, restart. No revert, no data move.
-    ce.conversation_extension_registry.reset_for_tests()
-    co.conversation_ownership_registry.reset_for_tests()
-    rolled_back = _activation_config(authoritative=False, ownership="legacy")
-    bundle, decision = _register(poke_auth, home, rolled_back, scope)
-    assert not decision.authoritative
-    plan, conflicts = co.activate_plan(scope=scope, config_raw=rolled_back)
-    assert conflicts == ()
-    assert all(selection.is_legacy for selection in plan.values())
-
-    runner = object.__new__(GatewayRunner)
-    for domain in co.OwnershipDomain:
-        assert runner._legacy_owns(scope, domain) is True
-
-    assert _digest(home) == before, "rollback must not touch durable state"
 
 
-def test_rolled_back_profile_still_satisfies_core_readiness(tmp_path, poke_auth):
-    """Rollback keeps the required-extension declaration satisfiable.
-
-    The rolled-back plugin still registers (dark), so a profile that declares
-    the requirement stays ready. Removing the plugin entirely is a different,
-    louder operation and correctly makes the profile unready.
-    """
-    from gateway import conversation_extension_runtime as ce_runtime
-
-    home = tmp_path / "poke"
-    _seed_profile(home)
-    scope = _scope(home)
-    rolled_back = _activation_config(authoritative=False, ownership="legacy")
-    _register(poke_auth, home, rolled_back, scope)
-
-    ok, reason = ce_runtime.profile_requirements_satisfied(
-        scope=scope, config_raw=rolled_back
-    )
-    assert ok, reason
 
 
 def test_removing_the_plugin_entirely_fails_readiness_closed(tmp_path):

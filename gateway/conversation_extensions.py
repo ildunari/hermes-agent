@@ -5,7 +5,7 @@ conversation routing, turn augmentation, tool authorization, and lifecycle.
 It is deliberately provider-neutral: nothing here knows about any particular
 plugin, contact, relationship, or product policy.
 
-Design constraints (see ``docs/plans/poke-plugin-decarry-20260827.md``):
+Design constraints:
 
 * **One atomic bundle.** An extension registers a single immutable
   :class:`GatewayConversationExtension` containing every subinterface it
@@ -133,13 +133,9 @@ class GatewayRouteDirective:
     ``runtime_profile`` is validated by core against served profiles and the
     permitted route map before it takes effect.
 
-    ``principal`` / ``subject_id`` let an admission owner report the identity
-    classification it performed, and ``context_prefix`` / ``scope_metadata``
-    let it contribute the trusted metadata block core's own routing used to
-    build. Without these an extension could pick a profile but not establish
-    who the sender is, so the guest/owner session scope would never be created
-    — the cascade Review 3 recorded. Core validates and applies them; it never
-    interprets their meaning.
+    ``principal`` / ``subject_id`` let an admission owner report a bounded,
+    opaque identity classification. ``context_prefix`` / ``scope_metadata``
+    carry extension-owned context without core interpreting product policy.
     """
 
     admit: bool
@@ -1103,13 +1099,11 @@ def resolve_route(
         reason=directive.reason,
         extension_id=extension_id,
         generation=generation,
-        # Identity classification performed by the admission owner. Core does
-        # not interpret these; it carries them so the routed turn can build the
-        # same trusted scope the legacy owner built. ``principal`` is
-        # constrained to the two authenticated values core knows how to scope.
+        # Identity classification performed by the admission owner. Core keeps
+        # it opaque but bounded; product-specific values remain in the plugin.
         principal=(
-            directive.principal
-            if directive.principal in ("owner", "guest")
+            directive.principal.strip()[:128]
+            if isinstance(directive.principal, str) and directive.principal.strip()
             else None
         ),
         subject_id=(

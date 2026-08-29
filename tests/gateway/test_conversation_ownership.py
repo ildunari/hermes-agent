@@ -2,15 +2,15 @@
 
 Written failing-first. The contract under test:
 
-* **Default is legacy.** A profile with no ownership configuration selects the
-  legacy in-core owner for every domain, so ordinary Hermes behavior and the
+* **Default is core.** A profile with no ownership configuration selects the
+  generic core owner for every domain, so ordinary Hermes behavior and the
   current Poke/Guest behavior are byte-identical until an operator opts in.
 * **Exactly one owner.** When a domain is configured to the extension owner,
   exactly one registered, API-compatible, capability-complete, healthy
   extension may claim it. Zero and two-or-more both resolve to ``UNOWNED``.
-* **Fail closed, never silent fallback.** ``UNOWNED`` is *not* legacy. A caller
+* **Fail closed, never silent fallback.** ``UNOWNED`` is *not* core. A caller
   that cannot establish an owner must refuse the work rather than quietly
-  running the legacy implementation beside a half-activated plugin — that is
+  running an unproven implementation beside a half-activated plugin — that is
   precisely the duplicate-writer/duplicate-send shape this checkpoint exists to
   prevent.
 * **No product policy in core.** The module names no plugin, contact,
@@ -94,20 +94,20 @@ def test_module_names_no_product_policy():
 
 
 # ---------------------------------------------------------------------------
-# Default = legacy
+# Default = core
 # ---------------------------------------------------------------------------
 
 
-def test_no_configuration_selects_legacy_for_every_domain():
+def test_no_configuration_selects_core_for_every_domain():
     for domain in co.OwnershipDomain:
         selection = co.select_owner(domain, scope="/tmp/home-a", config_raw={})
-        assert selection.kind is co.OwnerKind.LEGACY
-        assert selection.is_legacy
+        assert selection.kind is co.OwnerKind.CORE
+        assert selection.is_core
         assert not selection.is_extension
         assert selection.extension_id is None
 
 
-def test_explicit_legacy_stays_legacy_even_with_a_registered_extension():
+def test_explicit_legacy_selects_core_even_with_a_registered_extension():
     scope = "/tmp/home-legacy"
     ce.conversation_extension_registry.register(
         _bundle("ext", {"admission_policy"}), scope=scope
@@ -115,7 +115,7 @@ def test_explicit_legacy_stays_legacy_even_with_a_registered_extension():
     selection = co.select_owner(
         co.OwnershipDomain.ROUTING, scope=scope, config_raw=_cfg(routing="legacy")
     )
-    assert selection.kind is co.OwnerKind.LEGACY
+    assert selection.kind is co.OwnerKind.CORE
 
 
 def test_turn_policy_has_exactly_one_owner_for_extension_rollback_and_no_plan():
@@ -128,7 +128,7 @@ def test_turn_policy_has_exactly_one_owner_for_extension_rollback_and_no_plan():
     no_plan = co.conversation_ownership_registry.owner(
         scope, co.OwnershipDomain.TURN_POLICY
     )
-    assert no_plan.kind is co.OwnerKind.LEGACY
+    assert no_plan.kind is co.OwnerKind.CORE
 
     extension = co.select_owner(
         co.OwnershipDomain.TURN_POLICY,
@@ -143,7 +143,7 @@ def test_turn_policy_has_exactly_one_owner_for_extension_rollback_and_no_plan():
         scope=scope,
         config_raw=_cfg(turn_policy="legacy"),
     )
-    assert rollback.kind is co.OwnerKind.LEGACY
+    assert rollback.kind is co.OwnerKind.CORE
 
     ce.conversation_extension_registry.register(
         _bundle("second-turn-ext", {capability}), scope=scope
@@ -156,12 +156,12 @@ def test_turn_policy_has_exactly_one_owner_for_extension_rollback_and_no_plan():
     assert ambiguous.kind is co.OwnerKind.UNOWNED
 
 
-def test_unreadable_configuration_falls_back_to_legacy_not_unowned():
+def test_unreadable_configuration_falls_back_to_core_not_unowned():
     """A malformed *shape* must not take an ordinary gateway out of service."""
     selection = co.select_owner(
         co.OwnershipDomain.ROUTING, scope="/tmp/home-b", config_raw={"gateway": 5}
     )
-    assert selection.kind is co.OwnerKind.LEGACY
+    assert selection.kind is co.OwnerKind.CORE
 
 
 def test_unknown_owner_value_is_unowned_not_silently_legacy():
@@ -211,7 +211,7 @@ def test_extension_requested_but_none_registered_is_unowned():
     )
     assert selection.kind is co.OwnerKind.UNOWNED
     assert selection.reason == "no_owner"
-    assert not selection.is_legacy
+    assert not selection.is_core
 
 
 def test_two_claimants_fail_closed_rather_than_picking_one():
@@ -336,7 +336,7 @@ def test_per_domain_override_beats_default():
     plan = co.select_all(
         scope=scope, config_raw=_cfg(default="extension", routing="legacy")
     )
-    assert plan[co.OwnershipDomain.ROUTING].kind is co.OwnerKind.LEGACY
+    assert plan[co.OwnershipDomain.ROUTING].kind is co.OwnerKind.CORE
     assert plan[co.OwnershipDomain.INGRESS].kind is co.OwnerKind.EXTENSION
 
 
@@ -364,7 +364,7 @@ def test_partial_extension_activation_is_reported_as_a_conflict():
     assert conflicts, "splitting a coupled group must be reported"
 
 
-def test_a_fully_legacy_plan_has_no_conflicts():
+def test_a_fully_core_plan_has_no_conflicts():
     plan = co.select_all(scope="/tmp/home-clean", config_raw={})
     assert co.plan_conflicts(plan) == ()
 
@@ -393,7 +393,7 @@ def test_plan_summary_is_bounded_and_serializable():
     payload = co.describe_plan(plan)
     json.dumps(payload)
     assert set(payload) == {domain.value for domain in co.OwnershipDomain}
-    assert all(entry["owner"] == "legacy" for entry in payload.values())
+    assert all(entry["owner"] == "core" for entry in payload.values())
 
 
 # ---------------------------------------------------------------------------
@@ -401,31 +401,8 @@ def test_plan_summary_is_bounded_and_serializable():
 # ---------------------------------------------------------------------------
 
 
-def test_rollback_is_a_pure_config_switch():
-    """Same registry, different config -> the legacy owner is live again."""
-    scope = "/tmp/home-rollback"
-    caps = {cap for cap in co.DOMAIN_REQUIRED_CAPABILITY.values()}
-    ce.conversation_extension_registry.register(_bundle("alpha", caps), scope=scope)
-
-    activated = co.select_all(scope=scope, config_raw=_cfg(default="extension"))
-    assert all(sel.is_extension for sel in activated.values())
-
-    rolled_back = co.select_all(scope=scope, config_raw=_cfg(default="legacy"))
-    assert all(sel.is_legacy for sel in rolled_back.values())
-    assert co.plan_conflicts(rolled_back) == ()
 
 
-def test_legacy_owner_remains_importable_after_activation():
-    """Rollback requires the legacy implementation to still exist in core."""
-    import importlib
-
-    for module in (
-        "gateway.guest_access",
-        "gateway.proactive_scheduler",
-        "gateway.proactive_transport",
-        "gateway.contact_memory.runtime",
-    ):
-        assert importlib.import_module(module) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -440,10 +417,10 @@ def _clean_ownership():
     co.conversation_ownership_registry.reset_for_tests()
 
 
-def test_uninstalled_scope_reads_legacy_for_every_domain():
+def test_uninstalled_scope_reads_core_for_every_domain():
     """Any process that never ran gateway activation behaves as before."""
     for domain in co.OwnershipDomain:
-        assert co.legacy_owns("/tmp/never-activated", domain)
+        assert co.core_owns("/tmp/never-activated", domain)
         assert not co.extension_owns("/tmp/never-activated", domain)
 
 
@@ -455,7 +432,7 @@ def test_activate_plan_installs_a_clean_plan():
     assert conflicts == ()
     for domain in co.OwnershipDomain:
         assert co.extension_owns(scope, domain)
-        assert not co.legacy_owns(scope, domain)
+        assert not co.core_owns(scope, domain)
     assert plan[co.OwnershipDomain.ROUTING].extension_id == "alpha"
 
 
@@ -479,7 +456,7 @@ def test_unowned_domain_denies_both_owners():
             )
         },
     )
-    assert not co.legacy_owns(scope, co.OwnershipDomain.INGRESS)
+    assert not co.core_owns(scope, co.OwnershipDomain.INGRESS)
     assert not co.extension_owns(scope, co.OwnershipDomain.INGRESS)
 
 
@@ -496,7 +473,7 @@ def test_installed_plan_is_not_re_derived_when_the_extension_vanishes():
     )
     # Still extension-owned: the legacy path must not silently resume mid-run.
     assert co.extension_owns(scope, co.OwnershipDomain.INGRESS)
-    assert not co.legacy_owns(scope, co.OwnershipDomain.INGRESS)
+    assert not co.core_owns(scope, co.OwnershipDomain.INGRESS)
 
 
 def test_installed_plans_are_scope_isolated():
@@ -506,22 +483,9 @@ def test_installed_plans_are_scope_isolated():
     ce.conversation_extension_registry.register(_bundle("alpha", caps), scope=activated)
     co.activate_plan(scope=activated, config_raw=_cfg(default="extension"))
     assert co.extension_owns(activated, co.OwnershipDomain.DELIVERY)
-    assert co.legacy_owns(ordinary, co.OwnershipDomain.DELIVERY)
+    assert co.core_owns(ordinary, co.OwnershipDomain.DELIVERY)
 
 
-def test_rollback_reinstalls_legacy_over_an_activated_scope():
-    scope = "/tmp/home-rollback-install"
-    caps = set(co.DOMAIN_REQUIRED_CAPABILITY.values())
-    ce.conversation_extension_registry.register(_bundle("alpha", caps), scope=scope)
-    co.activate_plan(scope=scope, config_raw=_cfg(default="extension"))
-    assert co.extension_owns(scope, co.OwnershipDomain.DELIVERY)
-
-    # Config-only switch + restart == re-running activation with legacy config.
-    _plan, conflicts = co.activate_plan(scope=scope, config_raw=_cfg(default="legacy"))
-    assert conflicts == ()
-    for domain in co.OwnershipDomain:
-        assert co.legacy_owns(scope, domain)
-        assert not co.extension_owns(scope, domain)
 
 
 def test_reactivation_is_stable_across_restart():

@@ -104,8 +104,7 @@ class TurnContext:
     user_config: Any = None
     enabled_toolsets: Any = None
     disabled_toolsets: Any = None
-    guest_session: bool = False
-    trusted_contact_scope: Any = None
+    extension_identity_scope: Any = None
     log_mode_enabled: bool = False
     interim_assistant_messages_enabled: bool = False
     needs_progress_queue: bool = False

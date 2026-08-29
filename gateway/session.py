@@ -185,6 +185,9 @@ class SessionSource:
     # Transport-local fail-closed signal for an explicit profile route whose
     # target is not served. Excluded from repr/equality and wire serialization.
     profile_route_rejected: bool = field(default=False, repr=False, compare=False)
+    # In-process trust marker set only after a conversation extension's route
+    # directive has passed core validation. It is deliberately wire-invisible.
+    extension_route_admitted: bool = field(default=False, repr=False, compare=False)
 
     # Discord auto-thread metadata.  Newly auto-created Discord threads start
     # with a fast placeholder title from the raw message, then the gateway can
@@ -1195,16 +1198,12 @@ def build_session_key(
             dm_parts.append(source.thread_id)
         return ":".join(str(part) for part in dm_parts)
 
-    # BlueBubbles iMessage groups should behave like shared conversations per
-    # routed profile: authorization still checks source.user_id, but guest
-    # contacts in the same group need the same observed group context.  Owner
-    # and guest profiles remain separated by the source chat_id_alt marker.
+    # BlueBubbles groups routed to a profile share one conversation for that
+    # profile. The validated profile marker keeps routed profiles isolated.
     if source.platform == Platform.BLUEBUBBLES and source.chat_type == "group":
         group_ns = _session_key_namespace(
             str(source.chat_id_alt).split(":", 1)[1]
             if str(source.chat_id_alt or "").startswith("hermes-profile:")
-            else "guest"
-            if str(source.user_id_alt or "").startswith("guest:")
             else profile
         )
         group_key_parts = [group_ns, platform, source.chat_type]

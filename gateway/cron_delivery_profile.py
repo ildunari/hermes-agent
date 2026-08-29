@@ -1,4 +1,4 @@
-"""Fail-closed profile delegation for proactive cron alarm delivery."""
+"""Fail-closed cross-profile delivery for operational cron output."""
 from __future__ import annotations
 
 import json
@@ -21,7 +21,7 @@ _RECENT_ROUTE_AGE = timedelta(days=30)
 def resolve_delivery_profile_home(source_home: Path, profile_name: str) -> Path:
     """Resolve one named sibling profile without accepting paths or symlinks."""
     name = str(profile_name or "").strip()
-    if not _PROFILE_NAME.fullmatch(name) or name in {".", "..", "guest"}:
+    if not _PROFILE_NAME.fullmatch(name) or name in {".", ".."}:
         raise ValueError("delivery_profile must name an existing operator profile")
     source = Path(source_home).resolve()
     profiles_root = source.parent
@@ -138,22 +138,19 @@ def _allowed_chat(pconfig: Any, target: str) -> bool:
     return False
 
 
-def validate_delegated_alarm_delivery(source_home: Path, delivery_profile: str, target: dict[str, str]):
-    """Validate profile, platform, credentials, and an operator-owned destination."""
+def validate_delegated_delivery(source_home: Path, delivery_profile: str, target: dict[str, str]):
+    """Validate profile, platform, credentials, and a known destination."""
     home = resolve_delivery_profile_home(source_home, delivery_profile)
     config, platform, pconfig = load_delivery_profile_config(home, target["platform"])
     address = target["address"]
 
-    # Internal proactive alarms must never enter a contact conversation.  Poke
-    # owns BlueBubbles ingress, but that ownership is not permission for cron,
-    # maintenance, watchdog, bootstrap, probe, or dry-run output to use the
-    # transport.  Operator alarms must use an explicitly authenticated
-    # non-contact surface (normally Telegram).
+    # Cross-profile operational delivery never targets a conversation transport.
+    # Use an explicitly authenticated operator surface instead.
     if platform == Platform.BLUEBUBBLES:
-        raise ValueError("internal proactive alarm delivery to BlueBubbles is forbidden")
+        raise ValueError("delegated operational delivery to BlueBubbles is forbidden")
     elif not (_recent_authenticated_dm(home, target["platform"], address) or _allowed_chat(pconfig, address)):
         raise ValueError(
-            "alarm destination must match an authenticated recent DM or explicitly allowed chat "
+            "delivery destination must match an authenticated recent DM or explicitly allowed chat "
             f"for delivery profile {home.name}"
         )
     return home, config, platform, pconfig

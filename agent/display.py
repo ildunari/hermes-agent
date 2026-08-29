@@ -323,17 +323,7 @@ def group_compact_progress_tool(name: str | None, args: dict | None = None) -> s
         if action == "read":
             return "files_read"
         return "files"
-    if name == "guest_fs":
-        action = ""
-        if isinstance(args, dict):
-            action = str(args.get("action") or "list").strip().lower()
-        if action == "search":
-            return "files_search"
-        if action == "write":
-            return "files_write"
-        if action == "read":
-            return "files_read"
-        return "files"
+
     if name in {"execute_code", "python", "code_execution"}:
         return "python"
     if name in {"delegate_task", "agents", "subagent", "forge-agent", "forge-sage", "mixture_of_agents"}:

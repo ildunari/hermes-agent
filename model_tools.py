@@ -1189,57 +1189,6 @@ def _emit_post_tool_call_hook(
         logger.debug("post_tool_call hook error: %s", _hook_err)
 
 
-def _legacy_tool_policy_owner_active() -> bool:
-    """Is the legacy in-core Guest tool guard still the owner for this request?
-
-    Checkpoint 3 of the Poke/Guest de-carry moves tool policy behind a generic
-    single-owner selector. The legacy guard remains present (rollback is a
-    config switch, not a revert) but must not run alongside an *activated*
-    extension owner: two guards means one's *deny* can contradict the other's
-    *allow*, and neither is authoritative.
-
-    **The signal is the ownership verdict, not the presence of a token.** That
-    distinction is the Review-3 P0-1 fix. ``turn_policy_scope`` binds a token
-    whenever any registered bundle declares ``tool_authorization``, which
-    includes a rolled-back/dark bundle whose answer is an unconditional allow.
-    Keying the stand-down off token presence therefore disarmed the legacy
-    guard on the exact path the plan calls "rollback", handing a guest
-    unsandboxed ``terminal``/``execute_code``.
-
-    So the legacy guard stands down for exactly one proven state: a request
-    policy is bound *and* the ownership registry says an extension owns the
-    routing domain for that policy's profile scope. Every other state — no
-    token, no installed plan, a legacy verdict, an unowned/ambiguous verdict,
-    or any error resolving the verdict — keeps the legacy guard, which is the
-    stricter of the two.
-    """
-    try:
-        from gateway.conversation_extensions import current_request_policy
-
-        policy = current_request_policy()
-        if policy is None:
-            # Ordinary traffic, and every profile still on the legacy owner.
-            return True
-
-        from gateway.conversation_ownership import (
-            OwnershipDomain,
-            conversation_ownership_registry,
-        )
-
-        scope = str(getattr(policy, "profile_home", "") or "")
-        if not scope:
-            return True
-        # ``is_extension_owned`` is True only for a *proven* extension verdict;
-        # legacy and unowned both answer False, so both keep the legacy guard.
-        return not conversation_ownership_registry.is_extension_owned(
-            scope, OwnershipDomain.ROUTING
-        )
-    except Exception:
-        # Cannot prove an extension owner exists -> keep the legacy guard,
-        # which is the stricter of the two states.
-        return True
-
-
 def handle_function_call(
     function_name: str,
     function_args: Dict[str, Any],
@@ -1287,27 +1236,6 @@ def handle_function_call(
     if not isinstance(function_args, dict):
         function_args = {}
     _tool_middleware_trace = list(tool_request_middleware_trace or [])
-
-    # Enforce guest policy at the shared dispatch seam, including deferred tools.
-    #
-    # Checkpoint 3: this is the *legacy* tool-policy owner. When an extension
-    # owns the routing domain for this request's profile it also owns the tool
-    # decision, and the generic final-dispatch seam below enforces it. Running
-    # both would let a legacy deny contradict the owner's allow (and vice
-    # versa), which is double enforcement rather than defence in depth —
-    # exactly the ambiguity the single-owner selector exists to remove.
-    _guest_policy_active = False
-    if _legacy_tool_policy_owner_active():
-        try:
-            from gateway.guest_access import enforce_guest_tool_call, is_guest_policy_enabled
-            _guest_policy_active = is_guest_policy_enabled()
-            guest_block = enforce_guest_tool_call(function_name, function_args)
-            if guest_block is not None:
-                return guest_block
-        except Exception as guest_policy_error:
-            logger.debug("guest tool policy guard error: %s", guest_policy_error)
-            if os.environ.get("HERMES_GUEST_POLICY") or _guest_policy_active:
-                return json.dumps({"error": "Guest policy guard failed closed", "guest_policy": True}, ensure_ascii=False)
 
     # Final-dispatch authorization for the generic gateway conversation
     # extension seam. This is the *last* gate before a tool runs, so it covers

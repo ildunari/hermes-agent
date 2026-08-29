@@ -1,11 +1,11 @@
-"""Generic exactly-one conversation-ownership selector (Checkpoint 3).
+"""Generic exactly-one conversation-ownership selector.
 
 Checkpoint 2 gave the gateway a *seam*: a plugin can observe routing, tool
 dispatch, ingress, and turn completion. This module answers the next question,
 which is the one that actually makes an activation safe:
 
-    For this profile and this domain of behavior, **who owns it** — the
-    in-core legacy implementation, or exactly one registered extension?
+    For this profile and this domain of behavior, **who owns it** — the inert
+    generic core path, or exactly one registered extension?
 
 The point is not indirection for its own sake. A gateway that runs both owners
 writes ingress twice, compiles conversation texture twice, claims a proactive
@@ -16,9 +16,8 @@ selector's whole job is to make that state unrepresentable and to make the
 
 Three rules follow from that:
 
-* **Default is legacy.** No configuration means the in-core implementation
-  owns everything, exactly as before. An ordinary Hermes profile never touches
-  this code path in a way it can notice.
+* **Default is core.** No configuration means the generic no-op path owns every
+  optional extension domain. Ordinary Hermes profiles remain unaffected.
 * **Exactly one, or nobody.** For a domain configured to ``extension``, one
   registered, API-compatible, capability-complete, healthy extension owns it.
   Zero claimants and two claimants both resolve to :data:`OwnerKind.UNOWNED`.
@@ -37,7 +36,7 @@ Configuration shape (per profile, ``config.yaml``)::
 
     gateway:
       conversation_ownership:
-        default: legacy          # or: extension, extension:<id>
+        default: core            # or: extension, extension:<id>
         routing: extension       # optional per-domain override
         ingress: extension
 """
@@ -72,7 +71,7 @@ class OwnershipDomain(str, Enum):
     TURN_POLICY = "turn_policy"
     INGRESS = "ingress"
     EXTRACTION = "extraction"
-    PROACTIVE_CLAIMS = "proactive_claims"
+    INITIATED_CLAIMS = "initiated_claims"
     CHILD_CREATION = "child_creation"
     DELIVERY = "delivery"
 
@@ -83,7 +82,7 @@ DOMAIN_REQUIRED_CAPABILITY: dict[OwnershipDomain, str] = {
     OwnershipDomain.TURN_POLICY: "turn_policy",
     OwnershipDomain.INGRESS: "ingress_observer",
     OwnershipDomain.EXTRACTION: "post_turn_observer",
-    OwnershipDomain.PROACTIVE_CLAIMS: "lifecycle",
+    OwnershipDomain.INITIATED_CLAIMS: "lifecycle",
     OwnershipDomain.CHILD_CREATION: "initiated_turns",
     OwnershipDomain.DELIVERY: "authenticated_dm",
 }
@@ -91,10 +90,9 @@ DOMAIN_REQUIRED_CAPABILITY: dict[OwnershipDomain, str] = {
 
 #: Domains that share durable resources and must not be split across owners.
 #:
-#: Ingress and extraction write the same contact-memory tree; proactive claims,
-#: child creation, and delivery share the claim/ledger sequence. Splitting
-#: either group is the duplicate-writer / duplicate-send shape, so a plan that
-#: does it is reported as a conflict rather than started.
+#: Turn policy, ingress, and extraction may share extension-owned state;
+#: initiated claims, child creation, and delivery share one durable sequence.
+#: Splitting either group is reported as a conflict rather than started.
 COUPLED_DOMAIN_GROUPS: tuple[tuple[OwnershipDomain, ...], ...] = (
     (
         OwnershipDomain.TURN_POLICY,
@@ -102,7 +100,7 @@ COUPLED_DOMAIN_GROUPS: tuple[tuple[OwnershipDomain, ...], ...] = (
         OwnershipDomain.EXTRACTION,
     ),
     (
-        OwnershipDomain.PROACTIVE_CLAIMS,
+        OwnershipDomain.INITIATED_CLAIMS,
         OwnershipDomain.CHILD_CREATION,
         OwnershipDomain.DELIVERY,
     ),
@@ -110,7 +108,7 @@ COUPLED_DOMAIN_GROUPS: tuple[tuple[OwnershipDomain, ...], ...] = (
 
 
 class OwnerKind(str, Enum):
-    LEGACY = "legacy"
+    CORE = "core"
     EXTENSION = "extension"
     UNOWNED = "unowned"
 
@@ -126,8 +124,8 @@ class OwnerSelection:
     reason: str = ""
 
     @property
-    def is_legacy(self) -> bool:
-        return self.kind is OwnerKind.LEGACY
+    def is_core(self) -> bool:
+        return self.kind is OwnerKind.CORE
 
     @property
     def is_extension(self) -> bool:
@@ -162,17 +160,19 @@ class _OwnershipRequest:
     error: str = ""
 
 
-_LEGACY_REQUEST = _OwnershipRequest(OwnerKind.LEGACY)
+_CORE_REQUEST = _OwnershipRequest(OwnerKind.CORE)
 
 
 def _parse_request(value: Any) -> _OwnershipRequest:
     if value is None:
-        return _LEGACY_REQUEST
+        return _CORE_REQUEST
     if not isinstance(value, str):
         return _OwnershipRequest(OwnerKind.UNOWNED, error="unknown_owner_value")
     token = value.strip().lower()
-    if token in ("", "legacy", "core"):
-        return _LEGACY_REQUEST
+    if token in ("", "core", "legacy"):
+        # ``legacy`` is accepted as a read-only config spelling for one
+        # transition window; it no longer selects deleted runtime behavior.
+        return _CORE_REQUEST
     if token == "extension":
         return _OwnershipRequest(OwnerKind.EXTENSION)
     if token.startswith("extension:"):
@@ -184,7 +184,7 @@ def _parse_request(value: Any) -> _OwnershipRequest:
 
 
 def _ownership_section(config_raw: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    """Read ``gateway.conversation_ownership``; a malformed shape means legacy.
+    """Read ``gateway.conversation_ownership``; a malformed shape means core.
 
     A shape error here must not take an ordinary gateway out of service: it
     cannot establish that anyone asked for an extension owner, so the safe
@@ -200,7 +200,7 @@ def _ownership_section(config_raw: Mapping[str, Any] | None) -> Mapping[str, Any
             return {}
         if not isinstance(section, Mapping):
             logger.warning(
-                "gateway.%s must be a mapping; using the legacy owner", CONFIG_SECTION
+                "gateway.%s must be a mapping; using the core owner", CONFIG_SECTION
             )
             return {}
         return section
@@ -272,8 +272,8 @@ def select_owner(
 
     if request.kind is OwnerKind.UNOWNED:
         return OwnerSelection(domain, OwnerKind.UNOWNED, reason=request.error)
-    if request.kind is OwnerKind.LEGACY:
-        return OwnerSelection(domain, OwnerKind.LEGACY)
+    if request.kind is OwnerKind.CORE:
+        return OwnerSelection(domain, OwnerKind.CORE)
 
     claimants = list(_claimants(domain, scope, request.pinned_extension_id))
     if not claimants:
@@ -318,8 +318,8 @@ def plan_conflicts(plan: Mapping[OwnershipDomain, OwnerSelection]) -> tuple[str,
     """Return the reasons this plan must not be activated.
 
     Empty means the plan is coherent: every domain has exactly one owner and
-    no group of domains that shares a durable resource is split between the
-    legacy implementation and an extension.
+    no group of domains that shares a durable resource is split between core
+    and an extension.
     """
     conflicts: list[str] = []
     for domain, selection in sorted(plan.items(), key=lambda item: item[0].value):
@@ -360,7 +360,7 @@ class ConversationOwnershipRegistry:
     two halves of the same turn, which is the split-owner state this module
     exists to prevent. It also keeps the per-tool-call check a dict lookup.
 
-    A scope with no installed plan reads as legacy for every domain, so any
+    A scope with no installed plan reads as core for every domain, so any
     process that never ran gateway activation (CLI, tests, a bare import)
     behaves exactly as it did before this checkpoint.
     """
@@ -385,29 +385,27 @@ class ConversationOwnershipRegistry:
         if installed is not None:
             return dict(installed)
         return {
-            domain: OwnerSelection(domain, OwnerKind.LEGACY) for domain in OwnershipDomain
+            domain: OwnerSelection(domain, OwnerKind.CORE) for domain in OwnershipDomain
         }
 
     def owner(self, scope: str, domain: OwnershipDomain) -> OwnerSelection:
         with self._lock:
             installed = self._plans.get(scope)
         if installed is None:
-            return OwnerSelection(domain, OwnerKind.LEGACY)
-        return installed.get(domain, OwnerSelection(domain, OwnerKind.LEGACY))
+            return OwnerSelection(domain, OwnerKind.CORE)
+        return installed.get(domain, OwnerSelection(domain, OwnerKind.CORE))
 
     def is_extension_owned(self, scope: str, domain: OwnershipDomain) -> bool:
         """True only when an extension is the *proven* owner of *domain*.
 
-        Legacy and unowned both answer False, so a caller written as
-        ``if not is_extension_owned(...): run_legacy()`` would still run legacy
-        on an unowned domain. Callers that must fail closed use
-        :meth:`legacy_is_owner` instead, which is False for unowned.
+        Core and unowned both answer False. Callers that must distinguish them
+        use :meth:`core_is_owner`, which is False for unowned.
         """
         return self.owner(scope, domain).is_extension
 
-    def legacy_is_owner(self, scope: str, domain: OwnershipDomain) -> bool:
-        """True only when the in-core legacy implementation owns *domain*."""
-        return self.owner(scope, domain).is_legacy
+    def core_is_owner(self, scope: str, domain: OwnershipDomain) -> bool:
+        """True only when the inert generic core path owns *domain*."""
+        return self.owner(scope, domain).is_core
 
     def scopes(self) -> tuple[str, ...]:
         with self._lock:
@@ -427,9 +425,9 @@ class ConversationOwnershipRegistry:
 conversation_ownership_registry = ConversationOwnershipRegistry()
 
 
-def legacy_owns(scope: str, domain: OwnershipDomain) -> bool:
-    """Convenience wrapper: may the legacy in-core implementation run here?"""
-    return conversation_ownership_registry.legacy_is_owner(scope, domain)
+def core_owns(scope: str, domain: OwnershipDomain) -> bool:
+    """Convenience wrapper for the generic core ownership verdict."""
+    return conversation_ownership_registry.core_is_owner(scope, domain)
 
 
 def extension_owns(scope: str, domain: OwnershipDomain) -> bool:
@@ -444,8 +442,8 @@ def activate_plan(
 
     A conflicted plan is **not** installed: the caller marks the profile
     unready instead, so the gateway never serves traffic with an ambiguous or
-    split owner. Leaving the previous (default legacy) reading in place is the
-    conservative outcome, but the profile is refused regardless.
+    split owner. Leaving the previous default reading in place is conservative,
+    but the profile is refused regardless.
     """
     plan = select_all(scope=scope, config_raw=config_raw)
     conflicts = plan_conflicts(plan)
@@ -472,8 +470,8 @@ __all__ = [
     "activate_plan",
     "conversation_ownership_registry",
     "describe_plan",
+    "core_owns",
     "extension_owns",
-    "legacy_owns",
     "plan_conflicts",
     "select_all",
     "select_owner",

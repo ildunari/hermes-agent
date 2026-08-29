@@ -5,7 +5,9 @@ messages from non-allowlisted users must be silently dropped — matching the co
 behavior in _handle_message. Previously, the busy path skipped the auth check entirely,
 allowing unauthorized users to inject text into another user's running session.
 """
+import dataclasses
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -79,6 +81,7 @@ def _make_runner(authorized_users=None):
     runner.pairing_store.is_approved.return_value = False
     # Auth gate: only users in authorized_users set pass
     runner._is_user_authorized = lambda source: source.user_id in authorized_users
+    runner._route_busy_event_through_extension = lambda event: None
     return runner, _AGENT_PENDING_SENTINEL
 
 
@@ -195,128 +198,95 @@ class TestBusySessionAuthBypass:
 
 
 # ---------------------------------------------------------------------------
-# BlueBubbles guest-contact busy path (registry-based authorization)
+# Generic conversation-extension admission on the busy fast path
 # ---------------------------------------------------------------------------
 
-class TestBlueBubblesGuestBusyPath:
-    """Approved BlueBubbles guest contacts must not be dropped mid-turn.
 
-    The busy handler sees the raw adapter event before guest routing stamps
-    ``user_id_alt`` with guest:/owner: markers, so the env-allowlist check
-    alone denies approved contacts. The registry fallback must admit them.
-    """
-
-    def _bb_runner(self, tmp_path, handles=("+15551234567",)):
+class TestBusySessionExtensionAdmission:
+    def test_no_extension_baseline_does_not_mutate_ordinary_event(self):
         from gateway.run import GatewayRunner
-        from gateway.config import Platform
 
-        registry_file = tmp_path / "contacts.yaml"
-        registry_file.write_text(
-            "owner_profile: poke\n"
-            "owner_contact_id: kosta-owner\n"
-            "guest_profile: guest\n"
-            "owner_identities:\n"
-            "- '+18135285453'\n"
-            "contacts:\n"
-            "  test-guest:\n"
-            "    id: test-guest\n"
-            "    display_name: Test Guest\n"
-            "    role: family_guest\n"
-            "    identities:\n"
-            "      bluebubbles:\n"
-            "        handles:\n"
-            + "".join(f"        - '{h}'\n" for h in handles)
-            + "    allowed_surfaces:\n"
-            "    - bluebubbles\n"
-        )
         runner = object.__new__(GatewayRunner)
-        pcfg = MagicMock()
-        pcfg.extra = {
-            "guest_routing_enabled": True,
-            "guest_contacts_file": str(registry_file),
-        }
-        cfg = MagicMock()
-        cfg.platforms = {Platform.BLUEBUBBLES: pcfg}
-        runner.config = cfg
-        return runner
-
-    def _bb_source(self, user_id):
-        from gateway.config import Platform
-        return SessionSource(
-            platform=Platform.BLUEBUBBLES,
-            chat_id=user_id,
-            chat_type="dm",
-            user_id=user_id,
-            user_name="Someone",
+        event = _make_event(user_id="ordinary")
+        source = event.source
+        decision = SimpleNamespace(
+            admitted=True,
+            runtime_profile="default",
+            principal=None,
+            subject_id=None,
+            extension_id=None,
+            suppress_turn=False,
         )
 
-    def test_approved_guest_authorized(self, tmp_path):
-        runner = self._bb_runner(tmp_path)
-        assert runner._bluebubbles_registry_authorizes(self._bb_source("+15551234567")) is True
-
-    def test_owner_authorized(self, tmp_path):
-        runner = self._bb_runner(tmp_path)
-        assert runner._bluebubbles_registry_authorizes(self._bb_source("+18135285453")) is True
-
-    def test_stranger_denied(self, tmp_path):
-        runner = self._bb_runner(tmp_path)
-        assert runner._bluebubbles_registry_authorizes(self._bb_source("+19998887777")) is False
-
-    def test_non_bluebubbles_platform_denied(self, tmp_path):
-        runner = self._bb_runner(tmp_path)
-        src = SessionSource(
-            platform=MagicMock(value="slack"),
-            chat_id="1", chat_type="dm", user_id="1", user_name="x",
+        routed_source, routed_event = runner._apply_extension_route_decision(
+            source, event, decision
         )
-        assert runner._bluebubbles_registry_authorizes(src) is False
+        assert routed_source is source
+        assert routed_event is event
+        assert source.profile is None
+        assert source.chat_id_alt is None
+        assert source.extension_route_admitted is False
 
-    def test_routing_disabled_denied(self, tmp_path):
+    def test_generic_route_is_applied_before_busy_authorization(
+        self, tmp_path, monkeypatch
+    ):
+        from gateway import conversation_extension_runtime as runtime
         from gateway.run import GatewayRunner
-        from gateway.config import Platform
+        import gateway.run as run_module
+
         runner = object.__new__(GatewayRunner)
-        pcfg = MagicMock()
-        pcfg.extra = {}
-        cfg = MagicMock()
-        cfg.platforms = {Platform.BLUEBUBBLES: pcfg}
-        runner.config = cfg
-        assert runner._bluebubbles_registry_authorizes(self._bb_source("+15551234567")) is False
+        runner._resolve_profile_home_for_source = lambda source: tmp_path
+        runner._extension_profile_is_ready = lambda scope: True
+        runner._served_profile_names = lambda: ("default", "isolated")
+        runner._permitted_extension_routes = lambda: {"default": ("isolated",)}
+        monkeypatch.setattr(run_module, "_load_gateway_config_for_profile", lambda _: {})
+        monkeypatch.setattr(
+            runtime, "profile_requirements_satisfied", lambda **kwargs: (True, "")
+        )
+        monkeypatch.setattr(runtime, "build_route_context", lambda *a, **k: object())
+        decision = SimpleNamespace(admitted=True)
+        monkeypatch.setattr(runtime, "admit_and_route", lambda *a, **k: decision)
+
+        event = _make_event(user_id="external")
+        routed_source = dataclasses.replace(
+            event.source, profile="isolated", extension_route_admitted=True
+        )
+        routed_event = dataclasses.replace(event, source=routed_source)
+        runner._apply_extension_route_decision_safe = (
+            lambda source, original, resolved: (routed_source, routed_event)
+        )
+
+        assert runner._route_busy_event_through_extension(event) is routed_event
 
     @pytest.mark.asyncio
-    async def test_busy_path_admits_approved_guest(self, tmp_path, monkeypatch):
-        """End-to-end: guest follow-up during a busy turn is NOT dropped."""
+    async def test_busy_path_trusts_only_the_core_stamped_route(self):
         from gateway.run import GatewayRunner
-        from gateway.config import Platform
 
-        runner = self._bb_runner(tmp_path)
-        runner._running_agents = {}
-        runner._running_agents_ts = {}
-        runner._pending_messages = {}
-        runner._busy_ack_ts = {}
-        runner._draining = False
-        runner.adapters = {}
-        runner.session_store = None
-        runner.hooks = MagicMock()
-        runner.hooks.emit = AsyncMock()
-        # Env allowlist does NOT include the guest — mirrors production
-        runner._is_user_authorized = lambda source: False
-        runner._busy_input_mode = "queue"
-        runner._queue_depth = lambda *a, **k: 0
-        runner._enqueue_fifo = MagicMock()
+        runner, _ = _make_runner(authorized_users=set())
+        runner._is_user_authorized = lambda source: bool(
+            source.extension_route_admitted
+        )
+        routed_source = dataclasses.replace(
+            _make_event(user_id="external").source,
+            profile="isolated",
+            extension_route_admitted=True,
+        )
+        routed_event = _make_event(user_id="external")
+        routed_event.source = routed_source
+        runner._route_busy_event_through_extension = lambda event: routed_event
+        runner._session_key_for_source = lambda source: "routed-session"
         runner._adapter_for_source = lambda source: None
 
-        source = self._bb_source("+15551234567")
-        event = MessageEvent(
-            text="follow-up",
-            message_type=MessageType.TEXT,
-            source=source,
-            message_id="m1",
-        )
-        monkeypatch.setattr(
-            "tools.approval.has_blocking_approval", lambda sk: False, raising=False
-        )
-        result = await GatewayRunner._handle_active_session_busy_message(
-            runner, event, "agent:main:bluebubbles:dm:+15551234567"
-        )
-        # Not dropped-as-handled by the auth gate; falls through to adapter
-        # resolution (None adapter -> False = default path)
-        assert result is False
+        assert await GatewayRunner._handle_active_session_busy_message(
+            runner, routed_event, "raw-session"
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_busy_path_drops_an_extension_denial(self):
+        from gateway.run import GatewayRunner
+
+        runner, _ = _make_runner(authorized_users={"user1"})
+        runner._route_busy_event_through_extension = lambda event: False
+        assert await GatewayRunner._handle_active_session_busy_message(
+            runner, _make_event(user_id="user1"), "session"
+        ) is True

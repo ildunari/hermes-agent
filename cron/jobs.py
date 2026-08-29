@@ -2736,7 +2736,7 @@ def _mark_job_run_locked(
                 # it; delivery failures alone do NOT count (the agent did its
                 # job). Read by the scheduler's failure-delivery path to nudge
                 # the user to review a repeatedly-failing automation
-                # (Poke-inspired; see cron/scheduler._failure_streak_nudge).
+                # (see cron/scheduler._failure_streak_nudge).
                 if success:
                     job["failure_streak"] = 0
                 else:

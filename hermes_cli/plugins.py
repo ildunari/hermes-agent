@@ -2988,7 +2988,7 @@ class PluginContext:
 
             ctx.register_gateway_conversation_extension(
                 GatewayConversationExtension(
-                    extension_id="poke",
+                    extension_id="example-policy",
                     api_version=1,
                     capabilities=frozenset({"tool_authorization"}),
                     authorize_tool=my_policy,

@@ -1844,16 +1844,6 @@ def init_agent(
                 if isinstance(context_engine_config, dict)
                 else {}
             )
-        elif str(user_id_alt or "").startswith("guest:"):
-            from pathlib import Path as _Path
-            import yaml as _yaml
-
-            _guest_cfg_path = (
-                _Path.home() / ".hermes" / "profiles" / "guest" / "config.yaml"
-            )
-            _agent_cfg = (
-                _yaml.safe_load(_guest_cfg_path.read_text(encoding="utf-8")) or {}
-            )
         else:
             from hermes_cli.config import load_config_readonly as _load_agent_config
 

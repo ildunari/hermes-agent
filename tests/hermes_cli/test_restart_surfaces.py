@@ -89,11 +89,11 @@ def test_gateway_scope_plan_includes_profile_gateway_domains():
     assert "user/503/ai.hermes.gateway-design" in plan
     assert "user/503/ai.hermes.gateway-bookie" in plan
     assert "user/503/ai.hermes.gateway-scientist" in plan
-    assert "user/503/ai.hermes.gateway-poke" in plan
+
     assert "gui/503/ai.hermes.gateway-design" in plan
     assert "gui/503/ai.hermes.gateway-bookie" in plan
     assert "gui/503/ai.hermes.gateway-scientist" in plan
-    assert "gui/503/ai.hermes.gateway-poke" in plan
+
     assert "user/503/ai.hermes.webui" in plan
     assert "system/com.kosta.hermes-dashboard-system" in plan
     assert "system/com.kosta.hermes-dashboard-proxy-system" in plan
@@ -124,7 +124,7 @@ def test_multiplex_gateway_scope_plan_uses_single_root_topology(monkeypatch):
     assert "ai.hermes.gateway-gpt" not in plan
     assert "ai.hermes.gateway-coding" not in plan
     assert "ai.hermes.gateway-design" not in plan
-    assert "ai.hermes.gateway-poke" not in plan
+
     assert "Verification ports: 8642, 8644, 8647, 8787, 9119, 9120" in plan
 
 
@@ -312,7 +312,7 @@ def test_named_profile_gateway_is_never_bootstrapped(monkeypatch, tmp_path):
     named = next(
         target
         for target in restart_surfaces.GATEWAY_TARGETS
-        if target.label == "ai.hermes.gateway-poke" and target.domain_template.startswith("user/")
+        if target.label == "ai.hermes.gateway-coding" and target.domain_template.startswith("user/")
     )
     launch_agents = tmp_path / "LaunchAgents"
     _write_launchd_plist(launch_agents / f"{named.label}.plist", named.label)
@@ -466,7 +466,7 @@ def test_full_hermes_scope_includes_known_surfaces():
     assert "ai.hermes.gateway-design" in labels
     assert "ai.hermes.gateway-bookie" in labels
     assert "ai.hermes.gateway-scientist" in labels
-    assert "ai.hermes.gateway-poke" in labels
+
     assert "ai.hermes.webui" in labels
     assert "ai.hermes.desktop-remote-dashboard" in labels
     assert "ai.hermes.dashboard-host-rewrite-proxy" in labels
@@ -794,7 +794,7 @@ def test_graceful_gateway_restart_does_not_trust_status_pid_without_launchd_rest
     """
     from hermes_cli import restart_surfaces
 
-    target = RestartTarget("user/{uid}", "ai.hermes.gateway-poke", required=False)
+    target = RestartTarget("user/{uid}", "ai.hermes.gateway-coding", required=False)
     before = subprocess.CompletedProcess(
         ["launchctl", "print"],
         0,
@@ -812,14 +812,14 @@ def test_graceful_gateway_restart_does_not_trust_status_pid_without_launchd_rest
 
     verification, failure = real_graceful_restart_gateway(
         target,
-        "user/503/ai.hermes.gateway-poke",
+        "user/503/ai.hermes.gateway-coding",
         before,
         timeout=1,
     )
 
     assert verification is RestartVerification.NOT_RESTARTED
     assert failure == (
-        "user/503/ai.hermes.gateway-poke did not complete its graceful "
+        "user/503/ai.hermes.gateway-coding did not complete its graceful "
         "self-restart within 1s"
     )
 
@@ -829,9 +829,9 @@ def test_restart_scope_does_not_skip_twin_after_unverified_restart(monkeypatch, 
     from hermes_cli import restart_surfaces
 
     uid = restart_surfaces.os.getuid()
-    user_target = RestartTarget("user/{uid}", "ai.hermes.gateway-poke", required=False)
-    gui_target = RestartTarget("gui/{uid}", "ai.hermes.gateway-poke", required=False)
-    loaded_service = f"user/{uid}/ai.hermes.gateway-poke"
+    user_target = RestartTarget("user/{uid}", "ai.hermes.gateway-coding", required=False)
+    gui_target = RestartTarget("gui/{uid}", "ai.hermes.gateway-coding", required=False)
+    loaded_service = f"user/{uid}/ai.hermes.gateway-coding"
     before = subprocess.CompletedProcess(
         ["launchctl", "print"],
         0,
@@ -871,9 +871,9 @@ def test_restart_scope_dedupes_twin_when_restart_proof_is_transiently_unverifiab
     from hermes_cli import restart_surfaces
 
     uid = restart_surfaces.os.getuid()
-    user_target = RestartTarget("user/{uid}", "ai.hermes.gateway-poke", required=False)
-    gui_target = RestartTarget("gui/{uid}", "ai.hermes.gateway-poke", required=False)
-    loaded_service = f"user/{uid}/ai.hermes.gateway-poke"
+    user_target = RestartTarget("user/{uid}", "ai.hermes.gateway-coding", required=False)
+    gui_target = RestartTarget("gui/{uid}", "ai.hermes.gateway-coding", required=False)
+    loaded_service = f"user/{uid}/ai.hermes.gateway-coding"
     before = subprocess.CompletedProcess(
         ["launchctl", "print"],
         0,

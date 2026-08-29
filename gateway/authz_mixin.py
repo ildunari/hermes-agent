@@ -18,9 +18,7 @@ import time -> no import cycle. The lazy import preserves the exact logger name
 from __future__ import annotations
 
 import os
-import json
-from pathlib import Path
-from typing import Mapping, Optional
+from typing import Optional
 
 from gateway.config import Platform
 from gateway.session import SessionSource
@@ -86,103 +84,9 @@ def _coerce_allow_set(raw) -> set[str]:
     return {part.strip() for part in str(raw).split(",") if part.strip()}
 
 
-def _shared_bluebubbles_profiles_from_registry(path: Path) -> frozenset[str]:
-    """Read only the transport-sharing facts from a contact registry.
-
-    This generic authorization module deliberately does not import the carried
-    Guest policy leaf. It needs profile names and the presence of configured
-    identities only; route classification remains extension-owned.
-    """
-    text = path.read_text(encoding="utf-8")
-    if path.suffix.lower() == ".json":
-        data = json.loads(text)
-    else:
-        import yaml
-
-        data = yaml.safe_load(text) or {}
-    if not isinstance(data, Mapping):
-        return frozenset()
-
-    profiles: set[str] = set()
-    owner_profile = str(data.get("owner_profile") or "gpt").strip()
-    owner_identities = data.get("owner_identities") or data.get("kosta_identities")
-    if (
-        owner_profile
-        and data.get("owner_contact_id") == "kosta-owner"
-        and bool(owner_identities)
-    ):
-        profiles.add(owner_profile)
-
-    contacts = data.get("contacts") or {}
-    if isinstance(contacts, Mapping):
-        values = list(contacts.values())
-    elif isinstance(contacts, (list, tuple)):
-        values = list(contacts)
-    else:
-        values = []
-    guest_configured = False
-    for raw in values:
-        if not isinstance(raw, Mapping):
-            continue
-        surfaces = raw.get("allowed_surfaces", ["bluebubbles"])
-        if "bluebubbles" not in {str(item).strip().lower() for item in surfaces or ()}:
-            continue
-        identities = raw.get("identities")
-        identities = identities if isinstance(identities, Mapping) else {}
-        blue = identities.get("bluebubbles") or raw.get("bluebubbles") or {}
-        if isinstance(blue, Mapping):
-            blue = blue.get("handles") or blue.get("ids") or ()
-        email = identities.get("email") or raw.get("email") or {}
-        if isinstance(email, Mapping):
-            email = email.get("addresses") or email.get("handles") or ()
-        if blue or email:
-            guest_configured = True
-            break
-    guest_profile = str(data.get("guest_profile") or "guest").strip()
-    if guest_profile and guest_configured:
-        profiles.add(guest_profile)
-    return frozenset(profiles)
-
-
 class GatewayAuthorizationMixin:
     """User/chat authorization methods for ``GatewayRunner``."""
 
-    def _shared_bluebubbles_transport_profiles(self) -> frozenset[str]:
-        config = getattr(self, "config", None)
-        if not getattr(config, "multiplex_profiles", False):
-            return frozenset()
-        platform_config = getattr(config, "platforms", {}).get(Platform.BLUEBUBBLES)
-        extra = getattr(platform_config, "extra", None)
-        if not isinstance(extra, dict):
-            return frozenset()
-        registry_path = (
-            extra.get("guest_contacts_file")
-            or extra.get("contact_registry")
-            or os.getenv("HERMES_BLUEBUBBLES_GUEST_CONTACTS")
-        )
-        if not registry_path:
-            return frozenset()
-        path = Path(str(registry_path)).expanduser()
-        try:
-            stat = path.stat()
-            cache_key = (
-                str(path.resolve()),
-                stat.st_dev,
-                stat.st_ino,
-                stat.st_mtime_ns,
-                stat.st_size,
-            )
-        except OSError:
-            return frozenset()
-        cached = getattr(self, "_shared_bluebubbles_profiles_cache", None)
-        if cached and cached[0] == cache_key:
-            return cached[1]
-        try:
-            resolved = _shared_bluebubbles_profiles_from_registry(path)
-        except Exception:
-            return frozenset()
-        self._shared_bluebubbles_profiles_cache = (cache_key, resolved)
-        return resolved
 
     def _authorization_adapter(
         self,
@@ -194,9 +98,9 @@ class GatewayAuthorizationMixin:
         In multiplex mode, secondary-profile adapters live in
         ``_profile_adapters[profile]`` while the default/active profile uses
         ``self.adapters``. ``SessionSource.profile`` selects which map to consult.
-        A stamped profile without its own adapter fails closed, except for a
-        BlueBubbles owner/guest profile explicitly registered to share the
-        root multiplex transport.
+        A stamped profile without its own adapter fails closed. A validated
+        conversation-extension route is authorized separately by its
+        wire-invisible trust marker.
         """
         if not platform:
             return None
@@ -217,12 +121,6 @@ class GatewayAuthorizationMixin:
                 adapter = profile_adapters[profile_name].get(platform)
                 if adapter is not None:
                     return adapter
-            if (
-                platform == Platform.BLUEBUBBLES
-                and profile_name in self._shared_bluebubbles_transport_profiles()
-            ):
-                adapters = getattr(self, "adapters", None) or {}
-                return adapters.get(platform)
             return None
         adapters = getattr(self, "adapters", None) or {}
         return adapters.get(platform)
@@ -546,10 +444,9 @@ class GatewayAuthorizationMixin:
         ):
             return True
 
-        route_marker = str(getattr(source, "user_id_alt", "") or "")
-        if route_marker.startswith("guest:"):
-            return True
-        if source.platform == Platform.BLUEBUBBLES and route_marker.startswith("owner:"):
+        # Trust only the in-process marker stamped by core after validating a
+        # conversation extension's route directive. It is never serialized.
+        if getattr(source, "extension_route_admitted", False) is True:
             return True
 
         user_id = source.user_id

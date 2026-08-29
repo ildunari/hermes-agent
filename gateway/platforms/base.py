@@ -2567,7 +2567,7 @@ class MessageEvent:
 
     # Whether this event may resolve gateway commands or pending control
     # prompts. Kept last to preserve positional construction compatibility.
-    # Proactive plugin events set this to False so untrusted payload text
+    # Initiated extension events set this to False so untrusted payload text
     # remains conversational input.
     allow_gateway_control: bool = True
 
