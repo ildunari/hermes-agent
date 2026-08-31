@@ -9,7 +9,7 @@ from pathlib import Path
 
 from hermes_cli.tools_config import _get_platform_tools
 from model_tools import get_tool_definitions, handle_function_call
-from tools.web_tools import _handle_web
+from tools.web_tools import handle_web
 from toolsets import resolve_toolset
 
 
@@ -19,7 +19,13 @@ def _tool_names(tool_defs):
 
 def test_dedicated_file_tools_visible_and_fs_wrapper_retired():
     enabled = sorted(_get_platform_tools({"platform_toolsets": {"telegram": ["no_mcp", "file"]}}, "telegram"))
-    names = _tool_names(get_tool_definitions(enabled_toolsets=enabled, quiet_mode=True))
+    names = _tool_names(
+        get_tool_definitions(
+            enabled_toolsets=enabled,
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+    )
 
     assert {"read_file", "write_file", "patch", "search_files"} <= names
     assert "fs" not in names
@@ -50,7 +56,13 @@ def test_dedicated_file_tools_dispatch_read_write_patch_search(tmp_path):
 def test_web_wrapper_visible_with_search_affordance_and_extract_legacy_hidden_by_default(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     enabled = sorted(_get_platform_tools({"platform_toolsets": {"telegram": ["no_mcp", "web"]}}, "telegram"))
-    names = _tool_names(get_tool_definitions(enabled_toolsets=enabled, quiet_mode=True))
+    names = _tool_names(
+        get_tool_definitions(
+            enabled_toolsets=enabled,
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+    )
 
     assert "web" in names
     assert "web_search" in names
@@ -76,9 +88,9 @@ def test_web_wrapper_dispatches_search_and_extract_modes(monkeypatch):
     monkeypatch.setattr("tools.web_tools.web_extract_tool", fake_extract)
     monkeypatch.setattr("tools.web_tools.check_web_api_key", lambda: True)
 
-    search = asyncio.run(_handle_web({"action": "search", "query": "hermes", "limit": 2}))
-    fetch = asyncio.run(_handle_web({"action": "fetch", "urls": ["https://example.com"]}))
-    answer = asyncio.run(_handle_web({"action": "answer", "urls": ["https://example.com"], "question": "why?"}))
+    search = asyncio.run(handle_web({"action": "search", "query": "hermes", "limit": 2}))
+    fetch = asyncio.run(handle_web({"action": "fetch", "urls": ["https://example.com"]}))
+    answer = asyncio.run(handle_web({"action": "answer", "urls": ["https://example.com"], "question": "why?"}))
 
     assert json.loads(search)["data"]["web"][0]["title"] == "ok"
     assert json.loads(fetch)["results"][0]["content"] == "ok"
@@ -89,29 +101,34 @@ def test_web_wrapper_dispatches_search_and_extract_modes(monkeypatch):
 
 
 def test_web_wrapper_rejects_fetch_with_singular_url():
-    result = json.loads(asyncio.run(_handle_web({"action": "fetch", "url": "https://example.com"})))
+    result = json.loads(asyncio.run(handle_web({"action": "fetch", "url": "https://example.com"})))
     assert "error" in result
-    assert "requires 'urls' as a list" in result["error"]
+    assert "require 'urls' as a list" in result["error"]
 
 
 def test_web_wrapper_search_reports_missing_backend(monkeypatch):
     monkeypatch.setattr("tools.web_tools.check_web_api_key", lambda: False)
-    result = json.loads(asyncio.run(_handle_web({"action": "search", "query": "hermes"})))
+    result = json.loads(asyncio.run(handle_web({"action": "search", "query": "hermes"})))
     assert "error" in result
     assert "requires a configured web search backend" in result["error"]
     assert "web_search" not in result["error"]
 
 
-def test_webhook_default_toolset_keeps_web_surface_search_only(monkeypatch):
+def test_webhook_default_toolset_keeps_legacy_extract_without_unified_wrapper(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     enabled = ["hermes-webhook"]
-    names = _tool_names(get_tool_definitions(enabled_toolsets=enabled, quiet_mode=True))
+    names = _tool_names(
+        get_tool_definitions(
+            enabled_toolsets=enabled,
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+    )
 
-    assert {"web_search", "clarify"}.issubset(names)
+    assert {"web_search", "web_extract", "clarify"}.issubset(names)
     # vision_analyze is intentionally gated on vision-provider availability;
     # webhook must not depend on it for the web safety invariant.
     assert "web" not in names
-    assert "web_extract" not in names
     assert "curlmd_fetch" not in names
 
 

@@ -140,9 +140,6 @@ async def test_web_extract_max_chars_trims_after_provider(monkeypatch):
             return [{"url": urls[0], "title": "", "content": content, "raw_content": content}]
 
     monkeypatch.setattr(web_tools, "is_safe_url", lambda url: True)
-    async def no_fast(urls, **kwargs):
-        return [], urls
-    monkeypatch.setattr(web_tools, "try_fast_extract_urls", no_fast)
     monkeypatch.setattr(web_tools, "_get_extract_backend", lambda: "firecrawl")
     monkeypatch.setattr("agent.web_search_registry.get_provider", lambda name: FakeProvider())
     monkeypatch.setattr(web_tools, "check_auxiliary_model", lambda: False)
@@ -173,9 +170,6 @@ async def test_web_extract_summary_skips_aux_llm_processing(monkeypatch):
         raise AssertionError("summary mode should not run auxiliary LLM processing")
 
     monkeypatch.setattr(web_tools, "is_safe_url", lambda url: True)
-    async def no_fast(urls, **kwargs):
-        return [], urls
-    monkeypatch.setattr(web_tools, "try_fast_extract_urls", no_fast)
     monkeypatch.setattr(web_tools, "_get_extract_backend", lambda: "firecrawl")
     monkeypatch.setattr("agent.web_search_registry.get_provider", lambda name: FakeProvider())
     monkeypatch.setattr(web_tools, "check_auxiliary_model", lambda: True)
@@ -240,45 +234,3 @@ async def test_web_extract_registry_handler_keeps_legacy_format_aux_processing(
             },
         )
     ]
-
-
-@pytest.mark.asyncio
-async def test_web_wrapper_curlmd_uses_plugin_helper(monkeypatch):
-    from tools import web_tools
-
-    class FakeCurlmdTool:
-        @staticmethod
-        def curlmd_fetch_tool(**kwargs):
-            return json.dumps({"ok": True, "kwargs": kwargs})
-
-    monkeypatch.setattr(web_tools, "_load_curlmd_tool_module", lambda: FakeCurlmdTool)
-
-    result = json.loads(
-        await web_tools._handle_web(
-            {
-                "action": "curlmd",
-                "url": "https://example.com",
-                "objective": "extract docs",
-                "keywords": ["api"],
-                "curlmd_mode": "rush",
-                "fresh": True,
-                "retries": 1,
-                "timeout_seconds": 9,
-                "fallback_to_curl": False,
-                "max_chars": 123,
-            }
-        )
-    )
-
-    assert result["ok"] is True
-    assert result["kwargs"] == {
-        "url": "https://example.com",
-        "objective": "extract docs",
-        "keywords": ["api"],
-        "mode": "rush",
-        "fresh": True,
-        "retries": 1,
-        "timeout_seconds": 9,
-        "fallback_to_curl": False,
-        "max_chars": 123,
-    }

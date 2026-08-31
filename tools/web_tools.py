@@ -42,7 +42,7 @@ import os
 import re
 import asyncio
 import inspect
-from typing import List, Dict, Any, Optional, TYPE_CHECKING
+from typing import List, Dict, Any, Callable, Optional, TYPE_CHECKING
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
 # proxy, client construction, and response-shape normalizers all live in
@@ -99,7 +99,6 @@ from tools.tool_backend_helpers import (  # noqa: F401
     prefers_gateway,
 )
 from tools.url_safety import async_is_safe_url, is_safe_url, normalize_url_for_request, sensitive_query_param_name
-from tools.web_fast_extract import try_fast_extract_urls
 import sys
 
 logger = logging.getLogger(__name__)
@@ -431,6 +430,46 @@ async def _safe_url_allowed(url: str) -> bool:
     if inspect.isawaitable(result):
         result = await result
     return bool(result)
+
+
+async def validate_web_fetch_url(value: Any) -> tuple[Optional[str], Optional[str]]:
+    """Normalize and authorize one URL before an extension may fetch it.
+
+    This is the narrow public seam for plugin-owned fetch strategies. It keeps
+    secret detection and SSRF policy in core, and callers must not perform any
+    cache lookup or network request until it returns ``(url, None)``.
+    """
+    from agent.redact import _PREFIX_RE
+    from urllib.parse import unquote
+
+    url = _web_extract_url(value)
+    if url is None:
+        return None, (
+            "Invalid URL: expected a URL string or an object with a string "
+            "'url' or 'href' field"
+        )
+    normalized_url = normalize_url_for_request(url)
+    if (
+        _PREFIX_RE.search(url)
+        or _PREFIX_RE.search(unquote(url))
+        or _PREFIX_RE.search(normalized_url)
+        or _PREFIX_RE.search(unquote(normalized_url))
+    ):
+        return None, (
+            "Blocked: URL contains what appears to be an API key or token. "
+            "Secrets must not be sent in URLs."
+        )
+    sensitive_query_key = sensitive_query_param_name(normalized_url)
+    if sensitive_query_key:
+        return None, (
+            "Blocked: URL contains a credential-like query parameter "
+            f"({sensitive_query_key}). Web extract backends are third-party "
+            "readers; remove the sensitive query parameter or use a local "
+            "browser session when this access is explicitly required."
+        )
+    if not await _safe_url_allowed(normalized_url):
+        return None, "Blocked: URL targets a private or internal network address"
+    return normalized_url, None
 
 
 def _ddgs_package_importable() -> bool:
@@ -1133,6 +1172,7 @@ async def web_extract_tool(
     only_main_content: Optional[bool] = None,
     wait_for: Optional[int] = None,
     schema: Optional[dict] = None,
+    pre_extract: Optional[Callable[..., Any]] = None,
 ) -> str:
     """
     Extract content from specific web pages using the configured extraction backend.
@@ -1157,6 +1197,9 @@ async def web_extract_tool(
         only_main_content (Optional[bool]): Prefer main article/body content when the backend supports it.
         wait_for (Optional[int]): Milliseconds to wait for JS-rendered content when the backend supports it.
         schema (Optional[dict]): Firecrawl-only JSON schema for mode="json".
+        pre_extract (Optional[Callable]): Plugin-supplied async or sync
+            preprocessor. It receives only URLs that passed core secret/SSRF
+            checks and returns ``(results, provider_fallback_urls)``.
         use_llm_processing (bool): Whether markdown/html content may be summarized with an auxiliary LLM (default: True)
         model (Optional[str]): The model to use for LLM processing (defaults to current auxiliary backend model)
         min_length (int): Minimum content length to trigger LLM processing (default: 5000)
@@ -1260,13 +1303,12 @@ async def web_extract_tool(
                 safe_urls.append(url)
                 safe_indices.append(index)
 
-        # Dispatch only safe URLs. For default markdown fetches, try cheap
-        # machine-readable/static extractors first (Shopify product JSON,
-        # WordPress/WooCommerce REST, JSON-LD/OpenGraph) and fall back to the
-        # configured provider only for misses.
+        # Dispatch only safe URLs. A trusted extension may satisfy some URLs
+        # before the configured provider; core remains authoritative for the
+        # secret/SSRF gate above and for provider fallback/caching below.
         results: List[Dict[str, Any]] = []
-        if safe_urls and async_is_safe_url is _DEFAULT_ASYNC_IS_SAFE_URL:
-            fast_results, provider_urls = await try_fast_extract_urls(
+        if safe_urls and pre_extract is not None:
+            preprocessed = pre_extract(
                 safe_urls,
                 mode=mode or format or "markdown",
                 format=format,
@@ -1275,10 +1317,13 @@ async def web_extract_tool(
                 question=question,
                 schema=schema,
             )
+            if inspect.isawaitable(preprocessed):
+                preprocessed = await preprocessed
+            fast_results, provider_urls = preprocessed
             results.extend(fast_results)
             if fast_results:
-                debug_call_data["processing_applied"].append("fast_extract")
-                debug_call_data["fast_extract_count"] = len(fast_results)
+                debug_call_data["processing_applied"].append("pre_extract")
+                debug_call_data["pre_extract_count"] = len(fast_results)
             safe_urls = provider_urls
 
         if safe_urls:
@@ -1447,7 +1492,6 @@ async def web_extract_tool(
 
                 # Async-or-sync dispatch: parallel + firecrawl have async
                 # extract(); exa + tavily are sync.
-                import inspect
                 extract_kwargs = {
                     "mode": mode,
                     "question": question,
@@ -1987,71 +2031,38 @@ WEB_EXTRACT_SCHEMA = {
 WEB_SCHEMA = {
     "name": "web",
     "description": (
-        "Web research wrapper. Search the web, fetch pages, ask focused page questions, "
-        "summarize, extract structured JSON/links, or use curl.md fallback. Keep "
-        "github_repo_brief separate for GitHub repositories."
+        "Web research through configured providers. Search the web, fetch pages, "
+        "ask focused page questions, summarize, or extract structured JSON/links."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["search", "fetch", "answer", "summary", "json", "links", "curlmd"],
+                "enum": ["search", "fetch", "answer", "summary", "json", "links"],
                 "description": "Web operation to perform.",
             },
             "query": {"type": "string", "description": "For action='search': search query."},
             "limit": {"type": "integer", "description": "For action='search': max results.", "minimum": 1, "maximum": 100, "default": 5},
             "urls": {"type": "array", "items": {"type": "string"}, "description": "For fetch/answer/summary/json/links: URLs to extract (max 5).", "maxItems": 5},
-            "url": {"type": "string", "description": "For action='curlmd': absolute http(s) URL to fetch."},
             "mode": {"type": "string", "enum": ["markdown", "html", "answer", "summary", "json", "links"], "description": "Optional extract mode override. Usually inferred from action."},
             "question": {"type": "string", "description": "Focused question for action='answer'."},
             "max_chars": {"type": "integer", "description": "Maximum characters returned after extraction/fetch."},
             "only_main_content": {"type": "boolean", "description": "Prefer main article/body content when supported."},
             "wait_for": {"type": "integer", "description": "Milliseconds to wait for JS-rendered content when supported."},
             "schema": {"type": "object", "description": "Firecrawl-only JSON schema for action='json'."},
-            "objective": {"type": "string", "description": "For curlmd: focused extraction objective."},
-            "keywords": {"description": "For curlmd: keyword prefilter; string or list of strings.", "oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
-            "curlmd_mode": {"type": "string", "enum": ["smart", "rush"], "description": "For curlmd: curl.md processing mode.", "default": "smart"},
-            "fresh": {"type": "boolean", "description": "For curlmd: bypass curl.md cache.", "default": False},
-            "retries": {"type": "integer", "description": "For curlmd: retry count.", "minimum": 0, "maximum": 4, "default": 2},
-            "timeout_seconds": {"type": "integer", "description": "For curlmd: per-attempt timeout.", "minimum": 5, "maximum": 180, "default": 45},
-            "fallback": {"type": "boolean", "description": "For fetch actions: allow explicit fallback when supported. Results must say fallback_used/reason.", "default": False},
-            "fallback_to_curl": {"type": "boolean", "description": "For curlmd: allow plain curl fallback.", "default": True},
         },
         "required": ["action"],
     },
 }
 
-def _load_curlmd_tool_module():
-    """Load the curl.md helper from the user plugin, with legacy fallback."""
-    import importlib
 
-    for module_name in (
-        "hermes_plugins.local_tools.curlmd_tool",
-        "plugins.local_tools.curlmd_tool",
-        "tools.curlmd_tool",
-    ):
-        try:
-            return importlib.import_module(module_name)
-        except Exception:
-            continue
-    raise ModuleNotFoundError("curlmd_tool is not available from local-tools plugin or legacy tools package")
-
-
-def _check_web_wrapper_available() -> bool:
-    if check_web_api_key():
-        return True
-    try:
-        return bool(_load_curlmd_tool_module().check_curlmd_available())
-    except Exception:
-        return False
-
-
-async def _handle_web(args, **kw):
+async def handle_web(args, **kw):
+    """Generic built-in wrapper over the core search/extract providers."""
     action = args.get("action")
     if action == "search":
         if not check_web_api_key():
-            return tool_error("web(action='search') requires a configured web search backend/API key. Configure web search, or use action='curlmd' with a specific URL.")
+            return tool_error("web(action='search') requires a configured web search backend/API key.")
         if not args.get("query"):
             return tool_error("web(action='search') requires 'query'.")
         return web_search_tool(args.get("query", ""), limit=args.get("limit", 5))
@@ -2060,7 +2071,7 @@ async def _handle_web(args, **kw):
         urls = args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else []
         if not urls:
             if args.get("url"):
-                return tool_error("web(action='fetch'/'answer'/'summary'/'json'/'links') requires 'urls' as a list. Use action='curlmd' for a single 'url'.")
+                return tool_error("web extract actions require 'urls' as a list.")
             return tool_error("web extract actions require 'urls' as a non-empty list.")
         mode = args.get("mode") or ("markdown" if action == "fetch" else action)
         return await web_extract_tool(
@@ -2076,29 +2087,15 @@ async def _handle_web(args, **kw):
             use_llm_processing=mode not in {"answer", "summary", "json", "links"},
         )
 
-    if action == "curlmd":
-        curlmd_tool = _load_curlmd_tool_module()
-        return curlmd_tool.curlmd_fetch_tool(
-            url=args.get("url", ""),
-            objective=args.get("objective"),
-            keywords=args.get("keywords"),
-            mode=args.get("curlmd_mode", "smart"),
-            fresh=bool(args.get("fresh", False)),
-            retries=args.get("retries", 2),
-            timeout_seconds=args.get("timeout_seconds", 45),
-            fallback_to_curl=bool(args.get("fallback_to_curl", True)),
-            max_chars=args.get("max_chars", 50_000),
-        )
-
-    return tool_error("Unknown web action. Use one of: search, fetch, answer, summary, json, links, curlmd.")
+    return tool_error("Unknown web action. Use one of: search, fetch, answer, summary, json, links.")
 
 
 registry.register(
     name="web",
     toolset="web",
     schema=WEB_SCHEMA,
-    handler=_handle_web,
-    check_fn=_check_web_wrapper_available,
+    handler=handle_web,
+    check_fn=web_tools_registered,
     is_async=True,
     emoji="🌐",
     max_result_size_chars=100_000,
