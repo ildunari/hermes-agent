@@ -1391,6 +1391,34 @@ def _port_listener_pids(port: int) -> set[int]:
     return pids
 
 
+def _pid_is_descendant_of(pid: int, ancestor_pid: int) -> bool:
+    """Return whether ``pid`` is a live process descendant of ``ancestor_pid``.
+
+    LaunchAgent programs may be stable logging wrappers whose child owns the
+    actual gateway socket.  Bound the parent walk so stale/reused PIDs and
+    malformed process trees fail closed.
+    """
+    if pid <= 0 or ancestor_pid <= 0 or pid == ancestor_pid:
+        return pid == ancestor_pid and pid > 0
+    current = pid
+    seen = {current}
+    for _ in range(64):
+        result = _run(["/bin/ps", "-o", "ppid=", "-p", str(current)], timeout=5)
+        if result.returncode != 0:
+            return False
+        try:
+            parent = int((result.stdout or "").strip())
+        except (TypeError, ValueError):
+            return False
+        if parent == ancestor_pid:
+            return True
+        if parent <= 1 or parent in seen:
+            return False
+        seen.add(parent)
+        current = parent
+    return False
+
+
 def _gateway_pid(target: RestartTarget, launchctl_result: subprocess.CompletedProcess[str]) -> int | None:
     launchd_pid = _launchctl_pid(launchctl_result)
     if launchd_pid is None:
@@ -1406,6 +1434,17 @@ def _gateway_pid(target: RestartTarget, launchctl_result: subprocess.CompletedPr
         )
         if runtime_pid == launchd_pid:
             return launchd_pid
+        if (
+            runtime_pid is not None
+            and _pid_is_alive(runtime_pid)
+            and runtime_pid in _port_listener_pids(GATEWAY_LISTENER_PORT)
+            and _pid_is_descendant_of(runtime_pid, launchd_pid)
+        ):
+            _append_log(
+                f"{target.label}: launchd pid {launchd_pid} owns verified gateway "
+                f"descendant pid {runtime_pid} on listener port {GATEWAY_LISTENER_PORT}"
+            )
+            return runtime_pid
         # gateway_state.json disagrees with launchd (stale, dead PID, or
         # clobbered by a foreign writer). It only rewrites on turns/transitions,
         # so it never self-heals; refusing here on the status file alone would
@@ -1437,6 +1476,7 @@ def _graceful_restart_gateway(
     timeout: float,
 ) -> tuple[RestartVerification, str | None]:
     """Ask one gateway to drain and self-restart; never hard-kill it."""
+    launchd_pid = _launchctl_pid(launchctl_result)
     pid = _gateway_pid(target, launchctl_result)
     if pid is None:
         return RestartVerification.NOT_RESTARTED, f"{service} has no verifiable gateway PID; refusing hard restart"
@@ -1455,18 +1495,26 @@ def _graceful_restart_gateway(
         # that stale/transient value is treated as success, the outer dedup set
         # incorrectly suppresses the user/gui twin without restarting either.
         current = _launchctl_print(service)
-        replacement_pid = _launchctl_pid(current) if current.returncode == 0 else None
-        if replacement_pid is not None:
-            if replacement_pid != pid:
-                # A launchd PID change proves the supervisor started a replacement,
-                # but it does not prove the old process released its listeners or
-                # that gateway_state.json belongs to the replacement yet. Waiting
-                # for both prevents the old/new overlap that produced transient
-                # token and port-binding conflicts during chained restarts.
+        replacement_launchd_pid = _launchctl_pid(current) if current.returncode == 0 else None
+        if replacement_launchd_pid is not None:
+            replacement_gateway_pid = _gateway_pid(target, current)
+            launchd_replaced = replacement_launchd_pid != launchd_pid
+            wrapped_child_replaced = (
+                launchd_pid is not None
+                and pid != launchd_pid
+                and replacement_launchd_pid == launchd_pid
+                and replacement_gateway_pid is not None
+                and replacement_gateway_pid != pid
+            )
+            if launchd_replaced or wrapped_child_replaced:
+                # A new launchd process or a new verified child under a stable
+                # wrapper proves the supervisor started a replacement, but not
+                # that the old gateway released its listeners yet. Waiting for
+                # both prevents overlap and transient token/port conflicts.
                 if _pid_is_alive(pid):
                     time.sleep(0.25)
                     continue
-                if _gateway_pid(target, current) == replacement_pid:
+                if replacement_gateway_pid is not None:
                     return RestartVerification.RESTARTED, None
         else:
             # A failed/empty launchctl read is not proof that the old PID

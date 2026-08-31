@@ -557,6 +557,47 @@ def test_gateway_pid_requires_validated_status_and_launchd_agreement(monkeypatch
     assert real_gateway_pid(target, before) == 222
 
 
+def test_gateway_pid_accepts_verified_listener_child_of_launchd_wrapper(monkeypatch):
+    from gateway import status as gateway_status
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("gui/{uid}", "ai.hermes.gateway", required=True)
+    before = subprocess.CompletedProcess(
+        ["launchctl", "print"], 0, stdout="\tpid = 222\n", stderr=""
+    )
+    monkeypatch.setattr(restart_surfaces, "_read_json", lambda _path: {"pid": 333})
+    monkeypatch.setattr(
+        gateway_status, "get_runtime_status_running_pid", lambda *_a, **_k: 333
+    )
+    monkeypatch.setattr(restart_surfaces, "_pid_is_alive", lambda pid: pid == 333)
+    monkeypatch.setattr(restart_surfaces, "_port_listener_pids", lambda _port: {333})
+    monkeypatch.setattr(
+        restart_surfaces, "_pid_is_descendant_of", lambda pid, owner: (pid, owner) == (333, 222)
+    )
+
+    assert real_gateway_pid(target, before) == 333
+
+
+def test_gateway_pid_rejects_unrelated_listener_even_when_status_names_it(monkeypatch):
+    from gateway import status as gateway_status
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("gui/{uid}", "ai.hermes.gateway", required=True)
+    before = subprocess.CompletedProcess(
+        ["launchctl", "print"], 0, stdout="\tpid = 222\n", stderr=""
+    )
+    monkeypatch.setattr(restart_surfaces, "_read_json", lambda _path: {"pid": 333})
+    monkeypatch.setattr(
+        gateway_status, "get_runtime_status_running_pid", lambda *_a, **_k: 333
+    )
+    monkeypatch.setattr(restart_surfaces, "_pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(restart_surfaces, "_port_listener_pids", lambda _port: {333})
+    monkeypatch.setattr(restart_surfaces, "_pid_is_descendant_of", lambda *_a: False)
+    monkeypatch.setattr(restart_surfaces, "_heartbeat_confirms_pid", lambda *_a: False)
+
+    assert real_gateway_pid(target, before) is None
+
+
 def _write_status_and_heartbeat(tmp_path, *, status_pid, heartbeat_pid, heartbeat_age_s):
     """Build a profile-home dir with a stale status file and a heartbeat."""
     from datetime import datetime, timedelta, timezone
@@ -744,6 +785,32 @@ def test_graceful_gateway_restart_signals_and_waits_for_launchd_replacement(monk
     assert verification is RestartVerification.RESTARTED
     assert failure is None
     assert signals == [(100, restart_surfaces.signal.SIGUSR1)]
+
+
+def test_graceful_gateway_restart_accepts_new_child_under_stable_wrapper(monkeypatch):
+    from hermes_cli import restart_surfaces
+
+    target = RestartTarget("gui/{uid}", "ai.hermes.gateway", required=True)
+    wrapper = subprocess.CompletedProcess(
+        ["launchctl", "print"], 0, stdout="\tpid = 100\n", stderr=""
+    )
+    gateway_pids = iter((110, 111))
+    signals = []
+    monkeypatch.setattr(restart_surfaces, "_gateway_pid", lambda *_args: next(gateway_pids))
+    monkeypatch.setattr(restart_surfaces, "_launchctl_print", lambda _service: wrapper)
+    monkeypatch.setattr(restart_surfaces, "_pid_is_alive", lambda pid: False)
+    monkeypatch.setattr(restart_surfaces.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+
+    verification, failure = real_graceful_restart_gateway(
+        target,
+        "gui/503/ai.hermes.gateway",
+        wrapper,
+        timeout=10,
+    )
+
+    assert verification is RestartVerification.RESTARTED
+    assert failure is None
+    assert signals == [(110, restart_surfaces.signal.SIGUSR1)]
 
 
 def test_graceful_gateway_restart_waits_for_old_pid_exit_and_replacement_status(monkeypatch):
