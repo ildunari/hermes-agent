@@ -7752,7 +7752,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # /reasoning, /fast overrides; per-turn sidecar notes; ephemeral
         # context pin; last-delivered voice-channel context) lives on
         # SessionState.conversation — see gateway/session_state.py.
-        # Per-session personality overlays from /personality_session.
+        # Per-session personality overlays hydrated from routing metadata.
         self._session_personality_overrides: Dict[str, Dict[str, Any]] = {}
         self._kanban_notifier_profile = self._active_profile_name()
         # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
@@ -7770,9 +7770,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Pending /update prompt flags live on
         # SessionState.persistent.update_prompt_pending.
-        # Pending interactive /newthread title prompts, keyed by session.
-        self._pending_newthread_prompts: Dict[str, Dict[str, Any]] = {}
-
         # Slash-confirm state lives in tools.slash_confirm (module-level),
         # so platform adapters can resolve callbacks without a backref to
         # this runner.  Keep a local counter for confirm_id generation so
@@ -18904,14 +18901,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 _up_state.persistent.update_prompt_pending = False
 
-        # Consume the reply to an interactive bare /newthread prompt before it
-        # can become model text. A different slash command cancels the stale
-        # prompt and continues through normal cold dispatch.
-        _pending_newthread_result = await self._handle_pending_newthread_name(
-            event, _quick_key
+        # Consume a source-scoped free-text follow-up requested by a plugin
+        # command before it can become model input. A different slash command
+        # cancels the stale prompt and continues through normal dispatch.
+        from gateway.command_context import dispatch_pending_plugin_command_followup
+
+        _pending_plugin_result = await dispatch_pending_plugin_command_followup(
+            self, event, _quick_key
         )
-        if _pending_newthread_result is not False:
-            return _pending_newthread_result
+        if _pending_plugin_result is not False:
+            return _pending_plugin_result
 
         # Intercept messages that are responses to a pending clarify.
         # Open-ended prompts and "Other" responses are captured as free text;
@@ -19342,6 +19341,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # don't depend on the exact alias the user typed.
         _cmd_def = _resolve_cmd(command) if command else None
         canonical = _cmd_def.name if _cmd_def else command
+        if _cmd_def is None and command:
+            plugin_canonical = command.replace("_", "-")
+            if is_gateway_known_command(plugin_canonical):
+                canonical = plugin_canonical
 
         # Expand alias quick commands before built-in dispatch so targets like
         # /model openai/gpt-5.5 --provider openrouter reach the /model handler.
@@ -19509,21 +19512,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "topic":
             return await self._handle_topic_command(event)
 
-        if canonical == "cwd":
-            return await self._handle_cwd_command(event)
-
-        if canonical == "threads":
-            return await self._handle_threads_command(event)
-
-        if canonical == "thread":
-            return await self._handle_thread_command(event)
-
-        if canonical == "repo":
-            return await self._handle_repo_command(event)
-
-        if canonical == "newthread":
-            return await self._handle_newthread_command(event)
-        
         if canonical == "help":
             return await self._handle_help_command(event)
 
@@ -19655,9 +19643,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "personality":
             return await self._handle_personality_command(event)
 
-        if canonical == "personality_session":
-            return await self._handle_personality_session_command(event)
-
         if canonical == "kanban":
             return await self._handle_kanban_command(event)
 
@@ -19753,12 +19738,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "update":
             return await self._handle_update_command(event)
-
-        if canonical == "tts":
-            return await self._handle_tts_command(event)
-
-        if canonical == "bgnotify":
-            return await self._handle_bgnotify_command(event)
 
 
         if canonical == "version":
@@ -19939,14 +19918,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Plugin-registered slash commands
         if command:
             try:
-                from hermes_cli.plugins import get_plugin_command_handler
+                from gateway.command_context import build_gateway_command_context
+                from hermes_cli.plugins import (
+                    get_plugin_command_handler,
+                    invoke_plugin_command,
+                )
                 # Normalize underscores to hyphens so Telegram's underscored
                 # autocomplete form matches plugin commands registered with
                 # hyphens. See hermes_cli/commands.py:_build_telegram_menu.
-                plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
+                plugin_name = command.replace("_", "-")
+                plugin_handler = get_plugin_command_handler(plugin_name)
                 if plugin_handler:
                     user_args = event.get_command_args().strip()
-                    result = plugin_handler(user_args)
+                    invocation = await build_gateway_command_context(
+                        self, event, plugin_name, user_args
+                    )
+                    result = invoke_plugin_command(
+                        plugin_name, user_args, context=invocation
+                    )
                     if asyncio.iscoroutine(result):
                         result = await result
                     return str(result) if result else None

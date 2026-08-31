@@ -78,6 +78,14 @@ from hermes_cli.relay_plugin_cutover import (
     RELAY_PLUGINS_CONFIG_ENV,
     legacy_relay_plugin_keys,
 )
+from hermes_cli.command_context import (  # noqa: F401 — public plugin API
+    CommandActionResult,
+    CommandCapabilityError,
+    CommandInvocationContext,
+    CommandSession,
+    CommandSource,
+    cli_command_context,
+)
 
 
 def get_bundled_plugins_dir() -> Path:
@@ -2187,11 +2195,16 @@ class PluginContext:
         description: str = "",
         args_hint: str = "",
         argument_mode: str | None = None,
+        *,
+        context: bool = False,
     ) -> Optional[PluginRegistration]:
         """Register a slash command (e.g. ``/lcm``) available in CLI and gateway sessions.
 
-        The handler signature is ``fn(raw_args: str) -> str | None``.
-        It may also be an async callable — the gateway dispatch handles both.
+        Legacy handlers use ``fn(raw_args: str) -> str | None``. Pass
+        ``context=True`` for ``fn(CommandInvocationContext)``; this additive
+        opt-in avoids guessing from annotations or parameter names and keeps
+        every existing raw-argument plugin unchanged. Either shape may be an
+        async callable.
 
         Unlike ``register_cli_command()`` (which creates ``hermes <subcommand>``
         terminal commands), this registers in-session slash commands that users
@@ -2238,6 +2251,7 @@ class PluginContext:
         )
         entry = {
             "handler": handler,
+            "context": bool(context),
             "description": description or "Plugin command",
             "plugin": self.manifest.name,
             "plugin_key": self.manifest.key or self.manifest.name,
@@ -7222,6 +7236,30 @@ def get_plugin_command_handler(name: str) -> Optional[Callable]:
     """Return the handler for a plugin-registered slash command, or ``None``."""
     entry = _ensure_plugins_discovered()._plugin_commands.get(name)
     return entry["handler"] if entry else None
+
+
+def invoke_plugin_command(
+    name: str,
+    raw_args: str,
+    *,
+    context: Optional[CommandInvocationContext] = None,
+) -> Any:
+    """Invoke one plugin command with its registered argument shape.
+
+    Context-aware handlers receive the host-built immutable context. On
+    non-gateway callers a capability-free CLI context is supplied. Legacy
+    handlers always receive the exact raw argument string.
+    """
+
+    entry = _ensure_plugins_discovered()._plugin_commands.get(name)
+    if entry is None:
+        return None
+    handler = entry["handler"]
+    raw = str(raw_args or "")
+    if entry.get("context"):
+        invocation = context or cli_command_context(raw, name)
+        return handler(invocation)
+    return handler(raw)
 
 
 _PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS = 30.0

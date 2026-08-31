@@ -12785,20 +12785,20 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # Check for plugin-registered slash commands
             elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
                 from hermes_cli.plugins import (
-                    get_plugin_command_handler,
+                    invoke_plugin_command,
                     resolve_plugin_command_result,
                 )
-                plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
-                if plugin_handler:
-                    user_args = cmd_original[len(base_cmd):].strip()
-                    try:
-                        result = resolve_plugin_command_result(
-                            plugin_handler(user_args)
+                user_args = cmd_original[len(base_cmd):].strip()
+                try:
+                    result = resolve_plugin_command_result(
+                        invoke_plugin_command(
+                            base_cmd.lstrip("/"), user_args
                         )
-                        if result:
-                            _cprint(str(result))
-                    except Exception as e:
-                        _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
+                    )
+                    if result:
+                        _cprint(str(result))
+                except Exception as e:
+                    _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
             # Skill bundles take precedence over individual skills — /<bundle>
             # loads multiple skills at once. Rescans cheaply when files change.
             elif base_cmd in skill_bundles:

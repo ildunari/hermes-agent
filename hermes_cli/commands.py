@@ -562,8 +562,9 @@ def is_gateway_known_command(name: str | None) -> bool:
         return False
     if name in GATEWAY_KNOWN_COMMANDS:
         return True
+    plugin_lookup = name.replace("_", "-")
     for plugin_name, _description, _args_hint in _iter_plugin_command_entries():
-        if plugin_name == name:
+        if plugin_name == plugin_lookup:
             return True
     return False
 

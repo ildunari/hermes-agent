@@ -1,6 +1,6 @@
 """Focused tests for gateway-only slash command handlers."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -22,31 +22,6 @@ def _event(text: str) -> MessageEvent:
         ),
         message_id="m1",
     )
-
-
-@pytest.mark.asyncio
-async def test_tts_command_requires_prompt():
-    from gateway.run import GatewayRunner
-
-    runner = object.__new__(GatewayRunner)
-
-    result = await runner._handle_tts_command(_event("/tts"))
-
-    assert result == "Usage: /tts <prompt>"
-
-
-@pytest.mark.asyncio
-async def test_tts_command_sends_voice_reply():
-    from gateway.run import GatewayRunner
-
-    runner = object.__new__(GatewayRunner)
-    runner._send_voice_reply = AsyncMock()
-    event = _event("/tts say this out loud")
-
-    result = await runner._handle_tts_command(event)
-
-    assert result == "Sent voice message."
-    runner._send_voice_reply.assert_awaited_once_with(event, "say this out loud")
 
 
 @pytest.mark.asyncio
