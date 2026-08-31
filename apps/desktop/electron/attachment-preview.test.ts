@@ -69,4 +69,34 @@ describe('readAttachmentPreviewForIpc', () => {
     await expectCode(readAttachmentPreviewForIpc({ path: large, type: 'pdf' }), 'EFBIG')
     await expectCode(readAttachmentPreviewForIpc({ path: stale, type: 'pdf' }), 'ENOENT')
   })
+
+  it('rechecks size after opening so a growing file cannot bypass the host cap', async () => {
+    const dir = await fixtureDir()
+    const pdf = path.join(dir, 'growing.pdf')
+    await fs.promises.writeFile(pdf, '%PDF-1.4')
+
+    const fsImpl = {
+      ...fs,
+      promises: {
+        ...fs.promises,
+        open: async (...args: Parameters<typeof fs.promises.open>) => {
+          await fs.promises.writeFile(pdf, Buffer.alloc(ATTACHMENT_PREVIEW_MAX_BYTES + 1))
+
+          return fs.promises.open(...args)
+        }
+      }
+    } as typeof fs
+
+    await expectCode(readAttachmentPreviewForIpc({ path: pdf, type: 'pdf' }, fsImpl), 'EFBIG')
+  })
+
+  it('inherits sensitive-file blocking from the host IPC hardening boundary', async () => {
+    const dir = await fixtureDir()
+    const sshDir = path.join(dir, '.ssh')
+    const pdf = path.join(sshDir, 'private.pdf')
+    await fs.promises.mkdir(sshDir)
+    await fs.promises.writeFile(pdf, '%PDF-1.4')
+
+    await expectCode(readAttachmentPreviewForIpc({ path: pdf, type: 'pdf' }), 'sensitive-file')
+  })
 })

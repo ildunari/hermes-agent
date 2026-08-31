@@ -47,6 +47,13 @@ describe('attachment previewer selection', () => {
     expect(selectAttachmentPreviewer(target('/fixtures/archive.zip'), [contribution()])).toBeNull()
   })
 
+  it.each(['/fixtures/report.pdf#notes', '/fixtures/report.pdf?draft'])(
+    'treats %s as a literal filesystem path',
+    path => {
+      expect(selectAttachmentPreviewer(target(path), [contribution()])).toBeNull()
+    }
+  )
+
   it('rejects a MIME mismatch before mounting plugin UI', () => {
     expect(
       selectAttachmentPreviewer(target('/fixtures/paper.pdf', { mimeType: 'text/html' }), [contribution()])

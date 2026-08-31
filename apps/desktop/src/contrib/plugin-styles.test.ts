@@ -35,9 +35,14 @@ describe('plugin scoped styles', () => {
     ).toBe(false)
   })
 
-  it('rejects stylesheet-global imports', () => {
+  it.each([
+    '@import url(https://example.test/x.css);',
+    '@font-face { font-family: stolen; src: url(https://example.test/font); }',
+    '@keyframes host-animation { from { opacity: 0 } to { opacity: 1 } }',
+    '@property --host-token { syntax: "<color>"; inherits: true; initial-value: red; }'
+  ])('rejects stylesheet-global rule %s', css => {
     const styles = createPluginStyles('demo', dispose => dispose)
-    expect(() => styles.add('bad', '@import url(https://example.test/x.css);')).toThrow(/cannot contain/)
+    expect(() => styles.add('bad', css)).toThrow(/stylesheet-global/)
     expect(document.head.querySelector('style[data-hermes-plugin-style="demo:bad"]')).toBeNull()
   })
 

@@ -31,7 +31,7 @@
 import { installPluginSdk, sdkImportMap } from '@/sdk/runtime'
 import { notifyError } from '@/store/notifications'
 
-import { createPluginContext, type HermesPlugin } from './plugin'
+import { disposePluginResources, type HermesPlugin, registerPluginResources } from './plugin'
 import { $pluginRecords, dropPlugin, pluginActive, type PluginKind, publishPlugin } from './plugins-store'
 
 interface LoadOptions {
@@ -100,7 +100,12 @@ async function verifyIntegrity(source: string, integrity: string): Promise<boole
 }
 
 export function unloadRuntimePlugin(id: string): void {
-  loaded.get(id)?.forEach(dispose => dispose())
+  const disposers = loaded.get(id)
+
+  if (disposers) {
+    disposePluginResources(disposers)
+  }
+
   loaded.delete(id)
 }
 
@@ -175,8 +180,7 @@ export async function loadRuntimePlugin(
     const activate = () => {
       // Reload = dispose the previous incarnation, then register fresh.
       unloadRuntimePlugin(plugin.id)
-      const disposers: (() => void)[] = []
-      plugin.register(createPluginContext(plugin.id, dispose => disposers.push(dispose)))
+      const disposers = registerPluginResources(plugin)
       loaded.set(plugin.id, disposers)
       publishPlugin({ ...record, status: 'loaded' })
     }

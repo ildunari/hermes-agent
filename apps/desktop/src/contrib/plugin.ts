@@ -127,6 +127,44 @@ export interface HermesPlugin {
   register: (ctx: PluginContext) => void
 }
 
+const PLUGIN_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/
+
+export function assertPluginId(pluginId: string): void {
+  if (!PLUGIN_ID_PATTERN.test(pluginId)) {
+    throw new Error(`Invalid plugin id "${pluginId}": expected a lowercase kebab-case slug`)
+  }
+}
+
+/** Dispose every resource even when one plugin cleanup is itself broken. The
+ * reverse order mirrors stack unwinding and keeps a bad `onDispose` callback
+ * from stranding later contributions, styles, sockets, or locale bundles. */
+export function disposePluginResources(disposers: Array<() => void>): void {
+  const pending = disposers.splice(0).reverse()
+
+  for (const dispose of pending) {
+    try {
+      dispose()
+    } catch (error) {
+      console.error('[plugins] cleanup failed', error)
+    }
+  }
+}
+
+/** Register transactionally: a plugin that throws halfway through activation
+ * must not leave the resources it registered before the exception alive. */
+export function registerPluginResources(plugin: HermesPlugin): Array<() => void> {
+  const disposers: Array<() => void> = []
+
+  try {
+    plugin.register(createPluginContext(plugin.id, dispose => disposers.push(dispose)))
+  } catch (error) {
+    disposePluginResources(disposers)
+    throw error
+  }
+
+  return disposers
+}
+
 function createPluginStorage(pluginId: string): PluginStorage {
   const scoped = (key: string) => `hermes.plugin.${pluginId}.${key}`
 
@@ -205,6 +243,7 @@ function createPluginOs(pluginId: string): PluginOs {
 /** Build the scoped context handed to a plugin's `register`. `onDispose`
  *  receives every registration's disposer (the loader's unload/reload hook). */
 export function createPluginContext(pluginId: string, onDispose?: (dispose: () => void) => void): PluginContext {
+  assertPluginId(pluginId)
   const source = `plugin:${pluginId}`
   const scope = (c: PluginContribution): Contribution => ({ ...c, id: `${pluginId}:${c.id}`, source })
 

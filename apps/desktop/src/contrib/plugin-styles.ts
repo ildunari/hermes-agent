@@ -21,11 +21,16 @@ function safeToken(value: string): string {
 }
 
 function scopedCss(attribute: string, css: string): string {
-  // Imports and namespaces are stylesheet-global and cannot be meaningfully
-  // constrained by @scope. Runtime plugins get a removable style contribution,
-  // not an escape hatch into the app stylesheet.
-  if (/@(?:import|namespace)\b/i.test(css)) {
-    throw new Error('Plugin styles cannot contain @import or @namespace rules')
+  // Imports, namespaces, and named/global at-rules escape a selector scope:
+  // keyframes/property/font definitions remain visible to the whole document
+  // even when authored inside @scope. Runtime plugins get removable, scoped
+  // declarations — not a global stylesheet namespace.
+  if (
+    /@(?:charset|counter-style|font-face|font-feature-values|import|keyframes|layer|namespace|page|property|-webkit-keyframes)\b/i.test(
+      css
+    )
+  ) {
+    throw new Error('Plugin styles cannot contain stylesheet-global at-rules')
   }
 
   let depth = 0

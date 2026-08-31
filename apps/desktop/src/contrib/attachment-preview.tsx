@@ -47,11 +47,26 @@ export interface AttachmentPreviewerContribution {
   render: (props: AttachmentPreviewRenderProps) => ReactNode
 }
 
-function extension(value: string): string {
-  const clean = value.split(/[?#]/, 1)[0] || value
-  const index = clean.lastIndexOf('.')
+function literalExtension(value: string): string {
+  const index = value.lastIndexOf('.')
 
-  return index >= 0 ? clean.slice(index).toLowerCase() : ''
+  return index >= 0 ? value.slice(index).toLowerCase() : ''
+}
+
+function targetExtension(target: PreviewTarget): string {
+  // Filesystem paths treat `?` and `#` as ordinary filename characters. Only
+  // URL fallback candidates have query/fragment syntax to strip.
+  const literal = target.path?.trim() || target.source?.trim() || target.label?.trim()
+
+  if (literal) {
+    return literalExtension(literal)
+  }
+
+  try {
+    return literalExtension(new URL(target.url).pathname)
+  } catch {
+    return ''
+  }
 }
 
 function mime(value: string | undefined): string {
@@ -128,8 +143,7 @@ export function selectAttachmentPreviewer(
     return null
   }
 
-  const candidate = (target.path || target.source || target.label || target.url).trim()
-  const ext = extension(candidate) as HostAttachmentExtension
+  const ext = targetExtension(target) as HostAttachmentExtension
   const host = HOST_TYPES[ext]
 
   if (!host) {

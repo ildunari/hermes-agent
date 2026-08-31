@@ -13,7 +13,7 @@
  *    — the agent's/user's doors, watched + hot-reloaded by the runtime loader.
  */
 
-import { createPluginContext, type HermesPlugin } from './plugin'
+import { disposePluginResources, type HermesPlugin, registerPluginResources } from './plugin'
 import { pluginActive, publishPlugin } from './plugins-store'
 import { watchRuntimePlugins } from './runtime-loader'
 
@@ -54,11 +54,10 @@ export function discoverBundledPlugins(): void {
     let disposers: (() => void)[] = []
 
     const activate = () => {
-      disposers.forEach(dispose => dispose())
-      disposers = []
+      disposePluginResources(disposers)
 
       try {
-        plugin.register(createPluginContext(plugin.id, dispose => disposers.push(dispose)))
+        disposers = registerPluginResources(plugin)
         publishPlugin({ ...record, status: 'loaded' })
       } catch (error) {
         console.error(`[plugins] ${plugin.id} failed to register`, error)
@@ -67,8 +66,7 @@ export function discoverBundledPlugins(): void {
     }
 
     const deactivate = () => {
-      disposers.forEach(dispose => dispose())
-      disposers = []
+      disposePluginResources(disposers)
     }
 
     publishPlugin({ ...record, status: 'disabled' }, { activate, deactivate })
