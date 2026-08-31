@@ -18847,13 +18847,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _recognized_cmd = None
                 if cmd:
                     try:
-                        from hermes_cli.commands import resolve_command as _resolve_update_cmd
+                        from hermes_cli.commands import (
+                            is_gateway_known_command as _is_gateway_update_cmd,
+                            resolve_command as _resolve_update_cmd,
+                        )
                     except Exception:
+                        _is_gateway_update_cmd = None
                         _resolve_update_cmd = None
                     if _resolve_update_cmd is not None:
                         try:
                             _cmd_def = _resolve_update_cmd(cmd)
                             _recognized_cmd = _cmd_def.name if _cmd_def else None
+                            if (
+                                _recognized_cmd is None
+                                and _is_gateway_update_cmd is not None
+                                and _is_gateway_update_cmd(cmd.replace("_", "-"))
+                            ):
+                                _recognized_cmd = cmd.replace("_", "-")
                         except Exception:
                             _recognized_cmd = None
                 if _recognized_cmd:
@@ -19918,27 +19928,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Plugin-registered slash commands
         if command:
             try:
-                from gateway.command_context import build_gateway_command_context
-                from hermes_cli.plugins import (
-                    get_plugin_command_handler,
-                    invoke_plugin_command,
+                from gateway.command_context import dispatch_gateway_plugin_command
+
+                plugin_dispatch = await dispatch_gateway_plugin_command(
+                    self, event, command
                 )
-                # Normalize underscores to hyphens so Telegram's underscored
-                # autocomplete form matches plugin commands registered with
-                # hyphens. See hermes_cli/commands.py:_build_telegram_menu.
-                plugin_name = command.replace("_", "-")
-                plugin_handler = get_plugin_command_handler(plugin_name)
-                if plugin_handler:
-                    user_args = event.get_command_args().strip()
-                    invocation = await build_gateway_command_context(
-                        self, event, plugin_name, user_args
-                    )
-                    result = invoke_plugin_command(
-                        plugin_name, user_args, context=invocation
-                    )
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    return str(result) if result else None
+                if plugin_dispatch.matched:
+                    if plugin_dispatch.continue_as_message:
+                        # The command deliberately became ordinary model input.
+                        # Clear the slash token so skill/unknown-command routing
+                        # cannot reject the rewritten text before agent dispatch.
+                        command = None
+                        canonical = None
+                    else:
+                        return plugin_dispatch.response
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)
 

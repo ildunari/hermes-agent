@@ -466,6 +466,37 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5012, str(e))
 
 
+def _dispatch_plugin_command_for_session(
+    name: str,
+    arg: str,
+    session: dict | None,
+) -> tuple[bool, object]:
+    """Invoke a plugin command in the owning TUI session's profile scope."""
+
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from hermes_cli.plugins import (
+        _get_plugin_command_registration,
+        invoke_plugin_command,
+        resolve_plugin_command_result,
+    )
+
+    profile_home = session.get("profile_home") if session else None
+    home_token = (
+        set_hermes_home_override(str(profile_home)) if profile_home else None
+    )
+    try:
+        registration = _get_plugin_command_registration(name)
+        if registration is None:
+            return False, None
+        result = resolve_plugin_command_result(
+            invoke_plugin_command(name, arg, registration=registration)
+        )
+        return True, result
+    finally:
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
+
+
 @method("command.dispatch")
 def _(rid, params: dict) -> dict:
     name, arg = params.get("name", "").lstrip("/"), params.get("arg", "")
@@ -517,14 +548,8 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"type": "alias", "target": qc.get("target", "")})
 
     try:
-        from hermes_cli.plugins import (
-            get_plugin_command_handler,
-            resolve_plugin_command_result,
-        )
-
-        handler = get_plugin_command_handler(name)
-        if handler:
-            result = resolve_plugin_command_result(handler(arg))
+        matched, result = _dispatch_plugin_command_for_session(name, arg, session)
+        if matched:
             return _ok(rid, {"type": "plugin", "output": str(result or "")})
     except Exception:
         pass
@@ -1249,30 +1274,17 @@ def _(rid, params: dict) -> dict:
     except Exception:
         pass
 
-    plugin_handler = None
-    invoke_plugin_command = None
-    resolve_plugin_command_result = None
+    plugin_matched = False
+    plugin_result = None
     if _cmd_base:
         try:
-            from hermes_cli.plugins import (
-                get_plugin_command_handler,
-                invoke_plugin_command,
-                resolve_plugin_command_result,
+            plugin_matched, plugin_result = _dispatch_plugin_command_for_session(
+                _cmd_base, _cmd_arg, session
             )
-
-            plugin_handler = get_plugin_command_handler(_cmd_base)
-        except Exception:
-            plugin_handler = None
-            resolve_plugin_command_result = None
-
-    if plugin_handler and invoke_plugin_command and resolve_plugin_command_result:
-        try:
-            result = resolve_plugin_command_result(
-                invoke_plugin_command(_cmd_base, _cmd_arg)
-            )
-            return _ok(rid, {"output": str(result or "(no output)")})
         except Exception as e:
             return _ok(rid, {"output": f"Plugin command error: {e}"})
+    if plugin_matched:
+        return _ok(rid, {"output": str(plugin_result or "(no output)")})
 
     worker = session.get("slash_worker")
     if not worker:
@@ -2614,4 +2626,8 @@ def _(rid, params: dict) -> dict:
 
 def register(server) -> None:
     """Bind this module's handlers onto ``server``'s globals and registry."""
+    # HandlerRegistry rebinds handler globals to server.py. Publish the shared
+    # helper there before install so both RPC handlers resolve the same scoped
+    # dispatcher instead of falling through with NameError.
+    server._dispatch_plugin_command_for_session = _dispatch_plugin_command_for_session
     _registry.install(server)

@@ -7234,8 +7234,20 @@ def get_plugin_context_engine():
 
 def get_plugin_command_handler(name: str) -> Optional[Callable]:
     """Return the handler for a plugin-registered slash command, or ``None``."""
-    entry = _ensure_plugins_discovered()._plugin_commands.get(name)
+    entry = _get_plugin_command_registration(name)
     return entry["handler"] if entry else None
+
+
+def _get_plugin_command_registration(name: str) -> Optional[dict]:
+    """Return the live opaque registration entry for host dispatch code.
+
+    Host surfaces compare this entry by identity across awaits. It is a
+    short-lived authorization token: disabling, unloading, or replacing the
+    plugin invalidates contexts and pending follow-ups created by the old
+    registration. The entry remains private and is never passed to plugins.
+    """
+
+    return _ensure_plugins_discovered()._plugin_commands.get(name)
 
 
 def invoke_plugin_command(
@@ -7243,6 +7255,7 @@ def invoke_plugin_command(
     raw_args: str,
     *,
     context: Optional[CommandInvocationContext] = None,
+    registration: Optional[object] = None,
 ) -> Any:
     """Invoke one plugin command with its registered argument shape.
 
@@ -7251,9 +7264,13 @@ def invoke_plugin_command(
     handlers always receive the exact raw argument string.
     """
 
-    entry = _ensure_plugins_discovered()._plugin_commands.get(name)
+    entry = _get_plugin_command_registration(name)
     if entry is None:
         return None
+    if registration is not None and entry is not registration:
+        raise CommandCapabilityError(
+            f"Plugin command /{name} was unloaded or replaced before invocation"
+        )
     handler = entry["handler"]
     raw = str(raw_args or "")
     if entry.get("context"):

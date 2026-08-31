@@ -13,6 +13,7 @@ import inspect
 import os
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Optional
 
 from gateway.config import Platform
@@ -24,6 +25,22 @@ from hermes_cli.command_context import (
     CommandSource,
     _CommandServices,
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class GatewayPluginCommandDispatch:
+    """Host-side outcome of one plugin slash-command dispatch.
+
+    ``continue_as_message`` is deliberately explicit. A context-aware command
+    may rewrite the authenticated event through the narrow ``message.rewrite``
+    capability and return no immediate response (for example, a command that
+    expands into a skill invocation). Treating that ``None`` like an ordinary
+    handled command drops the rewritten turn before it ever reaches the agent.
+    """
+
+    matched: bool
+    response: Optional[str] = None
+    continue_as_message: bool = False
 
 
 def _profile_name(source: SessionSource) -> str:
@@ -98,7 +115,9 @@ def _session_snapshot(
         cwd_override=str(entry.cwd_override) if entry.cwd_override else None,
         effective_cwd=_effective_cwd(runner, entry),
         personality_override=(
-            {str(key): str(value) for key, value in personality.items()}
+            MappingProxyType(
+                {str(key): str(value) for key, value in personality.items()}
+            )
             if isinstance(personality, dict)
             else None
         ),
@@ -169,12 +188,48 @@ async def build_gateway_command_context(
     event: Any,
     command: str,
     raw_args: str,
+    *,
+    registration: Optional[object] = None,
 ) -> CommandInvocationContext:
     """Build one source-scoped command context for an authenticated event."""
 
     source: SessionSource = event.source
     profile = _profile_name(source)
     entry = await runner.async_session_store.get_or_create_session(source)
+
+    def entry_belongs_to_source(candidate: Optional[SessionEntry]) -> bool:
+        if candidate is None:
+            return False
+        origin = candidate.origin
+        if origin is None:
+            return True  # Legacy entries did not persist an origin snapshot.
+        return (
+            origin.platform == source.platform
+            and str(origin.chat_id) == str(source.chat_id)
+            and _profile_name(origin) == profile
+            and (
+                str(origin.thread_id) if origin.thread_id is not None else None
+            )
+            == (str(source.thread_id) if source.thread_id is not None else None)
+        )
+
+    if not entry_belongs_to_source(entry):
+        raise PermissionError(
+            "Gateway command session resolution crossed a source/profile boundary"
+        )
+
+    def registration_is_active() -> bool:
+        if registration is None:
+            # Runtime dispatch always supplies a token. Keeping the unbound
+            # path preserves the additive builder API used by host embedders.
+            return True
+        try:
+            from hermes_cli.plugins import _get_plugin_command_registration
+
+            return _get_plugin_command_registration(command) is registration
+        except Exception:
+            return False
+
     initial_snapshot = _session_snapshot(runner, entry, fallback_source=source)
     session_key = str(entry.session_key)
     adapter = runner._adapter_for_source(source)
@@ -212,6 +267,8 @@ async def build_gateway_command_context(
         if not token:
             return None, "Path is empty."
         current = await runner.async_session_store.get_session(session_key)
+        if not entry_belongs_to_source(current):
+            return None, "Current session is no longer available for this source."
         base_dir = Path(_effective_cwd(runner, current))
         expanded = Path(os.path.expandvars(os.path.expanduser(token)))
         if expanded.is_absolute():
@@ -246,6 +303,9 @@ async def build_gateway_command_context(
         return None, f"Directory not found: {first_missing or candidates[0]}"
 
     async def set_cwd(cwd: Optional[str]) -> Optional[CommandSession]:
+        current = await runner.async_session_store.get_session(session_key)
+        if not entry_belongs_to_source(current):
+            raise PermissionError("Session cwd write crossed a source/profile boundary")
         updated = await runner.async_session_store.set_session_cwd(session_key, cwd)
         return _session_snapshot(runner, updated, fallback_source=source)
 
@@ -260,6 +320,11 @@ async def build_gateway_command_context(
     async def set_personality(
         personality: Optional[dict[str, str]],
     ) -> Optional[CommandSession]:
+        current = await runner.async_session_store.get_session(session_key)
+        if not entry_belongs_to_source(current):
+            raise PermissionError(
+                "Session personality write crossed a source/profile boundary"
+            )
         normalized = dict(personality) if personality else None
         updated = await runner.async_session_store.set_session_personality_override(
             session_key, normalized
@@ -280,6 +345,15 @@ async def build_gateway_command_context(
         cwd: Optional[str],
         welcome: str,
     ) -> CommandActionResult:
+        if (
+            source.platform != Platform.TELEGRAM
+            or str(source.chat_type).lower() == "channel"
+        ):
+            return CommandActionResult(
+                ok=False,
+                error_code="capability_unavailable",
+                message="Telegram topic creation is unavailable for this source.",
+            )
         create_topic = _adapter_method(adapter, "create_topic")
         if create_topic is None:
             return CommandActionResult(
@@ -291,6 +365,12 @@ async def build_gateway_command_context(
             title = await _normalize_thread_title(runner, name)
         except ValueError as exc:
             return CommandActionResult(ok=False, error_code="invalid_title", message=str(exc))
+        if not registration_is_active():
+            return CommandActionResult(
+                ok=False,
+                error_code="authorization_revoked",
+                message="The plugin command was unloaded before topic creation.",
+            )
         try:
             thread_id = await create_topic(
                 chat_id=int(source.chat_id), name=title, persist=True
@@ -362,9 +442,25 @@ async def build_gateway_command_context(
     async def rename_thread(name: str) -> CommandActionResult:
         title = str(name or "").strip()
         current = await runner.async_session_store.get_or_create_session(source)
+        if not entry_belongs_to_source(current):
+            return CommandActionResult(
+                ok=False,
+                error_code="authorization_failed",
+                message="Current session no longer belongs to this source.",
+            )
         warning = await _set_session_title(runner, current.session_id, source, title)
-        rename_topic = _adapter_method(adapter, "rename_topic")
+        rename_topic = (
+            _adapter_method(adapter, "rename_topic")
+            if source.platform == Platform.TELEGRAM
+            else None
+        )
         if rename_topic is not None and source.thread_id:
+            if not registration_is_active():
+                return CommandActionResult(
+                    ok=False,
+                    error_code="authorization_revoked",
+                    message="The plugin command was unloaded before topic rename.",
+                )
             try:
                 await rename_topic(
                     chat_id=int(source.chat_id),
@@ -388,7 +484,10 @@ async def build_gateway_command_context(
             message="Telegram topic rename is not available on this adapter yet.",
         )
 
-    async def prompt_for_text(prompt: str) -> CommandActionResult:
+    async def prompt_for_text(
+        prompt: str,
+        cancel_message: str,
+    ) -> CommandActionResult:
         send = _adapter_method(adapter, "send")
         if send is None:
             return CommandActionResult(
@@ -403,13 +502,35 @@ async def build_gateway_command_context(
             else None
         )
         try:
-            await send(source.chat_id, prompt, metadata=metadata)
+            send_result = await send(source.chat_id, prompt, metadata=metadata)
         except Exception as exc:
             return CommandActionResult(
                 ok=False, error_code="platform_error", message=str(exc)
             )
+        if getattr(send_result, "success", True) is False:
+            return CommandActionResult(
+                ok=False,
+                error_code="platform_error",
+                message=str(
+                    getattr(send_result, "error", "")
+                    or "Prompt could not be delivered."
+                ),
+            )
+        if not registration_is_active():
+            return CommandActionResult(
+                ok=False,
+                error_code="authorization_revoked",
+                message="The plugin command was unloaded while prompting.",
+            )
         pending = runner.__dict__.setdefault("_pending_plugin_command_followups", {})
-        pending[session_key] = {"command": command, "profile": profile}
+        pending[session_key] = {
+            "command": command,
+            "profile": profile,
+            "registration": registration,
+            "cancel_message": str(
+                cancel_message or "Cancelled command follow-up."
+            ),
+        }
         return CommandActionResult(ok=True)
 
     def rewrite_input(text: str) -> None:
@@ -433,7 +554,15 @@ async def build_gateway_command_context(
         "thread.rename",
         "message.rewrite",
     }
-    if _adapter_method(adapter, "create_topic") is not None:
+    # Topic creation is a Telegram transport capability, not a convention
+    # inferred solely from a method name. A plugin platform may expose a
+    # same-named method with different semantics; never grant that external
+    # effect accidentally.
+    if (
+        source.platform == Platform.TELEGRAM
+        and str(source.chat_type).lower() != "channel"
+        and _adapter_method(adapter, "create_topic") is not None
+    ):
         capabilities.add("thread.create")
     if _adapter_method(adapter, "send") is not None:
         capabilities.add("followup.prompt")
@@ -459,7 +588,66 @@ async def build_gateway_command_context(
             prompt_for_text=prompt_for_text,
             rewrite_input=rewrite_input,
             send_voice=send_voice,
+            authorize=registration_is_active,
         ),
+    )
+
+
+async def dispatch_gateway_plugin_command(
+    runner: Any,
+    event: Any,
+    command: str,
+) -> GatewayPluginCommandDispatch:
+    """Dispatch one plugin command while preserving rewrite fall-through.
+
+    Handler presence is checked again after the context build's awaits. If the
+    plugin was disabled/unloaded in that window, the command is reported as
+    unmatched rather than swallowing the user's message as a handled ``None``.
+    """
+
+    from hermes_cli.plugins import (
+        _get_plugin_command_registration,
+        invoke_plugin_command,
+    )
+
+    plugin_name = str(command or "").replace("_", "-")
+    if not plugin_name:
+        return GatewayPluginCommandDispatch(matched=False)
+    registration = _get_plugin_command_registration(plugin_name)
+    if registration is None:
+        return GatewayPluginCommandDispatch(matched=False)
+
+    raw_args = event.get_command_args().strip()
+    original_text = str(event.text or "")
+    invocation = await build_gateway_command_context(
+        runner,
+        event,
+        plugin_name,
+        raw_args,
+        registration=registration,
+    )
+
+    if _get_plugin_command_registration(plugin_name) is not registration:
+        return GatewayPluginCommandDispatch(matched=False)
+
+    result = invoke_plugin_command(
+        plugin_name,
+        raw_args,
+        context=invocation,
+        registration=registration,
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    rewritten = str(event.text or "") != original_text
+    if rewritten and not result:
+        return GatewayPluginCommandDispatch(
+            matched=True,
+            continue_as_message=True,
+        )
+    return GatewayPluginCommandDispatch(
+        matched=True,
+        response=str(result) if result else None,
     )
 
 
@@ -489,19 +677,46 @@ async def dispatch_pending_plugin_command_followup(
         "never mind",
     }:
         pending_map.pop(session_key, None)
-        return "Cancelled command follow-up."
+        return str(
+            pending.get("cancel_message") or "Cancelled command follow-up."
+        )
     if command_token:
         pending_map.pop(session_key, None)
         return False
 
-    pending_map.pop(session_key, None)
     command = str(pending.get("command") or "")
     if not command:
+        pending_map.pop(session_key, None)
         return False
-    from hermes_cli.plugins import invoke_plugin_command
+    from hermes_cli.plugins import (
+        _get_plugin_command_registration,
+        invoke_plugin_command,
+    )
 
-    context = await build_gateway_command_context(runner, event, command, raw)
-    result = invoke_plugin_command(command, raw, context=context)
+    # A disable/unload or replacement between prompt and reply must not hand
+    # the free text to a different plugin generation or eat it as model input.
+    registration = pending.get("registration")
+    current_registration = _get_plugin_command_registration(command)
+    if current_registration is None or (
+        registration is not None and current_registration is not registration
+    ):
+        pending_map.pop(session_key, None)
+        return False
+
+    pending_map.pop(session_key, None)
+    context = await build_gateway_command_context(
+        runner,
+        event,
+        command,
+        raw,
+        registration=current_registration,
+    )
+    result = invoke_plugin_command(
+        command,
+        raw,
+        context=context,
+        registration=current_registration,
+    )
     if inspect.isawaitable(result):
         result = await result
     return str(result) if result else None

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from dataclasses import replace
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
 
 class CommandCapabilityError(RuntimeError):
@@ -47,7 +47,7 @@ class CommandSession:
     profile: str
     cwd_override: Optional[str]
     effective_cwd: str
-    personality_override: Optional[dict[str, str]]
+    personality_override: Optional[Mapping[str, str]]
     thread_id: Optional[str] = None
     topic: Optional[str] = None
     display_name: Optional[str] = None
@@ -86,9 +86,12 @@ class _CommandServices:
         Callable[[str, Optional[str], str], Awaitable[CommandActionResult]]
     ] = None
     rename_thread: Optional[Callable[[str], Awaitable[CommandActionResult]]] = None
-    prompt_for_text: Optional[Callable[[str], Awaitable[CommandActionResult]]] = None
+    prompt_for_text: Optional[
+        Callable[[str, str], Awaitable[CommandActionResult]]
+    ] = None
     rewrite_input: Optional[Callable[[str], None]] = None
     send_voice: Optional[Callable[[str], Awaitable[CommandActionResult]]] = None
+    authorize: Optional[Callable[[], bool]] = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,12 @@ class CommandInvocationContext:
             raise CommandCapabilityError(
                 f"Command capability {capability!r} is unavailable on {self.surface}"
             )
+        authorize = self._services.authorize
+        if authorize is not None and not authorize():
+            raise CommandCapabilityError(
+                f"Command capability {capability!r} is no longer authorized "
+                "because its plugin command was unloaded or replaced"
+            )
         return operation
 
     async def list_sessions(self) -> tuple[CommandSession, ...]:
@@ -175,9 +184,14 @@ class CommandInvocationContext:
         operation = self._require("thread.rename", self._services.rename_thread)
         return await operation(name)
 
-    async def prompt_for_text(self, prompt: str) -> CommandActionResult:
+    async def prompt_for_text(
+        self,
+        prompt: str,
+        *,
+        cancel_message: str = "Cancelled command follow-up.",
+    ) -> CommandActionResult:
         operation = self._require("followup.prompt", self._services.prompt_for_text)
-        return await operation(prompt)
+        return await operation(prompt, cancel_message)
 
     def rewrite_input(self, text: str) -> None:
         operation = self._require("message.rewrite", self._services.rewrite_input)

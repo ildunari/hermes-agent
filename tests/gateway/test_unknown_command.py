@@ -74,6 +74,10 @@ def _make_runner():
     runner.session_store.append_to_transcript = MagicMock()
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.update_session = MagicMock()
+    runner._async_session_store = SimpleNamespace(  # type: ignore[assignment]
+        _store=runner.session_store,
+        get_or_create_session=AsyncMock(return_value=session_entry),
+    )
     runner._running_agents = {}
     runner._pending_messages = {}
     runner._pending_approvals = {}
@@ -134,6 +138,41 @@ async def test_known_slash_command_not_flagged_as_unknown(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_plugin_command_bypasses_pending_update_answer_capture(
+    monkeypatch, tmp_path
+):
+    """Migrated plugin commands remain commands while /update awaits input."""
+    import gateway.run as gateway_run
+    import gateway.command_context as command_context
+    from hermes_cli import plugins as plugins_mod
+
+    runner = _make_runner()
+    event = _make_event("/metricas dias:7")
+    session_key = build_session_key(event.source)
+    runner._session_state(session_key).persistent.update_prompt_pending = True
+    (tmp_path / ".update_prompt.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        plugins_mod,
+        "get_plugin_commands",
+        lambda: {"metricas": {"description": "Metrics", "args_hint": "dias:7"}},
+    )
+    dispatch = AsyncMock(
+        return_value=command_context.GatewayPluginCommandDispatch(
+            matched=True, response="metrics dias:7"
+        )
+    )
+    monkeypatch.setattr(command_context, "dispatch_gateway_plugin_command", dispatch)
+
+    result = await runner._handle_message(event)
+
+    assert result == "metrics dias:7"
+    dispatch.assert_awaited_once_with(runner, event, "metricas")
+    assert (tmp_path / ".update_response").read_text(encoding="utf-8") == ""
+    assert not (tmp_path / ".update_prompt.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_egress_slash_command_reports_proxy_status(monkeypatch):
     runner = _make_runner()
     monkeypatch.setattr(
@@ -181,6 +220,7 @@ async def test_underscored_alias_for_hyphenated_builtin_not_flagged(monkeypatch)
 async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
     """A rewrite decision should re-resolve the command and route to the new one."""
     import gateway.run as gateway_run
+    import gateway.command_context as command_context
 
     runner = _make_runner()
     runner._run_agent = AsyncMock(
@@ -213,18 +253,12 @@ async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
         "get_plugin_commands",
         lambda: {"metricas": {"description": "Metrics", "args_hint": "dias:7"}},
     )
-    monkeypatch.setattr(
-        _plugins_mod,
-        "get_plugin_command_handler",
-        lambda name: (lambda args: f"metrics {args}") if name == "metricas" else None,
+    dispatch = AsyncMock(
+        return_value=command_context.GatewayPluginCommandDispatch(
+            matched=True, response="metrics dias:7"
+        )
     )
-    monkeypatch.setattr(
-        _plugins_mod,
-        "invoke_plugin_command",
-        lambda name, args, context=None: f"metrics {args}"
-        if name == "metricas"
-        else None,
-    )
+    monkeypatch.setattr(command_context, "dispatch_gateway_plugin_command", dispatch)
 
     result = await runner._handle_message(_make_event("/status"))
 

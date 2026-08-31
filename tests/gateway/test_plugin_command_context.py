@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
 from gateway.command_context import (
     build_gateway_command_context,
+    dispatch_gateway_plugin_command,
     dispatch_pending_plugin_command_followup,
 )
 from gateway.config import Platform
@@ -172,6 +174,20 @@ async def test_gateway_context_is_typed_immutable_and_hides_host_internals(
     assert not hasattr(invocation, "session_store")
     with pytest.raises(Exception):
         setattr(invocation, "profile", "other")
+    with pytest.raises(TypeError):
+        cast(Any, invocation.session.personality_override)["name"] = "stolen"
+
+
+@pytest.mark.asyncio
+async def test_context_rejects_cross_profile_initial_session_resolution():
+    source = _source(profile="alpha")
+    wrong = _entry(_source(profile="beta"), "shared-looking-key")
+    event = MessageEvent(text="/context-probe", source=source)
+
+    with pytest.raises(PermissionError, match="source/profile boundary"):
+        await build_gateway_command_context(
+            _Runner(wrong, [wrong]), event, "context-probe", ""
+        )
 
 
 @pytest.mark.asyncio
@@ -225,6 +241,95 @@ async def test_platform_effect_is_mocked_and_scoped_to_current_chat():
 
 
 @pytest.mark.asyncio
+async def test_non_telegram_same_named_topic_method_is_never_granted_or_called():
+    source = _source()
+    source.platform = Platform.DISCORD
+    current = _entry(source)
+    create_topic = AsyncMock(return_value="external-thread")
+    adapter = SimpleNamespace(create_topic=create_topic)
+    event = MessageEvent(text="/newthread Test", source=source)
+    invocation = await build_gateway_command_context(
+        _Runner(current, [current], adapter=adapter),
+        event,
+        "newthread",
+        "Test",
+    )
+
+    assert not invocation.supports("thread.create")
+    with pytest.raises(CommandCapabilityError):
+        await invocation.create_thread("Test")
+    create_topic.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_telegram_same_named_rename_method_is_never_called():
+    source = _source()
+    source.platform = Platform.DISCORD
+    current = _entry(source)
+    rename_topic = AsyncMock()
+    adapter = SimpleNamespace(rename_topic=rename_topic)
+    invocation = await build_gateway_command_context(
+        _Runner(current, [current], adapter=adapter),
+        MessageEvent(text="/thread rename New", source=source),
+        "thread",
+        "rename New",
+    )
+
+    result = await invocation.rename_thread("New")
+
+    assert result.ok
+    assert result.error_code == "platform_unavailable"
+    rename_topic.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rewritten_plugin_command_falls_through_as_model_input(
+    registered_manager,
+):
+    _, registration = registered_manager
+
+    def rewrite(invocation):
+        invocation.rewrite_input("expanded skill invocation")
+        return None
+
+    registration.register_command("rewrite-probe", rewrite, context=True)
+    source = _source()
+    current = _entry(source)
+    event = MessageEvent(text="/rewrite-probe hello", source=source)
+    runner = _Runner(current, [current])
+
+    result = await dispatch_gateway_plugin_command(
+        runner, event, "rewrite-probe"
+    )
+
+    assert result.matched
+    assert result.continue_as_message
+    assert result.response is None
+    assert event.text == "expanded skill invocation"
+
+
+@pytest.mark.asyncio
+async def test_gateway_dispatch_preserves_legacy_raw_argument_signature(
+    registered_manager,
+):
+    _, registration = registered_manager
+    seen = []
+    registration.register_command(
+        "legacy-probe", lambda raw: seen.append(raw) or f"legacy:{raw}"
+    )
+    source = _source()
+    event = MessageEvent(text="/legacy-probe exact args", source=source)
+    runner = _Runner(_entry(source), [_entry(source)])
+
+    result = await dispatch_gateway_plugin_command(runner, event, "legacy-probe")
+
+    assert result.matched
+    assert not result.continue_as_message
+    assert result.response == "legacy:exact args"
+    assert seen == ["exact args"]
+
+
+@pytest.mark.asyncio
 async def test_generic_followup_reinvokes_context_handler_in_same_profile(
     registered_manager,
 ):
@@ -255,3 +360,157 @@ async def test_generic_followup_reinvokes_context_handler_in_same_profile(
     assert result == "followup handled"
     assert seen == [("alpha", "same profile reply")]
     adapter.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_followup_preserves_command_specific_cancel_message(
+    registered_manager,
+):
+    _, registration = registered_manager
+    registration.register_command("ask-probe", lambda invocation: None, context=True)
+    source = _source(profile="alpha")
+    current = _entry(source)
+    adapter = SimpleNamespace(send=AsyncMock())
+    runner = _Runner(current, [current], adapter=adapter)
+    invocation = await build_gateway_command_context(
+        runner,
+        MessageEvent(text="/ask-probe", source=source),
+        "ask-probe",
+        "",
+    )
+    assert (
+        await invocation.prompt_for_text(
+            "What next?", cancel_message="Cancelled this specific command."
+        )
+    ).ok
+
+    result = await dispatch_pending_plugin_command_followup(
+        runner,
+        MessageEvent(text="/cancel", source=source),
+        current.session_key,
+    )
+
+    assert result == "Cancelled this specific command."
+
+
+@pytest.mark.asyncio
+async def test_failed_followup_delivery_does_not_arm_pending_state(
+    registered_manager,
+):
+    _, registration = registered_manager
+    registration.register_command("ask-probe", lambda invocation: None, context=True)
+    source = _source(profile="alpha")
+    current = _entry(source)
+    adapter = SimpleNamespace(
+        send=AsyncMock(return_value=SimpleNamespace(success=False, error="offline"))
+    )
+    runner = _Runner(current, [current], adapter=adapter)
+    invocation = await build_gateway_command_context(
+        runner,
+        MessageEvent(text="/ask-probe", source=source),
+        "ask-probe",
+        "",
+    )
+
+    result = await invocation.prompt_for_text("What next?")
+
+    assert not result.ok
+    assert result.message == "offline"
+    assert runner.__dict__.get("_pending_plugin_command_followups", {}) == {}
+
+
+@pytest.mark.asyncio
+async def test_unloaded_plugin_does_not_swallow_pending_followup(
+    registered_manager,
+):
+    manager, registration = registered_manager
+
+    async def handler(invocation):
+        return "handled"
+
+    registration.register_command("ask-probe", handler, context=True)
+    source = _source(profile="alpha")
+    current = _entry(source)
+    adapter = SimpleNamespace(send=AsyncMock())
+    runner = _Runner(current, [current], adapter=adapter)
+    command_event = MessageEvent(text="/ask-probe", source=source)
+    invocation = await build_gateway_command_context(
+        runner, command_event, "ask-probe", ""
+    )
+    assert (await invocation.prompt_for_text("What next?")).ok
+
+    assert manager.unload(registration.manifest)
+    reply_event = MessageEvent(text="ordinary user message", source=source)
+    result = await dispatch_pending_plugin_command_followup(
+        runner, reply_event, current.session_key
+    )
+
+    assert result is False
+    assert runner.__dict__.get("_pending_plugin_command_followups", {}) == {}
+
+
+@pytest.mark.asyncio
+async def test_retained_context_loses_external_effect_authority_on_unload(
+    registered_manager,
+):
+    manager, registration = registered_manager
+    registration.register_command("effect-probe", lambda ctx: None, context=True)
+    token = manager._plugin_commands["effect-probe"]
+    source = _source()
+    create_topic = AsyncMock(return_value="999")
+    runner = _Runner(
+        _entry(source), [_entry(source)], adapter=SimpleNamespace(create_topic=create_topic)
+    )
+    invocation = await build_gateway_command_context(
+        runner,
+        MessageEvent(text="/effect-probe", source=source),
+        "effect-probe",
+        "",
+        registration=token,
+    )
+
+    assert manager.unload(registration.manifest)
+    with pytest.raises(CommandCapabilityError, match="unloaded or replaced"):
+        await invocation.create_thread("must not send")
+    create_topic.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pending_followup_never_transfers_to_replacement_registration(
+    registered_manager,
+):
+    manager, registration = registered_manager
+    old_seen = []
+    new_seen = []
+    registration.register_command(
+        "ask-probe", lambda ctx: old_seen.append(ctx.raw_args), context=True
+    )
+    token = manager._plugin_commands["ask-probe"]
+    source = _source(profile="alpha")
+    current = _entry(source)
+    runner = _Runner(current, [current], adapter=SimpleNamespace(send=AsyncMock()))
+    invocation = await build_gateway_command_context(
+        runner,
+        MessageEvent(text="/ask-probe", source=source),
+        "ask-probe",
+        "",
+        registration=token,
+    )
+    assert (await invocation.prompt_for_text("What next?")).ok
+
+    assert manager.unload(registration.manifest)
+    replacement = PluginContext(
+        PluginManifest(name="replacement", source="user"), manager
+    )
+    replacement.register_command(
+        "ask-probe", lambda ctx: new_seen.append(ctx.raw_args), context=True
+    )
+    result = await dispatch_pending_plugin_command_followup(
+        runner,
+        MessageEvent(text="private followup", source=source),
+        current.session_key,
+    )
+
+    assert result is False
+    assert old_seen == []
+    assert new_seen == []
