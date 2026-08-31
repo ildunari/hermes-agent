@@ -18,7 +18,6 @@ import { ErrorBoundary } from '@/components/error-boundary'
 import { detectArtifact } from '@/lib/artifact-detect'
 import { normalizeExternalUrl, openExternalLink, PrettyLink } from '@/lib/external-link'
 import { createMemoizedMathPlugin } from '@/lib/katex-memo'
-import { isVisualDocumentPath } from '@/lib/local-preview'
 import { parseMarkdownIntoBlocksCached } from '@/lib/markdown-blocks'
 import { preprocessMarkdown } from '@/lib/markdown-preprocess'
 import {
@@ -259,13 +258,6 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
   const mediaPath = mediaPathFromMarkdownHref(href)
 
   if (mediaPath) {
-    // Renderable documents route to the preview rail instead of the opaque
-    // download-link fallback: visual docs (pdf/docx) via the carry's visual
-    // preview, markdown via upstream's rendered/source toggle. (#84951)
-    if (isVisualDocumentPath(mediaPath)) {
-      return <PreviewAttachment target={mediaPath} />
-    }
-
     if (isMarkdownDocumentPath(mediaPath)) {
       return <PreviewAttachment source="tool-result" target={mediaPath} />
     }

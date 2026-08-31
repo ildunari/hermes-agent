@@ -1,7 +1,6 @@
 import { atom, computed } from 'nanostores'
 
 import { persistentAtom } from '@/lib/persisted'
-import { normalizeDocumentPreviewKind } from '@/lib/preview-target'
 import { readKey } from '@/lib/storage'
 import { normalize } from '@/lib/text'
 
@@ -38,7 +37,9 @@ export interface PreviewTarget {
   language?: string
   mimeType?: string
   path?: string
-  previewKind?: 'binary' | 'docx' | 'html' | 'image' | 'pdf' | 'text'
+  /** Renderer hint. Core owns built-ins; plugins may dispatch additional kinds
+   *  by attachment extension/MIME without extending this interface. */
+  previewKind?: string
   renderMode?: 'preview' | 'source'
   source: string
   /** Runtime-only target that cannot be restored from persisted state. */
@@ -124,10 +125,7 @@ function isPreviewTab(value: unknown): value is PreviewTab {
 export function decodePreviewTabs(raw: string): PreviewTab[] {
   const parsed = JSON.parse(raw) as unknown
 
-  return (Array.isArray(parsed) ? parsed.filter(isPreviewTab) : []).map(tab => ({
-    ...tab,
-    target: normalizeDocumentPreviewKind(tab.target)
-  }))
+  return Array.isArray(parsed) ? parsed.filter(isPreviewTab) : []
 }
 
 export const $previewTabs = persistentAtom<PreviewTab[]>(TABS_STORAGE_KEY, [], {
@@ -386,7 +384,7 @@ function previewTargetForSource(target: PreviewTarget, source: PreviewRecordSour
  *  its target so a stale label/path can't outlive the thing it points at. The
  *  only way anything reaches a preview. */
 export function openPreview(target: PreviewTarget, source: PreviewRecordSource = 'manual') {
-  const resolved = previewTargetForSource(normalizeDocumentPreviewKind(target), source)
+  const resolved = previewTargetForSource(target, source)
   const current = $previewTabs.get()
   const id = resolved.kind === 'url' ? browserTabId(current) : previewTabId(resolved)
   const index = current.findIndex(tab => tab.id === id)

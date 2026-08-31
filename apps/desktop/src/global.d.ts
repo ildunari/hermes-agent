@@ -233,6 +233,12 @@ declare global {
           title: string
         } | null
       } | null>
+      /** Validated PDF/DOCX bytes for runtime attachment previewers. No raw fs handle is exposed. */
+      readAttachmentPreview?: (request: { path: string; type: 'docx' | 'pdf' }) => Promise<{
+        byteSize: number
+        dataUrl: string
+        mimeType: string
+      }>
       readFileDataUrl: (filePath: string) => Promise<string>
       /** Remote non-image attach: higher dedicated cap than preview/Settings default. */
       readFileDataUrlForAttach?: (filePath: string) => Promise<string>
@@ -1221,7 +1227,7 @@ export interface HermesPreviewTarget {
   language?: string
   mimeType?: string
   path?: string
-  previewKind?: 'binary' | 'html' | 'image' | 'pdf' | 'text'
+  previewKind?: string
   renderMode?: 'preview' | 'source'
   source: string
   url: string

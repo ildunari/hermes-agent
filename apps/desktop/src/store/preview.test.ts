@@ -224,34 +224,6 @@ describe('preview store', () => {
 
     expect(window.localStorage.getItem('hermes.desktop.previewTabs.v2') ?? '').not.toContain('base64')
   })
-  it('replaces a stale binary target when the same URL is reclassified as DOCX', () => {
-    const stale = {
-      ...fileTarget('/work/report.docx'),
-      binary: true,
-      previewKind: 'binary' as const
-    }
-
-    const corrected = { ...stale, previewKind: 'docx' as const }
-
-    openPreview(stale, 'tool-result')
-    openPreview(corrected, 'tool-result')
-
-    expect($previewTarget.get()).toEqual(corrected)
-  })
-
-  it('canonicalizes stale document classification before persisting it', () => {
-    const stale = {
-      ...fileTarget('/work/report.docx'),
-      binary: true,
-      previewKind: 'binary' as const
-    }
-
-    openPreview(stale, 'tool-result')
-
-    expect($previewTabs.get()[0]?.target.previewKind).toBe('docx')
-    expect($previewTarget.get()?.previewKind).toBe('docx')
-    expect(window.localStorage.getItem('hermes.desktop.previewTabs.v2')).toContain('"previewKind":"docx"')
-  })
 
   it('does not persist remote HTML without its in-memory document', () => {
     openPreview({ ...fileTarget('/remote/report.html'), dataUrl: 'data:text/html;base64,PGgxPnJlbW90ZTwvaDE+' })

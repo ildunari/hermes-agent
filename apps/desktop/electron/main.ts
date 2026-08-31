@@ -33,6 +33,7 @@ import {
 import { classifyActiveRuntime } from './active-runtime-state'
 import { destroyKeepaliveAgents, downloadAgentFor, jsonAgentFor, withRetry } from './api-transport'
 import { appIconCandidates, resolveAppIcon } from './app-icon'
+import { readAttachmentPreviewForIpc } from './attachment-preview'
 import { stopBackendChild as stopBackendChildImpl, stopBackendTreesForUpdate } from './backend-child'
 import {
   type BackendOutputTail,
@@ -1188,6 +1189,7 @@ function applyTitleBarOverlay(win) {
 const MEDIA_MIME_TYPES = {
   '.avi': 'video/x-msvideo',
   '.bmp': 'image/bmp',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.flac': 'audio/flac',
   '.gif': 'image/gif',
   '.jpeg': 'image/jpeg',
@@ -1208,10 +1210,7 @@ const MEDIA_MIME_TYPES = {
 }
 
 const PREVIEW_HTML_EXTENSIONS = new Set(['.html', '.htm'])
-const PREVIEW_DOCUMENT_KIND_BY_EXT = new Map([
-  ['.docx', 'docx'],
-  ['.pdf', 'pdf']
-])
+
 const PREVIEW_WATCH_DEBOUNCE_MS = 120
 const LOCAL_PREVIEW_HOSTS = new Set(['0.0.0.0', '127.0.0.1', '::1', '[::1]', 'localhost'])
 const TEXT_PREVIEW_MAX_BYTES = 512 * 1024
@@ -5967,9 +5966,7 @@ async function previewFileTarget(rawTarget, baseDir) {
   const metadata = previewFileMetadata(resolved, mimeType)
   const isHtml = PREVIEW_HTML_EXTENSIONS.has(ext)
   const isImage = mimeType.startsWith('image/')
-  const previewKind =
-    PREVIEW_DOCUMENT_KIND_BY_EXT.get(ext) ||
-    (isHtml ? 'html' : isImage ? 'image' : metadata.binary ? 'binary' : 'text')
+  const previewKind = isHtml ? 'html' : isImage ? 'image' : metadata.binary ? 'binary' : 'text'
 
   return {
     binary: metadata.binary,
@@ -9364,12 +9361,7 @@ function writeActiveDesktopProfile(name, { requireLocal = true } = {}) {
     throw new Error(`Invalid profile name: ${value}`)
   }
 
-  if (
-    requireLocal &&
-    value &&
-    value !== 'default' &&
-    !directoryExists(path.join(HERMES_HOME, 'profiles', value))
-  ) {
+  if (requireLocal && value && value !== 'default' && !directoryExists(path.join(HERMES_HOME, 'profiles', value))) {
     throw new Error(`Desktop profile does not exist locally: ${value}`)
   }
 
@@ -16286,6 +16278,8 @@ ipcMain.handle('hermes:data-url-read-max:set', (_event, maxMb) => {
     maxBytes: dataUrlReadMaxBytesFromMb(next)
   }
 })
+
+ipcMain.handle('hermes:readAttachmentPreview', (_event, request) => readAttachmentPreviewForIpc(request))
 
 ipcMain.handle('hermes:readFileDataUrl', async (_event, filePath) => {
   return readFileDataUrlForIpc(filePath, {

@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { openGuestContextMenu } from '@/app/context-menu/store'
 import { PanelEmpty } from '@/app/overlays/panel'
 import { Tip } from '@/components/ui/tooltip'
+import { AttachmentPreviewHost } from '@/contrib/attachment-preview'
 import { type Translations, useI18n } from '@/i18n'
 import { isDesktopFsRemoteMode } from '@/lib/desktop-fs'
 import { guardGuestPointers } from '@/lib/guest-pointer-guard'
@@ -1071,7 +1072,11 @@ export function PreviewPane({ embedded = false, onRestartServer, reloadRequest =
             (target.kind === 'artifact' ? (
               <ArtifactPreview target={target} />
             ) : (
-              <LocalFilePreview reloadKey={localReloadKey} target={target} />
+              <AttachmentPreviewHost
+                fallback={<LocalFilePreview reloadKey={localReloadKey} target={target} />}
+                reloadKey={localReloadKey}
+                target={target}
+              />
             ))}
           {isBlankPage && (
             <div className="absolute inset-0 grid bg-background">

@@ -14,7 +14,6 @@ import { selectableCardClass } from '@/lib/selectable-card'
 import { normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
 import { $backdrop, setBackdrop } from '@/store/backdrop'
-import { $chatWidth, setChatWidth } from '@/store/chat-width'
 import { $showCompactionSummaries, setShowCompactionSummaries } from '@/store/compaction-summary-visibility'
 import { $composerPopoutGesturesEnabled, setComposerPopoutGesturesEnabled } from '@/store/composer-popout'
 import { $embedAllowed, $embedMode, clearEmbedAllowed, type EmbedMode, setEmbedMode } from '@/store/embed-consent'
@@ -23,7 +22,6 @@ import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/p
 import { $reactionsEnabled, setReactionsEnabled } from '@/store/reactions-enabled'
 import { $reasoningCollapsedByDefault, setReasoningCollapsedByDefault } from '@/store/reasoning-disclosure'
 import { $sessionListDensity, type SessionListDensity, setSessionListDensity } from '@/store/session-list-density'
-import { $tableLayout, setTableLayout } from '@/store/table-layout'
 import { $tabStripDefault, setTabStripDefault, type TabStripDefault } from '@/store/tabstrip-prefs'
 import { $retiredTips, $tipsEnabled, resetTips, setTipsEnabled } from '@/store/tips'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
@@ -57,7 +55,7 @@ import type { DesktopTheme } from '@/themes/types'
 import { $marketplaceInstalls, isUserTheme, removeUserTheme } from '@/themes/user-themes'
 
 import { MODE_OPTIONS } from './constants'
-import { LocalEnhancementsSection } from './local-enhancements-section'
+import { AppearanceSettingsContributions } from './contributions'
 import { PetSettings } from './pet-settings'
 import { ListRow, SectionHeading, SettingsContent, ToggleRow } from './primitives'
 import { APPEARANCE_SETTING_IDS } from './settings-search'
@@ -367,8 +365,7 @@ export function AppearanceSettings() {
   const retiredTips = useStore($retiredTips)
   const vibeHeartsEnabled = useStore($vibeHeartsEnabled)
   const backdrop = useStore($backdrop)
-  const chatWidth = useStore($chatWidth)
-  const tableLayout = useStore($tableLayout)
+
   const introSplash = useStore($introSplash)
   const installs = useStore($marketplaceInstalls)
   const profiles = useStore($profiles)
@@ -452,17 +449,6 @@ export function AppearanceSettings() {
   ] as const satisfies readonly { id: EmbedMode; label: string }[]
 
   const uiScaleOptions = UI_SCALE_PRESETS.map(preset => ({ id: preset, label: `${preset}%` }))
-
-  const chatWidthOptions = [
-    { id: 'normal', label: a.chatWidthNormal },
-    { id: 'wide', label: a.chatWidthWide },
-    { id: 'full', label: a.chatWidthFull }
-  ] as const
-
-  const tableLayoutOptions = [
-    { id: 'fit', label: a.tableLayoutFit },
-    { id: 'scroll', label: a.tableLayoutScroll }
-  ] as const
 
   const matchedScalePreset = matchUiScalePreset(zoomPercent)
 
@@ -921,39 +907,7 @@ export function AppearanceSettings() {
         </div>
       </div>
 
-      <LocalEnhancementsSection>
-        <ListRow
-          action={
-            <SegmentedControl
-              ariaLabel={a.chatWidthTitle}
-              onChange={id => {
-                triggerHaptic('selection')
-                setChatWidth(id)
-              }}
-              options={chatWidthOptions}
-              value={chatWidth}
-            />
-          }
-          description={a.chatWidthDesc}
-          title={a.chatWidthTitle}
-        />
-
-        <ListRow
-          action={
-            <SegmentedControl
-              ariaLabel={a.tableLayoutTitle}
-              onChange={id => {
-                triggerHaptic('selection')
-                setTableLayout(id)
-              }}
-              options={tableLayoutOptions}
-              value={tableLayout}
-            />
-          }
-          description={a.tableLayoutDesc}
-          title={a.tableLayoutTitle}
-        />
-      </LocalEnhancementsSection>
+      <AppearanceSettingsContributions />
 
       <div className="mt-6">
         <PetSettings />

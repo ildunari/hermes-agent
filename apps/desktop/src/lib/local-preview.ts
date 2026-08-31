@@ -1,11 +1,6 @@
 import DOMPurify from 'dompurify'
 
 import { isDesktopFsRemoteMode, readDesktopFileDataUrl, readDesktopFileText } from '@/lib/desktop-fs'
-import {
-  isVisualDocumentPath,
-  normalizeDocumentPreviewKind,
-  visualDocumentPreviewKind
-} from '@/lib/preview-target'
 import type { PreviewTarget } from '@/store/preview'
 
 const HTML_EXTENSIONS = new Set(['.htm', '.html'])
@@ -13,7 +8,6 @@ const IMAGE_EXTENSIONS = new Set(['.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg
 // Mirrors `_FS_DATA_URL_MAX_BYTES` in the backend filesystem endpoint.
 const REMOTE_HTML_PREVIEW_MAX_BYTES = 16 * 1024 * 1024
 const REMOTE_HTML_PREVIEW_MAX_BASE64_BYTES = Math.ceil(REMOTE_HTML_PREVIEW_MAX_BYTES / 3) * 4
-
 
 const LANGUAGE_BY_EXT: Record<string, string> = {
   '.c': 'c',
@@ -60,8 +54,6 @@ function extension(value: string) {
 
   return idx >= 0 ? clean.slice(idx).toLowerCase() : ''
 }
-
-export { isVisualDocumentPath }
 
 function joinPath(base: string, rel: string) {
   if (!base) {
@@ -211,7 +203,6 @@ export function localPreviewTarget(rawTarget: string, cwd?: string | null): Prev
   const ext = extension(path)
   const isHtml = HTML_EXTENSIONS.has(ext)
   const isImage = IMAGE_EXTENSIONS.has(ext)
-  const documentKind = visualDocumentPreviewKind(path)
 
   return {
     kind: 'file',
@@ -221,7 +212,7 @@ export function localPreviewTarget(rawTarget: string, cwd?: string | null): Prev
     // Renderer fallback can't stat/sniff without reading; assume text unless
     // image/html/pdf extension says otherwise. LocalFilePreview still guards
     // binary/large files when readFileText/readFileDataUrl returns metadata.
-    previewKind: documentKind || (isHtml ? 'html' : isImage ? 'image' : 'text'),
+    previewKind: isHtml ? 'html' : isImage ? 'image' : 'text',
     source: raw,
     url: pathToFileUrl(path)
   }
@@ -232,14 +223,8 @@ async function enrichPreviewTarget(target: PreviewTarget | null): Promise<Previe
     return null
   }
 
-  const normalizedTarget = normalizeDocumentPreviewKind(target)
-
-  if (
-    !isDesktopFsRemoteMode() ||
-    normalizedTarget.kind !== 'file' ||
-    ['docx', 'image', 'pdf'].includes(normalizedTarget.previewKind || '')
-  ) {
-    return normalizedTarget
+  if (!isDesktopFsRemoteMode() || target.kind !== 'file' || target.previewKind === 'image') {
+    return target
   }
 
   if (target.previewKind === 'html') {
@@ -253,18 +238,18 @@ async function enrichPreviewTarget(target: PreviewTarget | null): Promise<Previe
   }
 
   try {
-    const result = await readDesktopFileText(normalizedTarget.path || normalizedTarget.source)
+    const result = await readDesktopFileText(target.path || target.source)
 
     return {
-      ...normalizedTarget,
+      ...target,
       binary: result.binary,
       byteSize: result.byteSize,
-      language: result.language || normalizedTarget.language,
+      language: result.language || target.language,
       large: (result.byteSize ?? 0) > 512 * 1024,
       mimeType: result.mimeType
     }
   } catch {
-    return normalizedTarget
+    return target
   }
 }
 

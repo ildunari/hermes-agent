@@ -1,6 +1,4 @@
 import { useStore } from '@nanostores/react'
-import DOMPurify from 'dompurify'
-import mammoth from 'mammoth/mammoth.browser'
 import type * as React from 'react'
 import type {
   ComponentProps,
@@ -27,7 +25,6 @@ import {
   desktopFileDiff,
   desktopFsCacheKey,
   desktopGitRoot,
-  isDesktopFsRemoteMode,
   readDesktopFileDataUrl,
   readDesktopFileText,
   writeDesktopFileText
@@ -36,7 +33,6 @@ import { Check, Pencil, X } from '@/lib/icons'
 import { createMemoizedMathPlugin } from '@/lib/katex-memo'
 import { isComposerChord } from '@/lib/keybinds/chords'
 import { shikiLanguageForFilename } from '@/lib/markdown-code'
-import { mediaExternalUrl, mediaStreamUrl } from '@/lib/media'
 import { normalizeFilePreviewMath } from '@/lib/markdown-preprocess'
 import { cn } from '@/lib/utils'
 import type { PreviewTarget } from '@/store/preview'
@@ -157,7 +153,7 @@ interface LocalPreviewState {
   binary?: boolean
   byteSize?: number
   dataUrl?: string
-  documentHtml?: string
+
   /** Working-tree-vs-HEAD unified diff, when the file has uncommitted changes. */
   diff?: string
   error?: string
@@ -165,83 +161,6 @@ interface LocalPreviewState {
   loading: boolean
   text?: string
   truncated?: boolean
-}
-
-function DocumentPreview({ html }: { html: string }) {
-  return (
-    <div className="h-full overflow-auto bg-muted/30 p-4 sm:p-6">
-      <article
-        className="prose prose-sm mx-auto min-h-full max-w-3xl rounded-lg border border-border bg-background px-6 py-8 text-foreground shadow-sm prose-headings:text-foreground prose-p:text-foreground prose-strong:text-foreground prose-table:text-foreground sm:px-10"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-    </div>
-  )
-}
-
-function documentFileUrl(filePath: string): string {
-  return isDesktopFsRemoteMode() ? mediaExternalUrl(filePath) : mediaStreamUrl(filePath)
-}
-
-function PdfPreview({ filePath, label }: { filePath: string; label: string }) {
-  const [source, setSource] = useState(() => (isDesktopFsRemoteMode() ? '' : mediaStreamUrl(filePath)))
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let active = true
-    let objectUrl = ''
-
-    setError(null)
-
-    if (!isDesktopFsRemoteMode()) {
-      setSource(mediaStreamUrl(filePath))
-
-      return () => {
-        active = false
-      }
-    }
-
-    setSource('')
-    void fetch(mediaExternalUrl(filePath))
-      .then(response => {
-        if (!response.ok) {
-          throw new Error(`Could not load PDF (${response.status})`)
-        }
-
-        return response.blob()
-      })
-      .then(blob => {
-        objectUrl = URL.createObjectURL(blob)
-
-        if (active) {
-          setSource(objectUrl)
-        } else {
-          URL.revokeObjectURL(objectUrl)
-        }
-      })
-      .catch(cause => {
-        if (active) {
-          setError(cause instanceof Error ? cause.message : String(cause))
-        }
-      })
-
-    return () => {
-      active = false
-
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl)
-      }
-    }
-  }, [filePath])
-
-  if (error) {
-    return <PreviewEmptyState body={error} title="Preview unavailable" />
-  }
-
-  if (!source) {
-    return <PageLoader label="Loading preview" />
-  }
-
-  return <iframe className="h-full w-full border-0 bg-background" src={source} title={label} />
 }
 
 // True when focus is in a field that should swallow plain keystrokes (so the
@@ -755,8 +674,6 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
   const fsCacheKey = desktopFsCacheKey(connection)
   const filePath = filePathForTarget(target)
   const isImage = target.previewKind === 'image'
-  const isDocx = target.previewKind === 'docx'
-  const isPdf = target.previewKind === 'pdf'
 
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
@@ -775,7 +692,7 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
   // when the file is forcibly previewed past the binary refusal screen.
   const isText = target.previewKind === 'text' || target.previewKind === 'binary' || target.previewKind === 'html'
 
-  const blockedByTarget = !isImage && !isDocx && !isPdf && !forcePreview && (target.binary || target.large)
+  const blockedByTarget = !isImage && !forcePreview && (target.binary || target.large)
 
   useEffect(() => {
     let active = true
@@ -787,7 +704,7 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
         return
       }
 
-      if (!isImage && !isDocx && !isPdf && !isText) {
+      if (!isImage && !isText) {
         setState({ loading: false })
 
         return
@@ -804,28 +721,6 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
           if (active) {
             setState({ dataUrl, loading: false })
           }
-
-          return
-        }
-
-        if (isDocx) {
-          const response = await fetch(documentFileUrl(filePath))
-
-          if (!response.ok) {
-            throw new Error(`Could not load document (${response.status})`)
-          }
-
-          const result = await mammoth.convertToHtml({ arrayBuffer: await response.arrayBuffer() })
-
-          if (active) {
-            setState({ documentHtml: DOMPurify.sanitize(result.value), loading: false })
-          }
-
-          return
-        }
-
-        if (isPdf) {
-          setState({ loading: false })
 
           return
         }
@@ -880,9 +775,9 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
     filePath,
     forcePreview,
     fsCacheKey,
-    isDocx,
+
     isImage,
-    isPdf,
+
     isText,
     reloadKey,
     selfReload,
@@ -1081,8 +976,6 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
 
   if (
     !isImage &&
-    !isDocx &&
-    !isPdf &&
     !forcePreview &&
     (target.binary || target.large || state.binary || (state.byteSize ?? 0) > TEXT_PREVIEW_MAX_BYTES)
   ) {
@@ -1110,14 +1003,6 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
         />
       </div>
     )
-  }
-
-  if (isDocx && state.documentHtml !== undefined) {
-    return <DocumentPreview html={state.documentHtml} />
-  }
-
-  if (isPdf) {
-    return <PdfPreview filePath={filePath} label={target.label} />
   }
 
   if (isText && state.text !== undefined) {

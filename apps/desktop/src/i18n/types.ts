@@ -442,15 +442,7 @@ export interface Translations {
       compactionSummariesDesc: string
       uiScaleTitle: string
       uiScaleDesc: (percent: number) => string
-      chatWidthTitle: string
-      chatWidthDesc: string
-      chatWidthNormal: string
-      chatWidthWide: string
-      chatWidthFull: string
-      tableLayoutTitle: string
-      tableLayoutDesc: string
-      tableLayoutFit: string
-      tableLayoutScroll: string
+
       sessionDensityTitle: string
       sessionDensityDesc: string
       sessionDensityCompact: string

@@ -1,8 +1,4 @@
 import './styles.css'
-// Side-effects: apply persisted renderer-owned presentation preferences before
-// the first app render so chat geometry never flashes through its defaults.
-import './store/chat-width'
-import './store/table-layout'
 // Side-effect: reports in-flight turns to the main process for the quit guard.
 import './store/active-work'
 // Side-effect: mirrors the machine's AC/battery state for poll demotion.

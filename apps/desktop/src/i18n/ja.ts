@@ -372,15 +372,7 @@ export const ja = defineLocale({
       uiScaleTitle: 'UI スケール',
       uiScaleDesc: (percent: number) =>
         `アプリ全体の文字と UI を拡大縮小します。Cmd/Ctrl と +、-、0 でも変更できます。現在: ${percent}%`,
-      chatWidthTitle: 'チャット幅',
-      chatWidthDesc: '会話と入力欄が利用可能なチャット領域をどこまで使うかを設定します。',
-      chatWidthNormal: '標準',
-      chatWidthWide: 'ワイド',
-      chatWidthFull: '全幅',
-      tableLayoutTitle: 'Markdown テーブル',
-      tableLayoutDesc: '「合わせる」はチャット内で折り返し、「スクロール」は列幅を保って横スクロールできます。',
-      tableLayoutFit: '合わせる',
-      tableLayoutScroll: 'スクロール',
+
       sessionDensityTitle: 'セッションリストの密度',
       sessionDensityDesc: 'サイドバーのセッションタイトルの下に表示する情報量を選びます。',
       sessionDensityCompact: 'コンパクト',

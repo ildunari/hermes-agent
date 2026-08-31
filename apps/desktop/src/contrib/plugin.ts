@@ -17,12 +17,14 @@ import { createPluginI18n, type PluginI18n } from '@/i18n'
 import { readKey, writeKey } from '@/lib/storage'
 import { dispatchPluginNativeNotification, type PluginNativeNotificationInput } from '@/store/native-notifications'
 
+import { createPluginStateFactory, type PluginState, type PluginStateOptions } from './plugin-state'
+import { createPluginStyles, type PluginStyles } from './plugin-styles'
 import { registry } from './registry'
 import type { Contribution } from './types'
 
+export type { PluginState, PluginStateOptions } from './plugin-state'
+export type { PluginStyleHandle, PluginStyles } from './plugin-styles'
 export type { PluginRestOptions } from '@/hermes'
-export type { HermesOpenTarget } from '@/lib/hermes-open-target'
-export type { PluginNativeNotificationInput, PluginNotificationAction } from '@/store/native-notifications'
 
 /** A contribution as a plugin author writes it — provenance + id scoping are
  *  the host's job, so those fields are off-limits here. */
@@ -99,6 +101,12 @@ export interface PluginContext {
   os: PluginOs
   /** Plugin-scoped persistence. */
   storage: PluginStorage
+  /** Namespaced, versioned, reactive JSON state. */
+  state: {
+    create: <T>(options: PluginStateOptions<T>) => PluginState<T>
+  }
+  /** Host-owned scoped style elements, removed on plugin unload. */
+  styles: PluginStyles
   /** Plugin-scoped i18n: ship + register locale bundles under this plugin,
    *  resolved against the app's active locale — no core `en.ts` edit. */
   i18n: PluginI18n
@@ -206,6 +214,8 @@ export function createPluginContext(pluginId: string, onDispose?: (dispose: () =
     return dispose
   }
 
+  const storage = createPluginStorage(pluginId)
+
   return {
     source,
     register: c => track(registry.register(scope(c))),
@@ -214,7 +224,12 @@ export function createPluginContext(pluginId: string, onDispose?: (dispose: () =
     rest: <T>(path: string, opts?: PluginRestOptions) => pluginRest<T>(pluginId, path, opts),
     socket: (path, onMessage) => track(pluginSocket(pluginId, path, onMessage)),
     os: createPluginOs(pluginId),
-    storage: createPluginStorage(pluginId),
+    storage,
+    state: { create: createPluginStateFactory(storage) },
+    styles: createPluginStyles(pluginId, track),
     i18n: createPluginI18n(pluginId, track)
   }
 }
+
+export type { HermesOpenTarget } from '@/lib/hermes-open-target'
+export type { PluginNativeNotificationInput, PluginNotificationAction } from '@/store/native-notifications'

@@ -9,45 +9,12 @@ vi.mock('@/lib/desktop-fs', () => ({
 }))
 
 import {
-  isVisualDocumentPath,
   localPreviewTarget,
   normalizeOrLocalPreviewTarget,
   openPreviewTargetInBrowser,
   remoteHtmlPreviewDocument,
   validatedRemoteHtmlDataUrl
 } from './local-preview'
-import { normalizeDocumentPreviewKind } from './preview-target'
-
-describe('local document previews', () => {
-  it.each([
-    ['/tmp/report.docx', 'docx'],
-    ['/tmp/report.DOCX', 'docx'],
-    ['/tmp/paper.pdf', 'pdf'],
-    ['/tmp/paper.PDF?download=1', 'pdf']
-  ] as const)('classifies %s as a visual %s preview', (path, previewKind) => {
-    expect(isVisualDocumentPath(path)).toBe(true)
-    expect(localPreviewTarget(path)?.previewKind).toBe(previewKind)
-  })
-
-  it('does not treat unsupported office formats as visual previews', () => {
-    expect(isVisualDocumentPath('/tmp/legacy.doc')).toBe(false)
-    expect(localPreviewTarget('/tmp/legacy.doc')?.previewKind).toBe('text')
-  })
-
-  it('repairs stale binary classification returned by preview IPC', () => {
-    const target = {
-      binary: true,
-      kind: 'file' as const,
-      label: 'report.docx',
-      path: '/tmp/report.docx',
-      previewKind: 'binary' as const,
-      source: '/tmp/report.docx',
-      url: 'file:///tmp/report.docx'
-    }
-
-    expect(normalizeDocumentPreviewKind(target)).toEqual({ ...target, previewKind: 'docx' })
-  })
-})
 
 const remoteTarget = {
   kind: 'file' as const,
@@ -202,31 +169,11 @@ describe('remote HTML previews', () => {
   })
 })
 
-describe('PDF previews', () => {
-  it('classifies PDF files as PDF previews', () => {
-    expect(localPreviewTarget('/tmp/spec.pdf')).toMatchObject({
-      path: '/tmp/spec.pdf',
-      previewKind: 'pdf'
-    })
-  })
-
+describe('file previews', () => {
   it('keeps ordinary text files on the source-preview path', () => {
     expect(localPreviewTarget('/tmp/spec.md')).toMatchObject({
       language: 'markdown',
       previewKind: 'text'
     })
-  })
-
-  it('does not UTF-8-enrich remote PDFs before loading their bytes', async () => {
-    vi.clearAllMocks()
-    window.hermesDesktop = {
-      normalizePreviewTarget: vi.fn(async () => null)
-    } as never
-
-    await expect(normalizeOrLocalPreviewTarget('/remote/spec.pdf')).resolves.toMatchObject({
-      path: '/remote/spec.pdf',
-      previewKind: 'pdf'
-    })
-    expect(readDesktopFileDataUrl).not.toHaveBeenCalled()
   })
 })

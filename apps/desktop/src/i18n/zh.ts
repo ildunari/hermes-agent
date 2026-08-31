@@ -535,15 +535,7 @@ export const zh: Translations = {
       uiScaleTitle: '界面缩放',
       uiScaleDesc: (percent: number) =>
         `缩放整个应用的文字和界面。也可使用 Cmd/Ctrl 加 +、- 或 0 调整。当前：${percent}%`,
-      chatWidthTitle: '聊天宽度',
-      chatWidthDesc: '控制对话和输入框在可用聊天区域内使用的宽度。',
-      chatWidthNormal: '标准',
-      chatWidthWide: '宽',
-      chatWidthFull: '全宽',
-      tableLayoutTitle: 'Markdown 表格',
-      tableLayoutDesc: '“适应”会在聊天区域内换行；“滚动”会保留合适的列宽并支持横向滚动。',
-      tableLayoutFit: '适应',
-      tableLayoutScroll: '滚动',
+
       sessionDensityTitle: '会话列表密度',
       sessionDensityDesc: '选择侧边栏会话标题下方显示的信息量。',
       sessionDensityCompact: '紧凑',

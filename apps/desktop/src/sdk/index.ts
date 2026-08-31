@@ -1446,6 +1446,8 @@ export {
 export { PROFILE_DETAIL_ACTIONS_AREA, profileDetailActionsArea } from '@/app/profiles'
 export { type RouteContribution, ROUTES_AREA, SIDEBAR_NAV_AREA, type SidebarNavContribution } from '@/app/routes'
 
+export { APPEARANCE_SETTINGS_AREA } from '@/app/settings/contributions'
+export { ListRow, SettingsSection } from '@/app/settings/primitives'
 /** THE full per-toolset config panel core Settings renders — provider picker,
  *  env vars / API keys, model catalog picker, and post-setup runners. Route-
  *  decoupled (the "manage keys" deep link is a no-op outside the router); pass
@@ -1554,6 +1556,13 @@ export { Switch } from '@/components/ui/switch'
 export { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 export { Textarea } from '@/components/ui/textarea'
 export { Tip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+export {
+  ATTACHMENT_PREVIEWERS_AREA,
+  type AttachmentPreviewerContribution,
+  type AttachmentPreviewInfo,
+  type AttachmentPreviewRenderProps,
+  type AttachmentPreviewSource
+} from '@/contrib/attachment-preview'
 export type { GatewayEventListener } from '@/contrib/events'
 export type {
   HermesPlugin,
@@ -1563,7 +1572,11 @@ export type {
   PluginNotificationAction,
   PluginOs,
   PluginRestOptions,
-  PluginStorage
+  PluginState,
+  PluginStateOptions,
+  PluginStorage,
+  PluginStyleHandle,
+  PluginStyles
 } from '@/contrib/plugin'
 /** Mount-scoped contribution: while the rendering component is mounted, its
  *  children render in the target area's slot; unmount disposes it. Use for

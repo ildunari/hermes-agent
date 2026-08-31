@@ -37,7 +37,7 @@ function staleDocxTarget(): PreviewTarget {
   }
 }
 
-describe('usePreviewRouting document previews', () => {
+describe('usePreviewRouting attachment previews', () => {
   beforeEach(() => {
     $activeSessionId.set(SESSION_ID)
     $currentCwd.set('/work')
@@ -61,7 +61,7 @@ describe('usePreviewRouting document previews', () => {
     vi.restoreAllMocks()
   })
 
-  it('repairs a stale binary DOCX returned by preview IPC', async () => {
+  it('preserves the generic binary target for plugin previewer dispatch', async () => {
     render(<PreviewRoutingHarness />)
 
     act(() =>
@@ -77,7 +77,7 @@ describe('usePreviewRouting document previews', () => {
         binary: true,
         label: 'DOCX smoke test',
         path: '/tmp/report.docx',
-        previewKind: 'docx'
+        previewKind: 'binary'
       })
     })
   })

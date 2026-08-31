@@ -549,16 +549,7 @@ export const en: Translations = {
       uiScaleTitle: 'UI Scale',
       uiScaleDesc: (percent: number) =>
         `Scales text and controls across the whole app. Cmd/Ctrl with +, - and 0 also works. Current: ${percent}%.`,
-      chatWidthTitle: 'Chat Width',
-      chatWidthDesc: 'Controls how much of the available chat pane the transcript and composer use.',
-      chatWidthNormal: 'Normal',
-      chatWidthWide: 'Wide',
-      chatWidthFull: 'Full',
-      tableLayoutTitle: 'Markdown Tables',
-      tableLayoutDesc:
-        'Fit wraps tables inside the chat; Scroll preserves useful column widths with horizontal scrolling.',
-      tableLayoutFit: 'Fit',
-      tableLayoutScroll: 'Scroll',
+
       sessionDensityTitle: 'Session List Density',
       sessionDensityDesc: 'Choose how much context appears beneath session titles in the sidebar.',
       sessionDensityCompact: 'Compact',
