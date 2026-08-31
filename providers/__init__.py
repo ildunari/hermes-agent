@@ -1,51 +1,58 @@
-"""Provider module registry.
+"""Provider profile registry and lazy plugin discovery.
 
-Provider profiles can live in three places:
-
-1. Bundled plugins: ``plugins/model-providers/<name>/`` (shipped with hermes-agent)
-2. User plugins: ``$HERMES_HOME/plugins/model-providers/<name>/``
-3. Pip-installed plugins: distributions exposing a ``hermes_agent.plugins``
-   entry point (``module:func`` callable or a self-registering ``module``)
-
-Each plugin directory contains:
-  - ``__init__.py`` — calls ``register_provider(profile)`` at import
-  - ``plugin.yaml`` — manifest (name, kind: model-provider, version, description)
-
-Discovery is lazy: the first call to ``get_provider_profile()`` or
-``list_providers()`` scans both locations and imports every plugin. User
-plugins override bundled plugins on name collision (last-writer-wins), so
-third parties can monkey-patch or replace any built-in profile without
-editing the repo.
-
-For backward compatibility, ``providers/*.py`` files (other than ``base.py``
-and ``__init__.py``) are still discovered via ``pkgutil.iter_modules``.
-This lets out-of-tree users drop a single-file profile into an editable
-install without the plugin dir structure. New profiles should prefer the
-plugin layout.
-
-Usage::
-
-    from providers import get_provider_profile
-    profile = get_provider_profile("nvidia")   # ProviderProfile or None
-    profile = get_provider_profile("kimi")     # checks name + aliases
+Provider profiles can be bundled, installed for one ``HERMES_HOME`` profile,
+or exposed through an enabled Python entry point. Bundled and legacy profiles
+form a process-global base. User and entry-point registrations are isolated by
+Hermes home so a multiplexed process never carries one profile's provider
+catalog or routing policy into another profile.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
 import logging
 import sys
+import threading
+from contextvars import ContextVar
 from pathlib import Path
 
+from hermes_constants import (
+    hermes_home_key,
+    reset_hermes_home_override,
+    set_hermes_home_override,
+)
 from providers.base import OMIT_TEMPERATURE, ProviderProfile  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# Process-global bundled/legacy registrations. These names remain public for
+# backward compatibility with tests and third-party code that snapshots the
+# historical registry directly.
 _REGISTRY: dict[str, ProviderProfile] = {}
 _ALIASES: dict[str, str] = {}
 _PROVIDER_LIST_CACHE: list[ProviderProfile] | None = None
 _discovered = False
+
+# User and entry-point registrations are overlays keyed by HERMES_HOME.
+_SCOPED_REGISTRIES: dict[str, dict[str, ProviderProfile]] = {}
+_SCOPED_ALIASES: dict[str, dict[str, str]] = {}
+_SCOPED_PROVIDER_LIST_CACHE: dict[str, list[ProviderProfile]] = {}
+_DISCOVERED_SCOPES: set[str] = set()
+_SCOPED_MODULES: dict[str, set[str]] = {}
+
+# Module-level plugin code calls register_provider(profile) with no scope. The
+# discovery context supplies the correct target without changing that stable
+# authoring contract. ContextVars keep concurrent multiplex-profile discovery
+# isolated by task/thread.
+_REGISTRATION_SCOPE: ContextVar[str | None] = ContextVar(
+    "provider_registration_scope", default=None
+)
+_REGISTRATION_PRECEDENCE: ContextVar[str] = ContextVar(
+    "provider_registration_precedence", default="user"
+)
+_DISCOVERY_LOCK = threading.RLock()
 
 # Repo-root ``plugins/model-providers/`` — populated at discovery time.
 _BUNDLED_PLUGINS_DIR = (
@@ -53,90 +60,280 @@ _BUNDLED_PLUGINS_DIR = (
 )
 
 
-def register_provider(profile: ProviderProfile) -> None:
+def _normalize_name(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def _rebuild_aliases(registry: dict[str, ProviderProfile]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for canonical in sorted(registry):
+        profile = registry[canonical]
+        for alias in profile.aliases:
+            key = _normalize_name(alias)
+            if key:
+                aliases[key] = canonical
+    return aliases
+
+
+def _invalidate_scope(scope_key: str) -> None:
+    _SCOPED_PROVIDER_LIST_CACHE.pop(scope_key, None)
+
+
+def register_provider(
+    profile: ProviderProfile,
+    *,
+    scope: str | Path | None = None,
+) -> None:
     """Register a provider profile by name and aliases.
 
-    Later registrations with the same name replace earlier ones — so user
-    plugins under ``$HERMES_HOME/plugins/model-providers/`` can override
-    bundled profiles without editing repo code.
+    Calls made by bundled modules register in the process-global base. Calls
+    made while a user plugin or enabled entry point is being discovered register
+    in that profile's scoped overlay. ``scope=`` is public primarily for plugin
+    lifecycle managers and tests that already know their immutable home.
+
+    User registrations replace bundled profiles of the same canonical name.
+    Entry-point registrations are lower precedence than bundled profiles and are
+    therefore ignored on a canonical-name collision. Registration order never
+    participates in model alias preference; that policy lives on
+    :class:`ProviderProfile` metadata.
     """
+    if not isinstance(profile, ProviderProfile):
+        raise TypeError(
+            "register_provider() expects a ProviderProfile instance, "
+            f"got {type(profile).__name__}"
+        )
+    canonical = _normalize_name(profile.name)
+    if not canonical:
+        raise ValueError("Provider profile .name must be a non-empty string")
+
+    explicit_scope = hermes_home_key(scope) if scope is not None else None
+    target_scope = explicit_scope or _REGISTRATION_SCOPE.get()
+    precedence = _REGISTRATION_PRECEDENCE.get()
+
     global _PROVIDER_LIST_CACHE
-    _REGISTRY[profile.name] = profile
-    for alias in profile.aliases:
-        _ALIASES[alias] = profile.name
-    _PROVIDER_LIST_CACHE = None
+    with _DISCOVERY_LOCK:
+        if target_scope is None:
+            _REGISTRY[canonical] = profile
+            _ALIASES.clear()
+            _ALIASES.update(_rebuild_aliases(_REGISTRY))
+            _PROVIDER_LIST_CACHE = None
+            _SCOPED_PROVIDER_LIST_CACHE.clear()
+            return
+
+        # Pip entry points are profile-gated but lower precedence than bundled
+        # filesystem profiles. A package cannot shadow a first-party provider.
+        if precedence == "entrypoint" and canonical in _REGISTRY:
+            return
+
+        registry = _SCOPED_REGISTRIES.setdefault(target_scope, {})
+        registry[canonical] = profile
+        _SCOPED_ALIASES[target_scope] = _rebuild_aliases(registry)
+        _invalidate_scope(target_scope)
 
 
-def get_provider_profile(name: str) -> ProviderProfile | None:
-    """Look up a provider profile by name or alias.
+def get_provider_profile(
+    name: str,
+    *,
+    scope: str | Path | None = None,
+) -> ProviderProfile | None:
+    """Look up a provider profile by canonical name or alias for one profile."""
+    scope_key = hermes_home_key(scope)
+    _discover_providers(scope=scope_key)
 
-    Returns None if the provider has no profile (falls back to generic).
-    """
-    if not _discovered:
-        _discover_providers()
-    lookup = (name or "").strip()
-    # Custom providers are configured as ``custom:<name>`` in config.yaml and
-    # slash commands, but they share the built-in custom/OpenAI-compatible
-    # request-profile quirks. Keep the suffix for runtime routing elsewhere;
-    # collapse only the provider-profile lookup.
-    if lookup.lower().startswith("custom:"):
+    lookup = _normalize_name(name)
+    # Custom providers keep their runtime suffix elsewhere but share the
+    # built-in custom request-profile quirks.
+    if lookup.startswith("custom:"):
         lookup = "custom"
+
+    scoped_registry = _SCOPED_REGISTRIES.get(scope_key, {})
+    scoped_aliases = _SCOPED_ALIASES.get(scope_key, {})
+
+    canonical = scoped_aliases.get(lookup)
+    if canonical:
+        return scoped_registry.get(canonical)
+
     canonical = _ALIASES.get(lookup, lookup)
-    return _REGISTRY.get(canonical)
+    # A scoped canonical override also owns the bundled profile's historical
+    # aliases, preserving last-writer-wins compatibility.
+    return scoped_registry.get(canonical) or _REGISTRY.get(canonical)
 
 
-def list_providers() -> list[ProviderProfile]:
-    """Return all registered provider profiles (one per canonical name)."""
+def list_providers(
+    *,
+    scope: str | Path | None = None,
+) -> list[ProviderProfile]:
+    """Return active profiles in deterministic canonical-name order."""
     global _PROVIDER_LIST_CACHE
-    if not _discovered:
-        _discover_providers()
-    if _PROVIDER_LIST_CACHE is not None:
-        return list(_PROVIDER_LIST_CACHE)
-    # Deduplicate: _REGISTRY has canonical names; _ALIASES points to same objects
-    seen: set[int] = set()
-    result: list[ProviderProfile] = []
-    for profile in _REGISTRY.values():
-        pid = id(profile)
-        if pid not in seen:
-            seen.add(pid)
-            result.append(profile)
-    _PROVIDER_LIST_CACHE = result
+    scope_key = hermes_home_key(scope)
+    _discover_providers(scope=scope_key)
+
+    cached = _SCOPED_PROVIDER_LIST_CACHE.get(scope_key)
+    if cached is not None:
+        return list(cached)
+
+    with _DISCOVERY_LOCK:
+        merged = dict(_REGISTRY)
+        merged.update(_SCOPED_REGISTRIES.get(scope_key, {}))
+        result = [merged[name] for name in sorted(merged)]
+        _SCOPED_PROVIDER_LIST_CACHE[scope_key] = result
+        # Preserve the old process-global cache as a snapshot of the bundled
+        # base only; scope-aware callers use the cache above.
+        _PROVIDER_LIST_CACHE = [_REGISTRY[name] for name in sorted(_REGISTRY)]
     return list(result)
 
 
-def _user_plugins_dir() -> Path | None:
-    """Return ``$HERMES_HOME/plugins/model-providers/`` if it exists."""
-    try:
-        from hermes_constants import get_hermes_home
+def snapshot_registration(
+    name: str,
+    *,
+    scope: str | Path | None = None,
+) -> ProviderProfile | None:
+    """Return exactly the registration in one layer (without fallback)."""
+    canonical = _normalize_name(name)
+    if scope is None:
+        return _REGISTRY.get(canonical)
+    return _SCOPED_REGISTRIES.get(hermes_home_key(scope), {}).get(canonical)
 
-        d = get_hermes_home() / "plugins" / "model-providers"
-        return d if d.is_dir() else None
-    except Exception:
-        return None
 
+def restore_registration(
+    name: str,
+    current: ProviderProfile,
+    previous: ProviderProfile | None,
+    *,
+    scope: str | Path | None = None,
+) -> bool:
+    """Restore a registration only when ``current`` is still installed.
 
-def _import_plugin_dir(plugin_dir: Path, source: str) -> None:
-    """Import a single plugin directory so it self-registers.
-
-    ``source`` is "bundled" or "user", used only for log messages.
+    This compare-and-restore shape makes plugin unload safe when two reloads or
+    managers race: an older owner cannot remove a newer replacement. Removing a
+    scoped override immediately restores the bundled/native profile beneath it.
     """
+    canonical = _normalize_name(name)
+    scope_key = hermes_home_key(scope) if scope is not None else None
+    global _PROVIDER_LIST_CACHE
+    with _DISCOVERY_LOCK:
+        target = (
+            _REGISTRY
+            if scope_key is None
+            else _SCOPED_REGISTRIES.setdefault(scope_key, {})
+        )
+        if target.get(canonical) is not current:
+            return False
+        if previous is None:
+            target.pop(canonical, None)
+        else:
+            target[canonical] = previous
+
+        aliases = _rebuild_aliases(target)
+        if scope_key is None:
+            _ALIASES.clear()
+            _ALIASES.update(aliases)
+            _PROVIDER_LIST_CACHE = None
+            _SCOPED_PROVIDER_LIST_CACHE.clear()
+        else:
+            if target:
+                _SCOPED_ALIASES[scope_key] = aliases
+            else:
+                _SCOPED_REGISTRIES.pop(scope_key, None)
+                _SCOPED_ALIASES.pop(scope_key, None)
+            _invalidate_scope(scope_key)
+        return True
+
+
+def unload_provider_plugins(*, scope: str | Path | None = None) -> None:
+    """Unload every profile-scoped provider registration for one Hermes home.
+
+    The bundled registry is untouched. The next lookup rediscovers the scope,
+    so a provider newly listed under ``plugins.disabled`` stays unloaded and a
+    removed override cleanly reveals the native provider underneath it.
+    """
+    scope_key = hermes_home_key(scope)
+    with _DISCOVERY_LOCK:
+        _SCOPED_REGISTRIES.pop(scope_key, None)
+        _SCOPED_ALIASES.pop(scope_key, None)
+        _SCOPED_PROVIDER_LIST_CACHE.pop(scope_key, None)
+        _DISCOVERED_SCOPES.discard(scope_key)
+        for module_name in _SCOPED_MODULES.pop(scope_key, set()):
+            sys.modules.pop(module_name, None)
+
+
+def _reset_for_tests() -> None:
+    """Clear every registry/discovery layer. Test-only."""
+    global _PROVIDER_LIST_CACHE, _discovered
+    with _DISCOVERY_LOCK:
+        _REGISTRY.clear()
+        _ALIASES.clear()
+        _PROVIDER_LIST_CACHE = None
+        _discovered = False
+        _SCOPED_REGISTRIES.clear()
+        _SCOPED_ALIASES.clear()
+        _SCOPED_PROVIDER_LIST_CACHE.clear()
+        _DISCOVERED_SCOPES.clear()
+        for modules in _SCOPED_MODULES.values():
+            for module_name in modules:
+                sys.modules.pop(module_name, None)
+        _SCOPED_MODULES.clear()
+
+
+def _user_plugins_dir(scope_key: str) -> Path | None:
+    """Return ``<scope>/plugins/model-providers`` when it exists."""
+    directory = Path(scope_key) / "plugins" / "model-providers"
+    return directory if directory.is_dir() else None
+
+
+def _plugin_manifest_names(plugin_dir: Path) -> set[str]:
+    names = {_normalize_name(plugin_dir.name)}
+    manifest = plugin_dir / "plugin.yaml"
+    if not manifest.is_file():
+        return names
+    try:
+        import yaml
+
+        payload = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        if isinstance(payload, dict) and payload.get("name"):
+            names.add(_normalize_name(payload["name"]))
+    except Exception:
+        # A malformed manifest should not prevent the provider loader from
+        # reporting the actual module import error independently.
+        pass
+    return names
+
+
+def _disabled_user_plugins(scope_key: str) -> set[str]:
+    token = set_hermes_home_override(scope_key)
+    try:
+        from hermes_cli.plugins import _get_disabled_plugins
+
+        return {_normalize_name(name) for name in _get_disabled_plugins()}
+    except Exception:
+        return set()
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _import_plugin_dir(
+    plugin_dir: Path,
+    source: str,
+    *,
+    scope_key: str | None = None,
+) -> None:
+    """Import one provider directory so its module-level registration runs."""
     init_file = plugin_dir / "__init__.py"
     if not init_file.exists():
         return
 
-    # Give bundled plugins a stable import path (``plugins.model_providers.<name>``)
-    # so relative imports within the plugin work. User plugins load via
-    # ``importlib.util.spec_from_file_location`` with a unique module name so
-    # multiple HERMES_HOME profiles don't alias each other.
     safe_name = plugin_dir.name.replace("-", "_")
     if source == "bundled":
         module_name = f"plugins.model_providers.{safe_name}"
     else:
-        module_name = f"_hermes_user_provider_{safe_name}"
+        digest = hashlib.sha256(str(scope_key).encode("utf-8")).hexdigest()[:12]
+        module_name = f"_hermes_user_provider_{digest}_{safe_name}"
 
     if module_name in sys.modules:
-        return  # already imported
+        return
 
+    scope_token = _REGISTRATION_SCOPE.set(scope_key if source == "user" else None)
+    precedence_token = _REGISTRATION_PRECEDENCE.set(source)
     try:
         spec = importlib.util.spec_from_file_location(
             module_name, init_file, submodule_search_locations=[str(plugin_dir)]
@@ -146,204 +343,141 @@ def _import_plugin_dir(plugin_dir: Path, source: str) -> None:
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
+        if scope_key is not None:
+            _SCOPED_MODULES.setdefault(scope_key, set()).add(module_name)
     except Exception as exc:
         logger.warning(
             "Failed to load %s provider plugin %s: %s", source, plugin_dir.name, exc
         )
         sys.modules.pop(module_name, None)
+    finally:
+        _REGISTRATION_PRECEDENCE.reset(precedence_token)
+        _REGISTRATION_SCOPE.reset(scope_token)
 
 
-def _discover_entry_point_providers() -> None:
-    """Import pip-installed provider plugins via the ``hermes_agent.plugins``
-    entry-point group so they self-register.
-
-    A distribution ships::
-
-        [project.entry-points."hermes_agent.plugins"]
-        acme-inference = "acme_hermes_plugin:register"
-
-    The target may be either a **callable** (``module:func`` — invoked with no
-    args; typically calls ``register_provider(profile)``) or a **module**
-    (``module`` — imported for its module-level ``register_provider`` side
-    effect, mirroring the directory-plugin ``__init__.py`` contract).
-
-    Gating and safety:
-
-    * **Opt-in.** Entry-point plugins are subject to the same
-      ``plugins.enabled`` allow-list (and ``plugins.disabled`` deny-list) the
-      general PluginManager enforces — a pip package is never imported just
-      because it is installed. An entry point whose name is not enabled is
-      skipped without loading.
-    * **Provider targets only.** The ``hermes_agent.plugins`` group is shared
-      with general plugins whose target is ``register(ctx)``. Callables that
-      require arguments are skipped here (the PluginManager owns them);
-      provider registration hooks take no arguments by contract.
-
-    Failures are swallowed per-entry (a broken third-party package must not
-    break provider discovery) and logged at warning level. This scan runs
-    first, so filesystem plugins (bundled + ``$HERMES_HOME``) keep their
-    documented override precedence via last-writer-wins in
-    ``register_provider()`` — a pip package cannot hijack a first-party
-    provider name.
-    """
+def _discover_entry_point_providers(scope_key: str) -> None:
+    """Load enabled zero-argument provider entry points into one profile."""
     try:
-        import importlib.metadata as _md
-    except Exception:  # pragma: no cover — importlib.metadata always present ≥3.8
+        import importlib.metadata as metadata
+    except Exception:  # pragma: no cover
         return
 
-    # Same opt-in gate as the general PluginManager: only entry points named
-    # in ``plugins.enabled`` load, and ``plugins.disabled`` always wins.
+    token = set_hermes_home_override(scope_key)
     try:
         from hermes_cli.plugins import _get_disabled_plugins, _get_enabled_plugins
 
-        enabled = _get_enabled_plugins()  # None = nothing enabled yet (opt-in default)
+        enabled = _get_enabled_plugins()
         disabled = _get_disabled_plugins()
-    except Exception:  # pragma: no cover — config layer unavailable
+    except Exception:
         enabled, disabled = None, set()
+    finally:
+        reset_hermes_home_override(token)
     if not enabled:
         return
 
-    group = "hermes_agent.plugins"
     try:
-        eps = _md.entry_points()
-        # Python 3.10+ exposes .select(); older returns a dict-like mapping.
-        if hasattr(eps, "select"):
-            group_eps = list(eps.select(group=group))
-        else:  # pragma: no cover — legacy interpreters
-            group_eps = list(eps.get(group, []))  # type: ignore[attr-defined]
+        entry_points = metadata.entry_points()
+        if hasattr(entry_points, "select"):
+            group_entries = list(entry_points.select(group="hermes_agent.plugins"))
+        else:  # pragma: no cover
+            group_entries = list(entry_points.get("hermes_agent.plugins", []))
     except Exception as exc:
         logger.debug("entry-point provider scan skipped: %s", exc)
         return
 
-    for ep in group_eps:
-        if ep.name not in enabled or ep.name in disabled:
-            logger.debug(
-                "entry-point provider %r skipped: not enabled in config", ep.name
-            )
+    for entry_point in sorted(group_entries, key=lambda item: item.name):
+        if entry_point.name not in enabled or entry_point.name in disabled:
             continue
+        scope_token = _REGISTRATION_SCOPE.set(scope_key)
+        precedence_token = _REGISTRATION_PRECEDENCE.set("entrypoint")
         try:
-            loaded = ep.load()
+            loaded = entry_point.load()
+            if callable(loaded):
+                if _requires_arguments(loaded):
+                    continue
+                loaded()
         except Exception as exc:
             logger.warning(
-                "Failed to load entry-point provider plugin %r: %s", ep.name, exc
+                "Failed to load entry-point provider plugin %r: %s",
+                entry_point.name,
+                exc,
             )
-            continue
-        # ``module:func`` → callable we invoke; bare ``module`` → import side
-        # effect already happened during load(). Only call when it's callable
-        # AND zero-arg: general plugins in this shared group expose
-        # ``register(ctx)`` (requires an argument) and belong to the
-        # PluginManager, not the provider registry.
-        if callable(loaded):
-            if _requires_arguments(loaded):
-                logger.debug(
-                    "entry-point %r skipped by provider scan: target requires "
-                    "arguments (general plugin owned by PluginManager)",
-                    ep.name,
-                )
-                continue
-            try:
-                loaded()
-            except Exception as exc:
-                logger.warning(
-                    "Entry-point provider plugin %r raised on invocation: %s",
-                    ep.name,
-                    exc,
-                )
+        finally:
+            _REGISTRATION_PRECEDENCE.reset(precedence_token)
+            _REGISTRATION_SCOPE.reset(scope_token)
 
 
 def _requires_arguments(fn) -> bool:
-    """True when ``fn`` cannot be called with zero arguments.
-
-    Used to distinguish provider registration hooks (zero-arg by contract)
-    from general plugin hooks (``register(ctx)``) sharing the same entry-point
-    group. Unintrospectable callables (C extensions) are treated as zero-arg
-    and left to the per-entry exception guard.
-    """
     import inspect
 
     try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):  # pragma: no cover — builtins/C callables
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):  # pragma: no cover
         return False
-    for param in sig.parameters.values():
-        if param.kind in (
+    for parameter in signature.parameters.values():
+        if parameter.kind in (
             inspect.Parameter.POSITIONAL_ONLY,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             inspect.Parameter.KEYWORD_ONLY,
-        ) and param.default is inspect.Parameter.empty:
+        ) and parameter.default is inspect.Parameter.empty:
             return True
     return False
 
 
-def _discover_providers() -> None:
-    """Populate the registry by importing every provider plugin.
-
-    Order:
-      1. Bundled plugins at ``<repo>/plugins/model-providers/<name>/``
-      2. User plugins at ``$HERMES_HOME/plugins/model-providers/<name>/``
-      3. Legacy per-file modules at ``providers/<name>.py`` (back-compat)
-
-    Each step imports its plugins, which call ``register_provider()`` at
-    module-level. Later steps win on name collision.
-    """
+def _discover_global_providers() -> None:
     global _discovered
     if _discovered:
         return
     _discovered = True
 
-    # 0. Pip-installed plugins — entry points in the ``hermes_agent.plugins``
-    #    group (the same group the general PluginManager uses). The manager
-    #    records model-provider manifests for introspection but deliberately
-    #    does NOT import them — provider lifecycle is owned here — so without
-    #    this step a ``pip install``ed provider never calls
-    #    ``register_provider()`` and is never selectable.
-    #
-    #    Discovered FIRST, i.e. lowest precedence: because
-    #    ``register_provider()`` is last-writer-wins, running this before the
-    #    filesystem steps means a bundled or ``$HERMES_HOME`` profile of the
-    #    same name always overrides a pip-installed one. That prevents a
-    #    third-party package from silently hijacking a first-party provider
-    #    name (e.g. ``openrouter``) while still letting pip packages add
-    #    genuinely new providers.
-    _discover_entry_point_providers()
-
-    # 1. Bundled plugins — shipped with hermes-agent.
     if _BUNDLED_PLUGINS_DIR.is_dir():
         for child in sorted(_BUNDLED_PLUGINS_DIR.iterdir()):
-            if not child.is_dir() or child.name.startswith(("_", ".")):
-                continue
-            _import_plugin_dir(child, "bundled")
+            if child.is_dir() and not child.name.startswith(("_", ".")):
+                _import_plugin_dir(child, "bundled")
 
-    # 2. User plugins — under $HERMES_HOME/plugins/model-providers/<name>/.
-    #    These can override any bundled profile of the same name (last-writer-wins
-    #    in register_provider()).
-    user_dir = _user_plugins_dir()
-    if user_dir is not None:
-        for child in sorted(user_dir.iterdir()):
-            if not child.is_dir() or child.name.startswith(("_", ".")):
-                continue
-            _import_plugin_dir(child, "user")
-
-    # 3. Legacy single-file profiles at providers/<name>.py. Kept for
-    #    back-compat — if someone drops a ``providers/foo.py`` into an
-    #    editable install, it still works without the plugin layout.
+    # Legacy single-file profiles remain a process-global compatibility layer.
     try:
         import pkgutil
 
-        import providers as _pkg
+        import providers as package
 
-        for _importer, modname, _ispkg in pkgutil.iter_modules(_pkg.__path__):
-            if modname.startswith("_") or modname == "base":
+        for _importer, module_name, _is_package in pkgutil.iter_modules(package.__path__):
+            if module_name.startswith("_") or module_name == "base":
                 continue
             try:
-                importlib.import_module(f"providers.{modname}")
+                importlib.import_module(f"providers.{module_name}")
             except ImportError as exc:
                 logger.warning(
-                    "Failed to import legacy provider module %s: %s", modname, exc
+                    "Failed to import legacy provider module %s: %s", module_name, exc
                 )
     except Exception:
         pass
 
-    # (Pip entry-point providers are discovered in step 0, before the
-    # filesystem plugins, so first-party profiles always win on name
-    # collision — see _discover_entry_point_providers.)
+
+def _discover_scope(scope_key: str) -> None:
+    if scope_key in _DISCOVERED_SCOPES:
+        return
+    _DISCOVERED_SCOPES.add(scope_key)
+
+    # Entry points are profile-gated and lower precedence than bundled profiles.
+    _discover_entry_point_providers(scope_key)
+
+    user_dir = _user_plugins_dir(scope_key)
+    if user_dir is None:
+        return
+    disabled = _disabled_user_plugins(scope_key)
+    for child in sorted(user_dir.iterdir()):
+        if not child.is_dir() or child.name.startswith(("_", ".")):
+            continue
+        if _plugin_manifest_names(child) & disabled:
+            logger.debug("Disabled provider plugin skipped: %s", child.name)
+            continue
+        _import_plugin_dir(child, "user", scope_key=scope_key)
+
+
+def _discover_providers(*, scope: str | Path | None = None) -> None:
+    """Populate the global provider base and one profile-scoped overlay."""
+    scope_key = hermes_home_key(scope)
+    with _DISCOVERY_LOCK:
+        _discover_global_providers()
+        _discover_scope(scope_key)

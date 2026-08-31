@@ -78,10 +78,26 @@ class ProviderProfile:
     # top-level fields rather than ignoring them.
     supports_prompt_cache_key: bool = False
 
-    # ── Model catalog ─────────────────────────────────────────
+    # ── Model catalog & automatic alias policy ─────────────────
     # fallback_models: curated list shown in /model picker when live fetch fails.
-    # Only agentic models that support tool calling should appear here.
+    # Only agentic models that support tool calling should appear here. For a
+    # provider supplied only by a plugin (no core static catalog), this is also
+    # the authoritative offline catalog used by model detection.
     fallback_models: tuple = ()
+
+    # model_aliases opts this provider into automatic ownership of bare model
+    # aliases such as ``opus`` or ``sonnet``. A mapping may declare the catalog
+    # family explicitly (``{"opus": "claude-opus"}``); a tuple of alias names
+    # uses Hermes' built-in family map for backward-compatible convenience.
+    # Merely re-exposing another vendor's models must never make a subscription
+    # gateway silently hijack native traffic.
+    model_aliases: dict[str, str] = field(default_factory=dict)
+
+    # Higher values win when several active profiles claim the same bare alias.
+    # None means the provider does not participate in automatic alias policy.
+    # Equal top priorities are ambiguous and callers must fail closed rather
+    # than depending on plugin discovery or dictionary insertion order.
+    model_alias_priority: int | None = None
 
     # hostname: base hostname for URL→provider reverse-mapping in model_metadata.py
     # e.g. "api.gmi-serving.com". Derived from base_url when empty.

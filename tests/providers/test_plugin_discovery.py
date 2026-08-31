@@ -19,10 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _clear_provider_caches():
     """Force providers/__init__.py to re-discover on next list_providers()."""
     import providers as _pkg
-    _pkg._REGISTRY.clear()
-    _pkg._ALIASES.clear()
-    _pkg._PROVIDER_LIST_CACHE = None
-    _pkg._discovered = False
+    _pkg._reset_for_tests()
     # Evict any cached plugin modules so the next import re-executes.
     for mod in list(sys.modules.keys()):
         if (
@@ -117,6 +114,55 @@ def test_user_plugin_overrides_bundled(tmp_path, monkeypatch):
     assert "gmi-user-override-test" in gmi.aliases
 
     # Clean up: reset discovery state so other tests see the bundled version
+    _clear_provider_caches()
+
+
+def test_disabled_user_provider_unloads_and_reloads_per_profile(tmp_path, monkeypatch):
+    """A profile deny-list removes policy without disturbing bundled providers."""
+    import providers
+
+    hermes_home = tmp_path / ".hermes"
+    plugin_dir = hermes_home / "plugins" / "model-providers" / "policy-proxy"
+    plugin_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    (plugin_dir / "__init__.py").write_text(
+        "from providers import register_provider\n"
+        "from providers.base import ProviderProfile\n"
+        "profile = ProviderProfile(\n"
+        "    name='policy-proxy',\n"
+        "    fallback_models=('claude-opus-test',),\n"
+        "    model_aliases={'opus': 'claude-opus'},\n"
+        "    model_alias_priority=10,\n"
+        ")\n"
+        "register_provider(profile)\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: policy-proxy-provider\nkind: model-provider\nversion: 1\n",
+        encoding="utf-8",
+    )
+    config_path = hermes_home / "config.yaml"
+    config_path.write_text(
+        "plugins:\n  disabled:\n    - policy-proxy-provider\n",
+        encoding="utf-8",
+    )
+
+    _clear_provider_caches()
+    assert providers.get_provider_profile("policy-proxy") is None
+
+    config_path.write_text("plugins:\n  disabled: []\n", encoding="utf-8")
+    providers.unload_provider_plugins(scope=hermes_home)
+    loaded = providers.get_provider_profile("policy-proxy")
+    assert loaded is not None
+    assert loaded.fallback_models == ("claude-opus-test",)
+
+    config_path.write_text(
+        "plugins:\n  disabled:\n    - policy-proxy-provider\n",
+        encoding="utf-8",
+    )
+    providers.unload_provider_plugins(scope=hermes_home)
+    assert providers.get_provider_profile("policy-proxy") is None
+
     _clear_provider_caches()
 
 

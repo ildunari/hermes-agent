@@ -266,30 +266,6 @@ def _xai_curated_models() -> list[str]:
 
 _PROVIDER_MODELS: dict[str, list[str]] = {
     "moa": ["default"],
-    # Local Claude/Vibe proxy. Keep this static because the proxy's /models
-    # endpoint is not the source of Kosta's curated picker list; profiles can
-    # further narrow it with model_picker.visible_models.
-    #
-    # POSITION IS LOAD-BEARING: this entry must stay ahead of "anthropic" (and
-    # every other native vendor) in this dict. detect_static_provider_for_model
-    # walks it in insertion order, so vibeproxy-before-anthropic is what makes
-    # bare aliases ("sonnet", "opus", "fable", ...) resolve to the local
-    # subscription proxy instead of the metered native API when
-    # model.provider is "auto". Guarded by
-    # tests/test_tui_gateway_server.py::test_startup_runtime_resolves_short_alias_without_network
-    # and the carry-manifest vibeproxy-alias-priority entry. Do NOT alphabetize
-    # or "clean up" this dict's ordering, and do NOT enroll vibeproxy in
-    # _BORROWED_MODEL_PROVIDERS (that mechanism only wins the alias race when
-    # the provider is already configured — the opposite of this default;
-    # empirically verified 2026-07-23).
-    "vibeproxy": [
-        "claude-fable-5",
-        "claude-opus-5",
-        "claude-sonnet-5",
-        "claude-haiku-4-5-20251001",
-        "gemini-3.7-flash-high",
-        "gemini-3.1-pro",
-    ],
     "nous": [
         # Anthropic
         "anthropic/claude-fable-5",
@@ -3346,10 +3322,43 @@ _PROVIDER_RETIRED_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _provider_catalog_names(provider: str) -> tuple[str, ...]:
-    """Active picker models plus retired aliases recognized for detection."""
+    """Active picker models plus retired aliases recognized for detection.
+
+    Core providers retain their specialized static catalogs. A provider that
+    exists only as a registered plugin gets its catalog from
+    ``ProviderProfile.fallback_models``; plugin catalogs therefore do not need
+    a load-bearing entry in this module.
+    """
     active = tuple(_PROVIDER_MODELS.get(provider, []))
+    if not active:
+        try:
+            from providers import get_provider_profile
+
+            profile = get_provider_profile(provider)
+            if profile is not None:
+                active = tuple(profile.fallback_models or ())
+        except Exception:
+            active = ()
     retired = _PROVIDER_RETIRED_ALIASES.get(provider, ())
     return active + retired
+
+
+def _catalog_provider_names() -> tuple[str, ...]:
+    """Static provider names plus profile-only plugin names, deterministically."""
+    names = list(_PROVIDER_MODELS)
+    try:
+        from providers import list_providers
+
+        names.extend(
+            sorted(
+                profile.name
+                for profile in list_providers()
+                if profile.name not in _PROVIDER_MODELS and profile.fallback_models
+            )
+        )
+    except Exception:
+        pass
+    return tuple(dict.fromkeys(names))
 
 
 def _model_in_provider_catalog(name_lower: str, providers: set[str]) -> bool:
@@ -3406,10 +3415,141 @@ _LIVE_FIRST_PICKER_PROVIDERS: frozenset[str] = frozenset(
 )
 
 
+_AMBIGUOUS_ALIAS_POLICY = object()
+
+
+def _profile_alias_model(profile, family: str) -> Optional[str]:
+    """Return a profile catalog model matching one declared alias family."""
+    prefix = str(family or "").strip().lower()
+    if not prefix:
+        return None
+    for model in profile.fallback_models or ():
+        lowered = str(model).lower()
+        if lowered.startswith(prefix):
+            return str(model)
+        if "/" in lowered and lowered.split("/", 1)[1].startswith(prefix):
+            return str(model)
+    return None
+
+
+def _resolve_registered_alias_policy(name_lower: str, identity=None):
+    """Resolve profile-owned alias policy, failing closed on an equal tie."""
+    try:
+        from collections.abc import Mapping
+
+        from providers import list_providers
+
+        candidates: list[tuple[int, str, str]] = []
+        for profile in list_providers():
+            priority = profile.model_alias_priority
+            declared = profile.model_aliases or {}
+            if isinstance(declared, Mapping):
+                family = str(declared.get(name_lower) or "").strip().lower()
+            else:
+                aliases = {
+                    str(alias).strip().lower()
+                    for alias in declared
+                    if str(alias).strip()
+                }
+                family = (
+                    str(identity.family or "").strip().lower()
+                    if identity is not None and name_lower in aliases
+                    else ""
+                )
+            if priority is None or not family:
+                continue
+            model = _profile_alias_model(profile, family)
+            if model:
+                candidates.append((int(priority), profile.name, model))
+    except Exception:
+        return None
+
+    if not candidates:
+        return None
+    top_priority = max(priority for priority, _provider, _model in candidates)
+    winners = sorted(
+        (provider, model)
+        for priority, provider, model in candidates
+        if priority == top_priority
+    )
+    if len(winners) != 1:
+        return _AMBIGUOUS_ALIAS_POLICY
+    return winners[0]
+
+
+def _registered_alias_policy_result(name_lower: str):
+    """Return the active profile policy result for a bare alias, if any."""
+    try:
+        from hermes_cli.model_switch import MODEL_ALIASES
+
+        identity = MODEL_ALIASES.get(name_lower)
+    except Exception:
+        identity = None
+    return _resolve_registered_alias_policy(name_lower, identity)
+
+
+def _resolve_registered_model_policy(name_lower: str):
+    """Resolve a bare model id claimed by profile alias-family metadata."""
+    if "/" in name_lower:
+        return None
+    try:
+        from collections.abc import Mapping
+
+        from hermes_cli.model_switch import MODEL_ALIASES
+        from providers import list_providers
+
+        candidates: list[tuple[int, str, str]] = []
+        for profile in list_providers():
+            priority = profile.model_alias_priority
+            if priority is None:
+                continue
+            declared = profile.model_aliases or {}
+            if isinstance(declared, Mapping):
+                families = {
+                    str(family).strip().lower()
+                    for family in declared.values()
+                    if str(family).strip()
+                }
+            else:
+                families = {
+                    str(MODEL_ALIASES[alias].family).strip().lower()
+                    for alias in (
+                        str(value).strip().lower() for value in declared
+                    )
+                    if alias in MODEL_ALIASES
+                }
+            if not any(name_lower.startswith(family) for family in families):
+                continue
+            matched = next(
+                (
+                    str(model)
+                    for model in (profile.fallback_models or ())
+                    if str(model).lower() == name_lower
+                ),
+                None,
+            )
+            if matched:
+                candidates.append((int(priority), profile.name, matched))
+    except Exception:
+        return None
+
+    if not candidates:
+        return None
+    top_priority = max(priority for priority, _provider, _model in candidates)
+    winners = sorted(
+        (provider, model)
+        for priority, provider, model in candidates
+        if priority == top_priority
+    )
+    if len(winners) != 1:
+        return _AMBIGUOUS_ALIAS_POLICY
+    return winners[0]
+
+
 def _resolve_static_model_alias(
     name_lower: str,
     current_keys: set[str],
-) -> Optional[tuple[str, str]]:
+):
     """Resolve short aliases (e.g. sonnet/opus) using static catalogs only."""
     try:
         from hermes_cli.model_switch import MODEL_ALIASES
@@ -3418,13 +3558,16 @@ def _resolve_static_model_alias(
 
     identity = MODEL_ALIASES.get(name_lower)
     if identity is None:
-        return None
+        # Plugin metadata may define an alias family that core does not know
+        # (for example a subscription-only family). Keep that policy in the
+        # provider profile rather than growing the shared alias table.
+        return _resolve_registered_alias_policy(name_lower)
 
     vendor = identity.vendor
     family = identity.family
 
     def _match(provider: str) -> Optional[str]:
-        models = _PROVIDER_MODELS.get(provider, [])
+        models = _provider_catalog_names(provider)
         if not models:
             return None
         prefix = (
@@ -3437,11 +3580,19 @@ def _resolve_static_model_alias(
                 return model
         return None
 
-    for provider in current_keys:
+    # An explicitly selected/current provider always wins over automatic plugin
+    # preference, including a metered native provider selected deliberately.
+    for provider in sorted(current_keys):
         if matched := _match(provider):
             return provider, matched
 
-    for provider in _PROVIDER_MODELS:
+    policy_match = _resolve_registered_alias_policy(name_lower, identity)
+    if policy_match is _AMBIGUOUS_ALIAS_POLICY:
+        return _AMBIGUOUS_ALIAS_POLICY
+    if policy_match is not None:
+        return policy_match
+
+    for provider in _catalog_provider_names():
         if (
             provider in current_keys
             or provider in _AGGREGATOR_PROVIDERS
@@ -3456,8 +3607,7 @@ def _resolve_static_model_alias(
             return provider, matched
 
     # Last resort: providers that re-expose other vendors' models. Only reached
-    # when no native-vendor catalog matched — so `sonnet` resolves to anthropic.
-    # None are currently defined (_BORROWED_MODEL_PROVIDERS is empty).
+    # when no native-vendor catalog matched.
     for provider in _BORROWED_MODEL_PROVIDERS:
         if provider in current_keys and (matched := _match(provider)):
             return provider, matched
@@ -3483,7 +3633,9 @@ def detect_static_provider_for_model(
     current_keys = _provider_keys(current_provider)
 
     alias_match = _resolve_static_model_alias(name_lower, current_keys)
-    if alias_match:
+    if alias_match is _AMBIGUOUS_ALIAS_POLICY:
+        return None
+    if isinstance(alias_match, tuple):
         return alias_match
 
     # --- Step 0: bare provider name typed as model ---
@@ -3530,7 +3682,12 @@ def detect_static_provider_for_model(
         current_provider == "custom"
         or current_provider.startswith("custom:")
     )
-    for pid in _PROVIDER_MODELS:
+    policy_model_match = _resolve_registered_model_policy(name_lower)
+    if policy_model_match is _AMBIGUOUS_ALIAS_POLICY:
+        return None
+    if isinstance(policy_model_match, tuple) and not _is_custom_current:
+        return policy_model_match
+    for pid in _catalog_provider_names():
         if (
             pid in current_keys
             or pid in _AGGREGATOR_PROVIDERS
@@ -3575,6 +3732,13 @@ def detect_provider_for_model(
     static_match = detect_static_provider_for_model(name, current_provider)
     if static_match:
         return static_match
+    # An equal top-priority plugin tie is an explicit ambiguity, not a miss.
+    # Do not turn it into an OpenRouter network lookup or a paid fallback.
+    if (
+        _registered_alias_policy_result(name.lower()) is _AMBIGUOUS_ALIAS_POLICY
+        or _resolve_registered_model_policy(name.lower()) is _AMBIGUOUS_ALIAS_POLICY
+    ):
+        return None
     if _model_in_provider_catalog(name.lower(), _provider_keys(current_provider)):
         return None
 
