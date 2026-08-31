@@ -476,6 +476,37 @@ async def test_retained_context_loses_external_effect_authority_on_unload(
 
 
 @pytest.mark.asyncio
+async def test_unload_during_prewrite_await_revokes_session_mutation(
+    registered_manager,
+):
+    manager, registration = registered_manager
+    registration.register_command("effect-probe", lambda ctx: None, context=True)
+    token = manager._plugin_commands["effect-probe"]
+    source = _source()
+    current = _entry(source)
+    runner = _Runner(current, [current])
+    invocation = await build_gateway_command_context(
+        runner,
+        MessageEvent(text="/effect-probe", source=source),
+        "effect-probe",
+        "",
+        registration=token,
+    )
+
+    async def get_then_unload(key):
+        assert key == current.session_key
+        assert manager.unload(registration.manifest)
+        return current
+
+    runner.async_session_store.get_session = get_then_unload
+    runner.async_session_store.set_session_cwd = AsyncMock()
+
+    with pytest.raises(CommandCapabilityError, match="revoked before the cwd write"):
+        await invocation.set_cwd("/must/not/write")
+    runner.async_session_store.set_session_cwd.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_pending_followup_never_transfers_to_replacement_registration(
     registered_manager,
 ):

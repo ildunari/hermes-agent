@@ -20,6 +20,7 @@ from gateway.config import Platform
 from gateway.session import SessionEntry, SessionSource
 from hermes_cli.command_context import (
     CommandActionResult,
+    CommandCapabilityError,
     CommandInvocationContext,
     CommandSession,
     CommandSource,
@@ -306,6 +307,10 @@ async def build_gateway_command_context(
         current = await runner.async_session_store.get_session(session_key)
         if not entry_belongs_to_source(current):
             raise PermissionError("Session cwd write crossed a source/profile boundary")
+        if not registration_is_active():
+            raise CommandCapabilityError(
+                "Plugin command authorization was revoked before the cwd write"
+            )
         updated = await runner.async_session_store.set_session_cwd(session_key, cwd)
         return _session_snapshot(runner, updated, fallback_source=source)
 
@@ -324,6 +329,10 @@ async def build_gateway_command_context(
         if not entry_belongs_to_source(current):
             raise PermissionError(
                 "Session personality write crossed a source/profile boundary"
+            )
+        if not registration_is_active():
+            raise CommandCapabilityError(
+                "Plugin command authorization was revoked before the personality write"
             )
         normalized = dict(personality) if personality else None
         updated = await runner.async_session_store.set_session_personality_override(
@@ -447,6 +456,12 @@ async def build_gateway_command_context(
                 ok=False,
                 error_code="authorization_failed",
                 message="Current session no longer belongs to this source.",
+            )
+        if not registration_is_active():
+            return CommandActionResult(
+                ok=False,
+                error_code="authorization_revoked",
+                message="The plugin command was unloaded before session rename.",
             )
         warning = await _set_session_title(runner, current.session_id, source, title)
         rename_topic = (
