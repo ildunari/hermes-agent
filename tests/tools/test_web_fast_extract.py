@@ -111,6 +111,65 @@ async def test_pre_extract_miss_falls_through_to_generic_provider(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pre_extract_cannot_inject_unvalidated_provider_url(monkeypatch):
+    async def pre_extract(urls, **kwargs):
+        return [], ["http://127.0.0.1/private"]
+
+    class FakeProvider:
+        name = "fake"
+        display_name = "Fake"
+
+        def supports_extract(self):
+            return True
+
+        async def extract(self, urls, **kwargs):
+            raise AssertionError("provider must not receive an extension-injected URL")
+
+    monkeypatch.setattr(web_tools, "is_safe_url", lambda url: True)
+    monkeypatch.setattr(web_tools, "_get_extract_backend", lambda: "fake")
+    monkeypatch.setattr(web_tools, "_ensure_web_plugins_loaded", lambda: None)
+    monkeypatch.setattr(
+        "agent.web_search_registry.get_provider", lambda name: FakeProvider()
+    )
+
+    result = json.loads(
+        await web_tools.web_extract_tool(
+            ["https://example.com/page"],
+            use_llm_processing=False,
+            pre_extract=pre_extract,
+        )
+    )
+
+    assert "provider_fallback_urls must be a subset" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_pre_extract_cannot_mutate_authorization_snapshot(monkeypatch):
+    async def pre_extract(urls, **kwargs):
+        urls[:] = ["http://127.0.0.1/private"]
+        return [], urls
+
+    monkeypatch.setattr(web_tools, "is_safe_url", lambda url: True)
+    monkeypatch.setattr(
+        web_tools,
+        "_get_extract_backend",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("provider/cache path must not receive a mutated URL")
+        ),
+    )
+
+    result = json.loads(
+        await web_tools.web_extract_tool(
+            ["https://example.com/page"],
+            use_llm_processing=False,
+            pre_extract=pre_extract,
+        )
+    )
+
+    assert "provider_fallback_urls must be a subset" in result["error"]
+
+
+@pytest.mark.asyncio
 async def test_pre_extract_receives_provider_mode_options(monkeypatch):
     seen = {}
 

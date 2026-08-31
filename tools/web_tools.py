@@ -1308,8 +1308,15 @@ async def web_extract_tool(
         # secret/SSRF gate above and for provider fallback/caching below.
         results: List[Dict[str, Any]] = []
         if safe_urls and pre_extract is not None:
+            # Keep an immutable host-owned authorization snapshot. The callback
+            # receives a separate list because plugin code can mutate its input;
+            # comparing against that same mutable object would let an extension
+            # replace an authorized URL with an internal one and then return it
+            # as an apparently valid provider fallback.
+            authorized_pre_extract_urls = tuple(safe_urls)
+            pre_extract_input_urls = list(authorized_pre_extract_urls)
             preprocessed = pre_extract(
-                safe_urls,
+                pre_extract_input_urls,
                 mode=mode or format or "markdown",
                 format=format,
                 only_main_content=only_main_content,
@@ -1320,6 +1327,29 @@ async def web_extract_tool(
             if inspect.isawaitable(preprocessed):
                 preprocessed = await preprocessed
             fast_results, provider_urls = preprocessed
+            if not isinstance(fast_results, list) or not isinstance(provider_urls, list):
+                raise ValueError(
+                    "pre_extract must return (list[results], list[provider_fallback_urls])"
+                )
+
+            # The callback receives URLs only after core secret/SSRF validation.
+            # Keep core authoritative after the callback too: a buggy or hostile
+            # extension must not be able to inject a fresh URL into the provider
+            # or cache path and thereby bypass the checks above.  A multiset
+            # check preserves legitimate reordering and duplicate input URLs.
+            remaining_urls: Dict[str, int] = {}
+            for allowed_url in authorized_pre_extract_urls:
+                remaining_urls[allowed_url] = remaining_urls.get(allowed_url, 0) + 1
+            for provider_url in provider_urls:
+                if (
+                    not isinstance(provider_url, str)
+                    or remaining_urls.get(provider_url, 0) <= 0
+                ):
+                    raise ValueError(
+                        "pre_extract provider_fallback_urls must be a subset of "
+                        "the core-validated input URLs"
+                    )
+                remaining_urls[provider_url] -= 1
             results.extend(fast_results)
             if fast_results:
                 debug_call_data["processing_applied"].append("pre_extract")
