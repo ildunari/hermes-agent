@@ -164,9 +164,8 @@ def test_tui_startup_rejects_ambiguous_policy_instead_of_falling_back(
             server._resolve_startup_runtime()
 
 
-def test_acp_and_web_resolvers_do_not_swallow_policy_ambiguity(monkeypatch):
+def test_web_resolver_does_not_swallow_policy_ambiguity(monkeypatch):
     import hermes_cli.models as models
-    from acp_adapter.server import HermesACPAgent
     from hermes_cli.web_server import _infer_provider_on_model_change
 
     def ambiguous(*_args, **_kwargs):
@@ -175,9 +174,22 @@ def test_acp_and_web_resolvers_do_not_swallow_policy_ambiguity(monkeypatch):
     monkeypatch.setattr(models, "detect_provider_for_model", ambiguous)
 
     with pytest.raises(AmbiguousProviderPolicyError):
-        HermesACPAgent._resolve_model_selection("opus", "auto")
-    with pytest.raises(AmbiguousProviderPolicyError):
         _infer_provider_on_model_change("opus", "auto")
+
+
+def test_acp_resolver_does_not_swallow_policy_ambiguity(monkeypatch):
+    import hermes_cli.models as models
+
+    pytest.importorskip("acp", reason="ACP is an optional runtime dependency")
+    from acp_adapter.server import HermesACPAgent
+
+    def ambiguous(*_args, **_kwargs):
+        raise AmbiguousProviderPolicyError("opus")
+
+    monkeypatch.setattr(models, "detect_provider_for_model", ambiguous)
+
+    with pytest.raises(AmbiguousProviderPolicyError):
+        HermesACPAgent._resolve_model_selection("opus", "auto")
 
 
 def test_unload_restores_native_alias_route(policy_scope):

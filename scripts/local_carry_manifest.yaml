@@ -43,12 +43,12 @@ checks:
     description: RETIRED 2026-08-26 — per-turn texture compilation and its engine are plugin-owned; core retains only the generic pre_llm_call system-context lane.
   - id: vibeproxy-alias-priority
     path: hermes_cli/models.py
-    needles: [POSITION IS LOAD-BEARING, "\"vibeproxy\": ["]
-    description: vibeproxy dict position ahead of anthropic drives bare-alias routing to the local proxy; do not reorder or enroll in _BORROWED_MODEL_PROVIDERS (refuted 2026-07-23)
+    needles: []
+    description: RETIRED 2026-08-31 — VibeProxy alias ownership is profile-scoped provider-plugin metadata; static dict ordering no longer controls routing.
   - id: vibeproxy-alias-guard-tests
-    path: tests/test_vibeproxy_alias_priority.py
-    needles: [test_startup_runtime_resolves_short_alias_without_network, test_startup_runtime_does_not_call_network_detector]
-    description: guard tests for vibeproxy short-alias default routing
+    path: tests/providers/test_provider_policy.py
+    needles: [test_interactive_alias_fallback_honors_provider_policy_before_paid_auth, test_provider_policy_is_isolated_by_profile]
+    description: generic provider-policy tests guard subscription alias priority, fail-closed ambiguity, and profile isolation
   - id: vibeproxy-credential-plumbing
     path: hermes_cli/auth.py
     needles: [DEFAULT_VIBEPROXY_BASE_URL, VIBEPROXY_NOAUTH_PLACEHOLDER]
@@ -551,80 +551,105 @@ features:
         needles: [formatProfileLabel]
         description: profile switcher renders labels through the formatting helper
 
-  - id: desktop.chat-layout
-    title: Responsive chat width modes
+  - id: tools.web-plugin-policy-seam
+    title: Generic validated web pre-extraction and trusted override seam
+    owner: kosta
+    class: keep-core
     owner_paths:
-      - apps/desktop/src/store/chat-width.ts
-      - apps/desktop/src/main.tsx
-    dependent_paths:
-      - apps/desktop/src/app/settings/appearance-settings.tsx
+      - tools/web_tools.py
+      - toolsets.py
+      - tests/tools/test_tool_surface_wrappers.py
+      - tests/tools/test_web_extract_surface.py
+      - tests/tools/test_web_fast_extract.py
     collision_paths:
-      - apps/desktop/src/app/settings/appearance-settings.tsx
+      - tools/web_tools.py
+      - toolsets.py
     tests:
-      - apps/desktop/src/store/chat-width.test.ts
+      - tests/tools/test_tool_surface_wrappers.py
+      - tests/tools/test_web_extract_surface.py
+      - tests/tools/test_web_fast_extract.py
     checks:
-      - id: desktop-chat-width-store
-        path: apps/desktop/src/store/chat-width.ts
-        needles: [hermes.desktop.chatWidth.v1, 48.75rem, 68rem, "100%"]
-        description: persisted Normal, Wide, and Full chat widths
-      - id: desktop-chat-width-bootstrap
-        path: apps/desktop/src/main.tsx
-        needles: [./store/chat-width]
-        description: pre-render chat width application
-      - id: desktop-chat-width-settings
-        path: apps/desktop/src/app/settings/appearance-settings.tsx
-        needles: [setChatWidth, chatWidthOptions]
-        description: chat width settings control
+      - id: web-pre-extract-validated-subset
+        path: tools/web_tools.py
+        needles: [authorized_pre_extract_urls, pre_extract provider_fallback_urls must be a subset]
+        description: plugin fast paths may return only URLs already validated by core before provider or cache access
 
-  - id: desktop.markdown-table-layout
-    title: Fit and horizontally scrollable Markdown tables
+  - id: gateway.plugin-command-invocation-context
+    title: Generic profile-scoped gateway command context
+    owner: kosta
+    class: keep-core
     owner_paths:
-      - apps/desktop/src/store/table-layout.ts
+      - cli.py
+      - gateway/command_context.py
+      - gateway/slash_commands.py
+      - hermes_cli/command_context.py
+      - hermes_cli/commands.py
+      - tui_gateway/methods_tools.py
+      - tests/gateway/test_gateway_command_handlers.py
+      - tests/gateway/test_plugin_command_context.py
+      - tests/gateway/test_unknown_command.py
+      - tests/tui_gateway/test_plugin_command_context_dispatch.py
+    dependent_paths:
+      - gateway/run.py
+      - hermes_cli/plugins.py
+      - tui_gateway/server.py
+    collision_paths:
+      - gateway/run.py
+      - gateway/slash_commands.py
+      - hermes_cli/plugins.py
+      - tui_gateway/server.py
+    tests:
+      - tests/gateway/test_plugin_command_context.py
+      - tests/gateway/test_gateway_command_handlers.py
+      - tests/tui_gateway/test_plugin_command_context_dispatch.py
+    checks:
+      - id: gateway-command-context-dispatch
+        path: gateway/command_context.py
+        needles: [invoke_plugin_command, registration_is_active]
+        description: context-aware command dispatch is profile/source scoped and revoked when the owning registration unloads
+
+  - id: desktop.runtime-enhancement-contributions
+    title: Runtime Desktop settings, state, and scoped-style contribution seams
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - apps/desktop/src/app/settings/contributions.test.tsx
+      - apps/desktop/src/app/settings/contributions.tsx
+      - apps/desktop/src/contrib/plugin-lifecycle.test.ts
+      - apps/desktop/src/contrib/plugin-state.test.ts
+      - apps/desktop/src/contrib/plugin-state.ts
+      - apps/desktop/src/contrib/plugin-styles.test.ts
+      - apps/desktop/src/contrib/plugin-styles.ts
+      - apps/desktop/src/contrib/plugin.ts
+      - apps/desktop/src/contrib/plugins.ts
+      - apps/desktop/src/contrib/react/slot.tsx
+      - apps/desktop/src/contrib/runtime-loader.ts
+      - apps/desktop/src/global.d.ts
+      - apps/desktop/src/main.tsx
+      - apps/desktop/src/sdk/index.ts
       - apps/desktop/src/styles.css
     dependent_paths:
       - apps/desktop/src/app/settings/appearance-settings.tsx
     collision_paths:
       - apps/desktop/src/app/settings/appearance-settings.tsx
+      - apps/desktop/src/contrib/plugin.ts
+      - apps/desktop/src/contrib/plugins.ts
+      - apps/desktop/src/contrib/runtime-loader.ts
+      - apps/desktop/src/sdk/index.ts
     tests:
-      - apps/desktop/src/store/table-layout.test.ts
+      - apps/desktop/src/app/settings/contributions.test.tsx
+      - apps/desktop/src/contrib/plugin-lifecycle.test.ts
+      - apps/desktop/src/contrib/plugin-state.test.ts
+      - apps/desktop/src/contrib/plugin-styles.test.ts
     checks:
-      - id: desktop-table-layout-store
-        path: apps/desktop/src/store/table-layout.ts
-        needles: [hermes.desktop.tableLayout.v1, hermesTableLayout]
-        description: persisted Fit and Scroll table modes
-      - id: desktop-table-layout-styles
-        path: apps/desktop/src/styles.css
-        needles: [data-hermes-table-layout, 'width: max-content', 'min-width: 6rem', 'max-width: 24rem']
-        description: bounded cells and transcript-contained horizontal scrolling
-      - id: desktop-table-layout-settings
-        path: apps/desktop/src/app/settings/appearance-settings.tsx
-        needles: [setTableLayout, tableLayoutOptions]
-        description: Markdown table settings control
-
-  - id: desktop.local-enhancements-settings
-    title: Local enhancements settings section
-    owner_paths:
-      - apps/desktop/src/app/settings/local-enhancements-section.tsx
-      - apps/desktop/src/i18n/local-carry.ts
-    dependent_paths:
-      - apps/desktop/src/app/settings/appearance-settings.tsx
-    collision_paths:
-      - apps/desktop/src/app/settings/appearance-settings.tsx
-    tests:
-      - apps/desktop/src/app/settings/local-enhancements-section.test.tsx
-    checks:
-      - id: desktop-local-enhancements-component
-        path: apps/desktop/src/app/settings/local-enhancements-section.tsx
-        needles: [desktop.local-enhancements-settings, LocalEnhancementsSection]
-        description: reusable collapsible local-enhancements chrome
-      - id: desktop-local-enhancements-mount
-        path: apps/desktop/src/app/settings/appearance-settings.tsx
-        needles: [LocalEnhancementsSection]
-        description: Appearance local-enhancements section mount
-      - id: desktop-local-enhancements-copy
-        path: apps/desktop/src/i18n/local-carry.ts
-        needles: [localCarrySettings, Local Enhancements]
-        description: isolated localized local-carry copy
+      - id: desktop-plugin-resource-transaction
+        path: apps/desktop/src/contrib/plugin.ts
+        needles: [registerPluginResources, disposePluginResources]
+        description: activation rolls back partial contributions and unload attempts every disposer in reverse order
+      - id: desktop-plugin-scoped-state-and-style
+        path: apps/desktop/src/sdk/index.ts
+        needles: [state, styles]
+        description: runtime plugins receive namespaced versioned state and removable host-scoped style capabilities
 
   - id: desktop.loopback-url-fences
     title: Preserve fenced loopback API endpoints
@@ -870,23 +895,44 @@ features:
         needles: [threadStructuralSignature, showCompactionSummaries]
         description: presentation-only filtering hides synthetic summary rows without mutating authoritative history; upstream-PR candidate
 
-  - id: models.vibeproxy-alias-priority
-    title: VibeProxy wins bare Claude-family aliases under provider auto
+  - id: models.provider-plugin-policy
+    title: Profile-scoped provider catalogs and deterministic alias policy
+    owner: kosta
+    class: keep-core
     owner_paths:
-      - tests/test_vibeproxy_alias_priority.py
+      - acp_adapter/server.py
+      - hermes_cli/web_server.py
+      - providers/__init__.py
+      - providers/base.py
+      - tests/hermes_cli/test_model_cache_swr.py
+      - tests/providers/test_entry_point_discovery.py
+      - tests/providers/test_plugin_discovery.py
+      - tests/providers/test_provider_policy.py
+    dependent_paths:
+      - hermes_cli/auth.py
+      - hermes_cli/model_switch.py
+      - hermes_cli/models.py
+      - hermes_cli/plugins.py
+      - tui_gateway/server.py
     collision_paths:
       - hermes_cli/models.py
+      - hermes_cli/plugins.py
+      - providers/__init__.py
+      - providers/base.py
     tests:
-      - tests/test_vibeproxy_alias_priority.py
+      - tests/hermes_cli/test_model_cache_swr.py
+      - tests/providers/test_entry_point_discovery.py
+      - tests/providers/test_plugin_discovery.py
+      - tests/providers/test_provider_policy.py
     checks:
-      - id: vibeproxy-ahead-of-anthropic
-        path: hermes_cli/models.py
-        needles: [POSITION IS LOAD-BEARING]
-        description: >-
-          needle guards the comment; real order enforcement is behavioral —
-          the tests above (short-alias resolves to vibeproxy without network)
-          run whenever hermes_cli/models.py changes, so reordering the
-          _PROVIDER_MODELS dict fails the gate, not just the needle scan
+      - id: provider-profile-alias-policy
+        path: providers/base.py
+        needles: [model_aliases, model_alias_priority]
+        description: provider plugins declare automatic alias ownership explicitly instead of relying on static catalog order
+      - id: provider-profile-registry-scope
+        path: providers/__init__.py
+        needles: [_SCOPED_REGISTRIES, _restore_registry_snapshot, snapshot_registration]
+        description: discovery, unload, failure rollback, catalogs, and auth metadata remain isolated by profile
   - id: models.gemini-36-auxiliary
     title: Gemini 3.6 native auxiliary and curated provider default
     owner_paths:
@@ -1134,55 +1180,52 @@ features:
         needles: [_MEDIA_LINE_RE, _MEDIA_TOKEN_RE, _TTS_AUDIO_PATH_RE, _LOCAL_PATH_RE]
         description: spoken-text normalization removes MEDIA directives and substitutes generated-file labels for host-local paths
 
-  - id: desktop.document-side-panel-preview
-    title: Render PDF and DOCX attachments in the Desktop side panel
+  - id: desktop.attachment-preview-contribution
+    title: Secure runtime attachment preview contribution seam
     owner: kosta
     class: keep-core
     owner_paths:
+      - apps/desktop/electron/attachment-preview.test.ts
+      - apps/desktop/electron/attachment-preview.ts
       - apps/desktop/electron/main.ts
-      - apps/desktop/src/app/session/hooks/use-preview-routing.test.tsx
-      - apps/desktop/src/app/chat/right-rail/preview-file.document.test.tsx
+      - apps/desktop/electron/preload.ts
       - apps/desktop/src/app/chat/right-rail/preview-file.tsx
+      - apps/desktop/src/app/chat/right-rail/preview-pane.test.tsx
+      - apps/desktop/src/app/chat/right-rail/preview-pane.tsx
+      - apps/desktop/src/app/session/hooks/use-preview-routing.test.tsx
       - apps/desktop/src/components/assistant-ui/markdown-text.media.test.tsx
       - apps/desktop/src/components/assistant-ui/markdown-text.tsx
       - apps/desktop/src/components/chat/preview-attachment.tsx
+      - apps/desktop/src/contrib/attachment-preview.test.ts
+      - apps/desktop/src/contrib/attachment-preview.tsx
       - apps/desktop/src/lib/local-preview.test.ts
       - apps/desktop/src/lib/local-preview.ts
-      - apps/desktop/src/lib/preview-target.ts
-      - apps/desktop/src/store/preview-persistence.test.ts
       - apps/desktop/src/store/preview.test.ts
       - apps/desktop/src/store/preview.ts
       - apps/desktop/src/vite-env.d.ts
     collision_paths:
+      - apps/desktop/electron/attachment-preview.ts
       - apps/desktop/electron/main.ts
       - apps/desktop/src/app/chat/right-rail/preview-file.tsx
-      - apps/desktop/src/components/assistant-ui/markdown-text.tsx
+      - apps/desktop/src/contrib/attachment-preview.tsx
       - apps/desktop/src/lib/local-preview.ts
       - apps/desktop/src/store/preview.ts
     tests:
+      - apps/desktop/electron/attachment-preview.test.ts
       - apps/desktop/src/app/session/hooks/use-preview-routing.test.tsx
-      - apps/desktop/src/app/chat/right-rail/preview-file.document.test.tsx
-      - apps/desktop/src/components/assistant-ui/markdown-text.media.test.tsx
+      - apps/desktop/src/app/chat/right-rail/preview-pane.test.tsx
+      - apps/desktop/src/contrib/attachment-preview.test.ts
       - apps/desktop/src/lib/local-preview.test.ts
-      - apps/desktop/src/store/preview-persistence.test.ts
       - apps/desktop/src/store/preview.test.ts
     checks:
-      - id: desktop-document-preview-kinds
-        path: apps/desktop/src/lib/preview-target.ts
-        needles: [DOCUMENT_PREVIEW_KIND_BY_EXT, "'.docx': 'docx'", "'.pdf': 'pdf'"]
-        description: PDF and DOCX paths retain visual preview classification
-      - id: desktop-document-preview-canonicalization
-        path: apps/desktop/src/store/preview.ts
-        needles: [normalizeDocumentPreviewKind, isSamePreviewTarget, a.previewKind]
-        description: stale and persisted document targets are canonicalized and rendering changes invalidate target identity
-      - id: desktop-document-preview-renderers
-        path: apps/desktop/src/app/chat/right-rail/preview-file.tsx
-        needles: [DocumentPreview, PdfPreview, mammoth.convertToHtml, DOMPurify.sanitize, mediaStreamUrl]
-        description: side panel renders sanitized DOCX HTML and streamed local or authenticated remote PDFs
-      - id: desktop-document-preview-stream-fetch
-        path: apps/desktop/electron/main.ts
-        needles: [MEDIA_PROTOCOL, corsEnabled, supportFetchAPI, "'.docx'", "'.pdf'"]
-        description: local document streams remain fetchable across the renderer and media protocol origins
+      - id: desktop-attachment-preview-selection
+        path: apps/desktop/src/contrib/attachment-preview.tsx
+        needles: [selectAttachmentPreviewer, readAttachmentPreview]
+        description: plugins register typed preview renderers while the host validates and reads attachment bytes
+      - id: desktop-attachment-preview-secure-read
+        path: apps/desktop/electron/attachment-preview.ts
+        needles: [O_NOFOLLOW, readAttachmentPreview]
+        description: local previews reject symlink, stale-file, growth, traversal, and sensitive-path races at the Electron boundary
   - id: agent.pre-llm-call-system-context-lane
     title: pre_llm_call system_context injection lane (consumed by plugins-repo conversation-texture)
     owner: kosta
