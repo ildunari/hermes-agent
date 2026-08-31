@@ -5217,6 +5217,8 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
     if not explicit_model:
         return model, None
 
+    from hermes_cli.models import AmbiguousProviderPolicyError
+
     try:
         from hermes_cli.models import detect_static_provider_for_model
 
@@ -5234,6 +5236,8 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
         if detected:
             provider, detected_model = detected
             return detected_model, provider
+    except AmbiguousProviderPolicyError:
+        raise
     except Exception:
         pass
     return model, None

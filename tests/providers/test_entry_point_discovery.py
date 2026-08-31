@@ -120,6 +120,49 @@ def test_entry_point_callable_and_module_targets(monkeypatch):
         _clear_provider_caches()
 
 
+def test_cached_bare_module_registration_is_replayed_per_profile(
+    tmp_path, monkeypatch
+):
+    """A module import side effect must not disappear in the second profile."""
+    from providers.base import ProviderProfile
+
+    loaded_module = object()
+    loads = 0
+
+    def _load_cached_module():
+        nonlocal loads
+        if loads == 0:
+            providers.register_provider(
+                ProviderProfile(
+                    name="ep-scoped-module",
+                    fallback_models=("scoped-model",),
+                )
+            )
+        loads += 1
+        return loaded_module
+
+    fake_eps = _FakeEntryPoints(
+        [_FakeEP("ep-scoped-module", _load_cached_module)]
+    )
+    import importlib.metadata as md
+
+    monkeypatch.setattr(md, "entry_points", lambda: fake_eps)
+    _enable(monkeypatch, "ep-scoped-module")
+    home_a = tmp_path / "a"
+    home_b = tmp_path / "b"
+    home_a.mkdir()
+    home_b.mkdir()
+    _clear_provider_caches()
+    try:
+        first = providers.get_provider_profile("ep-scoped-module", scope=home_a)
+        second = providers.get_provider_profile("ep-scoped-module", scope=home_b)
+        assert first is not None
+        assert second is first
+        assert loads == 2
+    finally:
+        _clear_provider_caches()
+
+
 def test_entry_point_not_enabled_is_skipped(monkeypatch):
     """Entry points honor the plugins.enabled opt-in gate — installed ≠ loaded."""
     fake_eps = _FakeEntryPoints([_FakeEP("ep-callable", _register_via_callable)])
@@ -189,6 +232,32 @@ def test_entry_point_failure_is_isolated(monkeypatch):
     try:
         # A broken entry point must not prevent the good one from registering.
         assert providers.get_provider_profile("ep-callable") is not None
+    finally:
+        _clear_provider_caches()
+
+
+def test_entry_point_failure_rolls_back_partial_registration(monkeypatch):
+    from providers.base import ProviderProfile
+
+    def _partial_then_boom():
+        def register():
+            providers.register_provider(
+                ProviderProfile(name="partial-entrypoint", aliases=("anthropic",))
+            )
+            raise RuntimeError("failed after registration")
+
+        return register
+
+    fake_eps = _FakeEntryPoints([_FakeEP("partial", _partial_then_boom)])
+    import importlib.metadata as md
+
+    monkeypatch.setattr(md, "entry_points", lambda: fake_eps)
+    _enable(monkeypatch, "partial")
+    _clear_provider_caches()
+    try:
+        assert providers.get_provider_profile("partial-entrypoint") is None
+        native = providers.get_provider_profile("anthropic")
+        assert native is not None and native.name == "anthropic"
     finally:
         _clear_provider_caches()
 

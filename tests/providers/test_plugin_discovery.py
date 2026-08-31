@@ -166,6 +166,92 @@ def test_disabled_user_provider_unloads_and_reloads_per_profile(tmp_path, monkey
     _clear_provider_caches()
 
 
-    # No import means the module must NOT be in the plugins list as a loaded one.
-    # We check that the general loader didn't crash and didn't raise from the
-    # broken __init__.py.
+def test_failed_user_plugin_registration_is_rolled_back(tmp_path, monkeypatch):
+    import providers
+
+    home = tmp_path / "profile"
+    plugin_dir = home / "plugins" / "model-providers" / "broken"
+    plugin_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    (plugin_dir / "__init__.py").write_text(
+        "from providers import register_provider\n"
+        "from providers.base import ProviderProfile\n"
+        "register_provider(ProviderProfile(name='partial-hijack', aliases=('anthropic',)))\n"
+        "raise RuntimeError('load failed after registration')\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.yaml").write_text(
+        "name: broken-provider\nkind: model-provider\nversion: 1\n",
+        encoding="utf-8",
+    )
+
+    _clear_provider_caches()
+    try:
+        assert providers.get_provider_profile("partial-hijack", scope=home) is None
+        native = providers.get_provider_profile("anthropic", scope=home)
+        assert native is not None and native.name == "anthropic"
+    finally:
+        _clear_provider_caches()
+
+
+def test_user_plugin_module_names_do_not_collide_after_normalization(
+    tmp_path, monkeypatch
+):
+    import providers
+
+    home = tmp_path / "profile"
+    root = home / "plugins" / "model-providers"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    for directory, provider_name in (("a-b", "dash-provider"), ("a_b", "underscore-provider")):
+        plugin_dir = root / directory
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "__init__.py").write_text(
+            "from providers import register_provider\n"
+            "from providers.base import ProviderProfile\n"
+            f"register_provider(ProviderProfile(name='{provider_name}'))\n",
+            encoding="utf-8",
+        )
+
+    _clear_provider_caches()
+    try:
+        assert providers.get_provider_profile("dash-provider", scope=home) is not None
+        assert providers.get_provider_profile("underscore-provider", scope=home) is not None
+    finally:
+        _clear_provider_caches()
+
+
+def test_unload_evicts_relative_submodules_before_reload(tmp_path, monkeypatch):
+    """Reload must not retain a stale catalog module from the prior generation."""
+    import importlib
+
+    import providers
+
+    home = tmp_path / "profile"
+    plugin_dir = home / "plugins" / "model-providers" / "reloadable"
+    plugin_dir.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    (plugin_dir / "__init__.py").write_text(
+        "from providers import register_provider\n"
+        "from providers.base import ProviderProfile\n"
+        "from .catalog import MODELS\n"
+        "register_provider(ProviderProfile(name='reloadable', fallback_models=MODELS))\n",
+        encoding="utf-8",
+    )
+    catalog = plugin_dir / "catalog.py"
+    catalog.write_text("MODELS = ('first-model',)\n", encoding="utf-8")
+
+    _clear_provider_caches()
+    try:
+        first = providers.get_provider_profile("reloadable", scope=home)
+        assert first is not None and first.fallback_models == ("first-model",)
+
+        catalog.write_text(
+            "MODELS = ('second-model-with-new-size',)\n", encoding="utf-8"
+        )
+        importlib.invalidate_caches()
+        providers.unload_provider_plugins(scope=home)
+        second = providers.get_provider_profile("reloadable", scope=home)
+        assert second is not None
+        assert second.fallback_models == ("second-model-with-new-size",)
+    finally:
+        _clear_provider_caches()

@@ -1492,6 +1492,19 @@ def _resolve_alias_fallback(
     Falls back to ``("openrouter", "nous")`` only when no authenticated
     providers are supplied (backwards compat for non-interactive callers).
     """
+    key = raw_input.strip().lower()
+    try:
+        from hermes_cli import models as model_catalog
+    except Exception:
+        model_catalog = None
+    if model_catalog is not None:
+        policy = model_catalog._registered_alias_policy_result(key)
+        if policy is model_catalog._AMBIGUOUS_ALIAS_POLICY:
+            raise model_catalog.AmbiguousProviderPolicyError(key)
+        if isinstance(policy, tuple):
+            provider, model = policy
+            return provider, model, key
+
     providers = authenticated_providers or ("openrouter", "nous")
     for provider in providers:
         # AmbiguousAliasError propagates: the alias exists on this provider,
@@ -1814,6 +1827,7 @@ def switch_model(
         )
 
     from hermes_cli.models import (
+        AmbiguousProviderPolicyError,
         copilot_model_api_mode,
         detect_provider_for_model,
         validate_requested_model,
@@ -2150,7 +2164,14 @@ def switch_model(
             and not resolved_in_current_catalog
             and not config_routed
         ):
-            detected = detect_provider_for_model(new_model, current_provider)
+            try:
+                detected = detect_provider_for_model(new_model, current_provider)
+            except AmbiguousProviderPolicyError as exc:
+                return ModelSwitchResult(
+                    success=False,
+                    is_global=is_global,
+                    error_message=str(exc),
+                )
             if detected:
                 target_provider, new_model = detected
 

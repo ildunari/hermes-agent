@@ -15,8 +15,10 @@ import importlib.util
 import logging
 import sys
 import threading
+from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Any
 
 from hermes_constants import (
     hermes_home_key,
@@ -41,6 +43,10 @@ _SCOPED_ALIASES: dict[str, dict[str, str]] = {}
 _SCOPED_PROVIDER_LIST_CACHE: dict[str, list[ProviderProfile]] = {}
 _DISCOVERED_SCOPES: set[str] = set()
 _SCOPED_MODULES: dict[str, set[str]] = {}
+# Bare-module entry points self-register only on their first Python import.
+# Retain the profiles that import produced so later Hermes-home scopes can
+# receive the same opt-in provider without re-executing an already-cached module.
+_ENTRY_POINT_PROVIDER_TEMPLATES: dict[str, tuple[ProviderProfile, ...]] = {}
 
 # Module-level plugin code calls register_provider(profile) with no scope. The
 # discovery context supplies the correct target without changing that stable
@@ -65,18 +71,88 @@ def _normalize_name(value: str) -> str:
 
 
 def _rebuild_aliases(registry: dict[str, ProviderProfile]) -> dict[str, str]:
-    aliases: dict[str, str] = {}
+    owners: dict[str, set[str]] = {}
     for canonical in sorted(registry):
         profile = registry[canonical]
         for alias in profile.aliases:
             key = _normalize_name(alias)
             if key:
-                aliases[key] = canonical
-    return aliases
+                owners.setdefault(key, set()).add(canonical)
+    # Collisions are intentionally absent: callers must use a canonical name
+    # rather than having filesystem/load order choose an endpoint.
+    return {
+        alias: next(iter(canonicals))
+        for alias, canonicals in owners.items()
+        if len(canonicals) == 1
+    }
+
+
+def _validate_profile_metadata(profile: ProviderProfile) -> None:
+    """Reject malformed routing metadata before it can affect other profiles.
+
+    Provider modules are an extension boundary.  In particular, one plugin's
+    invalid priority must not make the alias resolver abandon every otherwise
+    valid candidate and fall through to a metered native provider.
+    """
+    if profile.model_alias_priority is not None and (
+        isinstance(profile.model_alias_priority, bool)
+        or not isinstance(profile.model_alias_priority, int)
+    ):
+        raise TypeError("Provider profile .model_alias_priority must be an int or None")
+
+    aliases: Any = profile.model_aliases
+    if isinstance(aliases, Mapping):
+        invalid = any(
+            not isinstance(alias, str)
+            or not alias.strip()
+            or not isinstance(family, str)
+            or not family.strip()
+            for alias, family in aliases.items()
+        )
+    elif isinstance(aliases, (tuple, list, set, frozenset)):
+        invalid = any(not isinstance(alias, str) or not alias.strip() for alias in aliases)
+    else:
+        invalid = True
+    if invalid:
+        raise TypeError(
+            "Provider profile .model_aliases must contain non-empty string aliases"
+        )
+
+    if not isinstance(profile.fallback_models, (tuple, list)) or any(
+        not isinstance(model, str) or not model.strip()
+        for model in profile.fallback_models
+    ):
+        raise TypeError(
+            "Provider profile .fallback_models must contain non-empty model strings"
+        )
 
 
 def _invalidate_scope(scope_key: str) -> None:
     _SCOPED_PROVIDER_LIST_CACHE.pop(scope_key, None)
+
+
+def _restore_registry_snapshot(
+    scope_key: str | None,
+    snapshot: dict[str, ProviderProfile],
+) -> None:
+    """Roll back registrations made by one plugin that failed to load."""
+    global _PROVIDER_LIST_CACHE
+    if scope_key is None:
+        _REGISTRY.clear()
+        _REGISTRY.update(snapshot)
+        _ALIASES.clear()
+        _ALIASES.update(_rebuild_aliases(_REGISTRY))
+        _PROVIDER_LIST_CACHE = None
+        _SCOPED_PROVIDER_LIST_CACHE.clear()
+        return
+
+    if snapshot:
+        _SCOPED_REGISTRIES[scope_key] = dict(snapshot)
+        _SCOPED_ALIASES[scope_key] = _rebuild_aliases(snapshot)
+    else:
+        _SCOPED_REGISTRIES.pop(scope_key, None)
+        _SCOPED_ALIASES.pop(scope_key, None)
+    _invalidate_scope(scope_key)
 
 
 def register_provider(
@@ -105,6 +181,9 @@ def register_provider(
     canonical = _normalize_name(profile.name)
     if not canonical:
         raise ValueError("Provider profile .name must be a non-empty string")
+    if canonical != profile.name:
+        raise ValueError("Provider profile .name must be normalized lowercase text")
+    _validate_profile_metadata(profile)
 
     explicit_scope = hermes_home_key(scope) if scope is not None else None
     target_scope = explicit_scope or _REGISTRATION_SCOPE.get()
@@ -149,14 +228,24 @@ def get_provider_profile(
     scoped_registry = _SCOPED_REGISTRIES.get(scope_key, {})
     scoped_aliases = _SCOPED_ALIASES.get(scope_key, {})
 
+    # Built-in canonical names and aliases are reserved. A user plugin may
+    # deliberately replace a built-in by registering the same canonical name,
+    # but cannot redirect ``anthropic``/``claude`` merely by claiming either as
+    # an alias or by registering a new profile under an existing built-in alias.
+    if lookup in _REGISTRY:
+        return scoped_registry.get(lookup) or _REGISTRY[lookup]
+
+    canonical = _ALIASES.get(lookup)
+    if canonical:
+        return scoped_registry.get(canonical) or _REGISTRY.get(canonical)
+
+    if lookup in scoped_registry:
+        return scoped_registry[lookup]
+
     canonical = scoped_aliases.get(lookup)
     if canonical:
         return scoped_registry.get(canonical)
-
-    canonical = _ALIASES.get(lookup, lookup)
-    # A scoped canonical override also owns the bundled profile's historical
-    # aliases, preserving last-writer-wins compatibility.
-    return scoped_registry.get(canonical) or _REGISTRY.get(canonical)
+    return None
 
 
 def list_providers(
@@ -269,6 +358,7 @@ def _reset_for_tests() -> None:
         _SCOPED_ALIASES.clear()
         _SCOPED_PROVIDER_LIST_CACHE.clear()
         _DISCOVERED_SCOPES.clear()
+        _ENTRY_POINT_PROVIDER_TEMPLATES.clear()
         for modules in _SCOPED_MODULES.values():
             for module_name in modules:
                 sys.modules.pop(module_name, None)
@@ -327,13 +417,21 @@ def _import_plugin_dir(
         module_name = f"plugins.model_providers.{safe_name}"
     else:
         digest = hashlib.sha256(str(scope_key).encode("utf-8")).hexdigest()[:12]
-        module_name = f"_hermes_user_provider_{digest}_{safe_name}"
+        plugin_digest = hashlib.sha256(plugin_dir.name.encode("utf-8")).hexdigest()[:8]
+        module_name = f"_hermes_user_provider_{digest}_{plugin_digest}_{safe_name}"
 
     if module_name in sys.modules:
         return
 
     scope_token = _REGISTRATION_SCOPE.set(scope_key if source == "user" else None)
     precedence_token = _REGISTRATION_PRECEDENCE.set(source)
+    target_scope = scope_key if source == "user" else None
+    target_registry = (
+        _REGISTRY
+        if target_scope is None
+        else _SCOPED_REGISTRIES.get(target_scope, {})
+    )
+    registry_snapshot = dict(target_registry)
     try:
         spec = importlib.util.spec_from_file_location(
             module_name, init_file, submodule_search_locations=[str(plugin_dir)]
@@ -344,12 +442,20 @@ def _import_plugin_dir(
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
         if scope_key is not None:
-            _SCOPED_MODULES.setdefault(scope_key, set()).add(module_name)
+            owned_modules = {
+                name
+                for name in sys.modules
+                if name == module_name or name.startswith(f"{module_name}.")
+            }
+            _SCOPED_MODULES.setdefault(scope_key, set()).update(owned_modules)
     except Exception as exc:
+        _restore_registry_snapshot(target_scope, registry_snapshot)
         logger.warning(
             "Failed to load %s provider plugin %s: %s", source, plugin_dir.name, exc
         )
-        sys.modules.pop(module_name, None)
+        for name in tuple(sys.modules):
+            if name == module_name or name.startswith(f"{module_name}."):
+                sys.modules.pop(name, None)
     finally:
         _REGISTRATION_PRECEDENCE.reset(precedence_token)
         _REGISTRATION_SCOPE.reset(scope_token)
@@ -390,13 +496,35 @@ def _discover_entry_point_providers(scope_key: str) -> None:
             continue
         scope_token = _REGISTRATION_SCOPE.set(scope_key)
         precedence_token = _REGISTRATION_PRECEDENCE.set("entrypoint")
+        registry_snapshot = dict(_SCOPED_REGISTRIES.get(scope_key, {}))
+        template_key = f"{entry_point.name}:{getattr(entry_point, 'value', '')}"
         try:
             loaded = entry_point.load()
             if callable(loaded):
                 if _requires_arguments(loaded):
+                    _restore_registry_snapshot(scope_key, registry_snapshot)
                     continue
                 loaded()
+            else:
+                current = _SCOPED_REGISTRIES.get(scope_key, {})
+                registered = tuple(
+                    current[name]
+                    for name in sorted(current)
+                    if registry_snapshot.get(name) is not current[name]
+                )
+                if registered:
+                    _ENTRY_POINT_PROVIDER_TEMPLATES[template_key] = registered
+                else:
+                    # ``entry_point.load()`` returned an already-imported bare
+                    # module, so its registration side effect did not run for
+                    # this scope. Replay only the validated profiles captured
+                    # from that same entry point's first import.
+                    for profile in _ENTRY_POINT_PROVIDER_TEMPLATES.get(
+                        template_key, ()
+                    ):
+                        register_provider(profile, scope=scope_key)
         except Exception as exc:
+            _restore_registry_snapshot(scope_key, registry_snapshot)
             logger.warning(
                 "Failed to load entry-point provider plugin %r: %s",
                 entry_point.name,

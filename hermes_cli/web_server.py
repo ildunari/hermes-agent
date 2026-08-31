@@ -8061,6 +8061,7 @@ def _infer_provider_on_model_change(model_val: str, prev_provider: str) -> tuple
     try:
         from hermes_cli.models import (
             _AGGREGATOR_PROVIDERS,
+            AmbiguousProviderPolicyError,
             detect_provider_for_model,
             normalize_provider,
         )
@@ -8069,6 +8070,8 @@ def _infer_provider_on_model_change(model_val: str, prev_provider: str) -> tuple
 
     try:
         detected = detect_provider_for_model(name, prev_provider)
+    except AmbiguousProviderPolicyError:
+        raise
     except Exception:
         detected = None
     if detected:

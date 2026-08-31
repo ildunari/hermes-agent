@@ -11,6 +11,7 @@ and refreshed off-thread for the next open.
 from __future__ import annotations
 
 import time
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -146,6 +147,33 @@ class TestProviderModelsSWR:
 
         assert saved["openrouter"]["models"] == ["fresh1", "fresh2"]
         assert "openrouter" not in mod._swr_refresh_inflight  # cleared on completion
+
+    def test_swr_refresh_preserves_named_profile_context(self, tmp_path):
+        import hermes_cli.models as mod
+        from hermes_constants import (
+            hermes_home_key,
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        profile_home = tmp_path / "profile"
+        profile_home.mkdir()
+        observed = []
+        finished = threading.Event()
+
+        def refresh():
+            observed.append(hermes_home_key())
+            finished.set()
+            return None
+
+        token = set_hermes_home_override(profile_home)
+        try:
+            mod._spawn_swr_refresh("profile-provider", refresh_fn=refresh)
+        finally:
+            reset_hermes_home_override(token)
+
+        assert finished.wait(2), "background refresh did not finish"
+        assert observed == [hermes_home_key(profile_home)]
 
 
 class TestCatalogSWR:

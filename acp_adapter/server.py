@@ -982,6 +982,8 @@ class HermesACPAgent(acp.Agent):
         target_provider = current_provider
         new_model = raw_model.strip()
 
+        from hermes_cli.models import AmbiguousProviderPolicyError
+
         try:
             from hermes_cli.models import detect_provider_for_model, parse_model_input
 
@@ -990,6 +992,8 @@ class HermesACPAgent(acp.Agent):
                 detected = detect_provider_for_model(new_model, current_provider)
                 if detected:
                     target_provider, new_model = detected
+        except AmbiguousProviderPolicyError:
+            raise
         except Exception:
             logger.debug("Provider detection failed, using model as-is", exc_info=True)
 

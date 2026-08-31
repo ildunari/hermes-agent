@@ -8,6 +8,7 @@ Add, remove, or reorder entries here — both `hermes setup` and
 from __future__ import annotations
 
 import copy
+import contextvars
 import json
 import http.client
 import logging
@@ -18,6 +19,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 import time
+from collections.abc import Iterator, Mapping, Sequence
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, NamedTuple, Optional, TYPE_CHECKING
@@ -1225,7 +1227,7 @@ class ProviderEntry(NamedTuple):
     label: str
     tui_desc: str   # detailed description for `hermes model` TUI
 
-CANONICAL_PROVIDERS: list[ProviderEntry] = [
+_BASE_CANONICAL_PROVIDERS: tuple[ProviderEntry, ...] = (
     ProviderEntry("nous",           "Nous Portal",              "Nous Portal (Everything your agent needs, 300+ models with bundled tool use)"),
     ProviderEntry("fireworks",      "Fireworks AI",             "Fireworks AI (OpenAI-compatible direct model API)"),
     ProviderEntry("openrouter",     "OpenRouter",               "OpenRouter (Pay-per-use API aggregator)"),
@@ -1264,30 +1266,75 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("azure-foundry",  "Azure Foundry",            "Azure Foundry (OpenAI-style or Anthropic-style endpoint, your Azure AI deployment)"),
     ProviderEntry("ai-gateway",     "Vercel AI Gateway",        "Vercel AI Gateway (Multi-model aggregator)"),
     ProviderEntry("qwen-oauth",     "Qwen OAuth (Portal)",      "Qwen OAuth (Reuses local Qwen CLI login)"),
-]
+)
 
-# Auto-extend CANONICAL_PROVIDERS with any provider registered in providers/
-# that is not already in the list above.  Adding plugins/model-providers/<name>/
-# is sufficient to expose a new provider in the model picker, /model, and all
-# downstream consumers — no edits to this file needed.
-_canonical_slugs = {p.slug for p in CANONICAL_PROVIDERS}
-try:
-    from providers import list_providers as _list_providers_for_canonical
-    for _pp in _list_providers_for_canonical():
-        if _pp.name in _canonical_slugs:
-            continue
-        if _pp.auth_type in {"oauth_device_code", "oauth_external", "external_process", "aws_sdk", "copilot", "vertex"}:
-            continue  # non-api-key flows need bespoke picker UX; skip auto-inject
-        _label = _pp.display_name or _pp.name
-        _desc = _pp.description or f"{_label} (direct API)"
-        CANONICAL_PROVIDERS.append(ProviderEntry(_pp.name, _label, _desc))
-        _canonical_slugs.add(_pp.name)
-except Exception:
-    pass
 
-# Derived dicts — used throughout the codebase
-_PROVIDER_LABELS = {p.slug: p.label for p in CANONICAL_PROVIDERS}
-_PROVIDER_LABELS["custom"] = "Custom endpoint"  # special case: not a named provider
+def _canonical_provider_snapshot() -> tuple[ProviderEntry, ...]:
+    """Return the picker universe for the active Hermes profile.
+
+    Plugin providers cannot be appended to a module-global list: one long-lived
+    gateway serves multiple profiles, and the first profile to import this
+    module would otherwise leak its provider rows into every later profile.
+    """
+    rows = list(_BASE_CANONICAL_PROVIDERS)
+    seen = {entry.slug for entry in rows}
+    try:
+        from providers import list_providers  # type: ignore[attr-defined]
+
+        for profile in list_providers():
+            if profile.name in seen or profile.name in _BASE_PROVIDER_ALIASES:
+                continue
+            if profile.auth_type in {
+                "oauth_device_code",
+                "oauth_external",
+                "external_process",
+                "aws_sdk",
+                "copilot",
+                "vertex",
+            }:
+                continue
+            label = profile.display_name or profile.name
+            description = profile.description or f"{label} (direct API)"
+            rows.append(ProviderEntry(profile.name, label, description))
+            seen.add(profile.name)
+    except Exception:
+        pass
+    return tuple(rows)
+
+
+class _ScopedCanonicalProviders(Sequence[ProviderEntry]):
+    """Read-only sequence view over the active profile's provider rows."""
+
+    def __getitem__(self, index):
+        return _canonical_provider_snapshot()[index]
+
+    def __len__(self) -> int:
+        return len(_canonical_provider_snapshot())
+
+    def __iter__(self) -> Iterator[ProviderEntry]:
+        return iter(_canonical_provider_snapshot())
+
+
+CANONICAL_PROVIDERS: Sequence[ProviderEntry] = _ScopedCanonicalProviders()
+
+
+class _ScopedProviderLabels(Mapping[str, str]):
+    def _snapshot(self) -> dict[str, str]:
+        labels = {entry.slug: entry.label for entry in _canonical_provider_snapshot()}
+        labels["custom"] = "Custom endpoint"
+        return labels
+
+    def __getitem__(self, key: str) -> str:
+        return self._snapshot()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._snapshot())
+
+    def __len__(self) -> int:
+        return len(self._snapshot())
+
+
+_PROVIDER_LABELS: Mapping[str, str] = _ScopedProviderLabels()
 
 
 # ---------------------------------------------------------------------------
@@ -1394,7 +1441,7 @@ def group_providers(slugs):
     return rows
 
 
-_PROVIDER_ALIASES = {
+_BASE_PROVIDER_ALIASES = {
     "glm": "zai",
     "z-ai": "zai",
     "z.ai": "zai",
@@ -1485,6 +1532,41 @@ _PROVIDER_ALIASES = {
     "ollama": "custom",  # bare "ollama" = local; use "ollama-cloud" for cloud
     "ollama_cloud": "ollama-cloud",
 }
+
+
+class _ScopedProviderAliases(Mapping[str, str]):
+    def _snapshot(self) -> dict[str, str]:
+        aliases = dict(_BASE_PROVIDER_ALIASES)
+        reserved = aliases.keys() | {entry.slug for entry in _BASE_CANONICAL_PROVIDERS}
+        plugin_owners: dict[str, set[str]] = {}
+        try:
+            from providers import list_providers  # type: ignore[attr-defined]
+
+            for profile in list_providers():
+                for alias in profile.aliases:
+                    # Core canonical names and aliases are authoritative. A
+                    # plugin may add names, not redirect existing provider ids.
+                    normalized = str(alias).strip().lower()
+                    if normalized and normalized not in reserved:
+                        plugin_owners.setdefault(normalized, set()).add(profile.name)
+        except Exception:
+            pass
+        for alias, owners in plugin_owners.items():
+            if len(owners) == 1:
+                aliases[alias] = next(iter(owners))
+        return aliases
+
+    def __getitem__(self, key: str) -> str:
+        return self._snapshot()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._snapshot())
+
+    def __len__(self) -> int:
+        return len(self._snapshot())
+
+
+_PROVIDER_ALIASES: Mapping[str, str] = _ScopedProviderAliases()
 
 
 # In-repo fallback for the model Hermes silently lands on when the user never
@@ -2724,8 +2806,8 @@ def _fetch_novita_pricing(
 
 # All provider IDs and aliases that are valid for the provider:model syntax.
 _KNOWN_PROVIDER_NAMES: set[str] = (
-    set(_PROVIDER_LABELS.keys())
-    | set(_PROVIDER_ALIASES.keys())
+    {entry.slug for entry in _BASE_CANONICAL_PROVIDERS}
+    | set(_BASE_PROVIDER_ALIASES)
     | {"openrouter", "custom"}
 )
 
@@ -2818,7 +2900,12 @@ def parse_model_input(raw: str, current_provider: str) -> tuple[str, str]:
     if colon > 0:
         provider_part = stripped[:colon].strip().lower()
         model_part = stripped[colon + 1:].strip()
-        if provider_part and model_part and provider_part in _KNOWN_PROVIDER_NAMES:
+        active_provider_names = (
+            _KNOWN_PROVIDER_NAMES
+            | set(_PROVIDER_LABELS)
+            | set(_PROVIDER_ALIASES)
+        )
+        if provider_part and model_part and provider_part in active_provider_names:
             if provider_part == "custom":
                 lowered = stripped.lower()
                 for custom_id in sorted(
@@ -3311,7 +3398,19 @@ def curated_models_for_provider(
 def _provider_keys(provider: str) -> set[str]:
     key = (provider or "").strip().lower()
     normalized = normalize_provider(provider)
-    return {k for k in (key, normalized) if k}
+    keys = {k for k in (key, normalized) if k}
+    try:
+        from providers import get_provider_profile
+
+        profile = get_provider_profile(key)
+        if profile is not None and profile.name:
+            canonical = str(profile.name).strip().lower()
+            keys.add(canonical)
+            if key != canonical:
+                keys.discard(key)
+    except Exception:
+        pass
+    return keys
 
 
 # Retired model IDs kept for /model auto-detect only — not shown in pickers.
@@ -3347,7 +3446,7 @@ def _catalog_provider_names() -> tuple[str, ...]:
     """Static provider names plus profile-only plugin names, deterministically."""
     names = list(_PROVIDER_MODELS)
     try:
-        from providers import list_providers
+        from providers import list_providers  # type: ignore[attr-defined]
 
         names.extend(
             sorted(
@@ -3418,6 +3517,17 @@ _LIVE_FIRST_PICKER_PROVIDERS: frozenset[str] = frozenset(
 _AMBIGUOUS_ALIAS_POLICY = object()
 
 
+class AmbiguousProviderPolicyError(ValueError):
+    """Equal-priority provider policies claimed the same model input."""
+
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        super().__init__(
+            f"Multiple provider plugins claim {model_name!r} at the same priority; "
+            "select a provider explicitly."
+        )
+
+
 def _profile_alias_model(profile, family: str) -> Optional[str]:
     """Return a profile catalog model matching one declared alias family."""
     prefix = str(family or "").strip().lower()
@@ -3437,7 +3547,7 @@ def _resolve_registered_alias_policy(name_lower: str, identity=None):
     try:
         from collections.abc import Mapping
 
-        from providers import list_providers
+        from providers import list_providers  # type: ignore[attr-defined]
 
         candidates: list[tuple[int, str, str]] = []
         for profile in list_providers():
@@ -3496,7 +3606,7 @@ def _resolve_registered_model_policy(name_lower: str):
         from collections.abc import Mapping
 
         from hermes_cli.model_switch import MODEL_ALIASES
-        from providers import list_providers
+        from providers import list_providers  # type: ignore[attr-defined]
 
         candidates: list[tuple[int, str, str]] = []
         for profile in list_providers():
@@ -3584,7 +3694,16 @@ def _resolve_static_model_alias(
     # preference, including a metered native provider selected deliberately.
     for provider in sorted(current_keys):
         if matched := _match(provider):
-            return provider, matched
+            canonical = normalize_provider(provider)
+            try:
+                from providers import get_provider_profile  # type: ignore[attr-defined]
+
+                profile = get_provider_profile(provider)
+                if profile is not None:
+                    canonical = profile.name
+            except Exception:
+                pass
+            return canonical, matched
 
     policy_match = _resolve_registered_alias_policy(name_lower, identity)
     if policy_match is _AMBIGUOUS_ALIAS_POLICY:
@@ -3623,7 +3742,9 @@ def detect_static_provider_for_model(
 
     Returns ``(provider_id, model_name)``. The model name may be remapped
     when a static alias or bare provider name resolves to a catalog default.
-    Returns ``None`` when no confident match is found.
+    Returns ``None`` when no confident match is found. Raises
+    :class:`AmbiguousProviderPolicyError` when equal-priority plugin policies
+    claim the input, so callers cannot silently fall through to a paid route.
     """
     name = (model_name or "").strip()
     if not name:
@@ -3634,7 +3755,7 @@ def detect_static_provider_for_model(
 
     alias_match = _resolve_static_model_alias(name_lower, current_keys)
     if alias_match is _AMBIGUOUS_ALIAS_POLICY:
-        return None
+        raise AmbiguousProviderPolicyError(name)
     if isinstance(alias_match, tuple):
         return alias_match
 
@@ -3684,7 +3805,7 @@ def detect_static_provider_for_model(
     )
     policy_model_match = _resolve_registered_model_policy(name_lower)
     if policy_model_match is _AMBIGUOUS_ALIAS_POLICY:
-        return None
+        raise AmbiguousProviderPolicyError(name)
     if isinstance(policy_model_match, tuple) and not _is_custom_current:
         return policy_model_match
     for pid in _catalog_provider_names():
@@ -3732,13 +3853,6 @@ def detect_provider_for_model(
     static_match = detect_static_provider_for_model(name, current_provider)
     if static_match:
         return static_match
-    # An equal top-priority plugin tie is an explicit ambiguity, not a miss.
-    # Do not turn it into an OpenRouter network lookup or a paid fallback.
-    if (
-        _registered_alias_policy_result(name.lower()) is _AMBIGUOUS_ALIAS_POLICY
-        or _resolve_registered_model_policy(name.lower()) is _AMBIGUOUS_ALIAS_POLICY
-    ):
-        return None
     if _model_in_provider_catalog(name.lower(), _provider_keys(current_provider)):
         return None
 
@@ -4501,8 +4615,14 @@ def _spawn_swr_refresh(cache_key: str, refresh_fn=None) -> None:
             with _swr_refresh_lock:
                 _swr_refresh_inflight.discard(cache_key)
 
+    # New threads start with an empty ContextVar context. Capture the caller's
+    # profile override so a named-profile refresh cannot read or write the
+    # process launch profile's provider catalog/cache.
+    refresh_context = contextvars.copy_context()
     threading.Thread(
-        target=_refresh, daemon=True, name=f"model-cache-swr-{cache_key}"
+        target=lambda: refresh_context.run(_refresh),
+        daemon=True,
+        name=f"model-cache-swr-{cache_key}",
     ).start()
 
 

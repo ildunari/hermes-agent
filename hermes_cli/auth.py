@@ -248,7 +248,7 @@ class ProviderConfig:
     base_url_env_var: str = ""
 
 
-PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
+_BASE_PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
     "nous": ProviderConfig(
         id="nous",
         name="Nous Portal",
@@ -573,39 +573,106 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
     ),
 }
 
-# Auto-extend PROVIDER_REGISTRY with any api-key provider registered in
-# providers/ that is not already declared above.  New providers only need a
-# plugins/model-providers/<name>/ plugin — no edits to this file required.
-try:
-    from providers import list_providers as _list_providers_for_registry
-    for _pp in _list_providers_for_registry():
-        if _pp.name in PROVIDER_REGISTRY:
-            continue
-        if _pp.auth_type != "api_key" or not _pp.env_vars:
-            continue
-        # Skip providers that need custom token resolution or are special-cased
-        # in resolve_provider() (copilot/kimi/zai have bespoke token refresh;
-        # openrouter/custom are aggregator/user-supplied and handled outside
-        # the registry — adding them here breaks runtime_provider resolution
-        # that relies on `openrouter not in PROVIDER_REGISTRY`).
-        if _pp.name in {"copilot", "kimi-coding", "kimi-coding-cn", "zai", "openrouter", "custom"}:
-            continue
-        _api_key_vars = tuple(v for v in _pp.env_vars if not v.endswith("_BASE_URL") and not v.endswith("_URL"))
-        _base_url_var = next((v for v in _pp.env_vars if v.endswith("_BASE_URL") or v.endswith("_URL")), None)
-        PROVIDER_REGISTRY[_pp.name] = ProviderConfig(
-            id=_pp.name,
-            name=_pp.display_name or _pp.name,
-            auth_type="api_key",
-            inference_base_url=_pp.base_url,
-            api_key_env_vars=_api_key_vars or _pp.env_vars,
-            base_url_env_var=_base_url_var or "",
-        )
-        # Also register aliases so resolve_provider() resolves them
-        for _alias in _pp.aliases:
-            if _alias not in PROVIDER_REGISTRY:
-                PROVIDER_REGISTRY[_alias] = PROVIDER_REGISTRY[_pp.name]
-except Exception:
-    pass
+class _ScopedProviderRegistry(dict[str, ProviderConfig]):
+    """Built-in auth registry plus active-profile provider definitions.
+
+    A normal module-global auto-extension permanently retained whichever user
+    plugin happened to import ``auth`` first.  This mapping keeps legacy dict
+    behavior for built-ins while deriving plugin rows at each profile-scoped
+    read, so disable/unload and multiplex profile switches take effect at once.
+    """
+
+    _SPECIAL = {
+        "copilot",
+        "kimi-coding",
+        "kimi-coding-cn",
+        "zai",
+        "openrouter",
+        "custom",
+    }
+
+    def _snapshot(self) -> dict[str, ProviderConfig]:
+        merged = {key: value for key, value in dict.items(self)}
+        reserved = set(merged)
+        plugin_aliases: dict[str, list[ProviderConfig]] = {}
+        try:
+            from providers import list_providers  # type: ignore[attr-defined]
+
+            for profile in list_providers():
+                if (
+                    profile.auth_type != "api_key"
+                    or not profile.env_vars
+                    or profile.name in self._SPECIAL
+                ):
+                    continue
+                config = merged.get(profile.name)
+                if config is None:
+                    key_vars = tuple(
+                        value
+                        for value in profile.env_vars
+                        if not value.endswith("_BASE_URL")
+                        and not value.endswith("_URL")
+                    )
+                    base_url_var = next(
+                        (
+                            value
+                            for value in profile.env_vars
+                            if value.endswith("_BASE_URL")
+                            or value.endswith("_URL")
+                        ),
+                        "",
+                    )
+                    config = ProviderConfig(
+                        id=profile.name,
+                        name=profile.display_name or profile.name,
+                        auth_type="api_key",
+                        inference_base_url=profile.base_url,
+                        api_key_env_vars=key_vars or tuple(profile.env_vars),
+                        base_url_env_var=base_url_var,
+                    )
+                    merged[profile.name] = config
+                for alias in profile.aliases:
+                    normalized = str(alias).strip().lower()
+                    if normalized and normalized not in reserved:
+                        plugin_aliases.setdefault(normalized, []).append(config)
+        except Exception:
+            pass
+        for alias, configs in plugin_aliases.items():
+            owners = {config.id for config in configs}
+            if len(owners) == 1:
+                merged[alias] = configs[0]
+        return merged
+
+    def __getitem__(self, key: str) -> ProviderConfig:
+        if dict.__contains__(self, key):
+            return dict.__getitem__(self, key)
+        return self._snapshot()[key]
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._snapshot()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._snapshot().get(key, default)
+
+    def __iter__(self):
+        return iter(self._snapshot())
+
+    def __len__(self) -> int:
+        return len(self._snapshot())
+
+    def keys(self):
+        return self._snapshot().keys()
+
+    def values(self):
+        return self._snapshot().values()
+
+    def items(self):
+        return self._snapshot().items()
+
+
+PROVIDER_REGISTRY: Dict[str, ProviderConfig] = _ScopedProviderRegistry(
+    _BASE_PROVIDER_REGISTRY
+)
 
 
 # =============================================================================
@@ -2340,17 +2407,6 @@ def resolve_provider(
         "vllm": "custom", "llamacpp": "custom",
         "llama.cpp": "custom", "llama-cpp": "custom",
     }
-    # Extend with aliases declared in plugins/model-providers/<name>/ that aren't already mapped.
-    # This keeps providers/ as the single source for new aliases while the
-    # hardcoded dict above remains authoritative for existing ones.
-    try:
-        from providers import list_providers as _lp
-        for _pp in _lp():
-            for _alias in _pp.aliases:
-                if _alias not in _PROVIDER_ALIASES:
-                    _PROVIDER_ALIASES[_alias] = _pp.name
-    except Exception:
-        pass
     normalized = _PROVIDER_ALIASES.get(normalized, normalized)
 
     if normalized == "openrouter":
@@ -2358,7 +2414,7 @@ def resolve_provider(
     if normalized == "custom":
         return "custom"
     if normalized in PROVIDER_REGISTRY:
-        return normalized
+        return PROVIDER_REGISTRY[normalized].id
     if normalized != "auto":
         # Check for common config.yaml issues that cause this error
         _config_hint = _get_config_hint_for_unknown_provider(normalized)
@@ -2389,8 +2445,11 @@ def resolve_provider(
         _model_cfg = (load_config() or {}).get("model")
         if isinstance(_model_cfg, dict):
             _cfg_provider = _model_cfg.get("provider")
-            if isinstance(_cfg_provider, str) and _cfg_provider.strip().lower() in PROVIDER_REGISTRY:
-                return _cfg_provider.strip().lower()
+            if (
+                isinstance(_cfg_provider, str)
+                and _cfg_provider.strip().lower() in PROVIDER_REGISTRY
+            ):
+                return PROVIDER_REGISTRY[_cfg_provider.strip().lower()].id
     except Exception as e:
         logger.debug("Could not read config.yaml model.provider for auto-resolution: %s", e)
 
