@@ -81,10 +81,6 @@ checks:
     path: skills/creative/baoyu-infographic/SKILL.md
     needles: [Verify the host before generating., 127.0.0.1 resolves to whatever machine the client runs on]
     description: bundled image-generation skill stays host-neutral (upstream-PR candidate)
-  - id: bundled-image-skill-host-neutral-comfyui
-    path: skills/creative/comfyui/SKILL.md
-    needles: [Verify the host before generating., 127.0.0.1 resolves to whatever machine the client runs on]
-    description: bundled image-generation skill stays host-neutral (upstream-PR candidate)
 
   - id: provider-profile-finalize-hook
     path: providers/base.py
@@ -796,6 +792,42 @@ features:
         path: gateway/platforms/api_server.py
         needles: [VALID_REASONING_EFFORTS, '_REASONING_EFFORTS = frozenset']
         description: API model-options parsing accepts every canonical Hermes reasoning level, including max
+
+  - id: gateway.api-run-child-lifecycle
+    title: Preserve compact delegated-child ownership on API Runs
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - gateway/platforms/api_server_runs.py
+    collision_paths:
+      - gateway/platforms/api_server.py
+      - gateway/platforms/api_server_runs.py
+    tests:
+      - tests/gateway/test_api_server_runs.py
+      - tests/gateway/test_api_server_runtime_routing.py
+    checks:
+      - id: gateway-api-run-child-ownership
+        path: gateway/platforms/api_server_runs.py
+        needles: [_api_parent_session_id, _api_run_id, _run_subagents, subagent.upsert]
+        description: API Runs bind immutable parent ownership, retain sanitized compact child state, and reclaim it with the run lifecycle
+      - id: gateway-api-run-narrow-fixture-safety
+        path: gateway/platforms/api_server_runs.py
+        needles: ['getattr(self, "_run_idempotency_ids", set())']
+        description: routing callbacks remain safe in narrow adapters that do not initialize idempotency persistence
+
+  - id: auth.anthropic-refresh-scopes
+    title: Preserve Claude OAuth scopes on auxiliary refresh
+    owner: kosta
+    class: keep-core
+    owner_paths:
+      - agent/anthropic_credentials.py
+    tests:
+      - tests/agent/test_auxiliary_client.py
+    checks:
+      - id: anthropic-refresh-scope-persistence
+        path: agent/anthropic_credentials.py
+        needles: [scopes=scopes, 'user:inference']
+        description: direct auxiliary refreshes durably preserve Claude OAuth scopes instead of narrowing the rotated credential
 
   - id: runtime.doctor-live-backend-probes
     title: Keep live doctor aligned with configured runtime backends
