@@ -206,6 +206,48 @@ def _resolve_ws_orphan_reap_grace() -> float:
 
 
 _WS_ORPHAN_REAP_GRACE_S = _resolve_ws_orphan_reap_grace()
+
+
+def _resolve_ws_orphan_activity_stale() -> float:
+    """Resolve the detached-turn activity staleness threshold (seconds).
+
+    A detached RUNNING turn is only interrupted by the WS-orphan reaper once
+    its activity clock has been idle at least this long (#98028/#100325);
+    while the turn keeps producing (API waits, stream tokens, tool
+    heartbeats all stamp the clock) it runs to completion detached.
+    Config-driven via ``dashboard.ws_orphan_activity_stale_s``; the
+    ``HERMES_TUI_WS_ORPHAN_ACTIVITY_STALE_S`` env var is an internal
+    override. Defaults to 600s, matching the turn-liveness watchdog's idle
+    bound (``agent.turn_liveness.timeout_s``) so "wedged" means the same
+    thing on both paths. ``0`` disables the gate (pre-#98028 behavior:
+    interrupt at grace regardless of activity).
+    """
+    raw = os.environ.get("HERMES_TUI_WS_ORPHAN_ACTIVITY_STALE_S")
+    if raw is None or not str(raw).strip():
+        try:
+            from hermes_cli.config import load_config
+
+            raw = (load_config().get("dashboard") or {}).get(
+                "ws_orphan_activity_stale_s"
+            )
+        except Exception:
+            raw = None
+    try:
+        stale = float(raw) if raw is not None else 600.0
+    except (ValueError, TypeError):
+        stale = 600.0
+    return max(0.0, stale)
+
+
+_WS_ORPHAN_ACTIVITY_STALE_S = _resolve_ws_orphan_activity_stale()
+_WS_ORPHAN_INTERRUPT_REAP_POLL_S = 1.0
+# Total budget for the interrupt-then-reap poll chain. If an interrupted turn
+# never settles (agent thread hung in a syscall, supervisor lost), each 1s poll
+# would otherwise reschedule forever — trading the old leak-one-worker bug for
+# leak-one-session-plus-timer-chain (review finding, PR #90373). After this
+# many polls we log loudly and force-reap, mirroring the pre-existing
+# stuck-`running` safety net's role of breaking the deadlock.
+_WS_ORPHAN_INTERRUPT_REAP_MAX_POLLS = 60
 _TURN_SETTLE_BEFORE_CLOSE_SECONDS = 5.0
 _DETAIL_SECTION_NAMES = ("thinking", "tools", "subagents", "activity")
 _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
@@ -1421,6 +1463,40 @@ def _cancel_ws_orphan_reap(sid: str) -> None:
         logger.info("ws_orphan sid=%s action=reattached", sid)
 
 
+def _ws_orphan_turn_activity_is_fresh(session: dict) -> bool:
+    """Whether a detached RUNNING turn's activity clock is still fresh.
+
+    Reuses the agent's existing activity summary (``_touch_activity`` is
+    stamped by API waits, stream tokens, and tool heartbeats — the same
+    clock the turn-liveness watchdog samples; see agent/turn_liveness.py).
+    Fresh means the WS-orphan reaper must NOT interrupt the turn yet
+    (#98028/#100325): deliberate client absence (closed laptop, backgrounded
+    mobile app, desktop update/relaunch) keeps healthy work running detached.
+
+    Conservative fallbacks preserve the wedged-turn safety net: a disabled
+    threshold (<= 0), a missing/opaque agent, an unreadable summary, or a
+    never-stamped clock all report NOT fresh, i.e. eligible for the
+    interrupt-at-grace path exactly as before.
+    """
+    if _WS_ORPHAN_ACTIVITY_STALE_S <= 0:
+        return False
+    if session.get("_compute_host_active"):
+        # The isolated host owns both the live agent and its liveness watchdog;
+        # the parent mirror has no AIAgent activity clock to sample. Treat an
+        # active host-owned turn as fresh here rather than manufacturing an
+        # interrupt merely because the parent-side agent is intentionally None.
+        return True
+    agent = session.get("agent")
+    summary_fn = getattr(agent, "get_activity_summary", None)
+    if not callable(summary_fn):
+        return False
+    try:
+        elapsed = summary_fn().get("seconds_since_activity")
+        return elapsed is not None and float(elapsed) < _WS_ORPHAN_ACTIVITY_STALE_S
+    except Exception:
+        return False
+
+
 def _schedule_ws_orphan_reap(sid: str, *, delay_s: float | None = None) -> None:
     """After a grace window, reap session ``sid`` iff it's still orphaned.
 
@@ -1443,6 +1519,7 @@ def _schedule_ws_orphan_reap(sid: str, *, delay_s: float | None = None) -> None:
         # guard with _sessions_lock). _sessions_lock is an RLock and the global
         # ordering is always resume_lock -> sessions_lock, so nesting is safe.
         reschedule_delay = None
+        interrupt_session = None
         session = None
         settled_after_running = False
         with _session_resume_lock:
@@ -1458,22 +1535,72 @@ def _schedule_ws_orphan_reap(sid: str, *, delay_s: float | None = None) -> None:
                 reschedule_delay = _WS_ORPHAN_REAP_GRACE_S
                 logger.info("ws_orphan sid=%s action=preserve_delegation", sid)
             elif current.get("running"):
-                # A transport disappearing is not an interruption request.
-                # Mobile clients routinely lose their socket while locked,
-                # suspended, or changing networks. Preserve the turn and let
-                # its ordinary completion path persist the result.
-                first_preservation_check = not current.get(
-                    "_ws_orphan_preserved_running"
-                )
-                current["_ws_orphan_preserved_running"] = True
-                reschedule_delay = _WS_ORPHAN_REAP_GRACE_S
-                if first_preservation_check:
-                    logger.info("ws_orphan sid=%s action=preserve_running", sid)
+                if not current.get(
+                    "_client_gone_interrupt_requested"
+                ) and _ws_orphan_turn_activity_is_fresh(current):
+                    # Client-absent but actively producing (#98028/#100325):
+                    # the turn keeps running detached (the sentinel transport
+                    # already buffers emits) and the reaper re-checks each
+                    # grace interval. Only a turn whose activity clock has
+                    # gone stale — genuinely wedged, the case the interrupt
+                    # was added for — falls through to the interrupt below.
+                    logger.debug(
+                        "client_gone sid=%s action=defer (turn activity "
+                        "fresh; stale threshold %.0fs)",
+                        sid,
+                        _WS_ORPHAN_ACTIVITY_STALE_S,
+                    )
+                    reschedule_delay = _WS_ORPHAN_REAP_GRACE_S
+                else:
+                    # Mid-turn detached sessions must never drop the single
+                    # Timer (#85578): after the reconnect grace the turn is
+                    # interrupted once, then the reap keeps polling until the
+                    # normal turn-finalization path settles.
+                    polls = int(current.get("_client_gone_interrupt_polls") or 0) + 1
+                    current["_client_gone_interrupt_polls"] = polls
+                    if polls > _WS_ORPHAN_INTERRUPT_REAP_MAX_POLLS:
+                        # The interrupted turn never settled inside the budget
+                        # — force-reap rather than parking the session + a
+                        # timer chain forever. Loud by design: this only fires
+                        # when a turn is genuinely stuck past interrupt.
+                        logger.error(
+                            "client_gone sid=%s: turn did not settle after %d "
+                            "interrupt polls (%.0fs) — force-reaping detached "
+                            "session",
+                            sid, polls - 1,
+                            (polls - 1) * _WS_ORPHAN_INTERRUPT_REAP_POLL_S,
+                        )
+                        session = _pop_session_by_id(sid)
+                    else:
+                        if not current.get("_client_gone_interrupt_requested"):
+                            current["_client_gone_interrupt_requested"] = True
+                            interrupt_session = current
+                        reschedule_delay = _WS_ORPHAN_INTERRUPT_REAP_POLL_S
             else:
                 settled_after_running = bool(
                     current.pop("_ws_orphan_preserved_running", False)
                 )
                 session = _pop_session_by_id(sid)
+
+        if interrupt_session is not None:
+            try:
+                isolated = _interrupt_session_turn(
+                    sid,
+                    interrupt_session,
+                    request_id=f"client-gone-{sid}",
+                )
+                logger.info(
+                    "client_gone sid=%s action=interrupt turn_isolation=%s",
+                    sid,
+                    isolated,
+                )
+            except Exception:
+                logger.exception("client_gone interrupt failed sid=%s", sid)
+                with _sessions_lock:
+                    if _sessions.get(sid) is interrupt_session:
+                        interrupt_session.pop(
+                            "_client_gone_interrupt_requested", None
+                        )
 
         if reschedule_delay is not None:
             _schedule_ws_orphan_reap(sid, delay_s=reschedule_delay)
@@ -1566,6 +1693,8 @@ def _close_sessions_for_transport(
                     else:
                         current["transport"] = _detached_ws_transport
                         current.pop("_ws_orphan_preserved_running", None)
+                        current.pop("_client_gone_interrupt_requested", None)
+                        current.pop("_client_gone_interrupt_polls", None)
                         should_schedule_reap = True
         if claimed_for_teardown is not None:
             if _teardown_popped_session(claimed_for_teardown, end_reason=end_reason):
@@ -2215,10 +2344,10 @@ _start_idle_reaper()
 def _get_db():
     global _db, _db_error
     if _db is None:
-        from hermes_state import SessionDB
+        from hermes_state import get_shared_session_db
 
         try:
-            _db = SessionDB()
+            _db = get_shared_session_db()
             _db_error = None
         except Exception as exc:
             _db_error = str(exc)
@@ -2244,9 +2373,9 @@ def _db_for_profile(profile: str | None = None):
     if profile_home is None:
         return _get_db(), False
     try:
-        from hermes_state import SessionDB
+        from hermes_state import get_shared_session_db
 
-        return SessionDB(db_path=Path(profile_home) / "state.db"), True
+        return get_shared_session_db(Path(profile_home) / "state.db"), True
     except Exception as exc:
         logger.warning(
             "TUI profile session store unavailable for %s: %s",
@@ -2308,11 +2437,11 @@ def _open_profile_session_db(profile_home):
     the build's ``agent_error`` path) instead of swallowing it back onto the
     launch handle.
     """
-    from hermes_state import SessionDB
+    from hermes_state import get_shared_session_db
 
     db_path = Path(profile_home) / "state.db"
     try:
-        return SessionDB(db_path=db_path)
+        return get_shared_session_db(db_path)
     except Exception as exc:
         raise RuntimeError(
             f"profile session store unavailable: {db_path}: {exc}"
@@ -3964,7 +4093,8 @@ def _ensure_session_db_row(session: dict) -> bool:
         from hermes_state import SessionDB
 
         try:
-            db = SessionDB(db_path=Path(profile_home) / "state.db")
+            from hermes_state import get_shared_session_db
+            db = get_shared_session_db(Path(profile_home) / "state.db")
         except Exception:
             logger.debug("failed to open profile db for session row", exc_info=True)
             return False
@@ -4094,7 +4224,8 @@ def _ensure_session_db_row(session: dict) -> bool:
     finally:
         if close_db:
             try:
-                db.close()
+                from hermes_state import release_or_close
+                release_or_close(db)
             except Exception:
                 pass
     return True
@@ -4178,7 +4309,8 @@ def _session_db(session: dict):
         from hermes_state import SessionDB
 
         try:
-            db, close_db = SessionDB(db_path=Path(profile_home) / "state.db"), True
+            from hermes_state import get_shared_session_db
+            db, close_db = get_shared_session_db(Path(profile_home) / "state.db"), True
         except Exception:
             logger.debug("failed to open profile db for session", exc_info=True)
     else:
@@ -4188,7 +4320,8 @@ def _session_db(session: dict):
     finally:
         if close_db and db is not None:
             with contextlib.suppress(Exception):
-                db.close()
+                from hermes_state import release_or_close
+                release_or_close(db)
 
 
 def _rewind_active_session_history(
