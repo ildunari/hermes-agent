@@ -1,194 +1,217 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { api, fetchJSON, WEBUI_HIDDEN_MESSAGING_SESSION_SOURCES } from "./api";
+import { api, fetchJSON, setManagementProfile, WEBUI_HIDDEN_MESSAGING_SESSION_SOURCES } from './api'
 
 const reloadMocks = vi.hoisted(() => ({
   attemptDashboardTokenReloadOnce: vi.fn(() => false),
-  clearDashboardTokenReloadAttempt: vi.fn(),
-}));
+  clearDashboardTokenReloadAttempt: vi.fn()
+}))
 
-vi.mock("./dashboard-auth-reload", () => ({
+vi.mock('./dashboard-auth-reload', () => ({
   attemptDashboardTokenReloadOnce: reloadMocks.attemptDashboardTokenReloadOnce,
-  clearDashboardTokenReloadAttempt: reloadMocks.clearDashboardTokenReloadAttempt,
-}));
+  clearDashboardTokenReloadAttempt: reloadMocks.clearDashboardTokenReloadAttempt
+}))
 
-const SESSION_HEADER = "X-Hermes-Session-Token";
+const SESSION_HEADER = 'X-Hermes-Session-Token'
 
 beforeEach(() => {
-  reloadMocks.attemptDashboardTokenReloadOnce.mockReset();
-  reloadMocks.attemptDashboardTokenReloadOnce.mockReturnValue(false);
-  reloadMocks.clearDashboardTokenReloadAttempt.mockReset();
+  reloadMocks.attemptDashboardTokenReloadOnce.mockReset()
+  reloadMocks.attemptDashboardTokenReloadOnce.mockReturnValue(false)
+  reloadMocks.clearDashboardTokenReloadAttempt.mockReset()
 
-  Object.defineProperty(window, "__HERMES_SESSION_TOKEN__", {
+  Object.defineProperty(window, '__HERMES_SESSION_TOKEN__', {
     configurable: true,
-    value: "stale-token",
-    writable: true,
-  });
-  Object.defineProperty(window, "__HERMES_AUTH_REQUIRED__", {
+    value: 'stale-token',
+    writable: true
+  })
+  Object.defineProperty(window, '__HERMES_AUTH_REQUIRED__', {
     configurable: true,
     value: false,
-    writable: true,
-  });
-});
+    writable: true
+  })
+})
 
 afterEach(() => {
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
-});
+  setManagementProfile('')
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 function jsonFetchMock(body: unknown = { ok: true }) {
   return vi.fn<typeof fetch>(
     async () =>
       new Response(JSON.stringify(body), {
-        headers: { "Content-Type": "application/json" },
-        status: 200,
-      }),
-  );
+        headers: { 'Content-Type': 'application/json' },
+        status: 200
+      })
+  )
 }
 
-describe("fetchJSON", () => {
-  it("tries the one-shot reload path for loopback 401s", async () => {
+describe('fetchJSON', () => {
+  it('tries the one-shot reload path for loopback 401s', async () => {
     vi.stubGlobal(
-      "fetch",
+      'fetch',
       vi.fn(async () => ({
         clone: () => ({
-          json: async () => ({}),
+          json: async () => ({})
         }),
         ok: false,
         status: 401,
-        statusText: "Unauthorized",
-        text: async () => "Unauthorized",
-      })),
-    );
-    reloadMocks.attemptDashboardTokenReloadOnce.mockReturnValue(true);
+        statusText: 'Unauthorized',
+        text: async () => 'Unauthorized'
+      }))
+    )
+    reloadMocks.attemptDashboardTokenReloadOnce.mockReturnValue(true)
 
-    const pending = fetchJSON("/api/status");
-    await expect(Promise.race([pending, Promise.resolve("pending")])).resolves.toBe(
-      "pending",
-    );
+    const pending = fetchJSON('/api/status')
+    await expect(Promise.race([pending, Promise.resolve('pending')])).resolves.toBe('pending')
 
-    expect(reloadMocks.attemptDashboardTokenReloadOnce).toHaveBeenCalledTimes(1);
-    expect(reloadMocks.clearDashboardTokenReloadAttempt).not.toHaveBeenCalled();
-  });
+    expect(reloadMocks.attemptDashboardTokenReloadOnce).toHaveBeenCalledTimes(1)
+    expect(reloadMocks.clearDashboardTokenReloadAttempt).not.toHaveBeenCalled()
+  })
 
-  it("clears the reload latch after a successful response", async () => {
+  it('clears the reload latch after a successful response', async () => {
     vi.stubGlobal(
-      "fetch",
+      'fetch',
       vi.fn(async () => ({
         json: async () => ({ ok: true }),
         ok: true,
-        status: 200,
-      })),
-    );
+        status: 200
+      }))
+    )
 
-    await expect(fetchJSON("/api/status")).resolves.toEqual({ ok: true });
+    await expect(fetchJSON('/api/status')).resolves.toEqual({ ok: true })
 
-    expect(reloadMocks.clearDashboardTokenReloadAttempt).toHaveBeenCalledTimes(1);
-  });
-});
+    expect(reloadMocks.clearDashboardTokenReloadAttempt).toHaveBeenCalledTimes(1)
+  })
+})
 
-describe("api.getModelOptions", () => {
-  it("requests a live model refresh when asked", async () => {
-    vi.stubGlobal("window", {});
+describe('api.getModelOptions', () => {
+  it('requests a live model refresh when asked', async () => {
+    vi.stubGlobal('window', {})
 
-    const fetchMock = jsonFetchMock({ providers: [] });
-    vi.stubGlobal("fetch", fetchMock);
+    const fetchMock = jsonFetchMock({ providers: [] })
+    vi.stubGlobal('fetch', fetchMock)
 
-    await api.getModelOptions({ refresh: true });
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/model/options?refresh=1&include_unconfigured=1",
-      expect.objectContaining({ credentials: "include" }),
-    );
-  });
-
-  it("keeps explicit profile scoping when refreshing", async () => {
-    vi.stubGlobal("window", {});
-
-    const fetchMock = jsonFetchMock({ providers: [] });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await api.getModelOptions({ profile: "default", refresh: true });
+    await api.getModelOptions({ refresh: true })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/model/options?profile=default&refresh=1&include_unconfigured=1",
-      expect.objectContaining({ credentials: "include" }),
-    );
-  });
-});
+      '/api/model/options?refresh=1&include_unconfigured=1',
+      expect.objectContaining({ credentials: 'include' })
+    )
+  })
 
-describe("WebUI session visibility", () => {
-  it("excludes messaging transcripts from recents and search", async () => {
-    vi.stubGlobal("window", {});
-    const fetchMock = jsonFetchMock({ sessions: [], total: 0 });
-    vi.stubGlobal("fetch", fetchMock);
+  it('keeps explicit profile scoping when refreshing', async () => {
+    vi.stubGlobal('window', {})
 
-    await api.getSessions(20, 0, "default", "recent");
-    await api.searchSessions("needle", "default");
+    const fetchMock = jsonFetchMock({ providers: [] })
+    vi.stubGlobal('fetch', fetchMock)
 
-    const hidden = encodeURIComponent(WEBUI_HIDDEN_MESSAGING_SESSION_SOURCES.join(","));
+    await api.getModelOptions({ profile: 'default', refresh: true })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/model/options?profile=default&refresh=1&include_unconfigured=1',
+      expect.objectContaining({ credentials: 'include' })
+    )
+  })
+})
+
+describe('WebUI session visibility', () => {
+  it('excludes messaging transcripts from recents and search', async () => {
+    vi.stubGlobal('window', {})
+    const fetchMock = jsonFetchMock({ sessions: [], total: 0 })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.getSessions(20, 0, 'default', 'recent')
+    await api.searchSessions('needle', 'default')
+
+    const hidden = encodeURIComponent(WEBUI_HIDDEN_MESSAGING_SESSION_SOURCES.join(','))
     expect(fetchMock.mock.calls[0][0]).toBe(
-      `/api/sessions?limit=20&offset=0&order=recent&exclude_sources=${hidden}&profile=default`,
-    );
-    expect(fetchMock.mock.calls[1][0]).toBe(
-      `/api/sessions/search?q=needle&exclude_sources=${hidden}&profile=default`,
-    );
-  });
-});
+      `/api/sessions?limit=20&offset=0&order=recent&exclude_sources=${hidden}&profile=default`
+    )
+    expect(fetchMock.mock.calls[1][0]).toBe(`/api/sessions/search?q=needle&exclude_sources=${hidden}&profile=default`)
+  })
+})
 
-describe("api OAuth helpers", () => {
-  it("starts OAuth login in gated mode without requiring an injected session token", async () => {
-    vi.stubGlobal("window", { __HERMES_AUTH_REQUIRED__: true });
+describe('api OAuth helpers', () => {
+  it('starts OAuth login in gated mode without requiring an injected session token', async () => {
+    vi.stubGlobal('window', { __HERMES_AUTH_REQUIRED__: true })
     const fetchMock = jsonFetchMock({
-      flow: "device_code",
-      session_id: "oauth-session",
-    });
-    vi.stubGlobal("fetch", fetchMock);
+      flow: 'device_code',
+      session_id: 'oauth-session'
+    })
+    vi.stubGlobal('fetch', fetchMock)
 
-    await api.startOAuthLogin("openai-codex");
+    await api.startOAuthLogin('openai-codex')
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/providers/oauth/openai-codex/start",
+      '/api/providers/oauth/openai-codex/start',
       expect.objectContaining({
-        body: "{}",
-        credentials: "include",
-        method: "POST",
-      }),
-    );
-    const headers = fetchMock.mock.calls[0][1]?.headers as Headers;
-    expect(headers.get("Content-Type")).toBe("application/json");
-    expect(headers.has(SESSION_HEADER)).toBe(false);
-  });
+        body: '{}',
+        credentials: 'include',
+        method: 'POST'
+      })
+    )
+    const headers = fetchMock.mock.calls[0][1]?.headers as Headers
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.has(SESSION_HEADER)).toBe(false)
+  })
 
-  it("still sends the injected session token for OAuth login in loopback mode", async () => {
-    vi.stubGlobal("window", { __HERMES_SESSION_TOKEN__: "loopback-token" });
+  it('still sends the injected session token for OAuth login in loopback mode', async () => {
+    vi.stubGlobal('window', { __HERMES_SESSION_TOKEN__: 'loopback-token' })
     const fetchMock = jsonFetchMock({
-      flow: "device_code",
-      session_id: "oauth-session",
-    });
-    vi.stubGlobal("fetch", fetchMock);
+      flow: 'device_code',
+      session_id: 'oauth-session'
+    })
+    vi.stubGlobal('fetch', fetchMock)
 
-    await api.startOAuthLogin("openai-codex");
+    await api.startOAuthLogin('openai-codex')
 
-    const headers = fetchMock.mock.calls[0][1]?.headers as Headers;
-    expect(headers.get(SESSION_HEADER)).toBe("loopback-token");
-  });
+    const headers = fetchMock.mock.calls[0][1]?.headers as Headers
+    expect(headers.get(SESSION_HEADER)).toBe('loopback-token')
+  })
 
-  it("runs provider auth mutations in gated mode via cookie auth", async () => {
-    vi.stubGlobal("window", { __HERMES_AUTH_REQUIRED__: true });
-    const fetchMock = jsonFetchMock({ ok: true });
-    vi.stubGlobal("fetch", fetchMock);
+  it('runs provider auth mutations in gated mode via cookie auth', async () => {
+    vi.stubGlobal('window', { __HERMES_AUTH_REQUIRED__: true })
+    const fetchMock = jsonFetchMock({ ok: true })
+    vi.stubGlobal('fetch', fetchMock)
 
-    await api.disconnectOAuthProvider("anthropic");
-    await api.submitOAuthCode("anthropic", "oauth-session", "code-123");
-    await api.cancelOAuthSession("oauth-session");
-    await api.revealEnvVar("OPENAI_API_KEY");
+    await api.disconnectOAuthProvider('anthropic')
+    await api.submitOAuthCode('anthropic', 'oauth-session', 'code-123')
+    await api.cancelOAuthSession('oauth-session')
+    await api.revealEnvVar('OPENAI_API_KEY')
 
     for (const call of fetchMock.mock.calls) {
-      const init = call[1] as RequestInit;
-      expect(init.credentials).toBe("include");
-      expect((init.headers as Headers).has(SESSION_HEADER)).toBe(false);
+      const init = call[1] as RequestInit
+      expect(init.credentials).toBe('include')
+      expect((init.headers as Headers).has(SESSION_HEADER)).toBe(false)
     }
-  });
-});
+  })
+
+  it('keeps every OAuth operation on the selected management profile', async () => {
+    vi.stubGlobal('window', {})
+    const fetchMock = jsonFetchMock({
+      flow: 'device_code',
+      session_id: 'oauth-session'
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    setManagementProfile('worker')
+
+    await api.getOAuthProviders()
+    await api.disconnectOAuthProvider('anthropic')
+    await api.startOAuthLogin('openai-codex')
+    await api.submitOAuthCode('anthropic', 'oauth-session', 'code-123')
+    await api.pollOAuthSession('anthropic', 'oauth-session')
+    await api.cancelOAuthSession('oauth-session')
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/providers/oauth?profile=worker',
+      '/api/providers/oauth/anthropic?profile=worker',
+      '/api/providers/oauth/openai-codex/start?profile=worker',
+      '/api/providers/oauth/anthropic/submit?profile=worker',
+      '/api/providers/oauth/anthropic/poll/oauth-session?profile=worker',
+      '/api/providers/oauth/sessions/oauth-session?profile=worker'
+    ])
+  })
+})

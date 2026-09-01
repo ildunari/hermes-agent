@@ -1057,6 +1057,10 @@ class GatewayConfig:
     # routing is permitted at all, so an extension can only keep a message in
     # its own transport profile — the fail-closed default.
     permitted_conversation_routes: Dict[str, List[str]] = field(default_factory=dict)
+    # Public HTTPS endpoint another gateway may use for scoped RoomLink calls.
+    # Disabled by default: setting an API key alone must never expose or
+    # advertise a route. HERMES_ROOM_LINK_URL remains the operator override.
+    room_link_url: Optional[str] = None
 
     # Opt-in systemd event-loop watchdog. Zero preserves Type=simple and
     # disables sd_notify at runtime.
@@ -1228,6 +1232,7 @@ class GatewayConfig:
             "multiplex_profiles": self.multiplex_profiles,
             "multiplex_profile_allowlist": self.multiplex_profile_allowlist,
             "permitted_conversation_routes": self.permitted_conversation_routes,
+            "room_link_url": self.room_link_url,
             "systemd_watchdog_seconds": self.systemd_watchdog_seconds,
             "loop_watchdog": self.loop_watchdog,
             "loop_watchdog_probe_interval_s": self.loop_watchdog_probe_interval_s,
@@ -1308,6 +1313,9 @@ class GatewayConfig:
             permitted_conversation_routes = nested_gateway.get(
                 "permitted_conversation_routes"
             )
+        room_link_url = data.get("room_link_url")
+        if room_link_url is not None and not isinstance(room_link_url, str):
+            room_link_url = None
         if "systemd_watchdog_seconds" in data:
             systemd_watchdog_raw = data.get("systemd_watchdog_seconds")
             systemd_watchdog_key = "systemd_watchdog_seconds"
@@ -1415,6 +1423,7 @@ class GatewayConfig:
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
             multiplex_profile_allowlist=multiplex_profile_allowlist,
             permitted_conversation_routes=permitted_conversation_routes,
+            room_link_url=room_link_url,
             systemd_watchdog_seconds=systemd_watchdog_seconds,
             loop_watchdog=loop_watchdog,
             loop_watchdog_probe_interval_s=loop_watchdog_probe_interval_s,
@@ -1586,6 +1595,10 @@ def load_gateway_config() -> GatewayConfig:
                 gw_data["permitted_conversation_routes"] = gateway_section[
                     "permitted_conversation_routes"
                 ]
+            if "room_link_url" in yaml_cfg:
+                gw_data["room_link_url"] = yaml_cfg["room_link_url"]
+            elif isinstance(gateway_section, dict) and "room_link_url" in gateway_section:
+                gw_data["room_link_url"] = gateway_section["room_link_url"]
 
             # Profile-based routing rules: accept either top-level
             # ``profile_routes`` or the nested ``gateway.profile_routes`` form

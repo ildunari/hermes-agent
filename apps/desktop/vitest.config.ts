@@ -28,7 +28,10 @@ const electronNative: TestProjectConfiguration = {
     name: 'electron',
     environment: 'node',
     testTimeout: 15_000,
-    include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}'],
+    // `e2e/**/*.unit.test.ts` is the e2e HELPERS, not the specs: plain node
+    // modules that should be provable without booting Electron. Playwright
+    // ignores the same pattern so they run in exactly one runner.
+    include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}', 'e2e/**/*.unit.test.ts'],
     exclude: [
       'electron/autoplay-policy.test.ts',
       'electron/runtime-paths.test.ts',

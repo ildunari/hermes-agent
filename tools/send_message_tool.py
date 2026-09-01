@@ -53,6 +53,12 @@ _WHATSAPP_JID_RE = re.compile(
     r"^\s*[\w-]+@(?:g\.us|s\.whatsapp\.net|lid|broadcast|newsletter)\s*$",
     re.IGNORECASE,
 )
+# Buzz channels and DMs use native UUID identifiers. They are explicit
+# targets and must never substitute the configured home channel.
+_BUZZ_UUID_RE = re.compile(
+    r"^\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\s*$",
+    re.IGNORECASE,
+)
 # Email addresses — a valid email like "user@domain.com" should be treated as
 # an explicit target for the email platform, not fall through to channel-name
 # resolution which has no way to resolve a raw address.
@@ -595,6 +601,8 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         # through to the _PHONE_PLATFORMS handler below.
         if _WHATSAPP_JID_RE.fullmatch(target_ref):
             return target_ref.strip(), None, True
+    if platform_name == "buzz" and _BUZZ_UUID_RE.fullmatch(target_ref):
+        return target_ref.strip(), None, True
     stripped_target = target_ref.strip()
     if platform_name == "signal" and stripped_target.startswith("group:"):
         group_id = stripped_target[len("group:"):].strip()
@@ -836,6 +844,106 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     }
 
 
+def _bounded_send_error(detail, max_chars=900):
+    """Bound untrusted adapter/plugin error detail returned by send_message."""
+    text = str(detail or "send failed")
+    if len(text) <= max_chars:
+        return text
+    return f"{text[: max_chars - 3]}..."
+
+
+async def _send_live_adapter_media(
+    adapter,
+    chat_id,
+    message,
+    media_files,
+    *,
+    thread_id=None,
+    metadata=None,
+    force_document=False,
+):
+    """Deliver text and every media descriptor through adapter media APIs."""
+    caption, separate_text = _media_caption_split(
+        message, media_files, max_caption_len=_DEFAULT_CAPTION_LIMIT
+    )
+    last_result = None
+    if separate_text and separate_text.strip():
+        last_result = await adapter.send(
+            chat_id=chat_id, content=separate_text, metadata=metadata
+        )
+        if not last_result.success:
+            return {"error": f"Adapter send failed: {_bounded_send_error(last_result.error)}"}
+
+    total = len(media_files)
+    for index, descriptor in enumerate(media_files):
+        if not isinstance(descriptor, (list, tuple)) or not descriptor:
+            return {"error": f"Adapter media send failed: invalid media descriptor {index + 1}/{total}"}
+        media_path = descriptor[0]
+        is_voice = bool(descriptor[1]) if len(descriptor) > 1 else False
+        if not isinstance(media_path, str) or not media_path:
+            return {"error": f"Adapter media send failed: invalid media descriptor {index + 1}/{total}"}
+        if not os.path.exists(media_path):
+            return {"error": f"Adapter media send failed: media file {index + 1}/{total} was not found"}
+
+        ext = os.path.splitext(media_path)[1].lower()
+        kwargs = {
+            "caption": caption if index == 0 else None,
+            "reply_to": thread_id,
+            "metadata": metadata,
+        }
+        if force_document:
+            method_name = "send_document"
+            media_kind = "document"
+        elif ext in _IMAGE_EXTS:
+            method_name = "send_image_file"
+            media_kind = "image"
+        elif ext in _VIDEO_EXTS:
+            method_name = "send_video"
+            media_kind = "video"
+        elif is_voice or ext in _AUDIO_EXTS:
+            method_name = "send_voice"
+            media_kind = "audio"
+        else:
+            method_name = "send_document"
+            media_kind = "document"
+
+        from gateway.platforms.base import BasePlatformAdapter
+
+        adapter_method = getattr(type(adapter), method_name, None)
+        base_fallback = getattr(BasePlatformAdapter, method_name)
+        if adapter_method is None or adapter_method is base_fallback:
+            return {
+                "error": (
+                    f"Live adapter does not implement native {media_kind} delivery; "
+                    f"media file {index + 1}/{total} was not sent"
+                )
+            }
+        try:
+            last_result = await getattr(adapter, method_name)(chat_id, media_path, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return {
+                "error": (
+                    f"Adapter media send failed after {index}/{total} files: "
+                    f"{_bounded_send_error(exc)}"
+                )
+            }
+        if not last_result.success:
+            detail = _bounded_send_error(last_result.error or "media send failed")
+            return {
+                "error": f"Adapter media send failed after {index}/{total} files: {detail}"
+            }
+
+    if last_result is None:
+        return {"error": "No deliverable text or media remained after processing MEDIA tags"}
+    return {
+        "success": True,
+        "message_id": last_result.message_id,
+        "media_delivered": True,
+    }
+
+
 async def _send_via_adapter(
     platform,
     pconfig,
@@ -879,6 +987,13 @@ async def _send_via_adapter(
                     metadata["publish_topic"] = chat_id
                 if not metadata:
                     metadata = None
+                # The adapter's send() uses asyncio.Queue + worker tasks bound
+                # to the gateway's main event loop.  Calling send() from a
+                # different thread/loop (the agent's tool worker thread) causes
+                # a cross-loop Future deadlock: the worker loop's selector never
+                # gets woken when the gateway loop resolves the future.
+                # When on a different loop, dispatch onto the gateway loop via
+                # run_coroutine_threadsafe and await the wrapped future.
                 gateway_loop = getattr(runner, "_gateway_loop", None)
                 try:
                     current_loop = asyncio.get_running_loop()
@@ -907,10 +1022,21 @@ async def _send_via_adapter(
                     )
                     if fut is None:
                         awaitable.close()
-                        raise RuntimeError(
-                            "Gateway loop unavailable for send dispatch"
-                        )
+                        raise RuntimeError("Gateway loop unavailable for send dispatch")
                     return await asyncio.shield(asyncio.wrap_future(fut))
+
+                if media_files:
+                    return await _dispatch_adapter(
+                        _send_live_adapter_media(
+                            adapter,
+                            chat_id,
+                            chunk,
+                            media_files,
+                            thread_id=thread_id,
+                            metadata=metadata,
+                            force_document=force_document,
+                        )
+                    )
 
                 result = None
                 if chunk.strip():
@@ -921,56 +1047,14 @@ async def _send_via_adapter(
                             metadata=metadata,
                         )
                     )
-                    if result and not result.success:
-                        return {"error": f"Adapter send failed: {result.error}"}
-
-                for media_path, is_voice in media_files or []:
-                    ext = os.path.splitext(media_path)[1].lower()
-                    if ext in _IMAGE_EXTS and hasattr(adapter, "send_image_file"):
-                        awaitable = adapter.send_image_file(
-                            chat_id=chat_id,
-                            image_path=media_path,
-                            metadata=metadata,
-                        )
-                    elif ext in _VIDEO_EXTS and hasattr(adapter, "send_video"):
-                        awaitable = adapter.send_video(
-                            chat_id=chat_id,
-                            video_path=media_path,
-                            metadata=metadata,
-                        )
-                    elif ext in _AUDIO_EXTS and hasattr(adapter, "send_voice"):
-                        awaitable = adapter.send_voice(
-                            chat_id=chat_id,
-                            audio_path=media_path,
-                            metadata=metadata,
-                        )
-                    elif hasattr(adapter, "send_document"):
-                        awaitable = adapter.send_document(
-                            chat_id=chat_id,
-                            file_path=media_path,
-                            metadata=metadata,
-                        )
-                    else:
-                        return {
-                            "error": (
-                                f"Live adapter for {platform.value} cannot send "
-                                "media attachments"
-                            )
-                        }
-
-                    result = await _dispatch_adapter(awaitable)
-                    if result and not result.success:
-                        return {
-                            "error": f"Adapter media send failed: {result.error}"
-                        }
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                return {"error": f"Plugin platform send failed: {e}"}
+                return {"error": f"Plugin platform send failed: {_bounded_send_error(e)}"}
             if result and result.success:
                 return {"success": True, "message_id": result.message_id}
             if result:
-                return {"error": f"Adapter send failed: {result.error}"}
+                return {"error": f"Adapter send failed: {_bounded_send_error(result.error)}"}
             return {"error": "Live adapter had no text or media to send"}
 
     entry = None
@@ -994,9 +1078,11 @@ async def _send_via_adapter(
             raise
         except Exception as e:
             logger.debug("Plugin standalone send for %s raised", platform_name, exc_info=True)
-            return {"error": f"Plugin standalone send failed: {e}"}
+            return {"error": f"Plugin standalone send failed: {_bounded_send_error(e)}"}
 
         if isinstance(result, dict) and (result.get("success") or result.get("error")):
+            if result.get("error"):
+                return {**result, "error": _bounded_send_error(result["error"])}
             return result
         return {
             "error": (
@@ -1401,30 +1487,36 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         return last_result
 
     # --- Non-media platforms ---
-    if media_files and not message.strip():
-        plugin_can_send_media = False
+    plugin_can_send_media = platform.value == "buzz"
+    if media_files:
         try:
             from gateway.platform_registry import platform_registry
+
             entry = platform_registry.get(platform.value)
-            plugin_can_send_media = bool(entry and entry.standalone_sender_fn)
+            plugin_can_send_media = plugin_can_send_media or bool(
+                entry and entry.standalone_sender_fn
+            )
         except Exception:
-            plugin_can_send_media = False
-        if not plugin_can_send_media:
-            return {
-                "error": (
-                    f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and slack; "
-                    f"target {platform.value} had only media attachments"
-                )
-            }
+            pass
+
+    if media_files and not message.strip() and not plugin_can_send_media:
+        return {
+            "error": (
+                "send_message MEDIA delivery is currently only supported for "
+                "telegram, discord, matrix, weixin, signal, yuanbao, feishu, "
+                "whatsapp and slack; "
+                f"target {platform.value} had only media attachments"
+            )
+        }
     warning = None
-    if media_files:
+    if media_files and not plugin_can_send_media:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
             "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and slack"
         )
 
     last_result = None
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
         if platform == Platform.WHATSAPP:
             result = await _registry_standalone_send("whatsapp", pconfig, chat_id, chunk, thread_id)
         elif platform == Platform.SIGNAL:
@@ -1468,7 +1560,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                 chat_id,
                 chunk,
                 thread_id=thread_id,
-                media_files=media_files,
+                media_files=media_files if i == len(chunks) - 1 else [],
                 force_document=force_document,
             )
 
@@ -1476,7 +1568,12 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             return result
         last_result = result
 
-    if warning and isinstance(last_result, dict) and last_result.get("success"):
+    if (
+        warning
+        and isinstance(last_result, dict)
+        and last_result.get("success")
+        and not last_result.get("media_delivered")
+    ):
         warnings = list(last_result.get("warnings", []))
         warnings.append(warning)
         last_result["warnings"] = warnings
