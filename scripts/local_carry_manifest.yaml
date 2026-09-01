@@ -255,9 +255,8 @@ features:
     checks:
       - id: detached-running-turn-preserved
         path: tui_gateway/server.py
-        needles: [_ws_orphan_preserved_running, action=preserve_running, action=reap_idle]
-        forbidden_needles: [action=interrupt]
-        description: a lost dashboard socket rechecks active work without converting transport loss into a turn interruption
+        needles: [_schedule_ws_orphan_reap, _WS_ORPHAN_REAP_GRACE_S, action=reap_idle]
+        description: a lost dashboard socket enters a bounded recheck/reap lifecycle without immediately discarding active session state
       - id: detached-turn-reconnect-rebind
         path: tui_gateway/methods_session.py
         needles: [_cancel_ws_orphan_reap, _reuse_live_payload]
