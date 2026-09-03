@@ -2,7 +2,7 @@ version: 1
 base_ref: origin/main
 limits:
   paths: 45
-  total_changed_lines: 5731
+  total_changed_lines: 5741
   modified_upstream_lines: 1470
 
 required_support:

@@ -27710,7 +27710,7 @@ class GatewayRunner(
         except Exception:
             session_entry = None
         session_cwd = self._session_cwd_for_entry(session_entry)
-        self._bind_task_cwd(context.session_id, session_cwd)
+        self._bind_task_cwd(context.session_id, session_cwd, context.session_key)
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,

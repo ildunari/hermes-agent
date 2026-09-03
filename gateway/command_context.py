@@ -37,7 +37,12 @@ class GatewayCommandRuntimeMixin:
     def _session_cwd_for_entry(self, entry):
         if entry is not None and getattr(entry, "cwd_override", None):
             return str(entry.cwd_override)
-        raw = os.getenv("TERMINAL_CWD") or str(Path.home())
+        try:
+            from tools.terminal_scope import terminal_env
+
+            raw = terminal_env("TERMINAL_CWD", str(Path.home()))
+        except Exception:
+            raw = os.getenv("TERMINAL_CWD") or str(Path.home())
         return os.path.abspath(os.path.expanduser(raw))
 
     def _session_entry_for_key(self, session_key):
@@ -46,13 +51,18 @@ class GatewayCommandRuntimeMixin:
         except Exception:
             return None
 
-    def _bind_task_cwd(self, task_id, cwd):
+    def _bind_task_cwd(self, task_id, cwd, session_key=None):
         if not task_id or not cwd:
             return
         try:
-            from tools.terminal_tool import register_task_env_overrides
+            from tools.terminal_tool import (
+                record_session_cwd,
+                register_task_env_overrides,
+            )
 
             register_task_env_overrides(task_id, {"cwd": cwd})
+            if session_key:
+                record_session_cwd(session_key, cwd)
         except Exception:
             logger.debug(
                 "Failed to bind cwd override for task %s", task_id, exc_info=True
