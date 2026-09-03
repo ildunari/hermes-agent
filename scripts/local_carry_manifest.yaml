@@ -1,0 +1,218 @@
+version: 1
+base_ref: origin/main
+limits:
+  paths: 42
+  total_changed_lines: 14500
+  modified_upstream_lines: 1600
+
+evidence_templates:
+  provider: &provider
+    registration: providers.ProviderProfile registration and profile discovery
+    runtime_caller: hermes_cli runtime and auxiliary provider resolution
+    interface_test: plugin VibeProxy core-seam and runtime-provider tests
+    artifact: keyless Hermes one-shot through local CLIProxyAPI
+  conversation: &conversation
+    registration: PluginContext.register_gateway_conversation_extension
+    runtime_caller: GatewayRunner profile activation and message lifecycle
+    interface_test: conversation extension lifecycle, ownership, and run-wiring tests
+    artifact: authoritative Poke and Guest owner activation in gateway logs
+  command: &command
+    registration: gateway-session-commands plugin registration
+    runtime_caller: CLI and GatewayRunner command dispatch
+    interface_test: command-context and Poke gateway glue tests
+    artifact: registered slash and session commands in active profiles
+  restart: &restart
+    registration: CLI and gateway restart command dispatch
+    runtime_caller: detached restart-surfaces module entry point
+    interface_test: restart-surfaces behavior suite
+    artifact: restart receipt plus PID turnover and health probes
+  active_work: &active_work
+    registration: gateway lifecycle and shutdown watchdog wiring
+    runtime_caller: active-work drain, freshness, status, and session paths
+    interface_test: active-work and drain-freshness behavior tests
+    artifact: safe restart drain receipt
+  bluebubbles: &bluebubbles
+    registration: platform registry BlueBubbles adapter registration
+    runtime_caller: registry-first send-message dispatch
+    interface_test: BlueBubbles registry send and Poke glue tests
+    artifact: plugin registration without a real outbound message
+  context_engine: &context_engine
+    registration: context-engine plugin discovery
+    runtime_caller: agent initialization and context compression
+    interface_test: context-engine discovery and agent-init tests
+    artifact: active profile loads the configured context engine
+  ratchet: &ratchet
+    registration: explicit local carry validation command
+    runtime_caller: developer and update validation workflow
+    interface_test: local carry contract behavior tests
+    artifact: JSON PASS receipt on the exact integrated head
+
+paths:
+  - path: agent/agent_init.py
+    disposition: must-carry
+    owner: core context-engine seam
+    evidence: *context_engine
+  - path: agent/auxiliary_client.py
+    disposition: must-carry
+    owner: core provider fallback seam
+    evidence: *provider
+  - path: agent/context_compressor.py
+    disposition: upstream
+    owner: core context engine
+    evidence: *context_engine
+  - path: agent/request_scoped_tools.py
+    disposition: upstream
+    owner: core plugin tool seam
+    evidence: *conversation
+  - path: cli.py
+    disposition: must-carry
+    owner: core restart dispatch seam
+    evidence: *restart
+  - path: gateway/active_work.py
+    disposition: upstream
+    owner: core gateway lifecycle
+    evidence: *active_work
+  - path: gateway/authenticated_dm.py
+    disposition: plugin
+    owner: poke plugin
+    evidence: *conversation
+  - path: gateway/command_context.py
+    disposition: plugin
+    owner: gateway-session-commands plugin
+    evidence: *command
+  - path: gateway/config.py
+    disposition: upstream
+    owner: core gateway configuration
+    evidence: *conversation
+  - path: gateway/conversation_extension_host.py
+    disposition: upstream
+    owner: core conversation extension seam
+    evidence: *conversation
+  - path: gateway/conversation_extension_runtime.py
+    disposition: plugin
+    owner: poke plugin
+    evidence: *conversation
+  - path: gateway/conversation_extensions.py
+    disposition: upstream
+    owner: core conversation extension seam
+    evidence: *conversation
+  - path: gateway/conversation_ownership.py
+    disposition: plugin
+    owner: poke plugin
+    evidence: *conversation
+  - path: gateway/platform_registry.py
+    disposition: upstream
+    owner: core platform registry
+    evidence: *bluebubbles
+  - path: gateway/run.py
+    disposition: must-carry
+    owner: core gateway seams
+    evidence: *conversation
+  - path: gateway/session.py
+    disposition: must-carry
+    owner: core gateway session
+    evidence: *active_work
+  - path: gateway/shutdown_watchdog.py
+    disposition: upstream
+    owner: core gateway lifecycle
+    evidence: *active_work
+  - path: gateway/status.py
+    disposition: upstream
+    owner: core gateway status
+    evidence: *active_work
+  - path: hermes_cli/alias_billing_guard.py
+    disposition: plugin
+    owner: VibeProxy and OpenCodex provider policy
+    evidence: *provider
+  - path: hermes_cli/command_context.py
+    disposition: plugin
+    owner: gateway-session-commands plugin
+    evidence: *command
+  - path: hermes_cli/commands.py
+    disposition: must-carry
+    owner: core command dispatch seam
+    evidence: *command
+  - path: hermes_cli/opencodex_catalog.py
+    disposition: plugin
+    owner: VibeProxy and OpenCodex provider policy
+    evidence: *provider
+  - path: hermes_cli/plugins.py
+    disposition: must-carry
+    owner: core plugin interface
+    evidence: *conversation
+  - path: hermes_cli/restart_surfaces.py
+    disposition: ops-support
+    owner: hermes-studio-ops support package
+    evidence: *restart
+  - path: plugins/context_engine/__init__.py
+    disposition: upstream
+    owner: bundled context-engine plugin seam
+    evidence: *context_engine
+  - path: providers/base.py
+    disposition: upstream
+    owner: core provider profile seam
+    evidence: *provider
+  - path: scripts/check_local_carry_contract.py
+    disposition: must-carry
+    owner: local carry ratchet
+    evidence: *ratchet
+  - path: scripts/local_carry_manifest.yaml
+    disposition: must-carry
+    owner: local carry ratchet
+    evidence: *ratchet
+  - path: tests/agent/test_keep_aux_billing_glue.py
+    disposition: must-carry
+    owner: core provider seam tests
+    evidence: *provider
+  - path: tests/gateway/test_conversation_extension_lifecycle.py
+    disposition: upstream
+    owner: core conversation extension tests
+    evidence: *conversation
+  - path: tests/gateway/test_conversation_extension_run_wiring.py
+    disposition: upstream
+    owner: core conversation extension tests
+    evidence: *conversation
+  - path: tests/gateway/test_conversation_ownership.py
+    disposition: plugin
+    owner: poke plugin tests
+    evidence: *conversation
+  - path: tests/gateway/test_keep_active_work_glue.py
+    disposition: must-carry
+    owner: core gateway lifecycle tests
+    evidence: *active_work
+  - path: tests/gateway/test_keep_bb_poke_glue.py
+    disposition: plugin
+    owner: poke and BlueBubbles plugin tests
+    evidence: *bluebubbles
+  - path: tests/gateway/test_keep_drain_freshness_glue.py
+    disposition: must-carry
+    owner: core gateway lifecycle tests
+    evidence: *active_work
+  - path: tests/hermes_cli/test_restart_surfaces.py
+    disposition: ops-support
+    owner: hermes-studio-ops support tests
+    evidence: *restart
+  - path: tests/plugins/context_engine/test_user_context_engine_discovery.py
+    disposition: upstream
+    owner: core context-engine seam tests
+    evidence: *context_engine
+  - path: tests/run_agent/test_plugin_context_engine_init.py
+    disposition: upstream
+    owner: core context-engine seam tests
+    evidence: *context_engine
+  - path: tests/scripts/test_local_carry_contract.py
+    disposition: must-carry
+    owner: local carry ratchet tests
+    evidence: *ratchet
+  - path: tests/tools/test_keep_bluebubbles_registry_send.py
+    disposition: plugin
+    owner: BlueBubbles plugin tests
+    evidence: *bluebubbles
+  - path: tools/send_message_registry.py
+    disposition: upstream
+    owner: core platform registry
+    evidence: *bluebubbles
+  - path: tools/send_message_tool.py
+    disposition: upstream
+    owner: core platform registry
+    evidence: *bluebubbles
