@@ -3,7 +3,7 @@ base_ref: origin/main
 limits:
   paths: 43
   total_changed_lines: 5700
-  modified_upstream_lines: 1739
+  modified_upstream_lines: 1751
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/restart_surfaces.py
@@ -146,10 +146,7 @@ paths:
     disposition: plugin
     owner: VibeProxy and OpenCodex provider policy
     evidence: *provider
-  - path: hermes_cli/auth.py
-    disposition: upstream
-    owner: core provider credential resolution
-    evidence: *provider
+  - {path: hermes_cli/auth.py, disposition: upstream, owner: core provider credential resolution, evidence: *provider}
   - path: hermes_cli/command_context.py
     disposition: plugin
     owner: gateway-session-commands plugin
@@ -158,18 +155,9 @@ paths:
     disposition: must-carry
     owner: generic external support loading seam
     evidence: *ratchet
-  - path: hermes_cli/commands.py
-    disposition: must-carry
-    owner: core command dispatch seam
-    evidence: *command
-  - path: hermes_cli/opencodex_catalog.py
-    disposition: plugin
-    owner: VibeProxy and OpenCodex provider policy
-    evidence: *provider
-  - path: hermes_cli/plugins.py
-    disposition: must-carry
-    owner: core plugin interface
-    evidence: *conversation
+  - {path: hermes_cli/commands.py, disposition: must-carry, owner: core command dispatch seam, evidence: *command}
+  - {path: hermes_cli/opencodex_catalog.py, disposition: plugin, owner: VibeProxy and OpenCodex provider policy, evidence: *provider}
+  - {path: hermes_cli/plugins.py, disposition: must-carry, owner: core plugin interface, evidence: *conversation}
   - path: hermes_cli/restart_surfaces.py
     disposition: ops-support
     owner: hermes-studio-ops support package

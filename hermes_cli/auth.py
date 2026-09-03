@@ -7876,6 +7876,18 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
     if not pconfig or pconfig.auth_type != "api_key":
         return {"configured": False}
 
+    # ProviderProfile is the source of truth for out-of-tree keyless gateways.
+    # Diagnostics must agree with runtime credential admission instead of
+    # demanding a secret that the provider explicitly does not use.
+    try:
+        from providers.base import keyless_provider_status_for_auth
+
+        keyless_status = keyless_provider_status_for_auth(provider_id, pconfig)
+        if keyless_status is not None:
+            return keyless_status
+    except Exception:
+        pass
+
     # Keyless providers (opencode-free) are served anonymously: no credential
     # exists, so every install counts as configured/logged in. Derived from
     # the HermesOverlay keyless flag — the same source the provider catalog
