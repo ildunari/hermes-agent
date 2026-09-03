@@ -448,4 +448,3 @@ class _EngineCollector:
 
     def register_memory_provider(self, *args, **kwargs):
         pass
-

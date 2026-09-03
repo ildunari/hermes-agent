@@ -155,4 +155,3 @@ def test_loader_surfaces_import_failure_cause(tmp_path, monkeypatch, caplog):
         context_engines.load_context_engine("broken")
 
     assert "missing_lcm_dependency" in caplog.text
-
