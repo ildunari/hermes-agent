@@ -2195,11 +2195,16 @@ class PluginContext:
         description: str = "",
         args_hint: str = "",
         argument_mode: str | None = None,
+        *,
+        context: bool = False,
     ) -> Optional[PluginRegistration]:
         """Register a slash command (e.g. ``/lcm``) available in CLI and gateway sessions.
 
-        The handler signature is ``fn(raw_args: str) -> str | None``.
-        It may also be an async callable — the gateway dispatch handles both.
+        Legacy handlers use ``fn(raw_args: str) -> str | None``. Pass
+        ``context=True`` for ``fn(CommandInvocationContext)``; this additive
+        opt-in avoids guessing from annotations or parameter names and keeps
+        every existing raw-argument plugin unchanged. Either shape may be an
+        async callable.
 
         Unlike ``register_cli_command()`` (which creates ``hermes <subcommand>``
         terminal commands), this registers in-session slash commands that users
@@ -2246,6 +2251,7 @@ class PluginContext:
         )
         entry = {
             "handler": handler,
+            "context": bool(context),
             "description": description or "Plugin command",
             "plugin": self.manifest.name,
             "plugin_key": self.manifest.key or self.manifest.name,
