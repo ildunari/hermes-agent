@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 42
-  total_changed_lines: 14500
-  modified_upstream_lines: 1600
+  paths: 47
+  total_changed_lines: 14581
+  modified_upstream_lines: 1709
 
 evidence_templates:
   provider: &provider
@@ -48,6 +48,14 @@ evidence_templates:
     artifact: JSON PASS receipt on the exact integrated head
 
 paths:
+  - path: agent/chat_completion_helpers.py
+    disposition: upstream
+    owner: core chat-completions streaming seam
+    evidence: *provider
+  - path: agent/conversation_loop.py
+    disposition: upstream
+    owner: core response normalization seam
+    evidence: *provider
   - path: agent/agent_init.py
     disposition: must-carry
     owner: core context-engine seam
@@ -64,6 +72,10 @@ paths:
     disposition: upstream
     owner: core plugin tool seam
     evidence: *conversation
+  - path: agent/transports/chat_completions.py
+    disposition: upstream
+    owner: core provider transport seam
+    evidence: *provider
   - path: cli.py
     disposition: must-carry
     owner: core restart dispatch seam
@@ -123,6 +135,10 @@ paths:
   - path: hermes_cli/alias_billing_guard.py
     disposition: plugin
     owner: VibeProxy and OpenCodex provider policy
+    evidence: *provider
+  - path: hermes_cli/auth.py
+    disposition: upstream
+    owner: core provider credential resolution
     evidence: *provider
   - path: hermes_cli/command_context.py
     disposition: plugin
@@ -192,6 +208,10 @@ paths:
     disposition: ops-support
     owner: hermes-studio-ops support tests
     evidence: *restart
+  - path: tests/hermes_cli/test_runtime_provider_resolution.py
+    disposition: upstream
+    owner: core provider resolution tests
+    evidence: *provider
   - path: tests/plugins/context_engine/test_user_context_engine_discovery.py
     disposition: upstream
     owner: core context-engine seam tests
