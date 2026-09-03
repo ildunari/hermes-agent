@@ -7,6 +7,11 @@ from hermes_cli.external_support import load_support_module
 
 logger = logging.getLogger(__name__)
 
+# Tracks the configured session cwd most recently copied into terminal state.
+# Terminal `cd` commands update that same state independently, so an unchanged
+# gateway preference must not overwrite them at the start of every later turn.
+_last_bound_session_cwd = {}
+
 def _implementation():
     return load_support_module(
         "hermes_runtime_support.gateway_command_context",
@@ -61,8 +66,9 @@ class GatewayCommandRuntimeMixin:
             )
 
             register_task_env_overrides(task_id, {"cwd": cwd})
-            if session_key:
+            if session_key and _last_bound_session_cwd.get(session_key) != cwd:
                 record_session_cwd(session_key, cwd)
+                _last_bound_session_cwd[session_key] = cwd
         except Exception:
             logger.debug(
                 "Failed to bind cwd override for task %s", task_id, exc_info=True
