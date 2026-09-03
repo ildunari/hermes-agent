@@ -174,6 +174,7 @@ from agent.model_metadata import (
     strip_codex_context_variant_suffix as _strip_codex_ctx_variant,
 )
 from hermes_cli.config import get_hermes_home
+from hermes_cli.alias_billing_guard import aux_auto_metered_fallback_blocked
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, env_float, is_truthy_value, model_forces_max_completion_tokens, normalize_proxy_env_vars
 
@@ -5989,6 +5990,10 @@ def _try_payment_fallback(
                        "custom": "local/custom", "local/custom": "local/custom"}
     skip_chain_labels = {_alias_to_label.get(s, s) for s in skip_labels}
 
+    if aux_auto_metered_fallback_blocked(main_provider):
+        logger.warning("Auxiliary %s: skipping metered fallback for keyless/OAuth main provider %s", task or "call", main_provider)
+        return None, None, ""
+
     tried = []
     for label, try_fn in _get_provider_chain():
         if label in skip_chain_labels:
@@ -6635,6 +6640,9 @@ def _resolve_auto_route(
         return fb_client, fb_model, fb_label
 
     # ── Step 3: aggregator / fallback chain ──────────────────────────────
+    if aux_auto_metered_fallback_blocked(main_provider):
+        logger.warning("Auxiliary auto-detect: skipping metered chain for keyless/OAuth main provider %s", main_provider)
+        return None, None, ""
     tried = []
     for label, try_fn in _get_provider_chain():
         if _is_provider_unhealthy(label):
