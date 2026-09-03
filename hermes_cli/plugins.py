@@ -78,6 +78,14 @@ from hermes_cli.relay_plugin_cutover import (
     RELAY_PLUGINS_CONFIG_ENV,
     legacy_relay_plugin_keys,
 )
+from hermes_cli.command_context import (  # noqa: F401 — public plugin API
+    CommandActionResult,
+    CommandCapabilityError,
+    CommandInvocationContext,
+    CommandSession,
+    CommandSource,
+    cli_command_context,
+)
 
 
 def get_bundled_plugins_dir() -> Path:
@@ -1786,6 +1794,8 @@ class PluginContext:
         is_async: bool = False,
         description: str = "",
         emoji: str = "",
+        max_result_size_chars: int | float | None = None,
+        dynamic_schema_overrides: Callable | None = None,
         override: bool = False,
     ) -> Optional[PluginRegistration]:
         """Register a tool in the global registry **and** track it as plugin-provided.
@@ -1834,6 +1844,8 @@ class PluginContext:
             is_async=is_async,
             description=description,
             emoji=emoji,
+            max_result_size_chars=max_result_size_chars,
+            dynamic_schema_overrides=dynamic_schema_overrides,
             override=override,
             scope=scope,
         )
