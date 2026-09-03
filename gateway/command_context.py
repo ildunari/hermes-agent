@@ -1,5 +1,11 @@
 """Compatibility seam for external gateway command-context support."""
+import logging
+import os
+from pathlib import Path
+
 from hermes_cli.external_support import load_support_module
+
+logger = logging.getLogger(__name__)
 
 def _implementation():
     return load_support_module(
@@ -11,18 +17,51 @@ def __getattr__(name):
     return getattr(_implementation(), name)
 
 
+async def dispatch_pending_plugin_command_followup(runner, event, session_key):
+    """Fail open when optional command support is unavailable mid-update."""
+    try:
+        return await _implementation().dispatch_pending_plugin_command_followup(
+            runner, event, session_key
+        )
+    except Exception:
+        logger.warning(
+            "Pending plugin command follow-up dispatch failed",
+            exc_info=True,
+        )
+        return False
+
+
 class GatewayCommandRuntimeMixin:
     """Thin host hooks for session-aware command preferences."""
 
     def _session_cwd_for_entry(self, entry):
-        return _implementation().session_cwd_for_entry(entry)
+        if entry is not None and getattr(entry, "cwd_override", None):
+            return str(entry.cwd_override)
+        raw = os.getenv("TERMINAL_CWD") or str(Path.home())
+        return os.path.abspath(os.path.expanduser(raw))
+
+    def _session_entry_for_key(self, session_key):
+        try:
+            return self.session_store.lookup_by_session_key(session_key)
+        except Exception:
+            return None
+
+    def _bind_task_cwd(self, task_id, cwd):
+        if not task_id or not cwd:
+            return
+        try:
+            from tools.terminal_tool import register_task_env_overrides
+
+            register_task_env_overrides(task_id, {"cwd": cwd})
+        except Exception:
+            logger.debug(
+                "Failed to bind cwd override for task %s", task_id, exc_info=True
+            )
 
     def _session_personality_prompt(self, session_key: str) -> str:
-        try:
-            entry = self.session_store.lookup_by_session_key(session_key)
-        except Exception:
-            entry = None
-        return _implementation().session_personality_prompt(entry)
+        entry = self._session_entry_for_key(session_key)
+        value = getattr(entry, "personality_override", None) if entry else None
+        return str(value.get("prompt") or "").strip() if isinstance(value, dict) else ""
 
     async def _handle_detached_surface_restart_command(self, event, canonical: str) -> str:
         """Queue cross-surface restart work outside the receiving gateway."""

@@ -9491,6 +9491,7 @@ def _build_call_kwargs(
     profile_reasoning_extra: Dict[str, Any] = {}
     profile_top_level: Dict[str, Any] = {}
     profile_handles_reasoning = False
+    profile = None
     try:
         from providers import get_provider_profile
         from providers.base import ProviderProfile

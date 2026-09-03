@@ -20947,6 +20947,7 @@ class GatewayRunner(
                 from agent.context_references import preprocess_context_references_async
                 from agent.model_metadata import get_model_context_length_async
 
+                session_entry = self._session_entry_for_key(session_key)
                 _msg_cwd = self._session_cwd_for_entry(session_entry)
                 _msg_config_ctx = None
                 _msg_cfg = None
@@ -27708,6 +27709,8 @@ class GatewayRunner(
             )
         except Exception:
             session_entry = None
+        session_cwd = self._session_cwd_for_entry(session_entry)
+        self._bind_task_cwd(context.session_id, session_cwd)
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
@@ -27723,7 +27726,7 @@ class GatewayRunner(
             session_key=context.session_key,
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
-            cwd=self._session_cwd_for_entry(session_entry),
+            cwd=session_cwd,
             async_delivery=_async_delivery,
             cron_session="",
         )

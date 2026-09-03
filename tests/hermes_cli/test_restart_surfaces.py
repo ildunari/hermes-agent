@@ -39,6 +39,7 @@ def test_detached_bootstrap_failure_writes_private_completion_marker(tmp_path):
     missing_home.mkdir()
     environment = {
         **os.environ,
+        "HOME": str(tmp_path),
         "HERMES_HOME": str(missing_home),
         "PYTHONPATH": str(restart_surfaces.Path(__file__).parents[2]),
     }

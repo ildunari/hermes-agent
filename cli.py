@@ -13197,15 +13197,23 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # Check for plugin-registered slash commands
             elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
                 from hermes_cli.plugins import (
-                    get_plugin_command_handler,
+                    cli_command_context,
+                    get_plugin_commands,
                     resolve_plugin_command_result,
                 )
-                plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
-                if plugin_handler:
+                plugin_name = base_cmd.lstrip("/")
+                plugin_entry = get_plugin_commands().get(plugin_name)
+                if plugin_entry:
+                    plugin_handler = plugin_entry["handler"]
                     user_args = cmd_original[len(base_cmd):].strip()
                     try:
+                        argument = (
+                            cli_command_context(user_args, plugin_name)
+                            if plugin_entry.get("context")
+                            else user_args
+                        )
                         result = resolve_plugin_command_result(
-                            plugin_handler(user_args)
+                            plugin_handler(argument)
                         )
                         if result:
                             _cprint(str(result))
