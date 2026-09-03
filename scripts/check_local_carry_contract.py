@@ -109,7 +109,12 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return data
 
 
-def validate(repo: Path, manifest_path: Path, base_ref: str | None = None) -> CarryMetrics:
+def validate(
+    repo: Path,
+    manifest_path: Path,
+    base_ref: str | None = None,
+    support_root: Path | None = None,
+) -> CarryMetrics:
     manifest = load_manifest(manifest_path)
     resolved_base = str(base_ref or manifest.get("base_ref") or "origin/main")
     metrics, changed_paths = measure(repo, resolved_base)
@@ -156,6 +161,23 @@ def validate(repo: Path, manifest_path: Path, base_ref: str | None = None) -> Ca
         actual = getattr(metrics, field)
         if actual > limit:
             raise CarryContractError(f"{field} regressed: {actual} > {limit}")
+
+    if support_root is not None:
+        required_support = manifest.get("required_support")
+        if not isinstance(required_support, list) or not required_support:
+            raise CarryContractError("required_support must be a non-empty list")
+        missing_support = []
+        for item in required_support:
+            if not isinstance(item, str) or not item.strip():
+                missing_support.append(str(item))
+                continue
+            if not (support_root / item).is_file():
+                missing_support.append(item)
+        missing_support.sort()
+        if missing_support:
+            raise CarryContractError(
+                f"missing required support: {', '.join(missing_support)}"
+            )
     return metrics
 
 
@@ -166,13 +188,20 @@ def main(argv: list[str] | None = None) -> int:
         "--manifest", type=Path, default=Path("scripts/local_carry_manifest.yaml")
     )
     parser.add_argument("--base-ref")
+    parser.add_argument(
+        "--support-root",
+        type=Path,
+        help="verify external support files under this plugin repository root",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     manifest = args.manifest
     if not manifest.is_absolute():
         manifest = args.repo / manifest
     try:
-        metrics = validate(args.repo.resolve(), manifest, args.base_ref)
+        metrics = validate(
+            args.repo.resolve(), manifest, args.base_ref, args.support_root
+        )
     except CarryContractError as exc:
         print(f"carry contract: FAIL: {exc}", file=sys.stderr)
         return 1

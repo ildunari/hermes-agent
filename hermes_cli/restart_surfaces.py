@@ -2,80 +2,20 @@
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
+import json
 import os
 import sys
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
-from types import ModuleType
 from typing import Any, Iterable
 
+from hermes_cli.external_support import load_support_module
 
-_IMPLEMENTATION: ModuleType | None = None
-_SUPPORT_RELATIVE_PATH = Path(
-    "support/hermes-studio-ops/src/hermes_studio_ops/restart_surfaces.py"
-)
-
-
-def _support_source_candidates() -> tuple[Path, ...]:
-    """Return profile-local then root-local support implementation paths."""
-    configured_home = os.environ.get("HERMES_HOME", "").strip()
-    homes = []
-    if configured_home:
-        homes.append(Path(configured_home).expanduser())
-    homes.append(Path.home() / ".hermes")
-
-    candidates: list[Path] = []
-    for home in homes:
-        candidate = home / "plugins" / _SUPPORT_RELATIVE_PATH
-        if candidate not in candidates:
-            candidates.append(candidate)
-    return tuple(candidates)
-
-
-def _load_source(path: Path) -> ModuleType:
-    module_name = "_hermes_studio_ops_restart_surfaces"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load restart support module from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        sys.modules.pop(module_name, None)
-        raise
-    return module
-
-
-def _implementation() -> ModuleType:
-    global _IMPLEMENTATION
-    if _IMPLEMENTATION is not None:
-        return _IMPLEMENTATION
-
-    try:
-        _IMPLEMENTATION = importlib.import_module(
-            "hermes_studio_ops.restart_surfaces"
-        )
-        return _IMPLEMENTATION
-    except ImportError:
-        pass
-
-    failures: list[str] = []
-    for candidate in _support_source_candidates():
-        if not candidate.is_file():
-            continue
-        try:
-            _IMPLEMENTATION = _load_source(candidate)
-            return _IMPLEMENTATION
-        except Exception as exc:
-            failures.append(f"{candidate}: {exc}")
-
-    detail = f" ({'; '.join(failures)})" if failures else ""
-    raise RuntimeError(
-        "Hermes restart support is unavailable. Expected the versioned "
-        "hermes-studio-ops module under the active profile's plugins/support "
-        f"tree or as an installed package{detail}."
+def _implementation():
+    return load_support_module(
+        "hermes_studio_ops.restart_surfaces",
+        "support/hermes-studio-ops/src/hermes_studio_ops/restart_surfaces.py",
     )
 
 
@@ -86,7 +26,72 @@ def enqueue_detached_restart(*args: Any, **kwargs: Any):
 
 def main(argv: Iterable[str] | None = None) -> int:
     """Run the external implementation under the historical module command."""
-    return int(_implementation().main(argv))
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    try:
+        return int(_implementation().main(arguments))
+    except Exception as exc:
+        return _record_bootstrap_failure(arguments, exc)
+
+
+def _argument_value(arguments: list[str], name: str, default: str = "") -> str:
+    try:
+        return arguments[arguments.index(name) + 1]
+    except (ValueError, IndexError):
+        return default
+
+
+def _record_bootstrap_failure(arguments: list[str], exc: Exception) -> int:
+    """Preserve the detached completion contract when support cannot load."""
+    scope = _argument_value(arguments, "--scope", "hermes")
+    marker = _argument_value(arguments, "--completion-marker")
+    tty_path = _argument_value(arguments, "--notify-tty")
+    log_path = Path.home() / ".hermes" / "logs" / "restart-surfaces.log"
+    message = f"Hermes surfaces restart bootstrap failed. Check {log_path}"
+    timestamp = datetime.now(timezone.utc).isoformat()
+    try:
+        log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] {message}: {exc}\n")
+    except OSError:
+        pass
+    if tty_path:
+        try:
+            with open(tty_path, "a", encoding="utf-8", buffering=1) as handle:
+                handle.write(f"\n{message}\n")
+        except OSError:
+            pass
+    if marker:
+        path = Path(marker).expanduser()
+        try:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            payload = {
+                "status": "complete",
+                "scope": scope,
+                "exit_code": 1,
+                "message": message,
+                "completed_at": timestamp,
+                "log_path": str(log_path),
+            }
+            fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    fd = -1
+                    json.dump(payload, handle, separators=(",", ":"))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+        except OSError:
+            pass
+    print(message, file=sys.stderr)
+    return 1
 
 
 def __getattr__(name: str) -> Any:

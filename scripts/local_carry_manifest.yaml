@@ -1,9 +1,19 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 47
-  total_changed_lines: 10446
+  paths: 42
+  total_changed_lines: 5673
   modified_upstream_lines: 1701
+
+required_support:
+  - support/hermes-studio-ops/src/hermes_studio_ops/restart_surfaces.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/alias_billing_guard.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/authenticated_dm.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/cli_command_context.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extension_runtime.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/conversation_ownership.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/gateway_command_context.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/opencodex_catalog.py
 
 evidence_templates:
   provider: &provider
@@ -144,6 +154,10 @@ paths:
     disposition: plugin
     owner: gateway-session-commands plugin
     evidence: *command
+  - path: hermes_cli/external_support.py
+    disposition: must-carry
+    owner: generic external support loading seam
+    evidence: *ratchet
   - path: hermes_cli/commands.py
     disposition: must-carry
     owner: core command dispatch seam
@@ -176,30 +190,10 @@ paths:
     disposition: must-carry
     owner: local carry ratchet
     evidence: *ratchet
-  - path: tests/agent/test_keep_aux_billing_glue.py
-    disposition: must-carry
-    owner: core provider seam tests
-    evidence: *provider
-  - path: tests/gateway/test_conversation_extension_lifecycle.py
-    disposition: upstream
-    owner: core conversation extension tests
-    evidence: *conversation
-  - path: tests/gateway/test_conversation_extension_run_wiring.py
-    disposition: upstream
-    owner: core conversation extension tests
-    evidence: *conversation
-  - path: tests/gateway/test_conversation_ownership.py
-    disposition: plugin
-    owner: poke plugin tests
-    evidence: *conversation
   - path: tests/gateway/test_keep_active_work_glue.py
     disposition: must-carry
     owner: core gateway lifecycle tests
     evidence: *active_work
-  - path: tests/gateway/test_keep_bb_poke_glue.py
-    disposition: plugin
-    owner: poke and BlueBubbles plugin tests
-    evidence: *bluebubbles
   - path: tests/gateway/test_keep_drain_freshness_glue.py
     disposition: must-carry
     owner: core gateway lifecycle tests
@@ -224,10 +218,6 @@ paths:
     disposition: must-carry
     owner: local carry ratchet tests
     evidence: *ratchet
-  - path: tests/tools/test_keep_bluebubbles_registry_send.py
-    disposition: plugin
-    owner: BlueBubbles plugin tests
-    evidence: *bluebubbles
   - path: tools/send_message_registry.py
     disposition: upstream
     owner: core platform registry

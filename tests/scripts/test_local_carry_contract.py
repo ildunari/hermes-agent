@@ -47,6 +47,7 @@ def _manifest(path: Path, base: str, *, paths: list[str], limits: dict) -> Path:
         "version": 1,
         "base_ref": base,
         "limits": limits,
+        "required_support": ["support/required.py"],
         "paths": [
             {
                 "path": item,
@@ -117,3 +118,23 @@ def test_validate_rejects_incomplete_evidence(carry_repo, tmp_path):
 
     with pytest.raises(carry.CarryContractError, match="missing evidence"):
         carry.validate(repo, manifest)
+
+
+def test_validate_support_gate_requires_every_declared_file(carry_repo, tmp_path):
+    repo, base = carry_repo
+    manifest = _manifest(
+        tmp_path / "manifest.yaml",
+        base,
+        paths=["added.py", "existing.py"],
+        limits={"paths": 2, "total_changed_lines": 4, "modified_upstream_lines": 2},
+    )
+    support_root = tmp_path / "plugins"
+
+    with pytest.raises(carry.CarryContractError, match="missing required support"):
+        carry.validate(repo, manifest, support_root=support_root)
+
+    required = support_root / "support" / "required.py"
+    required.parent.mkdir(parents=True)
+    required.write_text("ready = True\n", encoding="utf-8")
+
+    assert carry.validate(repo, manifest, support_root=support_root).paths == 2
