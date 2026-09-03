@@ -41,6 +41,7 @@ class ProviderProfile:
 
     # ── Identity ─────────────────────────────────────────────
     name: str
+    response_tool_name_normalizer: Any = None
     api_mode: str = "chat_completions"
     aliases: tuple = ()
 
@@ -259,6 +260,33 @@ class ProviderProfile:
         """
         return None
 
+    def normalize_auxiliary_extra_body(
+        self,
+        extra_body: dict[str, Any],
+        *,
+        model: str | None = None,
+        **context: Any,
+    ) -> dict[str, Any]:
+        """Last-chance auxiliary ``extra_body`` normalization before SDK send."""
+        return extra_body
+
+    def finalize_api_kwargs(
+        self,
+        api_kwargs: dict[str, Any],
+        *,
+        model: str | None = None,
+        **context: Any,
+    ) -> dict[str, Any]:
+        """Last-chance request normalization for provider plugins.
+
+        Called by the chat-completions transport after generic request
+        assembly, provider extras, and user request overrides. Most providers
+        should leave this as a no-op; gateways with model-specific validation
+        quirks can strip or adjust unsupported fields here without adding
+        provider branches to the transport.
+        """
+        return api_kwargs
+
     def fetch_models(
         self,
         *,
@@ -330,3 +358,60 @@ class ProviderProfile:
         except Exception as exc:
             logger.debug("fetch_models(%s): %s", self.name, exc)
             return None
+
+
+def apply_keyless_api_key(
+    provider_id: str,
+    api_key: str,
+    key_source: str,
+) -> tuple[str, str]:
+    """Fill a keyless gateway placeholder when no secret is configured."""
+    if api_key:
+        return api_key, key_source
+    placeholder = keyless_api_key_placeholder(provider_id)
+    if placeholder:
+        return placeholder, key_source or "default"
+    return api_key, key_source
+
+def keyless_api_key_placeholder(provider_id: str) -> str | None:
+    """Return a keyless gateway's non-secret API-key placeholder, if any."""
+    profile = _provider_profile(provider_id)
+    if profile is not None and profile.keyless and profile.api_key_placeholder:
+        return profile.api_key_placeholder
+    return None
+
+def keyless_provider_status_for_auth(provider_id: str, pconfig) -> dict[str, Any] | None:
+    """Auth-status payload for a keyless provider registry row."""
+    return keyless_provider_status_payload(
+        provider_id,
+        default_name=pconfig.name,
+        default_base_url=pconfig.inference_base_url,
+    )
+
+def keyless_provider_status_payload(
+    provider_id: str,
+    *,
+    default_name: str,
+    default_base_url: str,
+) -> dict[str, Any] | None:
+    """Build a keyless provider auth-status payload from its profile."""
+    profile = _provider_profile(provider_id)
+    if profile is None or not profile.keyless:
+        return None
+    env_url = ""
+    for env_var in profile.env_vars:
+        if env_var.endswith("_BASE_URL") or env_var.endswith("_URL"):
+            import os
+
+            env_url = os.getenv(env_var, "").strip()
+            if env_url:
+                break
+    base_url = env_url.rstrip("/") if env_url else profile.base_url or default_base_url
+    return {
+        "configured": True,
+        "provider": provider_id,
+        "name": profile.display_name or default_name,
+        "key_source": "keyless",
+        "base_url": base_url,
+        "logged_in": True,
+    }
