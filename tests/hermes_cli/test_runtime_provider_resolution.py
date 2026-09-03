@@ -8,6 +8,55 @@ import pytest
 from hermes_cli import runtime_provider as rp
 
 
+def test_api_key_resolver_accepts_profile_declared_keyless_provider(monkeypatch):
+    from hermes_cli import auth as auth_mod
+    from providers import base as provider_base
+
+    provider_id = "test-keyless-gateway"
+    monkeypatch.setitem(
+        auth_mod.PROVIDER_REGISTRY,
+        provider_id,
+        auth_mod.ProviderConfig(
+            id=provider_id,
+            name="Test keyless gateway",
+            auth_type="api_key",
+            inference_base_url="http://127.0.0.1:19090/v1",
+        ),
+    )
+    monkeypatch.setattr(
+        auth_mod,
+        "_resolve_api_key_provider_secret",
+        lambda *_args, **_kwargs: ("", ""),
+    )
+    monkeypatch.setattr(
+        provider_base,
+        "_provider_profile",
+        lambda _provider_id: SimpleNamespace(
+            keyless=True,
+            api_key_placeholder="test-keyless-placeholder",
+        ),
+    )
+
+    resolved = auth_mod.resolve_api_key_provider_credentials(provider_id)
+
+    assert resolved["api_key"] == "test-keyless-placeholder"
+    assert resolved["source"] == "default"
+
+
+def test_api_key_resolver_preserves_legacy_lmstudio_keyless_fallback(monkeypatch):
+    from hermes_cli import auth as auth_mod
+
+    monkeypatch.setattr(
+        auth_mod,
+        "_resolve_api_key_provider_secret",
+        lambda *_args, **_kwargs: ("", ""),
+    )
+
+    resolved = auth_mod.resolve_api_key_provider_credentials("lmstudio")
+
+    assert resolved["api_key"] == auth_mod.LMSTUDIO_NOAUTH_PLACEHOLDER
+
+
 def test_configured_api_key_provider_without_key_fails_closed(monkeypatch):
     """A saved provider must not resolve as another authenticated provider."""
     monkeypatch.setattr(

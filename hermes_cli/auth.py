@@ -8160,9 +8160,20 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     key_source = ""
     api_key, key_source = _resolve_api_key_provider_secret(provider_id, pconfig)
 
-    # No-auth LM Studio: substitute a placeholder so runtime / auxiliary_client
-    # see the local server as configured. doctor still reports unconfigured
-    # because get_api_key_provider_status uses the raw secret resolver.
+    # Provider profiles own keyless admission. This lets an out-of-tree local
+    # gateway opt in without another provider-name branch in core.
+    try:
+        from providers.base import apply_keyless_api_key
+
+        api_key, key_source = apply_keyless_api_key(
+            provider_id, api_key, key_source
+        )
+    except Exception:
+        # Provider discovery must not make ordinary API-key auth unavailable.
+        pass
+
+    # Backward compatibility for LM Studio, which predates ProviderProfile and
+    # is intentionally still represented only in the auth registry.
     if not api_key and provider_id == "lmstudio":
         api_key = LMSTUDIO_NOAUTH_PLACEHOLDER
         key_source = key_source or "default"

@@ -13,12 +13,25 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Literal, Mapping
 
 logger = logging.getLogger(__name__)
 
 # Sentinel for "omit temperature entirely" (Kimi: server manages it)
 OMIT_TEMPERATURE = object()
+
+
+@dataclass(frozen=True)
+class ToolNameNormalizeContext:
+    """Describe where an inbound provider wire tool name appeared."""
+
+    phase: Literal["stream_delta", "final_tool_call"]
+    provider: str
+    model: str | None = None
+    request_wire_aliases: Mapping[str, str] | None = None
+
+
+ResponseToolNameNormalizer = Callable[[str, ToolNameNormalizeContext], str]
 
 
 def _profile_user_agent() -> str:
@@ -41,7 +54,6 @@ class ProviderProfile:
 
     # ── Identity ─────────────────────────────────────────────
     name: str
-    response_tool_name_normalizer: Any = None
     api_mode: str = "chat_completions"
     aliases: tuple = ()
 
@@ -78,6 +90,26 @@ class ProviderProfile:
     # is deliberately opt-in: many OpenAI-compatible endpoints reject unknown
     # top-level fields rather than ignoring them.
     supports_prompt_cache_key: bool = False
+
+    # A provider plugin may own the API mode even when the user's saved model
+    # block predates that plugin and contains a stale mode.
+    ignore_configured_api_mode: bool = False
+
+    # Keyless local gateways still need a non-empty token for OpenAI-compatible
+    # clients. The placeholder is routing metadata, never a credential.
+    keyless: bool = False
+    api_key_placeholder: str = ""
+
+    # Local gateways must not become the active provider merely because a
+    # compatibility token remains in the environment.
+    exclude_from_env_auto_select: bool = False
+
+    # OpenAI-wire gateways that front Claude may support Anthropic cache
+    # envelopes even though their transport is Chat Completions.
+    openai_wire_claude_prompt_caching: bool = False
+
+    # Optional provider-owned restoration of response tool names.
+    response_tool_name_normalizer: ResponseToolNameNormalizer | None = None
 
     # ── External-process providers (auth_type="external_process") ──
     # An agent CLI driven over stdio (ACP) rather than an HTTP endpoint. These
@@ -360,6 +392,15 @@ class ProviderProfile:
             return None
 
 
+def _provider_profile(provider_id: str):
+    try:
+        from providers import get_provider_profile
+
+        return get_provider_profile(provider_id)
+    except Exception:
+        return None
+
+
 def apply_keyless_api_key(
     provider_id: str,
     api_key: str,
@@ -373,12 +414,27 @@ def apply_keyless_api_key(
         return placeholder, key_source or "default"
     return api_key, key_source
 
+
 def keyless_api_key_placeholder(provider_id: str) -> str | None:
     """Return a keyless gateway's non-secret API-key placeholder, if any."""
     profile = _provider_profile(provider_id)
-    if profile is not None and profile.keyless and profile.api_key_placeholder:
+    if (
+        profile is not None
+        and getattr(profile, "keyless", False)
+        and getattr(profile, "api_key_placeholder", "")
+    ):
         return profile.api_key_placeholder
     return None
+
+
+def profile_excludes_env_auto_select(provider_id: str) -> bool:
+    """Return whether ambient environment keys may auto-select a provider."""
+    profile = _provider_profile(provider_id)
+    return bool(
+        profile is not None
+        and getattr(profile, "exclude_from_env_auto_select", False)
+    )
+
 
 def keyless_provider_status_for_auth(provider_id: str, pconfig) -> dict[str, Any] | None:
     """Auth-status payload for a keyless provider registry row."""
@@ -396,7 +452,7 @@ def keyless_provider_status_payload(
 ) -> dict[str, Any] | None:
     """Build a keyless provider auth-status payload from its profile."""
     profile = _provider_profile(provider_id)
-    if profile is None or not profile.keyless:
+    if profile is None or not getattr(profile, "keyless", False):
         return None
     env_url = ""
     for env_var in profile.env_vars:
