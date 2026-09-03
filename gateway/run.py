@@ -19898,6 +19898,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "platform":
             return await self._handle_platform_command(event)
 
+        if canonical in ("restart-gateways", "restart-hermes", "restart-webui"):
+            return await self._handle_detached_surface_restart_command(event, canonical)
+
         if canonical == "stop":
             return await self._handle_stop_command(event)
         
@@ -24207,6 +24210,51 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if key == prefix or key.startswith(prefix + ":"):
                 matches.append(key)
         return matches
+
+
+    async def _handle_detached_surface_restart_command(
+        self,
+        event: MessageEvent,
+        canonical: str,
+    ) -> str:
+        """Queue cross-surface restart work outside the receiving gateway."""
+        from hermes_cli.restart_surfaces import enqueue_detached_restart
+
+        scope = {
+            "restart-gateways": "gateways",
+            "restart-webui": "webui",
+        }.get(canonical, "hermes")
+        if scope == "webui" and event.source and event.source.platform:
+            try:
+                origin_platform = event.source.platform.value
+            except Exception:
+                origin_platform = ""
+            if origin_platform == "api_server":
+                return (
+                    "Refusing to restart the WebUI from the WebUI surface "
+                    "itself — send /restart-webui from Telegram (or another "
+                    "chat platform), or run `hermes restart-webui` in a "
+                    "terminal."
+                )
+        args = event.get_command_args().split()
+        dry_run = any(
+            arg.lower() in {"--dry-run", "dry-run", "smoke", "test", "plan"}
+            for arg in args
+        )
+        notify_origin = None
+        if event.source and event.source.platform and event.source.chat_id:
+            notify_origin = {
+                "platform": event.source.platform.value,
+                "chat_id": event.source.chat_id,
+            }
+            if event.source.thread_id:
+                notify_origin["thread_id"] = event.source.thread_id
+        return enqueue_detached_restart(
+            scope,
+            delay=1.0,
+            dry_run=dry_run,
+            notify_origin=notify_origin,
+        )
 
 
 
