@@ -7452,6 +7452,21 @@ def persist_active_agents_now() -> None:
     return _active_work.persist_active_agents_now()
 
 
+
+def _load_gateway_config_from_home(home: "Path") -> dict:
+    """Load a profile config.yaml from its HERMES_HOME directly."""
+    try:
+        config_path = Path(home) / "config.yaml"
+        if config_path.exists():
+            import yaml
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.debug(
+            "Could not load gateway config from home %s", home, exc_info=True
+        )
+    return {}
+
 def _load_gateway_config_for_profile(profile: str | None) -> dict:
     """Load profile config without changing the process-wide Hermes home."""
     if not profile or not str(profile).strip():
