@@ -2729,7 +2729,7 @@ async def _discover_gateway_mcp_tools(config: object) -> None:
         return
     for profile_name, profile_home in _multiplex_profile_homes(config):
         try:
-            with _profile_runtime_scope(Path(profile_home)):
+            async with _async_profile_runtime_scope(Path(profile_home)):
                 await loop.run_in_executor(None, copy_context().run, discover_mcp_tools)
         except Exception:
             logger.warning(
@@ -17969,7 +17969,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if getattr(source, "profile", None) is None:
                 source.profile = profile_name
             if profile_home is not None:
-                with _profile_runtime_scope(profile_home):
+                async with _async_profile_runtime_scope(profile_home):
                     return await self._handle_gateway_platform_event(event, source)
             return await self._handle_gateway_platform_event(event, source)
 
@@ -17981,7 +17981,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         async def _handler(event, source):
             source._authorization_profile_home = default_home
-            with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
+            async with _async_profile_runtime_scope(
+                self._resolve_profile_home_for_source(source)
+            ):
                 return await self._handle_gateway_platform_event(event, source)
 
         return _handler
@@ -18013,7 +18015,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         authorization_home = getattr(source, "_authorization_profile_home", None)
         if authorization_home is not None:
-            with _profile_runtime_scope(Path(authorization_home)):
+            with _profile_runtime_scope(
+                Path(authorization_home), hydrate_secrets=False
+            ):
                 return _check()
         return _check()
 
@@ -25608,7 +25612,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
 
         profile_home = self._resolve_profile_home_for_source(source)
-        with _profile_runtime_scope(profile_home):
+        async with _async_profile_runtime_scope(profile_home):
             return await self._run_background_task_inner(
                 prompt, source, task_id, event_message_id, media_urls, media_types,
             )
@@ -26595,7 +26599,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         multiplex = bool(getattr(self.config, "multiplex_profiles", False))
         if multiplex and not get_hermes_home_override():
             profile_home = self._resolve_profile_home_for_source(event.source)
-            with _profile_runtime_scope(Path(profile_home)):
+            async with _async_profile_runtime_scope(Path(profile_home)):
                 return await self._execute_mcp_reload(event)
         try:
             from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
@@ -31336,7 +31340,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
 
         profile_home = self._resolve_profile_home_for_source(source)
-        with _profile_runtime_scope(profile_home):
+        async with _async_profile_runtime_scope(profile_home):
             return await self._run_agent_inner(
                 message, context_prompt, history, source, session_id,
                 session_key=session_key, run_generation=run_generation,
