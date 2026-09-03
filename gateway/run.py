@@ -7447,6 +7447,28 @@ class TurnRunner:
 _SESSION_DB_UNPINNED = object()
 
 
+def persist_active_agents_now() -> None:
+    from gateway import active_work as _active_work
+    return _active_work.persist_active_agents_now()
+
+
+def _load_gateway_config_for_profile(profile: str | None) -> dict:
+    """Load profile config without changing the process-wide Hermes home."""
+    if not profile or not str(profile).strip():
+        return _load_gateway_config()
+    profile = str(profile).strip()
+    if profile == os.getenv("HERMES_PROFILE"):
+        return _load_gateway_config()
+    config_path = Path.home() / ".hermes" / "profiles" / profile / "config.yaml"
+    try:
+        if config_path.exists():
+            import yaml
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.debug("Could not load gateway profile config from %s", config_path, exc_info=True)
+    return {}
+
 class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
     """
     Main gateway controller.
@@ -10150,26 +10172,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             pass
 
     def _persist_active_agents(self) -> None:
-        """Persist the live in-flight agent count to ``gateway_state.json``.
-
-        Called at every turn boundary (a running-agent slot is claimed or
-        released) so the dashboard ``/api/status`` readout reflects in-flight
-        gateway turns in near-real-time.  Without this the file is only
-        rewritten on lifecycle transitions, so any ``active_agents`` read
-        between transitions is stale (a turn could start and finish without the
-        file ever moving).
-
-        Deliberately passes ONLY ``active_agents`` — ``gateway_state`` and the
-        other fields stay ``_UNSET`` so ``write_runtime_status``'s
-        read-merge-write preserves the current lifecycle state (``running`` /
-        ``draining`` / …).  Passing ``gateway_state=None`` here would clobber it.
-        Best-effort: a failed status write must never disrupt a turn.
-        """
-        try:
-            from gateway.status import write_runtime_status
-            write_runtime_status(active_agents=self._active_work_count())
-        except Exception:
-            pass
+        """Persist the live in-flight agent count to ``gateway_state.json``."""
+        from gateway import active_work as _active_work
+        return _active_work.persist_active_agents(self)
 
     # ------------------------------------------------------------------
     # External drain control (NAS-driven quiesce-without-restart, Phase 2).
@@ -11286,6 +11291,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_key,
             )
             return True  # handled (silently dropped); do not fall through
+
+        routed = self._route_busy_event_through_extension(event)
+        if routed is False:
+            return True
+        if routed is not None:
+            event = routed
 
         effective_mode = self._effective_busy_input_mode(event.source)
 
@@ -13835,6 +13846,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         Returns True if at least one adapter connected successfully.
         """
         logger.info("Starting Hermes Gateway...")
+        # Install the bounded host operations behind GatewayRuntimeFacade so
+        # registered conversation extensions get real lifecycle scheduling and
+        # session lookup instead of the deny-by-default stub.
+        try:
+            self._install_conversation_extension_host()
+        except Exception:
+            logger.debug("could not install extension host operations", exc_info=True)
         # Enable faulthandler for stack dumps on freezes/crashes (#70344).
         # Falls back to a log file when sys.stderr is None (Windows VBS /
         # pythonw / detached service) — otherwise the gateway would die
@@ -14634,6 +14652,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return True
         self.delivery_router.adapters = self.adapters
         self._wire_teams_pipeline_runtime()
+
+        try:
+            self._activate_conversation_extensions_for_served_profiles()
+        except Exception:
+            logger.error(
+                "conversation extension startup activation failed", exc_info=True
+            )
 
         self._running = True
         self._install_plugin_message_injector()
@@ -16567,6 +16592,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             self._running = False
             self._clear_plugin_message_injector()
+            try:
+                self._fire_extension_gateway_stop()
+            except Exception:
+                logger.debug(
+                    "conversation extension gateway-stop teardown failed",
+                    exc_info=True,
+                )
             self._draining = True
 
             stop_room_worker = getattr(self, "_stop_hosted_room_worker", None)
@@ -18853,6 +18885,58 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return None
 
+        # Conversation-extension admission owner (KEEP poke/guest host).
+        # Fail closed when a required extension is missing; otherwise apply
+        # the validated route before authorization and session setup.
+        try:
+            from gateway import conversation_extension_runtime as _ce_runtime
+            from hermes_constants import hermes_home_key as _hermes_home_key
+
+            _transport_profile = str(getattr(source, "profile", None) or "default")
+            _transport_home = str(self._resolve_profile_home_for_source(source))
+            _extension_scope = _hermes_home_key(_transport_home)
+            if self._extension_profile_is_ready(_extension_scope):
+                _config_raw = _load_gateway_config_for_profile(getattr(source, "profile", None))
+                _requirements_ok, _requirements_reason = _ce_runtime.profile_requirements_satisfied(
+                    scope=_extension_scope,
+                    config_raw=_config_raw,
+                )
+                if not _requirements_ok:
+                    logger.error(
+                        "Refusing inbound message: profile %s requires a conversation "
+                        "extension that is not available (%s)",
+                        _transport_profile,
+                        _requirements_reason,
+                    )
+                    return None
+                _extension_route_context = _ce_runtime.build_route_context(
+                    event,
+                    transport_profile=_transport_profile,
+                    transport_home=_transport_home,
+                )
+                if _extension_route_context is not None:
+                    _extension_route_decision = _ce_runtime.admit_and_route(
+                        _extension_route_context,
+                        scope=_extension_scope,
+                        served_profiles=tuple(self._served_profile_names()),
+                        permitted_routes=self._permitted_extension_routes(),
+                    )
+                    if (
+                        _extension_route_decision is not None
+                        and not _extension_route_decision.admitted
+                    ):
+                        logger.warning(
+                            "Conversation extension denied inbound message (%s)",
+                            _extension_route_decision.reason or "denied",
+                        )
+                        return None
+                    if _extension_route_decision is not None:
+                        source, event = self._apply_extension_route_decision_safe(
+                            source, event, _extension_route_decision
+                        )
+        except Exception:
+            logger.debug("inbound conversation-extension admission failed", exc_info=True)
+
         # Internal events (e.g. background-process completion notifications)
         # are system-generated and must skip user authorization.
         is_internal = bool(getattr(event, "internal", False))
@@ -19163,6 +19247,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # direct replies to multi-choice prompts are accepted too ("2" maps
         # to the second option). Slash
         # commands still bypass this path so /stop and friends keep working.
+        from gateway.command_context import dispatch_pending_plugin_command_followup
+
+        _pending_plugin_result = await dispatch_pending_plugin_command_followup(
+            self, event, _quick_key
+        )
+        if _pending_plugin_result is not False:
+            return _pending_plugin_result
+
         _clarify_mod = None
         try:
             from tools import clarify_gateway as _clarify_mod
@@ -20145,17 +20237,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Plugin-registered slash commands
         if command:
             try:
-                from hermes_cli.plugins import get_plugin_command_handler
-                # Normalize underscores to hyphens so Telegram's underscored
-                # autocomplete form matches plugin commands registered with
-                # hyphens. See hermes_cli/commands.py:_build_telegram_menu.
-                plugin_handler = get_plugin_command_handler(command.replace("_", "-"))
-                if plugin_handler:
-                    user_args = event.get_command_args().strip()
-                    result = plugin_handler(user_args)
-                    if asyncio.iscoroutine(result):
-                        result = await result
-                    return str(result) if result else None
+                from gateway.command_context import dispatch_gateway_plugin_command
+
+                plugin_dispatch = await dispatch_gateway_plugin_command(
+                    self, event, command
+                )
+                if plugin_dispatch.matched:
+                    if plugin_dispatch.continue_as_message:
+                        command = None
+                        canonical = None
+                    else:
+                        return plugin_dispatch.response
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)
 
@@ -33185,6 +33277,240 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("Post-delivery cleanup registration failed: %s", _rpe)
 
         return response
+
+    def _install_conversation_extension_host(self) -> None:
+        from gateway import conversation_extension_host as _host
+
+        return _host._install_conversation_extension_host(self)
+
+    def _served_profile_names(self) -> tuple[str, ...]:
+        from gateway import conversation_extension_host as _host
+
+        return _host._served_profile_names(self)
+
+    def _permitted_extension_routes(self) -> Dict[str, tuple[str, ...]]:
+        from gateway import conversation_extension_host as _host
+
+        return _host._permitted_extension_routes(self)
+
+    def _apply_extension_route_decision(self, source, event, decision):
+        from gateway import conversation_extension_host as _host
+
+        return _host._apply_extension_route_decision(self, source, event, decision)
+
+    def _apply_extension_route_decision_safe(self, source, event, decision):
+        from gateway import conversation_extension_host as _host
+
+        return _host._apply_extension_route_decision_safe(
+            self, source, event, decision
+        )
+
+    def _extension_runtime_profile(self, context, decision) -> str:
+        from gateway import conversation_extension_host as _host
+
+        return _host._extension_runtime_profile(self, context, decision)
+
+    def _fire_extension_gateway_start(
+        self, *, scope: str, profile_name: str
+    ) -> tuple[str, ...]:
+        from gateway import conversation_extension_host as _host
+
+        return _host._fire_extension_gateway_start(
+            self, scope=scope, profile_name=profile_name
+        )
+
+    def _fire_extension_gateway_stop(self) -> None:
+        from gateway import conversation_extension_host as _host
+
+        return _host._fire_extension_gateway_stop(self)
+
+    def _activate_conversation_extensions_for_profile(
+        self, profile_name: str, profile_home: "Path"
+    ) -> bool:
+        from gateway import conversation_extension_host as _host
+
+        return _host._activate_conversation_extensions_for_profile(
+            self, profile_name, profile_home
+        )
+
+    def _activate_conversation_extensions_for_served_profiles(self) -> None:
+        from gateway import conversation_extension_host as _host
+
+        return _host._activate_conversation_extensions_for_served_profiles(self)
+
+    def _extension_profile_is_ready(self, profile_scope: str) -> bool:
+        from gateway import conversation_extension_host as _host
+
+        return _host._extension_profile_is_ready(self, profile_scope)
+
+    def _extension_profile_unready_reason(self, profile_scope: str) -> str:
+        from gateway import conversation_extension_host as _host
+
+        return _host._extension_profile_unready_reason(self, profile_scope)
+
+    def _activate_conversation_ownership(
+        self, *, profile_name: str, scope: str, config_raw
+    ):
+        from gateway import conversation_extension_host as _host
+
+        return _host._activate_conversation_ownership(
+            self, profile_name=profile_name, scope=scope, config_raw=config_raw
+        )
+
+    def _collect_extension_turn_augmentation(
+        self,
+        *,
+        scope: str,
+        session_key: str,
+        runtime_profile: str,
+        platform: str,
+        sender_identity: str,
+        chat_type: str,
+        user_text: str,
+        profile_home: str = "",
+        session_id: str = "",
+        principal: str = "",
+        subject_id: str = "",
+        turn_index: int = 0,
+        now_timestamp: Optional[float] = None,
+        current_message_id: Optional[str] = None,
+        conversation_history: tuple = (),
+    ):
+        from gateway import conversation_extension_host as _host
+
+        return _host._collect_extension_turn_augmentation(
+            self,
+            scope=scope,
+            session_key=session_key,
+            runtime_profile=runtime_profile,
+            platform=platform,
+            sender_identity=sender_identity,
+            chat_type=chat_type,
+            user_text=user_text,
+            profile_home=profile_home,
+            session_id=session_id,
+            principal=principal,
+            subject_id=subject_id,
+            turn_index=turn_index,
+            now_timestamp=now_timestamp,
+            current_message_id=current_message_id,
+            conversation_history=conversation_history,
+        )
+
+    def _collect_extension_turn_context(
+        self,
+        *,
+        scope: str,
+        session_key: str,
+        runtime_profile: str,
+        platform: str,
+        sender_identity: str,
+        chat_type: str,
+        user_text: str,
+    ) -> str:
+        from gateway import conversation_extension_host as _host
+
+        return _host._collect_extension_turn_context(
+            self,
+            scope=scope,
+            session_key=session_key,
+            runtime_profile=runtime_profile,
+            platform=platform,
+            sender_identity=sender_identity,
+            chat_type=chat_type,
+            user_text=user_text,
+        )
+
+    async def _run_agent_turn_with_policy(
+        self,
+        *,
+        event,
+        source,
+        quick_key: str,
+        run_generation: int,
+        agent_kwargs: dict,
+        policy_scope: Optional[str] = None,
+    ):
+        from gateway import conversation_extension_host as _host
+
+        return await _host._run_agent_turn_with_policy(
+            self,
+            event=event,
+            source=source,
+            quick_key=quick_key,
+            run_generation=run_generation,
+            agent_kwargs=agent_kwargs,
+            policy_scope=policy_scope,
+        )
+
+
+    def _route_busy_event_through_extension(self, event: MessageEvent):
+        """Apply the generic admission owner before the adapter's busy fast path.
+
+        Active-session callbacks run in ``BasePlatformAdapter`` before the normal
+        message handler, so they cannot rely on the cold path having stamped a
+        validated extension route.  Return a routed event, ``None`` when no
+        extension claims admission, or ``False`` for a fail-closed denial.
+        """
+        source = getattr(event, "source", None)
+        if source is None:
+            return False
+        try:
+            from gateway import conversation_extension_runtime as _ce_runtime
+            from hermes_constants import hermes_home_key as _hermes_home_key
+
+            transport_profile = str(getattr(source, "profile", None) or "default")
+            transport_home = str(self._resolve_profile_home_for_source(source))
+            scope = _hermes_home_key(transport_home)
+            if not self._extension_profile_is_ready(scope):
+                return False
+            config_raw = _load_gateway_config_for_profile(
+                getattr(source, "profile", None)
+            )
+            requirements_ok, _ = _ce_runtime.profile_requirements_satisfied(
+                scope=scope,
+                config_raw=config_raw,
+            )
+            if not requirements_ok:
+                return False
+            context = _ce_runtime.build_route_context(
+                event,
+                transport_profile=transport_profile,
+                transport_home=transport_home,
+            )
+            if context is None:
+                return None
+            decision = _ce_runtime.admit_and_route(
+                context,
+                scope=scope,
+                served_profiles=tuple(self._served_profile_names()),
+                permitted_routes=self._permitted_extension_routes(),
+            )
+            if decision is None:
+                return None
+            if not decision.admitted:
+                return False
+            _, routed_event = self._apply_extension_route_decision_safe(
+                source, event, decision
+            )
+            return routed_event if routed_event is not None else False
+        except Exception:
+            logger.debug("busy-session extension admission failed", exc_info=True)
+            try:
+                from gateway import conversation_extension_runtime as _ce_runtime_fc
+                from hermes_constants import hermes_home_key as _hhk_fc
+
+                scope = _hhk_fc(self._resolve_profile_home_for_source(source))
+                ok, _ = _ce_runtime_fc.profile_requirements_satisfied(
+                    scope=scope,
+                    config_raw=_load_gateway_config_for_profile(
+                        getattr(source, "profile", None)
+                    ),
+                )
+                return None if ok else False
+            except Exception:
+                return False
+
 
 
 def _run_planned_stop_watcher(

@@ -99,6 +99,9 @@ class _LoopLivenessWatchdogHandle:
         return self._thread.is_alive()
 
 
+def _refresh_runtime_status_identity() -> None:
+    from gateway import active_work as _active_work
+    return _active_work.refresh_runtime_status_identity()
 def _arm_loop_floor_timer(
     loop: asyncio.AbstractEventLoop,
     interval: float = DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S,
