@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 42
+  paths: 43
   total_changed_lines: 5700
-  modified_upstream_lines: 1719
+  modified_upstream_lines: 1739
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/restart_surfaces.py
@@ -174,6 +174,7 @@ paths:
     disposition: ops-support
     owner: hermes-studio-ops support package
     evidence: *restart
+  - {path: hermes_cli/runtime_provider.py, disposition: upstream, owner: core provider resolution, evidence: *provider}
   - path: plugins/context_engine/__init__.py
     disposition: upstream
     owner: bundled context-engine plugin seam

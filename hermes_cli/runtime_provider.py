@@ -397,6 +397,20 @@ def _provider_supports_explicit_api_mode(provider: Optional[str], configured_pro
         return normalized_configured == "custom" or normalized_configured.startswith("custom:")
     return normalized_configured == normalized_provider
 
+def _configured_api_mode_for_provider(
+    provider: str, model_cfg: Dict[str, Any]
+) -> Optional[str]:
+    """Return persisted mode unless the provider profile owns its transport."""
+    try:
+        from providers import get_provider_profile
+
+        profile = get_provider_profile(provider)
+        if getattr(profile, "ignore_configured_api_mode", False):
+            return None
+    except Exception:
+        pass
+    return _parse_api_mode(model_cfg.get("api_mode"))
+
 
 def _copilot_runtime_api_mode(
     model_cfg: Dict[str, Any],
@@ -595,7 +609,7 @@ def _resolve_runtime_from_pool_entry(
             cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
             if cfg_base_url:
                 base_url = cfg_base_url
-        configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
+        configured_mode = _configured_api_mode_for_provider(provider, model_cfg)
         from hermes_cli.models import opencode_provider_family
         if opencode_provider_family(provider) is not None:
             # Re-derive api_mode from the effective model rather than the
@@ -1927,7 +1941,7 @@ def _resolve_explicit_runtime(
             api_mode = "codex_responses"
         else:
             configured_provider = str(model_cfg.get("provider") or "").strip().lower()
-            configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
+            configured_mode = _configured_api_mode_for_provider(provider, model_cfg)
             if configured_mode and _provider_supports_explicit_api_mode(provider, configured_provider):
                 api_mode = configured_mode
             else:
@@ -2606,7 +2620,7 @@ def resolve_runtime_provider(
         else:
             configured_provider = str(model_cfg.get("provider") or "").strip().lower()
             # Only honor persisted api_mode when it belongs to the same provider family.
-            configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
+            configured_mode = _configured_api_mode_for_provider(provider, model_cfg)
             from hermes_cli.models import opencode_provider_family
             if opencode_provider_family(provider) is not None:
                 # opencode-zen/go must always re-derive api_mode from the
