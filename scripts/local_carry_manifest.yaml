@@ -2,8 +2,8 @@ version: 1
 base_ref: origin/main
 limits:
   paths: 47
-  total_changed_lines: 14581
-  modified_upstream_lines: 1709
+  total_changed_lines: 10446
+  modified_upstream_lines: 1701
 
 evidence_templates:
   provider: &provider
