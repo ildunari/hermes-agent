@@ -9,3 +9,17 @@ def _implementation():
 
 def __getattr__(name):
     return getattr(_implementation(), name)
+
+
+class GatewayCommandRuntimeMixin:
+    """Thin host hooks for session-aware command preferences."""
+
+    def _session_cwd_for_entry(self, entry):
+        return _implementation().session_cwd_for_entry(entry)
+
+    def _session_personality_prompt(self, session_key: str) -> str:
+        try:
+            entry = self.session_store.lookup_by_session_key(session_key)
+        except Exception:
+            entry = None
+        return _implementation().session_personality_prompt(entry)

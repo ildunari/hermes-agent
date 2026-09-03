@@ -9540,6 +9540,13 @@ def _build_call_kwargs(
         else:
             effort = reasoning_config.get("effort") or "medium"
             merged_extra["reasoning"] = {"enabled": True, "effort": effort}
+    if profile is not None:
+        merged_extra = profile.normalize_auxiliary_extra_body(
+            merged_extra,
+            model=model,
+            base_url=effective_base,
+            reasoning_config=reasoning_config,
+        )
     # Portal product tags + sticky session_id. The provider profile usually
     # supplies both; this fallback covers profile-load failures and alias
     # spellings the profile lookup might miss. session_id keeps aux

@@ -1007,7 +1007,13 @@ class ChatCompletionsTransport(ProviderTransport):
             cache_scope_id=params.get("cache_scope_id"),
         )
 
-        return api_kwargs
+        return profile.finalize_api_kwargs(
+            api_kwargs,
+            model=model,
+            base_url=params.get("base_url"),
+            reasoning_config=reasoning_config,
+            session_id=params.get("session_id"),
+        )
 
     def normalize_response(self, response: Any, **kwargs) -> NormalizedResponse:
         """Normalize OpenAI ChatCompletion to NormalizedResponse.

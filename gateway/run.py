@@ -3151,6 +3151,8 @@ from gateway.session_state import (
     legacy_lease_token_property,
 )
 from gateway.authz_mixin import GatewayAuthorizationMixin
+from gateway.command_context import GatewayCommandRuntimeMixin
+from gateway.conversation_extension_host import ConversationExtensionHostMixin
 from gateway.kanban_watchers import GatewayKanbanWatchersMixin
 from gateway.slash_commands import GatewaySlashCommandsMixin
 from gateway.turn_context import TurnContext
@@ -5976,6 +5978,13 @@ class TurnRunner:
         )
         if cfg_channel_prompt:
             combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
+        session_personality = self._runner._session_personality_prompt(
+            ctx.session_key
+        )
+        if session_personality:
+            combined_ephemeral = (
+                combined_ephemeral + "\n\n" + session_personality
+            ).strip()
 
         max_iterations = _current_max_iterations()
 
@@ -7447,12 +7456,6 @@ class TurnRunner:
 _SESSION_DB_UNPINNED = object()
 
 
-def persist_active_agents_now() -> None:
-    from gateway import active_work as _active_work
-    return _active_work.persist_active_agents_now()
-
-
-
 def _load_gateway_config_from_home(home: "Path") -> dict:
     """Load a profile config.yaml from its HERMES_HOME directly."""
     try:
@@ -7484,7 +7487,13 @@ def _load_gateway_config_for_profile(profile: str | None) -> dict:
         logger.debug("Could not load gateway profile config from %s", config_path, exc_info=True)
     return {}
 
-class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
+class GatewayRunner(
+    GatewayAuthorizationMixin,
+    GatewayCommandRuntimeMixin,
+    ConversationExtensionHostMixin,
+    GatewayKanbanWatchersMixin,
+    GatewaySlashCommandsMixin,
+):
     """
     Main gateway controller.
 
@@ -20938,12 +20947,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 from agent.context_references import preprocess_context_references_async
                 from agent.model_metadata import get_model_context_length_async
 
-                try:
-                    from tools.terminal_scope import terminal_env as _ts_env
-                except ImportError:
-                    _msg_cwd = os.environ.get("TERMINAL_CWD", os.path.expanduser("~"))
-                else:
-                    _msg_cwd = _ts_env("TERMINAL_CWD", os.path.expanduser("~"))
+                _msg_cwd = self._session_cwd_for_entry(session_entry)
                 _msg_config_ctx = None
                 _msg_cfg = None
                 _msg_model_cfg = {}
@@ -27745,6 +27749,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _adapters = getattr(self, "adapters", None) or {}
         _adapter = _adapters.get(context.source.platform)
         _async_delivery = getattr(_adapter, "supports_async_delivery", True)
+        try:
+            session_entry = self.session_store.lookup_by_session_key(
+                context.session_key
+            )
+        except Exception:
+            session_entry = None
         return set_session_vars(
             platform=context.source.platform.value,
             chat_id=context.source.chat_id,
@@ -27760,6 +27770,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             session_key=context.session_key,
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
+            cwd=self._session_cwd_for_entry(session_entry),
             async_delivery=_async_delivery,
             cron_session="",
         )
@@ -33351,248 +33362,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("Post-delivery cleanup registration failed: %s", _rpe)
 
         return response
-
-    def _install_conversation_extension_host(self) -> None:
-        from gateway import conversation_extension_host as _host
-
-        return _host._install_conversation_extension_host(self)
-
-    def _served_profile_names(self) -> tuple[str, ...]:
-        from gateway import conversation_extension_host as _host
-
-        return _host._served_profile_names(self)
-
-    def _permitted_extension_routes(self) -> Dict[str, tuple[str, ...]]:
-        from gateway import conversation_extension_host as _host
-
-        return _host._permitted_extension_routes(self)
-
-    def _admission_scope_for_source(self, source, transport_home: str):
-        from gateway import conversation_extension_host as _host
-
-        return _host._admission_scope_for_source(self, source, transport_home)
-
-    def _apply_extension_route_decision(self, source, event, decision):
-        from gateway import conversation_extension_host as _host
-
-        return _host._apply_extension_route_decision(self, source, event, decision)
-
-    def _apply_extension_route_decision_safe(self, source, event, decision):
-        from gateway import conversation_extension_host as _host
-
-        return _host._apply_extension_route_decision_safe(
-            self, source, event, decision
-        )
-
-    def _extension_runtime_profile(self, context, decision) -> str:
-        from gateway import conversation_extension_host as _host
-
-        return _host._extension_runtime_profile(self, context, decision)
-
-    def _fire_extension_gateway_start(
-        self, *, scope: str, profile_name: str
-    ) -> tuple[str, ...]:
-        from gateway import conversation_extension_host as _host
-
-        return _host._fire_extension_gateway_start(
-            self, scope=scope, profile_name=profile_name
-        )
-
-    def _fire_extension_gateway_stop(self) -> None:
-        from gateway import conversation_extension_host as _host
-
-        return _host._fire_extension_gateway_stop(self)
-
-    def _activate_conversation_extensions_for_profile(
-        self, profile_name: str, profile_home: "Path"
-    ) -> bool:
-        from gateway import conversation_extension_host as _host
-
-        return _host._activate_conversation_extensions_for_profile(
-            self, profile_name, profile_home
-        )
-
-    def _activate_conversation_extensions_for_served_profiles(self) -> None:
-        from gateway import conversation_extension_host as _host
-
-        return _host._activate_conversation_extensions_for_served_profiles(self)
-
-    def _extension_profile_is_ready(self, profile_scope: str) -> bool:
-        from gateway import conversation_extension_host as _host
-
-        return _host._extension_profile_is_ready(self, profile_scope)
-
-    def _extension_profile_unready_reason(self, profile_scope: str) -> str:
-        from gateway import conversation_extension_host as _host
-
-        return _host._extension_profile_unready_reason(self, profile_scope)
-
-    def _activate_conversation_ownership(
-        self, *, profile_name: str, scope: str, config_raw
-    ):
-        from gateway import conversation_extension_host as _host
-
-        return _host._activate_conversation_ownership(
-            self, profile_name=profile_name, scope=scope, config_raw=config_raw
-        )
-
-    def _collect_extension_turn_augmentation(
-        self,
-        *,
-        scope: str,
-        session_key: str,
-        runtime_profile: str,
-        platform: str,
-        sender_identity: str,
-        chat_type: str,
-        user_text: str,
-        profile_home: str = "",
-        session_id: str = "",
-        principal: str = "",
-        subject_id: str = "",
-        turn_index: int = 0,
-        now_timestamp: Optional[float] = None,
-        current_message_id: Optional[str] = None,
-        conversation_history: tuple = (),
-    ):
-        from gateway import conversation_extension_host as _host
-
-        return _host._collect_extension_turn_augmentation(
-            self,
-            scope=scope,
-            session_key=session_key,
-            runtime_profile=runtime_profile,
-            platform=platform,
-            sender_identity=sender_identity,
-            chat_type=chat_type,
-            user_text=user_text,
-            profile_home=profile_home,
-            session_id=session_id,
-            principal=principal,
-            subject_id=subject_id,
-            turn_index=turn_index,
-            now_timestamp=now_timestamp,
-            current_message_id=current_message_id,
-            conversation_history=conversation_history,
-        )
-
-    def _collect_extension_turn_context(
-        self,
-        *,
-        scope: str,
-        session_key: str,
-        runtime_profile: str,
-        platform: str,
-        sender_identity: str,
-        chat_type: str,
-        user_text: str,
-    ) -> str:
-        from gateway import conversation_extension_host as _host
-
-        return _host._collect_extension_turn_context(
-            self,
-            scope=scope,
-            session_key=session_key,
-            runtime_profile=runtime_profile,
-            platform=platform,
-            sender_identity=sender_identity,
-            chat_type=chat_type,
-            user_text=user_text,
-        )
-
-    async def _run_agent_turn_with_policy(
-        self,
-        *,
-        event,
-        source,
-        quick_key: str,
-        run_generation: int,
-        agent_kwargs: dict,
-        policy_scope: Optional[str] = None,
-    ):
-        from gateway import conversation_extension_host as _host
-
-        return await _host._run_agent_turn_with_policy(
-            self,
-            event=event,
-            source=source,
-            quick_key=quick_key,
-            run_generation=run_generation,
-            agent_kwargs=agent_kwargs,
-            policy_scope=policy_scope,
-        )
-
-
-    def _route_busy_event_through_extension(self, event: MessageEvent):
-        """Apply the generic admission owner before the adapter's busy fast path.
-
-        Active-session callbacks run in ``BasePlatformAdapter`` before the normal
-        message handler, so they cannot rely on the cold path having stamped a
-        validated extension route.  Return a routed event, ``None`` when no
-        extension claims admission, or ``False`` for a fail-closed denial.
-        """
-        source = getattr(event, "source", None)
-        if source is None:
-            return False
-        try:
-            from gateway import conversation_extension_runtime as _ce_runtime
-            from hermes_constants import hermes_home_key as _hermes_home_key
-
-            transport_profile = str(getattr(source, "profile", None) or "default")
-            transport_home = str(self._resolve_profile_home_for_source(source))
-            scope, requirements_profile = self._admission_scope_for_source(
-                source, transport_home
-            )
-            if not self._extension_profile_is_ready(scope):
-                return False
-            config_raw = _load_gateway_config_for_profile(
-                requirements_profile or getattr(source, "profile", None)
-            )
-            requirements_ok, _ = _ce_runtime.profile_requirements_satisfied(
-                scope=scope,
-                config_raw=config_raw,
-            )
-            if not requirements_ok:
-                return False
-            context = _ce_runtime.build_route_context(
-                event,
-                transport_profile=transport_profile,
-                transport_home=transport_home,
-            )
-            if context is None:
-                return None
-            decision = _ce_runtime.admit_and_route(
-                context,
-                scope=scope,
-                served_profiles=tuple(self._served_profile_names()),
-                permitted_routes=self._permitted_extension_routes(),
-            )
-            if decision is None:
-                return None
-            if not decision.admitted:
-                return False
-            _, routed_event = self._apply_extension_route_decision_safe(
-                source, event, decision
-            )
-            return routed_event if routed_event is not None else False
-        except Exception:
-            logger.debug("busy-session extension admission failed", exc_info=True)
-            try:
-                from gateway import conversation_extension_runtime as _ce_runtime_fc
-                from hermes_constants import hermes_home_key as _hhk_fc
-
-                scope = _hhk_fc(self._resolve_profile_home_for_source(source))
-                ok, _ = _ce_runtime_fc.profile_requirements_satisfied(
-                    scope=scope,
-                    config_raw=_load_gateway_config_for_profile(
-                        getattr(source, "profile", None)
-                    ),
-                )
-                return None if ok else False
-            except Exception:
-                return False
-
-
 
 def _run_planned_stop_watcher(
     stop_event: threading.Event,

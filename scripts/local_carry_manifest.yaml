@@ -13,7 +13,6 @@ required_support:
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extension_runtime.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_ownership.py
   - support/hermes-runtime-support/src/hermes_runtime_support/gateway_command_context.py
-  - support/hermes-runtime-support/src/hermes_runtime_support/opencodex_catalog.py
 
 evidence_templates:
   provider: &provider
@@ -118,6 +117,10 @@ paths:
     disposition: upstream
     owner: core conversation extension seam
     evidence: *conversation
+  - path: gateway/plugin_extension_registration.py
+    disposition: upstream
+    owner: core conversation extension seam
+    evidence: *conversation
   - path: gateway/conversation_ownership.py
     disposition: plugin
     owner: poke plugin
@@ -156,7 +159,6 @@ paths:
     owner: generic external support loading seam
     evidence: *ratchet
   - {path: hermes_cli/commands.py, disposition: must-carry, owner: core command dispatch seam, evidence: *command}
-  - {path: hermes_cli/opencodex_catalog.py, disposition: plugin, owner: VibeProxy and OpenCodex provider policy, evidence: *provider}
   - {path: hermes_cli/plugins.py, disposition: must-carry, owner: core plugin interface, evidence: *conversation}
   - path: hermes_cli/restart_surfaces.py
     disposition: ops-support

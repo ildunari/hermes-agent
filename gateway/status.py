@@ -1203,11 +1203,6 @@ def write_pid_file() -> None:
         raise
 
 
-def _process_owns_runtime_status(existing):
-    from gateway import active_work as _active_work
-    return _active_work.process_owns_runtime_status(existing)
-
-
 def write_runtime_status(
     *,
     gateway_state: Any = _UNSET,

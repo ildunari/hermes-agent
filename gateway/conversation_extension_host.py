@@ -1019,3 +1019,95 @@ async def _run_agent_turn_with_policy(
             run_generation,
             **agent_kwargs,
         )
+
+
+def _route_busy_event_through_extension(self, event):
+    """Apply extension admission before an adapter's busy-session fast path."""
+    source = getattr(event, "source", None)
+    if source is None:
+        return False
+    try:
+        from gateway import conversation_extension_runtime as runtime
+        from gateway.run import _load_gateway_config_for_profile
+
+        transport_profile = str(getattr(source, "profile", None) or "default")
+        transport_home = str(self._resolve_profile_home_for_source(source))
+        scope, requirements_profile = self._admission_scope_for_source(
+            source, transport_home
+        )
+        if not self._extension_profile_is_ready(scope):
+            return False
+        config_raw = _load_gateway_config_for_profile(
+            requirements_profile or getattr(source, "profile", None)
+        )
+        requirements_ok, _ = runtime.profile_requirements_satisfied(
+            scope=scope,
+            config_raw=config_raw,
+        )
+        if not requirements_ok:
+            return False
+        context = runtime.build_route_context(
+            event,
+            transport_profile=transport_profile,
+            transport_home=transport_home,
+        )
+        if context is None:
+            return None
+        decision = runtime.admit_and_route(
+            context,
+            scope=scope,
+            served_profiles=tuple(self._served_profile_names()),
+            permitted_routes=self._permitted_extension_routes(),
+        )
+        if decision is None:
+            return None
+        if not decision.admitted:
+            return False
+        _, routed_event = self._apply_extension_route_decision_safe(
+            source, event, decision
+        )
+        return routed_event if routed_event is not None else False
+    except Exception:
+        logger.debug("busy-session extension admission failed", exc_info=True)
+        try:
+            from gateway import conversation_extension_runtime as fallback_runtime
+            from gateway.run import _load_gateway_config_for_profile
+            from hermes_constants import hermes_home_key
+
+            scope = hermes_home_key(self._resolve_profile_home_for_source(source))
+            ok, _ = fallback_runtime.profile_requirements_satisfied(
+                scope=scope,
+                config_raw=_load_gateway_config_for_profile(
+                    getattr(source, "profile", None)
+                ),
+            )
+            return None if ok else False
+        except Exception:
+            return False
+
+
+class ConversationExtensionHostMixin:
+    """Collision-isolated GatewayRunner implementation for extension hosting."""
+
+    _install_conversation_extension_host = _install_conversation_extension_host
+    _served_profile_names = _served_profile_names
+    _admission_scope_for_source = _admission_scope_for_source
+    _permitted_extension_routes = _permitted_extension_routes
+    _apply_extension_route_decision = _apply_extension_route_decision
+    _apply_extension_route_decision_safe = _apply_extension_route_decision_safe
+    _extension_runtime_profile = _extension_runtime_profile
+    _fire_extension_gateway_start = _fire_extension_gateway_start
+    _fire_extension_gateway_stop = _fire_extension_gateway_stop
+    _activate_conversation_extensions_for_profile = (
+        _activate_conversation_extensions_for_profile
+    )
+    _activate_conversation_extensions_for_served_profiles = (
+        _activate_conversation_extensions_for_served_profiles
+    )
+    _extension_profile_is_ready = _extension_profile_is_ready
+    _extension_profile_unready_reason = _extension_profile_unready_reason
+    _activate_conversation_ownership = _activate_conversation_ownership
+    _collect_extension_turn_augmentation = _collect_extension_turn_augmentation
+    _collect_extension_turn_context = _collect_extension_turn_context
+    _run_agent_turn_with_policy = _run_agent_turn_with_policy
+    _route_busy_event_through_extension = _route_busy_event_through_extension

@@ -801,6 +801,11 @@ class SessionEntry:
     platform: Optional[Platform] = None
     chat_type: str = "dm"
 
+    # Session-local command preferences. CWD survives conversation resets for
+    # the same chat/thread; personality is cleared by a normal /new boundary.
+    cwd_override: Optional[str] = None
+    personality_override: Optional[Dict[str, Any]] = None
+
     # Lightweight persisted key/value state scoped to this session entry
     # (e.g. Slack thread-context watermarks). Survives gateway restarts via
     # the routing index; must stay small and JSON-serializable.
@@ -888,6 +893,8 @@ class SessionEntry:
             "display_name": self.display_name,
             "platform": self.platform.value if self.platform else None,
             "chat_type": self.chat_type,
+            "cwd_override": self.cwd_override,
+            "personality_override": self.personality_override,
             "metadata": self.metadata,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -989,6 +996,12 @@ class SessionEntry:
             display_name=data.get("display_name"),
             platform=platform,
             chat_type=data.get("chat_type", "dm"),
+            cwd_override=data.get("cwd_override"),
+            personality_override=(
+                dict(data["personality_override"])
+                if isinstance(data.get("personality_override"), dict)
+                else None
+            ),
             metadata=dict(data.get("metadata") or {}),
             input_tokens=data.get("input_tokens", 0),
             output_tokens=data.get("output_tokens", 0),
@@ -3053,9 +3066,14 @@ class SessionStore:
         auto_reset_reason = None
         reset_had_activity = False
         prev_session_id: Optional[str] = None
+        inherited_cwd_override: Optional[str] = None
 
         with self._lock:
             self._ensure_loaded_locked()
+
+            prior_entry = self._entries.get(session_key)
+            if prior_entry is not None:
+                inherited_cwd_override = prior_entry.cwd_override
 
             if session_key in self._entries and not force_new:
                 entry = self._entries[session_key]
@@ -3168,6 +3186,7 @@ class SessionStore:
                 display_name=source.chat_name,
                 platform=source.platform,
                 chat_type=source.chat_type,
+                cwd_override=inherited_cwd_override,
                 was_auto_reset=was_auto_reset,
                 auto_reset_reason=auto_reset_reason,
                 reset_had_activity=reset_had_activity,
@@ -3347,6 +3366,39 @@ class SessionStore:
             entry.metadata[key] = value
             self._save()
             return True
+
+    def set_session_cwd(
+        self, session_key: str, cwd_override: Optional[str]
+    ) -> Optional[SessionEntry]:
+        """Persist a working-directory binding for one chat/thread."""
+        normalized = str(cwd_override).strip() if cwd_override else None
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return None
+            entry.cwd_override = normalized or None
+            entry.updated_at = _now()
+            self._save()
+            return entry
+
+    def set_session_personality_override(
+        self,
+        session_key: str,
+        personality_override: Optional[Dict[str, Any]],
+    ) -> Optional[SessionEntry]:
+        """Persist a personality overlay for one live conversation."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return None
+            entry.personality_override = (
+                dict(personality_override) if personality_override else None
+            )
+            entry.updated_at = _now()
+            self._save()
+            return entry
 
     def set_model_override(
         self, session_key: str, override: Optional[Dict[str, Any]]
@@ -3693,6 +3745,7 @@ class SessionStore:
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
                 is_fresh_reset=True,
+                cwd_override=old_entry.cwd_override,
             )
 
             self._entries[session_key] = new_entry
@@ -3834,6 +3887,7 @@ class SessionStore:
                 display_name=old_entry.display_name,
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
+                cwd_override=old_entry.cwd_override,
             )
 
             self._entries[session_key] = new_entry

@@ -2494,6 +2494,22 @@ def anthropic_prompt_cache_policy(
         and (eff_provider == "anthropic" or base_url_hostname(eff_base_url) == "api.anthropic.com")
     )
 
+    # Provider plugins may declare Anthropic cache-control support on an
+    # OpenAI-compatible wire without forcing operators to duplicate that
+    # capability in custom_providers model metadata.
+    try:
+        from providers import get_provider_profile
+
+        _profile = get_provider_profile(provider_lower)
+    except Exception:
+        _profile = None
+    if (
+        is_claude
+        and eff_api_mode == "chat_completions"
+        and bool(getattr(_profile, "openai_wire_claude_prompt_caching", False))
+    ):
+        return True, False
+
     # A configured route may use an arbitrary provider name and model alias
     # that are canonicalized only after Hermes sends the request. Honor its
     # existing per-model ``prompt_caching`` capability instead of guessing
