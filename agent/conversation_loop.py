@@ -7427,6 +7427,16 @@ def run_conversation(
             _normalize_kwargs = {}
             if agent.api_mode == "anthropic_messages":
                 _normalize_kwargs["strip_tool_prefix"] = agent._is_anthropic_oauth
+            elif agent.api_mode == "chat_completions":
+                try:
+                    from providers import get_provider_profile
+
+                    _normalize_kwargs["provider_profile"] = get_provider_profile(
+                        agent.provider
+                    )
+                except Exception:
+                    _normalize_kwargs["provider_profile"] = None
+                _normalize_kwargs["model"] = agent.model
             normalized = _transport.normalize_response(response, **_normalize_kwargs)
             assistant_message = normalized
             finish_reason = normalized.finish_reason

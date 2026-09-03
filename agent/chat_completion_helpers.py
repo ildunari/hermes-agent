@@ -3637,6 +3637,26 @@ def _build_partial_stream_stub(
     )
 
 
+def _normalize_streamed_tool_name(agent, wire_name: str, api_kwargs: dict) -> str:
+    """Restore a complete streamed tool name before display callbacks see it."""
+    if not isinstance(wire_name, str) or not wire_name:
+        return wire_name
+    try:
+        from agent.transports.chat_completions import _normalize_response_tool_name
+        from providers import get_provider_profile
+
+        transport = agent._get_transport("chat_completions")
+        return _normalize_response_tool_name(
+            wire_name,
+            profile=get_provider_profile(getattr(agent, "provider", "") or ""),
+            phase="stream_delta",
+            model=api_kwargs.get("model") or getattr(agent, "model", None),
+            request_wire_aliases=getattr(transport, "_last_wire_aliases", None),
+        )
+    except Exception:
+        return wire_name
+
+
 def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=None):
     """Streaming variant of _interruptible_api_call for real-time token delivery.
 
@@ -4681,7 +4701,15 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     if name and idx not in tool_gen_notified:
                         tool_gen_notified.add(idx)
                         _fire_first_delta()
-                        agent._fire_tool_gen_started(name)
+                        callback_name = _normalize_streamed_tool_name(
+                            agent, name, api_kwargs
+                        )
+                        # Keep the completed streamed response consistent with
+                        # the callback while preserving an explicit marker so
+                        # final normalization does not invoke a non-idempotent
+                        # provider hook a second time.
+                        entry["function"]["name"] = callback_name
+                        agent._fire_tool_gen_started(callback_name)
                         # Record the partial tool-call name so the outer
                         # stub-builder can surface a user-visible warning
                         # if streaming dies before this tool's arguments
@@ -4689,7 +4717,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         # during tool-call JSON generation lets the stub
                         # at line ~6107 return `tool_calls=None`, silently
                         # discarding the attempted action.
-                        result["partial_tool_names"].append(name)
+                        result["partial_tool_names"].append(callback_name)
 
             # (finish_reason/usage are now extracted at the top of the loop
             # body. The old tail-side extraction sat after the SSE-echo
@@ -4898,6 +4926,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             model=model_name,
             choices=[mock_choice],
             usage=usage_obj,
+            _tool_names_normalized=True,
         )
 
     def _call_anthropic(request_client):

@@ -10,7 +10,7 @@ reasoning configuration, temperature handling, and extra_body assembly.
 """
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Literal, Mapping
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
 from agent.reasoning_effort import (
@@ -324,6 +324,34 @@ def _model_consumes_thought_signature(model: Any) -> bool:
     """
     m = str(model or "").lower()
     return "gemini" in m or "gemma" in m
+
+
+def _normalize_response_tool_name(
+    wire_name: str,
+    *,
+    profile: Any | None = None,
+    phase: Literal["stream_delta", "final_tool_call"] = "final_tool_call",
+    model: str | None = None,
+    request_wire_aliases: Mapping[str, str] | None = None,
+) -> str:
+    """Apply a provider profile's inbound tool-name restoration hook."""
+    if not isinstance(wire_name, str) or not wire_name:
+        return wire_name
+    normalizer = getattr(profile, "response_tool_name_normalizer", None)
+    if normalizer is None:
+        return wire_name
+
+    from providers.base import ToolNameNormalizeContext
+
+    return normalizer(
+        wire_name,
+        ToolNameNormalizeContext(
+            phase=phase,
+            provider=str(getattr(profile, "name", "") or ""),
+            model=model,
+            request_wire_aliases=request_wire_aliases,
+        ),
+    )
 
 
 class ChatCompletionsTransport(ProviderTransport):
@@ -1022,6 +1050,14 @@ class ChatCompletionsTransport(ProviderTransport):
                         function_name = "tool_search"
                 elif function_name in _alias_map:
                     function_name = _alias_map[function_name]
+                if not getattr(response, "_tool_names_normalized", False):
+                    function_name = _normalize_response_tool_name(
+                        function_name,
+                        profile=kwargs.get("provider_profile"),
+                        phase="final_tool_call",
+                        model=kwargs.get("model"),
+                        request_wire_aliases=_alias_map,
+                    )
                 function_arguments = getattr(tc_function, "arguments", None)
                 # Preserve provider-specific extras on the tool call.
                 # Gemini 3 thinking models attach extra_content with
