@@ -11,7 +11,11 @@ from gateway import conversation_extensions as ce
 from gateway.config import GatewayConfig, Platform
 from gateway.platforms.base import MessageEvent
 from gateway.run import GatewayRunner
-from gateway.session import SessionSource
+from gateway.session import (
+    SessionSource,
+    build_session_key,
+    is_shared_multi_user_session,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -220,7 +224,96 @@ def test_inbound_bluebubbles_owner_dm_on_default_admits_to_poke(tmp_path, monkey
     )
     assert routed_source.profile == "poke"
     assert routed_event.text.startswith("[Owner contact context:")
-    assert "agent:main:bluebubbles" not in routed_event.text
+    assert build_session_key(
+        routed_source, profile=routed_source.profile
+    ).startswith("agent:poke:bluebubbles:dm:")
+
+
+def test_inbound_bluebubbles_guest_dm_on_default_admits_to_guest(
+    tmp_path, monkeypatch
+):
+    """Default-transport approved guest iMessage enters the guest namespace."""
+    poke_home = tmp_path / "profiles" / "poke"
+    poke_home.mkdir(parents=True)
+    default_home = tmp_path / "default"
+    default_home.mkdir()
+
+    runner = _bare_runner()
+    runner.config = GatewayConfig.from_dict(
+        {
+            "gateway": {
+                "multiplex_profiles": True,
+                "permitted_conversation_routes": {"default": ["poke", "guest"]},
+            }
+        }
+    )
+
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(
+        gateway_run,
+        "_multiplex_profile_homes",
+        lambda config: [
+            ("default", default_home),
+            ("poke", poke_home),
+            ("guest", tmp_path / "profiles" / "guest"),
+        ],
+    )
+
+    from hermes_constants import hermes_home_key
+
+    poke_scope = hermes_home_key(str(poke_home))
+    bundle = ce.GatewayConversationExtension(
+        extension_id="poke",
+        api_version=ce.EXTENSION_API_VERSION,
+        capabilities=frozenset({"admission_policy"}),
+        authorize_route=lambda ctx: ce.GatewayRouteDirective(
+            admit=True,
+            runtime_profile="guest",
+            principal="guest",
+            subject_id="steve",
+            context_prefix="[Guest contact context: approved_contact_id=steve] ",
+            reason="approved guest sender",
+        ),
+    )
+    ce.conversation_extension_registry.register(bundle, scope=poke_scope)
+
+    source = SessionSource(
+        platform=Platform.BLUEBUBBLES,
+        chat_id="steve@example.test",
+        chat_type="dm",
+        user_id="steve@example.test",
+    )
+    event = MessageEvent(text="Hey", source=source)
+    transport_home = str(default_home)
+    scope, requirements_profile = runner._admission_scope_for_source(
+        source, transport_home
+    )
+
+    assert requirements_profile == "poke"
+    assert scope == poke_scope
+    context = ce_runtime.build_route_context(
+        event,
+        transport_profile="default",
+        transport_home=transport_home,
+    )
+    decision = ce_runtime.admit_and_route(
+        context,
+        scope=scope,
+        served_profiles=("default", "poke", "guest"),
+        permitted_routes=runner._permitted_extension_routes(),
+    )
+
+    assert decision is not None and decision.admitted is True
+    assert decision.runtime_profile == "guest"
+    routed_source, routed_event = runner._apply_extension_route_decision(
+        source, event, decision
+    )
+    assert routed_source.profile == "guest"
+    assert routed_event.text.startswith("[Guest contact context:")
+    assert build_session_key(
+        routed_source, profile=routed_source.profile
+    ).startswith("agent:guest:bluebubbles:dm:")
 
 
 def test_gateway_config_parses_permitted_conversation_routes():
@@ -232,3 +325,28 @@ def test_gateway_config_parses_permitted_conversation_routes():
 
 def test_gateway_config_permitted_routes_default_is_empty():
     assert GatewayConfig().permitted_conversation_routes == {}
+
+
+def test_bluebubbles_group_session_remains_shared_after_main_land():
+    first = SessionSource(
+        platform=Platform.BLUEBUBBLES,
+        chat_id="iMessage;+;group-guid",
+        chat_type="group",
+        user_id="member-one",
+        chat_id_alt="hermes-profile:guest",
+    )
+    second = SessionSource(
+        platform=Platform.BLUEBUBBLES,
+        chat_id="iMessage;+;group-guid",
+        chat_type="group",
+        user_id="member-two",
+        chat_id_alt="hermes-profile:guest",
+    )
+
+    assert build_session_key(first, profile="guest") == build_session_key(
+        second, profile="guest"
+    )
+    assert build_session_key(first, profile="guest").startswith(
+        "agent:guest:bluebubbles:group:"
+    )
+    assert is_shared_multi_user_session(first) is True

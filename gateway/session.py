@@ -1070,6 +1070,8 @@ def is_shared_multi_user_session(
     """
     if source.chat_type == "dm":
         return False
+    if source.platform == Platform.BLUEBUBBLES and source.chat_type == "group":
+        return True
     if source.thread_id:
         return not thread_sessions_per_user
     return not group_sessions_per_user
@@ -1173,6 +1175,21 @@ def build_session_key(
         if source.thread_id:
             dm_parts.append(source.thread_id)
         return ":".join(str(part) for part in dm_parts)
+
+    # BlueBubbles groups routed to a profile share one conversation for that
+    # profile. The validated profile marker keeps routed profiles isolated.
+    if source.platform == Platform.BLUEBUBBLES and source.chat_type == "group":
+        group_ns = _session_key_namespace(
+            str(source.chat_id_alt).split(":", 1)[1]
+            if str(source.chat_id_alt or "").startswith("hermes-profile:")
+            else profile
+        )
+        group_key_parts = [group_ns, platform, source.chat_type]
+        if source.chat_id:
+            group_key_parts.append(source.chat_id)
+        if source.thread_id:
+            group_key_parts.append(source.thread_id)
+        return ":".join(group_key_parts)
 
     participant_id = source.user_id_alt or source.user_id
     if participant_id and source.platform == Platform.WHATSAPP:

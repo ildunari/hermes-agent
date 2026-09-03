@@ -2730,6 +2730,7 @@ def init_agent(
     # 4. Fall back to built-in ContextCompressor
     _selected_engine = None
     _copy_failed = False
+    _load_failed = False
     _engine_name = "compressor"  # default
     try:
         _ctx_cfg = _agent_cfg.get("context", {}) if isinstance(_agent_cfg, dict) else {}
@@ -2737,13 +2738,44 @@ def init_agent(
     except Exception:
         pass
 
-    if _engine_name != "compressor":
-        # Try loading from plugins/context_engine/<name>/
+    if _engine_name == "compressor":
+        # Clear standalone-engine values left by an earlier in-process
+        # construction under the same lock used by plugin construction.
         try:
-            from plugins.context_engine import load_context_engine
-            _selected_engine = load_context_engine(_engine_name)
+            from plugins.context_engine import context_engine_construction_scope
+
+            with context_engine_construction_scope(_agent_cfg, _engine_name):
+                pass
+        except Exception as _ce_bridge_err:
+            _ra().logger.warning(
+                "Could not reset context-engine environment for compressor: %s",
+                _ce_bridge_err,
+            )
+    else:
+        # Standalone engines read profile-scoped settings from environment.
+        # Bridge and construct under one lock so multiplex profiles cannot
+        # observe one another's LCM settings or HERMES_HOME.
+        try:
+            from plugins.context_engine import (
+                context_engine_construction_scope,
+                load_context_engine,
+            )
+
+            with context_engine_construction_scope(
+                _agent_cfg,
+                _engine_name,
+                hermes_home=str(get_hermes_home()),
+            ):
+                _selected_engine = load_context_engine(_engine_name)
         except Exception as _ce_load_err:
-            _ra().logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
+            _load_failed = True
+            _ra().logger.warning(
+                "Context engine '%s' standalone load failed (%s: %s); "
+                "trying remaining fallbacks",
+                _engine_name,
+                type(_ce_load_err).__name__,
+                _ce_load_err,
+            )
 
         # Try general plugin system as fallback
         if _selected_engine is None:
@@ -2775,7 +2807,7 @@ def init_agent(
                     )
                     _selected_engine = None
 
-        if _selected_engine is None and not _copy_failed:
+        if _selected_engine is None and not _copy_failed and not _load_failed:
             _ra().logger.warning(
                 "Context engine '%s' not found — falling back to built-in compressor",
                 _engine_name,

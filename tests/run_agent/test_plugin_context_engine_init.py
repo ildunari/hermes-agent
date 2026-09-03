@@ -4,6 +4,7 @@ Regression test for #9071 — plugin engines were never initialized with
 context_length, causing the CLI status bar to show 'ctx --'.
 """
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from agent.context_engine import ContextEngine
@@ -35,6 +36,56 @@ class _ToolEngine(_StubEngine):
                 "parameters": {"type": "object", "properties": {}},
             }
         ]
+
+
+def test_user_engine_constructs_inside_active_profile_scope(tmp_path):
+    engine = _StubEngine()
+    profile_home = tmp_path / "profiles" / "gpt"
+    profile_home.mkdir(parents=True)
+    cfg = {
+        "context": {"engine": "stub", "stub": {"context_threshold": 0.42}},
+        "agent": {},
+    }
+    observed = {}
+
+    @contextmanager
+    def _construction_scope(config, engine_name, *, hermes_home=None):
+        observed.update(
+            config=config,
+            engine_name=engine_name,
+            hermes_home=hermes_home,
+        )
+        yield
+
+    with (
+        patch("hermes_cli.config.load_config_readonly", return_value=cfg),
+        patch(
+            "plugins.context_engine.context_engine_construction_scope",
+            side_effect=_construction_scope,
+        ),
+        patch("plugins.context_engine.load_context_engine", return_value=engine),
+        patch("agent.agent_init.get_hermes_home", return_value=profile_home),
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    assert agent.context_compressor is engine
+    assert observed == {
+        "config": cfg,
+        "engine_name": "stub",
+        "hermes_home": str(profile_home),
+    }
 
 
 def test_plugin_engine_gets_context_length_on_init():
@@ -208,5 +259,4 @@ def test_codex_gpt55_autoraise_still_applies_to_builtin_compressor():
     assert agent.context_compressor.threshold_percent == 0.85
     # Gateway parity: the notice is stashed for replay on turn 1.
     assert agent._compression_warning and "85%" in agent._compression_warning
-
 

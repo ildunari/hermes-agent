@@ -1,12 +1,15 @@
 """Context engine plugin discovery.
 
-Scans ``plugins/context_engine/<name>/`` directories for context engine
-plugins.  Each subdirectory must contain ``__init__.py`` with a class
-implementing the ContextEngine ABC.
+Scans both the repo's ``plugins/context_engine/<name>/`` directories and the
+shared user directory ``~/.hermes/plugins/context_engine/<package>/``.  Each
+subdirectory must contain ``__init__.py`` with a class implementing the
+ContextEngine ABC (or a plugin-style ``register(ctx)`` entry point).
 
-Context engines are separate from the general plugin system — they live
-in the repo and are always available without user installation.  Only ONE
-can be active at a time, selected via ``context.engine`` in config.yaml.
+Context engines are separate from the general plugin system.  Repo-shipped
+engines are always available; standalone third-party engines belong in the
+shared user directory so they do not vendor another project into the Hermes
+core tree.  Only ONE can be active at a time, selected via ``context.engine``
+in config.yaml.
 The default engine is ``"compressor"`` (the built-in ContextCompressor).
 
 Usage:
@@ -20,84 +23,236 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import hashlib
 import logging
+import os
 import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _CONTEXT_ENGINE_PLUGINS_DIR = Path(__file__).parent
+_BRIDGED_CONTEXT_ENGINE_ENV: dict[str, tuple[bool, str | None, str]] = {}
+_CONTEXT_ENGINE_CONSTRUCTION_LOCK = threading.RLock()
+
+
+class ContextEngineLoadError(RuntimeError):
+    """A matching context-engine package was found but could not be loaded."""
+
+
+@contextmanager
+def context_engine_construction_scope(
+    config: dict,
+    engine_name: str,
+    *,
+    hermes_home: str | None = None,
+):
+    """Atomically bridge profile config and construct one standalone engine."""
+    with _CONTEXT_ENGINE_CONSTRUCTION_LOCK:
+        previous_home = os.environ.get("HERMES_HOME")
+        try:
+            if hermes_home:
+                os.environ["HERMES_HOME"] = str(hermes_home)
+            bridge_context_engine_config_to_env(config, engine_name)
+            yield
+        finally:
+            if hermes_home:
+                if previous_home is None:
+                    os.environ.pop("HERMES_HOME", None)
+                else:
+                    os.environ["HERMES_HOME"] = previous_home
+
+
+def _user_context_engine_plugins_dir() -> Path:
+    """Return the shared, profile-independent context-engine install root."""
+    return Path.home() / ".hermes" / "plugins" / "context_engine"
+
+
+def _engine_dirs() -> list[tuple[Path, bool]]:
+    """Return discovery roots in precedence order (repo first, then user)."""
+    return [
+        (_CONTEXT_ENGINE_PLUGINS_DIR, False),
+        (_user_context_engine_plugins_dir(), True),
+    ]
+
+
+def _iter_engine_package_dirs(root: Path):
+    if not root.is_dir():
+        return
+    for child in sorted(root.iterdir()):
+        if (
+            child.is_dir()
+            and not child.name.startswith(("_", "."))
+            and (child / "__init__.py").exists()
+        ):
+            yield child
+
+
+def bridge_context_engine_config_to_env(config: dict, engine_name: str) -> dict[str, str]:
+    """Bridge ``context.<engine>`` scalar config to ``<ENGINE>_*`` env vars.
+
+    Behavioral settings stay in config.yaml, while standalone engines can keep
+    their existing environment-variable initialization contracts. Values from
+    a previous bridge call are removed before applying a new engine config, so
+    in-process engine switching and rollback do not retain stale settings.
+    """
+    global _BRIDGED_CONTEXT_ENGINE_ENV
+
+    for key, (was_present, previous_value, bridged_value) in list(
+        _BRIDGED_CONTEXT_ENGINE_ENV.items()
+    ):
+        if os.environ.get(key) != bridged_value:
+            continue
+        if was_present and previous_value is not None:
+            os.environ[key] = previous_value
+        else:
+            os.environ.pop(key, None)
+    _BRIDGED_CONTEXT_ENGINE_ENV = {}
+
+    if not isinstance(config, dict):
+        return {}
+    context_cfg = config.get("context") or {}
+    if not isinstance(context_cfg, dict):
+        return {}
+    engine_cfg = context_cfg.get(str(engine_name or "").strip().lower()) or {}
+    if not isinstance(engine_cfg, dict):
+        return {}
+
+    prefix = "".join(
+        ch if ch.isalnum() else "_" for ch in str(engine_name or "")
+    ).strip("_").upper()
+    if not prefix:
+        return {}
+
+    bridged: dict[str, str] = {}
+    bridge_state: dict[str, tuple[bool, str | None, str]] = {}
+    for raw_key, raw_value in engine_cfg.items():
+        key_suffix = "".join(
+            ch if ch.isalnum() else "_" for ch in str(raw_key)
+        ).strip("_").upper()
+        if not key_suffix or raw_value is None or isinstance(raw_value, dict):
+            continue
+        if isinstance(raw_value, bool):
+            value = "true" if raw_value else "false"
+        elif isinstance(raw_value, (list, tuple)):
+            value = ",".join(str(item) for item in raw_value)
+        else:
+            value = str(raw_value)
+        env_key = f"{prefix}_{key_suffix}"
+        bridge_state[env_key] = (env_key in os.environ, os.environ.get(env_key), value)
+        os.environ[env_key] = value
+        bridged[env_key] = value
+
+    _BRIDGED_CONTEXT_ENGINE_ENV = bridge_state
+    return dict(bridged)
 
 
 def discover_context_engines() -> List[Tuple[str, str, bool]]:
-    """Scan plugins/context_engine/ for available engines.
+    """Scan repo and user context-engine directories for available engines.
 
-    Returns list of (name, description, is_available) tuples.
-    Does NOT import the engines — just reads plugin.yaml for metadata
-    and does a lightweight availability check.
+    Returns list of (name, description, is_available) tuples. The selectable
+    name comes from ``engine.name`` so a standalone repository directory such
+    as ``hermes-lcm`` can register the config value ``lcm``.
     """
     results = []
-    if not _CONTEXT_ENGINE_PLUGINS_DIR.is_dir():
-        return results
+    seen_names: set[str] = set()
 
-    for child in sorted(_CONTEXT_ENGINE_PLUGINS_DIR.iterdir()):
-        if not child.is_dir() or child.name.startswith(("_", ".")):
-            continue
-        init_file = child / "__init__.py"
-        if not init_file.exists():
-            continue
+    for root, is_user_dir in _engine_dirs():
+        for child in _iter_engine_package_dirs(root) or ():
+            desc = ""
+            yaml_file = child / "plugin.yaml"
+            if yaml_file.exists():
+                try:
+                    import yaml
+                    with open(yaml_file, encoding="utf-8-sig") as f:
+                        meta = yaml.safe_load(f) or {}
+                    desc = meta.get("description", "")
+                except Exception:
+                    pass
 
-        # Read description from plugin.yaml if available
-        desc = ""
-        yaml_file = child / "plugin.yaml"
-        if yaml_file.exists():
+            available = True
+            engine = None
             try:
-                import yaml
-                with open(yaml_file, encoding="utf-8-sig") as f:
-                    meta = yaml.safe_load(f) or {}
-                desc = meta.get("description", "")
+                engine = _load_engine_from_dir(child, user_dir=is_user_dir)
+                if engine is None:
+                    available = False
+                elif hasattr(engine, "is_available"):
+                    available = engine.is_available()
             except Exception:
-                pass
-
-        # Quick availability check — try loading and calling is_available()
-        available = True
-        try:
-            engine = _load_engine_from_dir(child)
-            if engine is None:
                 available = False
-            elif hasattr(engine, "is_available"):
-                available = engine.is_available()
-        except Exception:
-            available = False
 
-        results.append((child.name, desc, available))
+            engine_name = str(getattr(engine, "name", "") or child.name)
+            if engine_name in seen_names:
+                continue
+            seen_names.add(engine_name)
+            results.append((engine_name, desc, available))
 
     return results
 
 
 def load_context_engine(name: str) -> Optional["ContextEngine"]:
-    """Load and return a ContextEngine instance by name.
-
-    Returns None if the engine is not found or fails to load.
-    """
-    engine_dir = _CONTEXT_ENGINE_PLUGINS_DIR / name
-    if not engine_dir.is_dir():
-        logger.debug("Context engine '%s' not found in %s", name, _CONTEXT_ENGINE_PLUGINS_DIR)
+    """Load and return a ContextEngine instance by selectable engine name."""
+    requested = str(name or "").strip()
+    if not requested:
         return None
+    load_failures: list[tuple[Path, BaseException]] = []
 
-    try:
-        engine = _load_engine_from_dir(engine_dir)
-        if engine:
-            return engine
-        logger.warning("Context engine '%s' loaded but no engine instance found", name)
-        return None
-    except Exception as e:
-        logger.warning("Failed to load context engine '%s': %s", name, e)
-        return None
+    # Fast path for the historical directory-name contract, with repo engines
+    # taking precedence over a same-named user package.
+    if requested not in {".", ".."} and "/" not in requested and "\\" not in requested:
+        for root, is_user_dir in _engine_dirs():
+            engine_dir = root / requested
+            if not engine_dir.is_dir():
+                continue
+            try:
+                engine = _load_engine_from_dir(engine_dir, user_dir=is_user_dir)
+                if engine and str(getattr(engine, "name", "") or requested) == requested:
+                    return engine
+            except Exception as exc:
+                load_failures.append((engine_dir, exc))
+
+    # Standalone repositories may use a package/repo name different from the
+    # registered engine name. Scan user packages and match ContextEngine.name.
+    user_root = _user_context_engine_plugins_dir()
+    for engine_dir in _iter_engine_package_dirs(user_root) or ():
+        try:
+            engine = _load_engine_from_dir(engine_dir, user_dir=True)
+            if engine and str(getattr(engine, "name", "")) == requested:
+                return engine
+        except Exception as exc:
+            load_failures.append((engine_dir, exc))
+
+    if load_failures:
+        engine_dir, exc = load_failures[0]
+        logger.warning(
+            "Context engine '%s' failed to load from %s: %s: %s",
+            requested,
+            engine_dir,
+            type(exc).__name__,
+            exc,
+        )
+        raise ContextEngineLoadError(
+            f"context engine {requested!r} failed to load from {engine_dir}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    logger.debug(
+        "Context engine '%s' not found in %s or %s",
+        requested,
+        _CONTEXT_ENGINE_PLUGINS_DIR,
+        user_root,
+    )
+    return None
 
 
-def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:
+def _load_engine_from_dir(
+    engine_dir: Path,
+    *,
+    user_dir: bool = False,
+) -> Optional["ContextEngine"]:
     """Import an engine module and extract the ContextEngine instance.
 
     The module must have either:
@@ -105,7 +260,11 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:
     - A top-level class that extends ContextEngine — we instantiate it
     """
     name = engine_dir.name
-    module_name = f"plugins.context_engine.{name}"
+    if user_dir:
+        path_digest = hashlib.sha256(str(engine_dir.resolve()).encode()).hexdigest()[:16]
+        module_name = f"_hermes_user_context_engine_{path_digest}"
+    else:
+        module_name = f"plugins.context_engine.{name}"
     init_file = engine_dir / "__init__.py"
 
     if not init_file.exists():
@@ -168,9 +327,10 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:
         try:
             spec.loader.exec_module(mod)
         except Exception as e:
-            logger.debug("Failed to exec_module %s: %s", module_name, e)
             sys.modules.pop(module_name, None)
-            return None
+            raise ContextEngineLoadError(
+                f"failed to import {module_name}: {type(e).__name__}: {e}"
+            ) from e
 
     # Try register(ctx) pattern first (how plugins are written)
     if hasattr(mod, "register"):
@@ -180,7 +340,9 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:
             if collector.engine:
                 return collector.engine
         except Exception as e:
-            logger.debug("register() failed for %s: %s", name, e)
+            raise ContextEngineLoadError(
+                f"register() failed for {name}: {type(e).__name__}: {e}"
+            ) from e
 
     # Fallback: find a ContextEngine subclass and instantiate it
     from agent.context_engine import ContextEngine
@@ -190,8 +352,11 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:
                 and attr is not ContextEngine):
             try:
                 return attr()
-            except Exception:
-                pass
+            except Exception as e:
+                raise ContextEngineLoadError(
+                    f"constructing {attr.__name__} from {name} failed: "
+                    f"{type(e).__name__}: {e}"
+                ) from e
 
     return None
 
@@ -283,3 +448,4 @@ class _EngineCollector:
 
     def register_memory_provider(self, *args, **kwargs):
         pass
+

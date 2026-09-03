@@ -1473,7 +1473,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         try_send_via_registry,
     )
 
-    if media_files and not message.strip() and platform.value != "buzz":
+    if media_files and not message.strip() and not platform_supports_registry_media(platform):
         return {
             "error": (
                 f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and slack; "
@@ -1481,7 +1481,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             )
         }
     warning = None
-    if media_files and platform.value != "buzz":
+    if media_files and not platform_supports_registry_media(platform):
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
             "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and slack"

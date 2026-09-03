@@ -53,7 +53,7 @@ def persist_active_agents(runner: Any) -> None:
     try:
         from gateway.status import write_runtime_status
 
-        write_runtime_status(active_agents=runner._active_work_count)
+        write_runtime_status(active_agents=runner._active_work_count())
     except Exception:
         pass
 
