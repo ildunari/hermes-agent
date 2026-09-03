@@ -16,6 +16,68 @@ from gateway.config import Platform
 logger = logging.getLogger(__name__)
 
 
+
+def install_early_lifecycle_scheduling() -> None:
+    """Install spawn_task as soon as a running loop exists.
+
+    Multiplex profile plugins (poke/guest) register conversation extensions
+    during GatewayRunner construction / MCP warmup — several seconds before
+    ``GatewayRunner.start`` logs "Starting Hermes Gateway..." and installs
+    the full host. Without spawn_task, poke ``on_start`` fails closed
+    (``CapabilityDenied``) and later ``fire_gateway_start`` skips duplicate.
+
+    The full host (session lookup, authenticated DM, turn injection) is
+    installed later in ``_install_conversation_extension_host``. This early
+    install only provides lifecycle scheduling so watchers can start.
+    """
+    from gateway.conversation_extensions import (
+        GatewayHostOperations,
+        gateway_host_operations,
+        install_gateway_host_operations,
+        lifecycle_task_registry,
+    )
+
+    existing = gateway_host_operations()
+    if existing.spawn_task is not None:
+        return
+
+    def _spawn(task) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "No running loop; refusing to start extension task %s",
+                task.task_key,
+            )
+            raise
+        handle = loop.create_task(
+            _coerce_awaitable(task.factory()),
+            name=f"ext:{task.extension_id}:{task.task_key}:{task.generation}",
+        )
+        lifecycle_task_registry.record(task, handle)
+
+    def _coerce_awaitable(value):
+        if asyncio.iscoroutine(value):
+            return value
+
+        async def _wrap():
+            return value
+
+        return _wrap()
+
+    install_gateway_host_operations(
+        GatewayHostOperations(
+            spawn_task=_spawn,
+            cancel_tasks=lifecycle_task_registry.cancel,
+            lookup_session=existing.lookup_session,
+            create_initiated_child=existing.create_initiated_child,
+            inject_turn=existing.inject_turn,
+            send_authenticated_existing_dm=existing.send_authenticated_existing_dm,
+            run_blocking=existing.run_blocking or asyncio.to_thread,
+        )
+    )
+
+
 def _install_conversation_extension_host(self) -> None:
     """Install the bounded host operations behind ``GatewayRuntimeFacade``.
 
@@ -332,6 +394,39 @@ def _served_profile_names(self) -> tuple[str, ...]:
     except Exception:
         logger.debug("could not enumerate served profiles", exc_info=True)
     return tuple(sorted(names))
+
+
+def _admission_scope_for_source(self, source, transport_home: str):
+    """Return ``(scope, requirements_profile)`` for conversation-extension admission.
+
+    Official multiplex routing only consults ``gateway.profile_routes``. Home
+    has none, so inbound BlueBubbles stays on the default transport. Poke's
+    classifier lives in the poke profile plugin, not home ``plugins.enabled``.
+    Default-transport BlueBubbles therefore classifies against poke's
+    registry so owner DMs can move default → poke and guests → guest.
+
+    The transport profile/home on the route *context* stay default; only the
+    registry scope changes. Do not enable a second BlueBubbles webhook.
+    """
+    from hermes_constants import hermes_home_key
+
+    transport_scope = hermes_home_key(str(transport_home))
+    if getattr(source, "profile", None):
+        return transport_scope, getattr(source, "profile", None)
+    platform = getattr(source, "platform", None)
+    platform_value = getattr(platform, "value", platform)
+    if str(platform_value or "").lower() != "bluebubbles":
+        return transport_scope, getattr(source, "profile", None)
+    try:
+        from gateway.run import _multiplex_profile_homes
+
+        for name, home in _multiplex_profile_homes(getattr(self, "config", None)):
+            if name == "poke":
+                return hermes_home_key(str(home)), "poke"
+    except Exception:
+        logger.debug("could not resolve poke admission scope", exc_info=True)
+    return transport_scope, getattr(source, "profile", None)
+
 
 def _permitted_extension_routes(self) -> Dict[str, tuple[str, ...]]:
     """Return the core-owned permitted runtime-route map.

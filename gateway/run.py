@@ -18909,9 +18909,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             _transport_profile = str(getattr(source, "profile", None) or "default")
             _transport_home = str(self._resolve_profile_home_for_source(source))
-            _extension_scope = _hermes_home_key(_transport_home)
+            _extension_scope, _requirements_profile = self._admission_scope_for_source(
+                source, _transport_home
+            )
             if self._extension_profile_is_ready(_extension_scope):
-                _config_raw = _load_gateway_config_for_profile(getattr(source, "profile", None))
+                _config_raw = _load_gateway_config_for_profile(
+                    _requirements_profile or getattr(source, "profile", None)
+                )
                 _requirements_ok, _requirements_reason = _ce_runtime.profile_requirements_satisfied(
                     scope=_extension_scope,
                     config_raw=_config_raw,
@@ -33308,6 +33312,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return _host._permitted_extension_routes(self)
 
+    def _admission_scope_for_source(self, source, transport_home: str):
+        from gateway import conversation_extension_host as _host
+
+        return _host._admission_scope_for_source(self, source, transport_home)
+
     def _apply_extension_route_decision(self, source, event, decision):
         from gateway import conversation_extension_host as _host
 
@@ -33476,11 +33485,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             transport_profile = str(getattr(source, "profile", None) or "default")
             transport_home = str(self._resolve_profile_home_for_source(source))
-            scope = _hermes_home_key(transport_home)
+            scope, requirements_profile = self._admission_scope_for_source(
+                source, transport_home
+            )
             if not self._extension_profile_is_ready(scope):
                 return False
             config_raw = _load_gateway_config_for_profile(
-                getattr(source, "profile", None)
+                requirements_profile or getattr(source, "profile", None)
             )
             requirements_ok, _ = _ce_runtime.profile_requirements_satisfied(
                 scope=scope,
@@ -34449,6 +34460,21 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         # Lower root logger level if needed so DEBUG records can reach the handler
         if _stderr_level < logging.getLogger().level:
             logging.getLogger().setLevel(_stderr_level)
+
+    # KEEP: poke/guest plugins register conversation extensions during
+    # GatewayRunner construction (MCP warmup / multiplex plugin load),
+    # which is before start() installs the full host. Install lifecycle
+    # scheduling first so poke on_start can spawn watchers.
+    try:
+        from gateway.conversation_extension_host import (
+            install_early_lifecycle_scheduling,
+        )
+        install_early_lifecycle_scheduling()
+    except Exception:
+        logger.debug(
+            "could not install early extension lifecycle scheduling",
+            exc_info=True,
+        )
 
     runner = GatewayRunner(config)
     # Multiplex: swap the launch-home file handlers for per-profile routers so

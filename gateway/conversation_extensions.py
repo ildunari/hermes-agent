@@ -460,7 +460,9 @@ class GatewayRuntimeFacade:
             raise ValueError("task_key is required")
         if not callable(factory):
             raise ValueError("factory must be callable")
-        if self._host.spawn_task is None:
+        live = gateway_host_operations()
+        spawn = live.spawn_task or self._host.spawn_task
+        if spawn is None:
             raise CapabilityDenied(
                 "host does not provide lifecycle task scheduling; "
                 "refusing to report a task as started"
@@ -474,7 +476,7 @@ class GatewayRuntimeFacade:
             ),
             factory=factory,
         )
-        self._host.spawn_task(task)
+        spawn(task)
         return task
 
     def lookup_session(self, session_key: str) -> Optional[Mapping[str, Any]]:
