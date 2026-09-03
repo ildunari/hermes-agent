@@ -47,7 +47,6 @@ def _manifest(path: Path, base: str, *, paths: list[str], limits: dict) -> Path:
         "version": 1,
         "base_ref": base,
         "limits": limits,
-        "required_support": ["support/required.py"],
         "paths": [
             {
                 "path": item,
@@ -128,6 +127,9 @@ def test_validate_support_gate_requires_every_declared_file(carry_repo, tmp_path
         paths=["added.py", "existing.py"],
         limits={"paths": 2, "total_changed_lines": 4, "modified_upstream_lines": 2},
     )
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    data["required_support"] = ["support/required.py"]
+    manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
     support_root = tmp_path / "plugins"
 
     with pytest.raises(carry.CarryContractError, match="missing required support"):

@@ -70,16 +70,16 @@ def test_detached_bootstrap_failure_writes_private_completion_marker(tmp_path):
     assert stat.S_IMODE(marker.stat().st_mode) == 0o600
 
 
-def test_external_support_prefers_profile_then_root_over_installed(tmp_path, monkeypatch):
-    profile_home = tmp_path / "profile"
+def test_external_support_prefers_root_source_package_over_installed(tmp_path, monkeypatch):
     root_home = tmp_path / "root" / ".hermes"
-    relative = "support/example/example.py"
-    profile_source = profile_home / "plugins" / relative
-    root_source = root_home / "plugins" / relative
-    for source, value in ((profile_source, 1), (root_source, 2)):
-        source.parent.mkdir(parents=True)
-        source.write_text(f"value = {value}\n", encoding="utf-8")
-    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    relative = "support/example/src/example_support/main.py"
+    package = root_home / "plugins" / "support/example/src/example_support"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "sibling.py").write_text("value = 42\n", encoding="utf-8")
+    (package / "main.py").write_text(
+        "from example_support.sibling import value\n", encoding="utf-8"
+    )
     monkeypatch.setattr(external_support.Path, "home", lambda: tmp_path / "root")
     monkeypatch.setattr(external_support, "_MODULES", {})
     monkeypatch.setattr(
@@ -88,10 +88,7 @@ def test_external_support_prefers_profile_then_root_over_installed(tmp_path, mon
         lambda _name: SimpleNamespace(value="stale-installed-shadow"),
     )
 
-    profile = external_support.load_support_module("example_support.example", relative)
-    profile_source.unlink()
-    external_support._MODULES.clear()
-    root = external_support.load_support_module("example_support.example", relative)
+    loaded = external_support.load_support_module("example_support.main", relative)
 
-    assert profile.value == 1
-    assert root.value == 2
+    assert loaded.value == 42
+    assert loaded.__file__ == str(package / "main.py")

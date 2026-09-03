@@ -162,10 +162,11 @@ def validate(
         if actual > limit:
             raise CarryContractError(f"{field} regressed: {actual} > {limit}")
 
-    if support_root is not None:
-        required_support = manifest.get("required_support")
-        if not isinstance(required_support, list) or not required_support:
-            raise CarryContractError("required_support must be a non-empty list")
+    required_support = manifest.get("required_support")
+    if required_support:
+        if not isinstance(required_support, list):
+            raise CarryContractError("required_support must be a list")
+        support_root = support_root or Path.home() / ".hermes" / "plugins"
         missing_support = []
         for item in required_support:
             if not isinstance(item, str) or not item.strip():
@@ -191,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--support-root",
         type=Path,
-        help="verify external support files under this plugin repository root",
+        help="override the default root-global ~/.hermes/plugins support tree",
     )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
