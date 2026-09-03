@@ -2,8 +2,8 @@ version: 1
 base_ref: origin/main
 limits:
   paths: 45
-  total_changed_lines: 5698
-  modified_upstream_lines: 1750
+  total_changed_lines: 5671
+  modified_upstream_lines: 1450
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/restart_surfaces.py
