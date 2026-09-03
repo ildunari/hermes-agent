@@ -1468,6 +1468,11 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     # --- Non-media platforms ---
     # Buzz is a plugin platform with verified native media delivery through
     # _send_via_adapter below, including valid media-only sends.
+    from tools.send_message_registry import (
+        platform_supports_registry_media,
+        try_send_via_registry,
+    )
+
     if media_files and not message.strip() and platform.value != "buzz":
         return {
             "error": (
@@ -1499,7 +1504,19 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         elif platform == Platform.WECOM:
             result = await _registry_standalone_send("wecom", pconfig, chat_id, chunk, thread_id)
         elif platform == Platform.BLUEBUBBLES:
-            result = await _send_bluebubbles(pconfig.extra, chat_id, chunk)
+            result = await try_send_via_registry(
+                platform,
+                pconfig,
+                chat_id,
+                chunk,
+                thread_id=thread_id,
+                media_files=media_files if i == len(chunks) - 1 else [],
+                force_document=force_document,
+            )
+            if result is None:
+                result = {
+                    "error": "Platform plugin not registered or missing standalone_sender_fn"
+                }
         elif platform == Platform.QQBOT:
             result = await _send_qqbot(pconfig, chat_id, chunk)
         elif platform == Platform.YUANBAO:
@@ -2319,32 +2336,8 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
         return _error(f"Weixin send failed: {e}")
 
 
-async def _send_bluebubbles(extra, chat_id, message):
-    """Send via BlueBubbles iMessage server using the adapter's REST API."""
-    try:
-        from gateway.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
-        if not check_bluebubbles_requirements():
-            return {"error": "BlueBubbles requirements not met (need aiohttp + httpx)."}
-    except ImportError:
-        return {"error": "BlueBubbles adapter not available."}
-
-    try:
-        from gateway.config import PlatformConfig
-        pconfig = PlatformConfig(extra=extra)
-        adapter = BlueBubblesAdapter(pconfig)
-        connected = await adapter.connect()
-        if not connected:
-            return _error("BlueBubbles: failed to connect to server")
-        try:
-            result = await adapter.send(chat_id, message)
-            if not result.success:
-                return _error(f"BlueBubbles send failed: {result.error}")
-            return {"success": True, "platform": "bluebubbles", "chat_id": chat_id, "message_id": result.message_id}
-        finally:
-            await adapter.disconnect()
-    except Exception as e:
-        return _error(f"BlueBubbles send failed: {e}")
-
+# _send_bluebubbles removed; BlueBubbles send is plugin-owned via
+# registry standalone_sender_fn / try_send_via_registry. Fail closed on miss.
 
 # _send_feishu moved to plugins/platforms/feishu/adapter.py::_standalone_send,
 # wired via standalone_sender_fn and reached through _registry_standalone_send
