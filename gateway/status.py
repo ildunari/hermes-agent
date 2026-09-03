@@ -764,6 +764,7 @@ def _build_runtime_status_record() -> dict[str, Any]:
         "exit_reason": None,
         "restart_requested": False,
         "active_agents": 0,
+        "active_agents_updated_at": _utc_now_iso(),
         "platforms": {},
         "session_store": {"status": "unknown"},
         "updated_at": _utc_now_iso(),
@@ -1261,6 +1262,9 @@ def write_runtime_status(
         payload["restart_requested"] = bool(restart_requested)
     if active_agents is not _UNSET:
         payload["active_agents"] = parse_active_agents(active_agents)
+        # Count freshness is independent from the identity heartbeat. The
+        # watchdog refreshes top-level updated_at without re-counting work.
+        payload["active_agents_updated_at"] = _utc_now_iso()
     if served_profiles is not _UNSET:
         # Profiles this gateway multiplexes (multi-profile mode). Absent/empty
         # for a single-profile gateway. Lets `hermes status` show per-profile

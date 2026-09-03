@@ -455,6 +455,19 @@ def arm_shutdown_watchdog(
     return done
 
 
+def _collect_heartbeat_extra(
+    extra_provider: Optional[Callable[[], Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    """Best-effort: call ``extra_provider`` without breaking the heartbeat."""
+    if extra_provider is None:
+        return None
+    try:
+        return extra_provider()
+    except Exception:
+        logger.debug("Loop heartbeat extra_provider failed", exc_info=True)
+        return None
+
+
 async def _tick_socket_handler(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
@@ -485,6 +498,7 @@ async def loop_heartbeat_forever(
     start_time: Optional[float] = None,
     home: Optional[Path] = None,
     should_continue: Optional[Callable[[], bool]] = None,
+    extra_provider: Optional[Callable[[], Dict[str, Any]]] = None,
 ) -> None:
     """Rewrite the loop heartbeat file on a cadence until cancelled / gated off.
 
@@ -610,18 +624,24 @@ async def loop_heartbeat_forever(
         )
 
     async def _write_off_loop() -> None:
-        # write_loop_heartbeat never raises, so a failure here is an executor
-        # problem (shutdown, saturation) and must not kill the heartbeat task.
+        # Both writes are off-loop: either can fsync and must not freeze the
+        # event loop whose liveness this heartbeat measures.
         try:
+            heartbeat_extra = dict(_collect_heartbeat_extra(extra_provider) or {})
+            # Locally sampled extras never override the authoritative witness.
+            heartbeat_extra.update(
+                {
+                    "loop_tick_socket": tick_server is not None,
+                    "loop_tick_tcp_port": tick_tcp_port,
+                }
+            )
             await asyncio.to_thread(
                 write_loop_heartbeat,
                 start_time=start_time,
                 home=home,
-                extra={
-                    "loop_tick_socket": tick_server is not None,
-                    "loop_tick_tcp_port": tick_tcp_port,
-                },
+                extra=heartbeat_extra,
             )
+            await asyncio.to_thread(_refresh_runtime_status_identity)
         except asyncio.CancelledError:
             raise
         except Exception:

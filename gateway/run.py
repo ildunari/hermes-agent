@@ -13840,6 +13840,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 loop_heartbeat_forever(
                     interval_s=DEFAULT_HEARTBEAT_INTERVAL_S,
                     start_time=getattr(self, "_gateway_started_at", 0.0),
+                    extra_provider=lambda: {
+                        "active_agents": self._active_work_count()
+                    },
                 )
             )
             # PERMANENT for the process lifetime, same as a
