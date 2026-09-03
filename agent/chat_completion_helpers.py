@@ -4682,7 +4682,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                             # produce "read_fileread_file".  Assignment
                             # (matching the OpenAI Node SDK / LiteLLM /
                             # Vercel AI patterns) is immune to this.
-                            entry["function"]["name"] = function_name
+                            entry["function"]["name"] = _normalize_streamed_tool_name(
+                                agent, function_name, api_kwargs
+                            )
                         function_arguments = getattr(tc_function, "arguments", None)
                         if function_arguments:
                             tool_argument_parts[idx].append(function_arguments)
@@ -4701,15 +4703,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     if name and idx not in tool_gen_notified:
                         tool_gen_notified.add(idx)
                         _fire_first_delta()
-                        callback_name = _normalize_streamed_tool_name(
-                            agent, name, api_kwargs
-                        )
-                        # Keep the completed streamed response consistent with
-                        # the callback while preserving an explicit marker so
-                        # final normalization does not invoke a non-idempotent
-                        # provider hook a second time.
-                        entry["function"]["name"] = callback_name
-                        agent._fire_tool_gen_started(callback_name)
+                        agent._fire_tool_gen_started(name)
                         # Record the partial tool-call name so the outer
                         # stub-builder can surface a user-visible warning
                         # if streaming dies before this tool's arguments
@@ -4717,7 +4711,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         # during tool-call JSON generation lets the stub
                         # at line ~6107 return `tool_calls=None`, silently
                         # discarding the attempted action.
-                        result["partial_tool_names"].append(callback_name)
+                        result["partial_tool_names"].append(name)
 
             # (finish_reason/usage are now extracted at the top of the loop
             # body. The old tail-side extraction sat after the SSE-echo
