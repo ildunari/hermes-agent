@@ -88,6 +88,61 @@ def _normalize_multiplex_profile_allowlist(value: Any) -> Optional[List[str]]:
     return normalized
 
 
+
+def _normalize_permitted_conversation_routes(value: Any) -> Dict[str, List[str]]:
+    """Normalize ``gateway.permitted_conversation_routes``.
+
+    Shape: ``{transport_profile: [allowed_runtime_profile, ...]}``. Malformed
+    entries are dropped (fail closed) so bad config never widens cross-profile
+    routing.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        logger.warning(
+            "Invalid gateway.permitted_conversation_routes (expected a mapping, "
+            "got %s); permitting no cross-profile conversation routes",
+            type(value).__name__,
+        )
+        return {}
+
+    permitted: Dict[str, List[str]] = {}
+    for source_profile, targets in value.items():
+        if not isinstance(source_profile, str) or not source_profile.strip():
+            logger.warning(
+                "Skipping gateway.permitted_conversation_routes entry with "
+                "invalid transport profile %r",
+                source_profile,
+            )
+            continue
+        if isinstance(targets, str):
+            targets = [targets]
+        if not isinstance(targets, (list, tuple)):
+            logger.warning(
+                "Skipping gateway.permitted_conversation_routes entry %r "
+                "(expected a list of runtime profiles, got %s)",
+                source_profile,
+                type(targets).__name__,
+            )
+            continue
+        cleaned: List[str] = []
+        for target in targets:
+            if not isinstance(target, str) or not target.strip():
+                logger.warning(
+                    "Skipping invalid gateway.permitted_conversation_routes "
+                    "target %r for transport profile %r",
+                    target,
+                    source_profile,
+                )
+                continue
+            name = target.strip()
+            if name not in cleaned:
+                cleaned.append(name)
+        if cleaned:
+            permitted[source_profile.strip()] = cleaned
+    return permitted
+
+
 # Recognized truthy / falsy tokens for the GATEWAY_MULTIPLEX_PROFILES operator
 # override. Anything not in either set — and a blank/whitespace value — is
 # treated as "unset" so it falls through to config.yaml rather than silently
@@ -983,6 +1038,14 @@ class GatewayConfig:
     # historical serve-all behavior; [] serves only the default profile.
     multiplex_profile_allowlist: Optional[List[str]] = None
 
+    # Core-owned permitted runtime-route map for gateway conversation
+    # extensions. Shape: ``{transport_profile: [allowed_runtime_profile, ...]}``.
+    # An extension may only *propose* a runtime route; core validates the
+    # proposal against this map. Empty (the default) means no cross-profile
+    # routing is permitted at all, so an extension can only keep a message in
+    # its own transport profile — the fail-closed default.
+    permitted_conversation_routes: Dict[str, List[str]] = field(default_factory=dict)
+
     # Public HTTPS endpoint another gateway may use for scoped RoomLink calls.
     # Disabled by default: setting an API key alone must never expose or
     # advertise a route. HERMES_ROOM_LINK_URL remains the operator override.
@@ -1038,6 +1101,9 @@ class GatewayConfig:
     def __post_init__(self) -> None:
         self.multiplex_profile_allowlist = _normalize_multiplex_profile_allowlist(
             self.multiplex_profile_allowlist
+        )
+        self.permitted_conversation_routes = _normalize_permitted_conversation_routes(
+            self.permitted_conversation_routes
         )
         self.systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
             self.systemd_watchdog_seconds
@@ -1154,6 +1220,7 @@ class GatewayConfig:
             "max_concurrent_sessions": self.max_concurrent_sessions,
             "multiplex_profiles": self.multiplex_profiles,
             "multiplex_profile_allowlist": self.multiplex_profile_allowlist,
+            "permitted_conversation_routes": self.permitted_conversation_routes,
             "room_link_url": self.room_link_url,
             "systemd_watchdog_seconds": self.systemd_watchdog_seconds,
             "loop_watchdog": self.loop_watchdog,
@@ -1228,6 +1295,12 @@ class GatewayConfig:
         else:
             multiplex_profile_allowlist = nested_gateway.get(
                 "multiplex_profile_allowlist"
+            )
+        if "permitted_conversation_routes" in data:
+            permitted_conversation_routes = data.get("permitted_conversation_routes")
+        else:
+            permitted_conversation_routes = nested_gateway.get(
+                "permitted_conversation_routes"
             )
         room_link_url = data.get("room_link_url")
         if room_link_url is not None and not isinstance(room_link_url, str):
@@ -1338,6 +1411,7 @@ class GatewayConfig:
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
             multiplex_profile_allowlist=multiplex_profile_allowlist,
+            permitted_conversation_routes=permitted_conversation_routes,
             room_link_url=room_link_url,
             systemd_watchdog_seconds=systemd_watchdog_seconds,
             loop_watchdog=loop_watchdog,
@@ -1495,6 +1569,20 @@ def load_gateway_config() -> GatewayConfig:
             ):
                 gw_data["multiplex_profile_allowlist"] = gateway_section[
                     "multiplex_profile_allowlist"
+                ]
+
+            # Core-owned permitted runtime-route map for conversation
+            # extensions. Same top-level / nested-gateway parity as above.
+            if "permitted_conversation_routes" in yaml_cfg:
+                gw_data["permitted_conversation_routes"] = yaml_cfg[
+                    "permitted_conversation_routes"
+                ]
+            elif (
+                isinstance(gateway_section, dict)
+                and "permitted_conversation_routes" in gateway_section
+            ):
+                gw_data["permitted_conversation_routes"] = gateway_section[
+                    "permitted_conversation_routes"
                 ]
 
             if "room_link_url" in yaml_cfg:
