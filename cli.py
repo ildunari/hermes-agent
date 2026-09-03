@@ -13132,6 +13132,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # Check for user-defined quick commands (bypass agent loop, no LLM call)
             base_cmd = cmd_lower.split()[0]
             skill_commands = _ensure_skill_commands()
+            from agent.skill_commands import resolve_skill_command_key
             skill_bundles = get_skill_bundles()
             quick_commands = self.config.get("quick_commands", {})
             if base_cmd.lstrip("/") in quick_commands:
@@ -13265,6 +13266,26 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                         self._pending_input.put(msg)
                 else:
                     ChatConsole().print(f"[bold red]Failed to load skill for {base_cmd}[/]")
+            elif (resolved_skill_key := resolve_skill_command_key(
+                base_cmd.lstrip("/")
+            )) is not None:
+                # Resolve aliases only after exact skill/bundle/plugin names so
+                # aliases cannot shadow an installed command or core command.
+                rest = cmd_original[len(base_cmd):].strip()
+                msg = build_skill_invocation_message(
+                    resolved_skill_key, rest, task_id=self.session_id
+                )
+                if msg:
+                    skill_name = skill_commands.get(resolved_skill_key, {}).get(
+                        "name", resolved_skill_key
+                    )
+                    print(f"\n⚡ Loading skill: {skill_name}")
+                    if hasattr(self, '_pending_input'):
+                        self._pending_input.put(msg)
+                else:
+                    ChatConsole().print(
+                        f"[bold red]Failed to load skill for {resolved_skill_key}[/]"
+                    )
             else:
                 # Prefix matching: if input uniquely identifies one command, execute it.
                 # Matches against both built-in COMMANDS and installed skill commands so
