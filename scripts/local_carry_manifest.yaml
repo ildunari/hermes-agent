@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 63
-  total_changed_lines: 5565
-  modified_upstream_lines: 1990
+  paths: 56
+  total_changed_lines: 4388
+  modified_upstream_lines: 838
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -82,18 +82,6 @@ paths:
     disposition: must-carry
     owner: generic plugin validation and delegated cron delivery seams
     evidence: *proactive_alarm
-  - path: agent/agent_runtime_helpers.py
-    disposition: upstream
-    owner: core provider prompt-cache policy
-    evidence: *provider
-  - path: agent/chat_completion_helpers.py
-    disposition: upstream
-    owner: core chat-completions streaming seam
-    evidence: *provider
-  - path: agent/conversation_loop.py
-    disposition: upstream
-    owner: core response normalization seam
-    evidence: *provider
   - path: agent/agent_init.py
     disposition: must-carry
     owner: core context-engine seam
@@ -102,22 +90,10 @@ paths:
     disposition: must-carry
     owner: core provider fallback seam
     evidence: *provider
-  - path: agent/context_compressor.py
-    disposition: upstream
-    owner: core context engine
-    evidence: *context_engine
   - path: agent/request_scoped_tools.py
     disposition: upstream
     owner: core plugin tool seam
     evidence: *conversation
-  - path: agent/transports/chat_completions.py
-    disposition: upstream
-    owner: core provider transport seam
-    evidence: *provider
-  - path: cli.py
-    disposition: must-carry
-    owner: core restart dispatch seam
-    evidence: *restart
   - path: gateway/active_work.py
     disposition: upstream
     owner: core gateway lifecycle
@@ -130,10 +106,6 @@ paths:
     disposition: plugin
     owner: gateway-session-commands plugin
     evidence: *command
-  - path: gateway/config.py
-    disposition: upstream
-    owner: core gateway configuration
-    evidence: *conversation
   - path: gateway/conversation_extension_host.py
     disposition: upstream
     owner: core conversation extension seam
@@ -154,13 +126,25 @@ paths:
     disposition: plugin
     owner: poke plugin
     evidence: *conversation
-  - path: gateway/platform_registry.py
-    disposition: upstream
-    owner: core platform registry
-    evidence: *bluebubbles
   - path: gateway/run.py
     disposition: must-carry
     owner: core gateway seams
+    evidence: *conversation
+  - path: gateway/run_adapters.py
+    disposition: must-carry
+    owner: off-loop profile handoff store resolution
+    evidence: *active_work
+  - path: gateway/run_inbound.py
+    disposition: must-carry
+    owner: conversation extension admission and observation
+    evidence: *conversation
+  - path: gateway/run_shutdown.py
+    disposition: must-carry
+    owner: conversation extension lifecycle teardown
+    evidence: *conversation
+  - path: gateway/run_startup.py
+    disposition: must-carry
+    owner: conversation extension activation and liveness freshness
     evidence: *conversation
   - path: gateway/turn_context.py
     disposition: must-carry
@@ -171,18 +155,18 @@ paths:
     owner: core gateway session
     evidence: *active_work
   - path: gateway/shutdown_watchdog.py
-    disposition: upstream
+    disposition: must-carry
     owner: core gateway lifecycle
     evidence: *active_work
   - path: gateway/status.py
-    disposition: upstream
+    disposition: must-carry
     owner: core gateway status
     evidence: *active_work
   - path: hermes_cli/alias_billing_guard.py
     disposition: plugin
     owner: VibeProxy and OpenCodex provider policy
     evidence: *provider
-  - {path: hermes_cli/auth.py, disposition: upstream, owner: core provider credential resolution, evidence: *provider}
+  - {path: hermes_cli/auth.py, disposition: must-carry, owner: generic keyless provider credential seam, evidence: *provider}
   - path: hermes_cli/command_context.py
     disposition: plugin
     owner: gateway-session-commands plugin
@@ -197,11 +181,6 @@ paths:
     disposition: ops-support
     owner: hermes-studio-ops support package
     evidence: *restart
-  - {path: hermes_cli/runtime_provider.py, disposition: upstream, owner: core provider resolution, evidence: *provider}
-  - path: plugins/context_engine/__init__.py
-    disposition: upstream
-    owner: bundled context-engine plugin seam
-    evidence: *context_engine
   - path: providers/base.py
     disposition: upstream
     owner: core provider profile seam
@@ -307,10 +286,6 @@ paths:
     owner: web provider dependency-isolation tests
     evidence: *provider
   - path: tools/send_message_registry.py
-    disposition: upstream
-    owner: core platform registry
-    evidence: *bluebubbles
-  - path: tools/send_message_tool.py
     disposition: upstream
     owner: core platform registry
     evidence: *bluebubbles

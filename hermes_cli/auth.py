@@ -2005,6 +2005,13 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
             provider=provider_id, code="invalid_provider")
 
     api_key, key_source = _resolve_api_key_provider_secret(provider_id, pconfig)
+    try:
+        from providers.base import apply_keyless_api_key
+        api_key, key_source = apply_keyless_api_key(
+            provider_id, api_key, key_source
+        )
+    except Exception:
+        pass
     # No-auth LM Studio: a placeholder so runtime / auxiliary_client see the local server as
     # configured. doctor still reports unconfigured because the status path uses the raw secret.
     if not api_key and provider_id == "lmstudio":

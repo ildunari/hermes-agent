@@ -320,9 +320,23 @@ def _sweep_stale_tick_sockets(own_path: Path) -> None:
         logger.debug("stale loop-tick socket sweep failed", exc_info=True)
 
 
+def _collect_heartbeat_extra(
+    extra_provider: Optional[Callable[[], Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    """Call the optional live-state sampler without breaking liveness writes."""
+    if extra_provider is None:
+        return None
+    try:
+        return extra_provider()
+    except Exception:
+        logger.debug("Loop heartbeat extra_provider failed", exc_info=True)
+        return None
+
+
 async def loop_heartbeat_forever(
     *, interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S, start_time: Optional[float] = None,
-    home: Optional[Path] = None, should_continue: Optional[Callable[[], bool]] = None) -> None:
+    home: Optional[Path] = None, should_continue: Optional[Callable[[], bool]] = None,
+    extra_provider: Optional[Callable[[], Dict[str, Any]]] = None) -> None:
     """Rewrite the loop heartbeat file on a cadence until cancelled / gated off. Runs on the
     gateway loop so a frozen loop lets the file age for monitors. The fsync write goes to a thread
     (inline, a stalled filesystem blocked the loop inside its own heartbeat and the liveness
@@ -357,10 +371,14 @@ async def loop_heartbeat_forever(
         logger.warning("Loop tick socket unavailable — liveness probes will have no "
                        "loop-scheduling witness and will not escalate on a stale heartbeat",
                        exc_info=True)
-    extra = {"loop_tick_socket": tick_server is not None, "loop_tick_tcp_port": tick_tcp_port}
     try:
         while True:  # first write is immediate so monitors see a fresh file at once
             try:
+                extra = dict(_collect_heartbeat_extra(extra_provider) or {})
+                extra.update({
+                    "loop_tick_socket": tick_server is not None,
+                    "loop_tick_tcp_port": tick_tcp_port,
+                })
                 await asyncio.to_thread(write_loop_heartbeat, start_time=start_time, home=home,
                                         extra=extra)
             except Exception:  # write_loop_heartbeat never raises: executor problem, keep the task

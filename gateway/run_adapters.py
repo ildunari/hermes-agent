@@ -17,7 +17,7 @@ import os
 import time
 import weakref as _weakref
 from agent.async_utils import consume_detached_task_result
-from contextvars import Context
+from contextvars import Context, copy_context
 from datetime import datetime, timedelta, timezone
 from gateway.config import Platform, platform_binds_port as _platform_binds_port
 from gateway.platforms.base import BasePlatformAdapter
@@ -486,7 +486,9 @@ class GatewayAdapterLifecycleMixin:
             """One poll of the CURRENTLY-SCOPED store; ``profile_name`` (None = root) routes delivery
             to that profile's OWN adapter. A closure, not a method: tests bind ``_handoff_watcher`` onto
             a ``SimpleNamespace`` with only ``_session_db``/``_running``/``_process_handoff``."""
-            session_db = getattr(self, "_session_db", None)
+            session_db = await asyncio.to_thread(
+                copy_context().run, getattr, self, "_session_db", None
+            )
             if session_db is None:
                 return
             pending = await session_db.list_pending_handoffs()

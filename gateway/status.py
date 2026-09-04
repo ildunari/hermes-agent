@@ -453,7 +453,8 @@ def _pid_record_belongs_to_current_profile(record: Optional[dict[str, Any]]) -> 
 def _build_runtime_status_record() -> dict[str, Any]:
     return {
         **_build_pid_record(), "gateway_state": "starting", "exit_reason": None,
-        "restart_requested": False, "active_agents": 0, "platforms": {},
+        "restart_requested": False, "active_agents": 0,
+        "active_agents_updated_at": _utc_now_iso(), "platforms": {},
         "session_store": {"status": "unknown"}, "updated_at": _utc_now_iso(),
         **_get_code_identity_fields(),
     }
@@ -823,6 +824,8 @@ def write_runtime_status(
         ("served_profiles", served_profiles, lambda v: list(v or [])),
         ("session_store", session_store, _coerce_session_store),
     ))
+    if active_agents is not _UNSET:
+        payload["active_agents_updated_at"] = _utc_now_iso()
     if platform is not _UNSET:
         platform_payload = payload["platforms"].get(platform, {})
         _apply_set_fields(platform_payload, (

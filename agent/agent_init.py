@@ -1752,36 +1752,31 @@ def _select_context_engine(_agent_cfg):
     _selected_engine = None
     _copy_failed = False
     try:
-        from plugins.context_engine import load_context_engine
-        _selected_engine = load_context_engine(_engine_name)
-    except Exception as _ce_load_err:
-        _ra().logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
-
-    if _selected_engine is None:
+        from hermes_cli.plugins import get_plugin_context_engine
+        _candidate = get_plugin_context_engine()
+    except Exception:
+        _candidate = None
+    if _candidate is not None and _candidate.name == _engine_name:
         try:
-            from hermes_cli.plugins import get_plugin_context_engine
-            _candidate = get_plugin_context_engine()
-        except Exception:
-            _candidate = None
-        if _candidate is not None and _candidate.name == _engine_name:
-            # Deep-copy the shared singleton so a child's update_model() can't mutate the
-            # parent's. Uncopyable state (locks, DB conns) → built-in with an ACCURATE message.
             import copy
-            try:
-                # Copy can fail for engines holding uncopyable state (locks, DB connections, clients); in
-                # that case fall back to the built-in compressor with an ACCURATE message rather than
-                # silently mislabelling it "not found". See #42449.
-                _selected_engine = copy.deepcopy(_candidate)
-            except Exception as _copy_err:
-                _copy_failed = True
-                _ra().logger.warning(
-                    "Context engine '%s' could not be safely copied for this "
-                    "agent (%s) — falling back to built-in compressor. Plugin "
-                    "engines that hold uncopyable state (locks, DB connections) "
-                    "should implement __deepcopy__ to copy only mutable budget "
-                    "state.",
-                    _engine_name, _copy_err,
-                )
+            _selected_engine = copy.deepcopy(_candidate)
+        except Exception as _copy_err:
+            _copy_failed = True
+            _ra().logger.warning(
+                "Context engine '%s' could not be safely copied for this "
+                "agent (%s) — falling back to built-in compressor. Plugin "
+                "engines that hold uncopyable state (locks, DB connections) "
+                "should implement __deepcopy__ to copy only mutable budget "
+                "state.",
+                _engine_name, _copy_err,
+            )
+
+    if _selected_engine is None and not _copy_failed:
+        try:
+            from plugins.context_engine import load_context_engine
+            _selected_engine = load_context_engine(_engine_name)
+        except Exception as _ce_load_err:
+            _ra().logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
 
     if _selected_engine is None and not _copy_failed:
         _ra().logger.warning(
