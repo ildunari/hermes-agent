@@ -19,6 +19,7 @@ required_support:
   - support/hermes-runtime-support/src/hermes_runtime_support/alias_billing_guard.py
   - support/hermes-runtime-support/src/hermes_runtime_support/authenticated_dm.py
   - support/hermes-runtime-support/src/hermes_runtime_support/cli_command_context.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extension_host.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extension_runtime.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_ownership.py
   - support/hermes-runtime-support/src/hermes_runtime_support/gateway_command_context.py
@@ -107,6 +108,10 @@ paths:
     disposition: upstream
     owner: core plugin tool seam
     evidence: *conversation
+  - path: agent/turn_context.py
+    disposition: must-carry
+    owner: API-only conversation extension system-context seam
+    evidence: *conversation
   - path: agent/transports/chat_completions.py
     disposition: upstream
     owner: core provider transport seam
@@ -158,6 +163,10 @@ paths:
   - path: gateway/run.py
     disposition: must-carry
     owner: core gateway seams
+    evidence: *conversation
+  - path: gateway/turn_context.py
+    disposition: must-carry
+    owner: per-turn conversation extension augmentation seam
     evidence: *conversation
   - path: gateway/session.py
     disposition: must-carry
@@ -226,6 +235,14 @@ paths:
   - path: tests/gateway/test_conversation_extension_early_lifecycle.py
     disposition: must-carry
     owner: gateway extension lifecycle thread-affinity contract
+    evidence: *conversation
+  - path: tests/gateway/test_conversation_extension_turn_ingress.py
+    disposition: must-carry
+    owner: production conversation extension turn-wiring contract
+    evidence: *conversation
+  - path: tests/agent/test_gateway_turn_sidecar.py
+    disposition: must-carry
+    owner: API-only conversation extension context tests
     evidence: *conversation
   - path: tests/gateway/test_session.py
     disposition: must-carry
