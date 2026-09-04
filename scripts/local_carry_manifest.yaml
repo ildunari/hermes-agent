@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 49
-  total_changed_lines: 5987
-  modified_upstream_lines: 1680
+  paths: 50
+  total_changed_lines: 5991
+  modified_upstream_lines: 1684
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -234,6 +234,10 @@ paths:
   - path: tests/hermes_cli/test_runtime_provider_resolution.py
     disposition: upstream
     owner: core provider resolution tests
+    evidence: *provider
+  - path: tests/test_tui_gateway_server.py
+    disposition: must-carry
+    owner: model-picker test isolation
     evidence: *provider
   - path: tests/plugins/context_engine/test_user_context_engine_discovery.py
     disposition: upstream
