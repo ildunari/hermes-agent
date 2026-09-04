@@ -203,7 +203,11 @@ class GatewayInboundMixin:
                         "decision": decision,
                     }
         except Exception:
-            logger.debug("inbound conversation-extension admission failed", exc_info=True)
+            # Admission is a security/identity boundary. The extension contract
+            # requires denials and errors to drop the message; continuing would
+            # bypass required Poke/Guest routing and tool policy.
+            logger.warning("Dropping inbound message: conversation-extension admission failed", exc_info=True)
+            return None
 
         is_internal = bool(getattr(event, "internal", False))  # e.g. background-process notifications
 

@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 58
-  total_changed_lines: 4508
-  modified_upstream_lines: 922
+  paths: 61
+  total_changed_lines: 4593
+  modified_upstream_lines: 951
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -72,8 +72,21 @@ evidence_templates:
     runtime_caller: cron scheduler delivery and atomic probe completion
     interface_test: Poke proactive scheduler, transport, gate, rollout, and status suites
     artifact: exact probe ACK persisted after operator-profile delivery
+  desktop: &desktop
+    registration: Desktop package version and signed artifact build
+    runtime_caller: updater Desktop staging and activation
+    interface_test: updater version monotonicity and artifact identity tests
+    artifact: signed Studio and MacBook bundles with exact commit stamps
 
 paths:
+  - path: apps/desktop/package.json
+    disposition: must-carry
+    owner: monotonic local Desktop release version
+    evidence: *desktop
+  - path: package-lock.json
+    disposition: must-carry
+    owner: monotonic local Desktop release version
+    evidence: *desktop
   - path: cron/jobs.py
     disposition: must-carry
     owner: generic proactive probe completion seam
@@ -224,6 +237,10 @@ paths:
   - path: tests/gateway/test_conversation_extension_turn_ingress.py
     disposition: must-carry
     owner: production conversation extension turn-wiring contract
+    evidence: *conversation
+  - path: tests/gateway/test_gateway_platform_event_hook.py
+    disposition: must-carry
+    owner: off-loop multiplex platform event coverage
     evidence: *conversation
   - path: tests/agent/test_gateway_turn_sidecar.py
     disposition: must-carry

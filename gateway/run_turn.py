@@ -2260,11 +2260,11 @@ class GatewayTurnMixin:
 
         See #95518.
         """
-        from gateway.run import _profile_runtime_scope
+        from gateway.run import _async_profile_runtime_scope
         multiplex = bool(getattr(self.config, "multiplex_profiles", False))
         if multiplex and not get_hermes_home_override():
             profile_home = self._resolve_profile_home_for_source(event.source)
-            with _profile_runtime_scope(Path(profile_home)):
+            async with _async_profile_runtime_scope(Path(profile_home)):
                 return await self._execute_mcp_reload(event)
         try:
             from tools.mcp_tool_lifecycle import shutdown_mcp_servers

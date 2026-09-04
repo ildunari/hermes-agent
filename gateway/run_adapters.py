@@ -1365,25 +1365,25 @@ class GatewayAdapterLifecycleMixin:
 
     def _make_profile_platform_event_handler(self, profile_name: str):
         """Bind platform-event auth and hook dispatch to one multiplex profile."""
-        from gateway.run import _profile_runtime_scope
+        from gateway.run import _async_profile_runtime_scope
         profile_home = self._profile_home_or_none(profile_name)
 
         async def _handler(event, source):
             if getattr(source, "profile", None) is None:
                 source.profile = profile_name
-            with self._scope_or_null(_profile_runtime_scope, profile_home):
+            async with self._scope_or_null(_async_profile_runtime_scope, profile_home):
                 return await self._handle_gateway_platform_event(event, source)
 
         return _handler
 
     def _make_default_profile_platform_event_handler(self):
         """Scope primary-transport events to their routed multiplex profile."""
-        from gateway.run import _profile_runtime_scope, get_hermes_home
+        from gateway.run import _async_profile_runtime_scope, get_hermes_home
         default_home = Path(get_hermes_home())
 
         async def _handler(event, source):
             source._authorization_profile_home = default_home
-            with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
+            async with _async_profile_runtime_scope(self._resolve_profile_home_for_source(source)):
                 return await self._handle_gateway_platform_event(event, source)
 
         return _handler

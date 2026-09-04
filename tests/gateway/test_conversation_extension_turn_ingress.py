@@ -105,3 +105,42 @@ async def test_unready_required_extension_refuses_ingress_before_auth(
         assert await runner._handle_message(_event()) is None
 
     assert order == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_point", ["requirements", "admission", "route_apply"])
+async def test_extension_admission_errors_refuse_ingress_before_auth(
+    monkeypatch, tmp_path, failure_point
+):
+    from gateway import conversation_extension_runtime as runtime
+
+    order = []
+    runner = _runner(tmp_path, order)
+    context = object()
+    decision = SimpleNamespace(admitted=True)
+    monkeypatch.setattr(runtime, "profile_requirements_satisfied", lambda **_kwargs: (True, ""))
+    monkeypatch.setattr(runtime, "build_route_context", lambda *_args, **_kwargs: context)
+    monkeypatch.setattr(runtime, "admit_and_route", lambda *_args, **_kwargs: decision)
+
+    if failure_point == "requirements":
+        monkeypatch.setattr(
+            runtime,
+            "profile_requirements_satisfied",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("requirements failed")),
+        )
+    elif failure_point == "admission":
+        monkeypatch.setattr(
+            runtime,
+            "admit_and_route",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("admission failed")),
+        )
+    else:
+        runner._apply_extension_route_decision_safe = lambda source, _event, _decision: (source, None)
+
+    with (
+        patch("gateway.run._load_gateway_config_for_profile", return_value={}),
+        patch("hermes_cli.lifecycle.invoke_hook", return_value=[]),
+    ):
+        assert await runner._handle_message(_event()) is None
+
+    assert order == []
