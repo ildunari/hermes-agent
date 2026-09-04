@@ -16,6 +16,7 @@ call on the loop makes the relevant assertion fail.
 """
 
 import asyncio
+import threading
 import types
 
 import pytest
@@ -132,3 +133,49 @@ async def test_watcher_wraps_calls_via_asyncio_to_thread(monkeypatch):
     assert "list_pending_handoffs" in wrapped
     assert "claim_handoff" in wrapped
     assert "complete_handoff" in wrapped
+
+
+@pytest.mark.asyncio
+async def test_watcher_resolves_lazy_session_db_off_event_loop(monkeypatch):
+    """Opening the per-profile handle must be off-loop, not only its methods."""
+
+    loop_thread = threading.get_ident()
+    resolved_on = []
+
+    class _DB:
+        async def list_pending_handoffs(self):
+            return []
+
+        async def reclaim_stale_running_handoffs(self, _reason):
+            return []
+
+    class _Fake:
+        @property
+        def _session_db(self):
+            resolved_on.append(threading.get_ident())
+            return _DB()
+
+    fake = _Fake()
+    states = iter([True, False])
+
+    class _Running:
+        def __bool__(_self):
+            return next(states, False)
+
+    fake._running = _Running()
+
+    async def _process_handoff(_row):
+        return None
+
+    fake._process_handoff = _process_handoff
+
+    async def _no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(run.asyncio, "sleep", _no_sleep)
+    await asyncio.wait_for(
+        run.GatewayRunner._handoff_watcher(fake, interval=0.0), timeout=5
+    )
+
+    assert len(resolved_on) >= 2  # startup reclaim plus the first poll tick
+    assert all(thread_id != loop_thread for thread_id in resolved_on)

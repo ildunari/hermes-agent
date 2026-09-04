@@ -2563,7 +2563,13 @@ async def _reclaim_stale(runner: object) -> None:
     Defensive throughout: the watcher's unit tests bind it onto stand-ins
     with no such method, and a raising reclaim would abort watcher startup.
     """
-    session_db = getattr(runner, "_session_db", None)
+    # Resolving the lazy per-profile handle may open and initialise state.db.
+    # That path can wait on SQLite locks and must not run on the gateway loop.
+    # Capture the active profile ContextVars before crossing the thread seam so
+    # the worker still opens the intended profile store.
+    session_db = await asyncio.to_thread(
+        copy_context().run, getattr, runner, "_session_db", None
+    )
     if session_db is None:
         return
     reclaim = getattr(session_db, "reclaim_stale_running_handoffs", None)
@@ -15195,7 +15201,13 @@ class GatewayRunner(
             uses that profile's OWN adapter/home channel; see the docstring
             there. ``None`` means the root/default profile.
             """
-            session_db = getattr(self, "_session_db", None)
+            # ``_session_db`` is a lazy property in production. Resolving it can
+            # synchronously open/initialise a profile's SQLite store, so move
+            # the property access itself off-loop (the AsyncSessionDB facade
+            # only offloads calls made after the handle already exists).
+            session_db = await asyncio.to_thread(
+                copy_context().run, getattr, self, "_session_db", None
+            )
             if session_db is None:
                 return
             pending = await session_db.list_pending_handoffs()
