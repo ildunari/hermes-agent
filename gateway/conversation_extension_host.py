@@ -15,6 +15,25 @@ from gateway.config import Platform
 
 logger = logging.getLogger(__name__)
 
+_early_host_ready: asyncio.Event | None = None
+_early_host_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _mark_full_host_ready() -> None:
+    """Release extension factories queued during pre-start plugin discovery."""
+    event = _early_host_ready
+    loop = _early_host_loop
+    if event is None or loop is None or loop.is_closed():
+        return
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+    if current is loop:
+        event.set()
+    else:
+        loop.call_soon_threadsafe(event.set)
+
 
 
 def install_early_lifecycle_scheduling() -> None:
@@ -37,6 +56,8 @@ def install_early_lifecycle_scheduling() -> None:
         lifecycle_task_registry,
     )
 
+    global _early_host_loop, _early_host_ready
+
     existing = gateway_host_operations()
     if existing.spawn_task is not None:
         return
@@ -47,9 +68,13 @@ def install_early_lifecycle_scheduling() -> None:
     # factories can always be marshalled back to it instead of relying on the
     # registration thread having a running loop.
     owner_loop = asyncio.get_running_loop()
+    host_ready = asyncio.Event()
+    _early_host_loop = owner_loop
+    _early_host_ready = host_ready
 
     def _spawn(task) -> None:
         async def _run_factory():
+            await host_ready.wait()
             return await _coerce_awaitable(task.factory())
 
         try:
@@ -523,6 +548,7 @@ def _install_conversation_extension_host(self) -> None:
             run_blocking=_run_blocking,
         )
     )
+    _mark_full_host_ready()
 
 def _served_profile_names(self) -> tuple[str, ...]:
     """Return every profile this gateway process actually serves.

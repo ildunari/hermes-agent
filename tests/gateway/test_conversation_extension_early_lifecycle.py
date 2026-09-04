@@ -38,6 +38,11 @@ async def test_early_lifecycle_marshals_worker_registration_to_gateway_loop():
         )
 
         await asyncio.to_thread(spawn, task)
+        await asyncio.sleep(0)
+        assert not started.is_set()
+        from gateway.run import GatewayRunner
+
+        object.__new__(GatewayRunner)._install_conversation_extension_host()
         await asyncio.wait_for(started.wait(), timeout=1)
 
         assert factory_threads == [owner_thread]
