@@ -3037,6 +3037,8 @@ def mark_job_run(
     success: bool,
     error: Optional[str] = None,
     delivery_error: Optional[str] = None,
+    delivery_ack_metadata: Optional[Dict[str, Any]] = None,
+    probe_run_snapshot: Optional[Dict[str, Any]] = None,
     status: Optional[str] = None,
     *,
     expected_fire_owner: Optional[str] = None,
@@ -3049,6 +3051,8 @@ def mark_job_run(
             success,
             error,
             delivery_error,
+            delivery_ack_metadata=delivery_ack_metadata,
+            probe_run_snapshot=probe_run_snapshot,
             status=status,
             expected_fire_owner=expected_fire_owner,
         )
@@ -3143,6 +3147,8 @@ def _mark_job_run_locked(
     error: Optional[str] = None,
     delivery_error: Optional[str] = None,
     *,
+    delivery_ack_metadata: Optional[Dict[str, Any]] = None,
+    probe_run_snapshot: Optional[Dict[str, Any]] = None,
     status: Optional[str] = None,
     expected_fire_owner: Optional[str] = None,
 ) -> bool:
@@ -3171,6 +3177,19 @@ def _mark_job_run_locked(
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
+                current_binding = job.get("probe_binding")
+                completion_binding = (
+                    probe_run_snapshot
+                    if probe_run_snapshot is not None
+                    else delivery_ack_metadata
+                )
+                if (
+                    isinstance(completion_binding, dict)
+                    and completion_binding != current_binding
+                ):
+                    # The installed probe changed while this run was in flight.
+                    # Reject the whole stale completion under the jobs lock.
+                    return False
                 if expected_fire_owner is not None:
                     claim = job.get("fire_claim")
                     if not isinstance(claim, dict) or claim.get("by") != expected_fire_owner:
@@ -3225,6 +3244,17 @@ def _mark_job_run_locked(
                     job["failure_streak"] = int(job.get("failure_streak") or 0) + 1
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
+                if (
+                    success
+                    and delivery_error is None
+                    and isinstance(delivery_ack_metadata, dict)
+                    and isinstance(current_binding, dict)
+                    and delivery_ack_metadata == current_binding
+                ):
+                    job["last_probe_delivery_ack"] = {
+                        **delivery_ack_metadata,
+                        "run_at": now,
+                    }
                 # Clear any external-fire claim so a re-armed recurring job can
                 # be claimed again on its next fire (Phase 4C CAS).
                 job["fire_claim"] = None

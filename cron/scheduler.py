@@ -3196,6 +3196,22 @@ def _deliver_result(
     Returns None on success, or an error string on failure.
     """
     targets = _resolve_delivery_targets(job, for_failure=for_failure)
+
+    # Platform plugins may impose fail-closed delivery policy (for example,
+    # Poke's internal-only BlueBubbles lane).  Validate before loading any
+    # source or delegated profile so policy failures remain authoritative even
+    # when that profile is unavailable or misconfigured.
+    from gateway.platform_registry import cron_delivery_validation_errors
+
+    target_validation_errors = cron_delivery_validation_errors(job, targets)
+    rejected_validation_errors = [
+        error for error in target_validation_errors if error is not None
+    ]
+    if targets and len(rejected_validation_errors) == len(targets):
+        message = "; ".join(rejected_validation_errors)
+        logger.error("Job '%s': %s", job.get("id", "?"), message)
+        return message
+
     if not targets:
         deliver_value = _normalize_deliver_value(
             _delivery_lane_value(job, for_failure=for_failure)
@@ -3328,16 +3344,55 @@ def _deliver_result(
     _, mirror_text = BasePlatformAdapter.extract_media(content)
     mirror_text = (mirror_text or "").strip()
 
+    delivery_profile = job.get("delivery_profile")
     try:
-        config = load_gateway_config()
+        if delivery_profile is None:
+            config = load_gateway_config()
+        else:
+            # Poke owns the product-specific validation policy; core keeps only
+            # the small generic dispatch seam needed to honor a persisted cron
+            # delivery profile. Import lazily so installations without Poke are
+            # unchanged unless a job explicitly requests this feature.
+            from poke.operations.cron_delivery_profile import (
+                validate_delegated_delivery,
+            )
+
+            source_home = _get_hermes_home().resolve()
+            if not targets:
+                raise ValueError("delegated delivery requires one explicit target")
+            first = targets[0]
+            if any(
+                target.get("platform") != first.get("platform")
+                or target.get("chat_id") != first.get("chat_id")
+                for target in targets
+            ):
+                raise ValueError("delegated delivery cannot fan out across destinations")
+            _, config, _, _ = validate_delegated_delivery(
+                source_home,
+                str(delivery_profile),
+                {
+                    "platform": str(first["platform"]),
+                    "address": str(first["chat_id"]),
+                    "target": str(job.get("deliver") or ""),
+                },
+            )
+            # Never borrow a source profile's adapter for delegated delivery;
+            # the operator profile is outbound-only and must not gain ingress.
+            adapters = None
     except Exception as e:
         msg = f"failed to load gateway config: {e}"
         logger.error("Job '%s': %s", job["id"], msg)
+        if rejected_validation_errors:
+            return "; ".join([*rejected_validation_errors, msg])
         return msg
 
-    delivery_errors = []
+    delivery_errors = list(rejected_validation_errors)
 
-    for target in targets:
+    for target_index, target in enumerate(targets):
+        validation_error = target_validation_errors[target_index]
+        if validation_error is not None:
+            logger.error("Job '%s': %s", job.get("id", "?"), validation_error)
+            continue
         platform_name = target["platform"]
         chat_id = target["chat_id"]
         thread_id = target.get("thread_id")
@@ -7463,6 +7518,8 @@ def run_one_job(
         _stamped = job.get("manual_run_prompt")
         if _stamped and job.get("manual_run_at"):
             extra_prompt = str(_stamped)
+    binding = job.get("probe_binding")
+    probe_run_snapshot = dict(binding) if isinstance(binding, dict) else None
     claim = job.get("fire_claim")
     fire_owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
     execution_token = object()
@@ -7487,6 +7544,7 @@ def run_one_job(
                     else lost_ownership
                 ),
                 execution_token=execution_token,
+                probe_run_snapshot=probe_run_snapshot,
             ),
         )
     finally:
@@ -7507,6 +7565,7 @@ def _run_one_job_body(
     extra_prompt: Optional[str] = None,
     fire_claim_lost: Optional[_CancelEventLike] = None,
     execution_token: Optional[object] = None,
+    probe_run_snapshot: Optional[dict[str, Any]] = None,
 ) -> bool:
     claim = job.get("fire_claim")
     fire_owner = str(claim.get("by") or "") if isinstance(claim, dict) else None
@@ -7904,7 +7963,33 @@ def _run_one_job_body(
             )
             return True
 
-        mark_kwargs = {"delivery_error": delivery_error}
+        expected_probe_output = None
+        if isinstance(probe_run_snapshot, dict):
+            nonce = str(probe_run_snapshot.get("nonce") or "")
+            generation = str(probe_run_snapshot.get("generation") or "")
+            if nonce and generation:
+                expected_probe_output = (
+                    f"HERMES_PROACTIVE_ALARM_PROBE_ACK_REQUEST {nonce} {generation}"
+                )
+        ack_metadata = None
+        if (
+            isinstance(probe_run_snapshot, dict)
+            and should_deliver
+            and success
+            and delivery_error is None
+            and expected_probe_output is not None
+            and deliver_content.strip() == expected_probe_output
+            and job.get("deliver") == probe_run_snapshot.get("target")
+            and job.get("script") == probe_run_snapshot.get("script")
+        ):
+            ack_metadata = dict(probe_run_snapshot)
+        mark_kwargs = {
+            "delivery_error": delivery_error,
+        }
+        if probe_run_snapshot is not None:
+            mark_kwargs["probe_run_snapshot"] = probe_run_snapshot
+        if ack_metadata is not None:
+            mark_kwargs["delivery_ack_metadata"] = ack_metadata
         if fire_owner is not None:
             mark_kwargs["expected_fire_owner"] = fire_owner
         if blocked_config:

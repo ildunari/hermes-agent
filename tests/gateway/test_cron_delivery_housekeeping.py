@@ -78,8 +78,8 @@ def test_multiplex_housekeeping_scopes_primary_and_drains_each_profile(
     )
 
     @contextmanager
-    def fake_scope(home):
-        calls.append(("scope", home))
+    def fake_scope(home, *, hydrate_secrets=True):
+        calls.append(("scope", home, hydrate_secrets))
         yield
 
     monkeypatch.setattr(gateway_run, "_profile_runtime_scope", fake_scope)
@@ -98,9 +98,9 @@ def test_multiplex_housekeeping_scopes_primary_and_drains_each_profile(
     )
 
     assert calls == [
-        ("scope", root_home),
+        ("scope", root_home, False),
         ("drain", root_adapters),
-        ("scope", secondary_home),
+        ("scope", secondary_home, False),
         ("drain", secondary_adapters),
     ]
 
@@ -125,7 +125,8 @@ def test_multiplex_housekeeping_uses_primary_routes_for_credentialless_satellite
     )
 
     @contextmanager
-    def fake_scope(_home):
+    def fake_scope(_home, *, hydrate_secrets=True):
+        assert hydrate_secrets is False
         yield
 
     class FakeSharedRouteAdapters:

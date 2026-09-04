@@ -33426,7 +33426,9 @@ def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
             )
         if profile_adapters is None:
             continue
-        with _profile_runtime_scope(scoped_home):
+        # Startup already hydrated each served profile. Rebuild the in-memory
+        # scope without polling external secret providers on every drain tick.
+        with _profile_runtime_scope(scoped_home, hydrate_secrets=False):
             if profile_name is not None and not profile_adapters and adapters:
                 routes = cron_scheduler._primary_profile_routes_for_current_home()
                 if routes:
@@ -34256,7 +34258,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             exc_info=True,
         )
 
-    runner = GatewayRunner(config)
+    # The default multiplex config load may hydrate profile secret sources
+    # (1Password, vaults, and similar blocking providers). start_gateway()
+    # already owns the event loop, so resolve that default in a worker before
+    # constructing the runner. Explicit config injection stays unchanged.
+    resolved_config = config
+    if resolved_config is None:
+        resolved_config = await asyncio.to_thread(load_gateway_config_for_runner)
+    runner = GatewayRunner(resolved_config)
     # Multiplex: swap the launch-home file handlers for per-profile routers so
     # each profile's records land in its own logs/ (#82936). Must run after
     # the runner resolved the (possibly None) config and after setup_logging.

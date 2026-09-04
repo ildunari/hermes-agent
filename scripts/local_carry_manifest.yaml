@@ -1,11 +1,20 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 45
-  total_changed_lines: 5747
-  modified_upstream_lines: 1470
+  paths: 49
+  total_changed_lines: 5964
+  modified_upstream_lines: 1657
 
 required_support:
+  - support/hermes-update-ops/README.md
+  - support/hermes-update-ops/hermes_checkpoint.py
+  - support/hermes-update-ops/hermes_update_service.py
+  - support/hermes-update-ops/pyproject.toml
+  - support/hermes-update-ops/run_update_smart_client_validation.sh
+  - support/hermes-update-ops/setup_update_service.py
+  - support/hermes-update-ops/tests/test_hermes_update_service.py
+  - support/hermes-update-ops/tests/test_setup_update_service.py
+  - support/hermes-update-ops/verify_deployed_turn.py
   - support/hermes-studio-ops/src/hermes_studio_ops/restart_surfaces.py
   - support/hermes-runtime-support/src/hermes_runtime_support/alias_billing_guard.py
   - support/hermes-runtime-support/src/hermes_runtime_support/authenticated_dm.py
@@ -55,8 +64,21 @@ evidence_templates:
     runtime_caller: developer and update validation workflow
     interface_test: local carry contract behavior tests
     artifact: JSON PASS receipt on the exact integrated head
+  proactive_alarm: &proactive_alarm
+    registration: platform registry cron validator and delegated delivery profile seam
+    runtime_caller: cron scheduler delivery and atomic probe completion
+    interface_test: Poke proactive scheduler, transport, gate, rollout, and status suites
+    artifact: exact probe ACK persisted after operator-profile delivery
 
 paths:
+  - path: cron/jobs.py
+    disposition: must-carry
+    owner: generic proactive probe completion seam
+    evidence: *proactive_alarm
+  - path: cron/scheduler.py
+    disposition: must-carry
+    owner: generic plugin validation and delegated cron delivery seams
+    evidence: *proactive_alarm
   - path: agent/agent_runtime_helpers.py
     disposition: upstream
     owner: core provider prompt-cache policy
@@ -189,6 +211,14 @@ paths:
     disposition: must-carry
     owner: core gateway lifecycle tests
     evidence: *active_work
+  - path: tests/gateway/test_cron_delivery_housekeeping.py
+    disposition: must-carry
+    owner: gateway off-loop profile housekeeping contract
+    evidence: *proactive_alarm
+  - path: tests/gateway/test_runner_startup_failures.py
+    disposition: must-carry
+    owner: gateway off-loop startup hydration contract
+    evidence: *conversation
   - path: tests/gateway/test_session.py
     disposition: must-carry
     owner: gateway-session-commands plugin contract

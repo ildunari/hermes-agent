@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 from unittest.mock import AsyncMock
 
@@ -6,6 +8,44 @@ from gateway.platforms.base import BasePlatformAdapter
 from gateway.restart import GATEWAY_FATAL_CONFIG_EXIT_CODE, is_global_startup_conflict
 from gateway.run import GatewayRunner
 from gateway.status import read_runtime_status
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_loads_default_config_off_event_loop(monkeypatch, tmp_path):
+    """Default profile secret hydration must not block the gateway loop."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    loader_threads = []
+    config = GatewayConfig()
+
+    def fake_load_config():
+        loader_threads.append(threading.current_thread().name)
+        return config
+
+    class _CleanExitRunner:
+        def __init__(self, received):
+            assert received is config
+            self.config = received
+            self.should_exit_cleanly = True
+            self.exit_reason = None
+            self.exit_code = None
+            self.adapters = {}
+
+        async def start(self):
+            return True
+
+        async def stop(self):
+            return None
+
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
+    monkeypatch.setattr("hermes_logging.setup_logging", lambda hermes_home, mode: tmp_path)
+    monkeypatch.setattr("gateway.run.load_gateway_config_for_runner", fake_load_config)
+    monkeypatch.setattr("gateway.run.GatewayRunner", _CleanExitRunner)
+
+    from gateway.run import start_gateway
+
+    assert await start_gateway(config=None, replace=False, verbosity=None) is True
+    assert loader_threads and loader_threads[0] != threading.current_thread().name
 
 
 @pytest.mark.parametrize(
