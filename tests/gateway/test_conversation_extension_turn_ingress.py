@@ -77,4 +77,3 @@ async def test_observed_only_reconnect_fires_after_auth_and_never_runs_agent(
         assert await runner._handle_message(_event()) is None
 
     assert order == ["auth", "observe"]
-
