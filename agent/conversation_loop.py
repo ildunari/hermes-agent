@@ -48,6 +48,7 @@ from agent.turn_context import (
     _compression_warrants_another_preflight_pass,
     _review_fork_first_request_pending,
     build_turn_context,
+    compose_api_system_prompt,
     compose_user_api_content,
     reanchor_current_turn_user_idx,
 )
@@ -2183,6 +2184,7 @@ def run_conversation(
     current_turn_user_idx = _ctx.current_turn_user_idx
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
+    _plugin_system_context = _ctx.plugin_system_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
 
     # Commentary deduplication spans all provider continuations and tool calls
@@ -2635,24 +2637,25 @@ def run_conversation(
             # The signature field helps maintain reasoning continuity
             api_messages.append(api_msg)
 
-        # Build the final system message: cached prompt + ephemeral system prompt.
+        # Build the final system message: cached prompt, Hermes ephemeral prompt,
+        # then API-call-only plugin/extension context.
         # Ephemeral additions are API-call-time only (not persisted to session DB).
         # External recall context is injected into the user message, not the system
         # prompt, so the stable cache prefix remains unchanged.
         #
-        # NOTE: Plugin context from pre_llm_call hooks is injected into the
-        # user message (see injection block above), NOT the system prompt.
-        # This is intentional — system prompt modifications break the prompt
-        # cache prefix.  The system prompt is reserved for Hermes internals.
+        # ``system_context`` deliberately changes only the suffix after the
+        # stable cached prompt and is never persisted to the transcript.
         #
         # Hermes invariant: the system prompt is built ONCE per session
         # (cached on ``_cached_system_prompt``) and replayed verbatim on
         # every turn. ``apply_anthropic_cache_control`` may split its stable
         # prefix into content blocks on the wire, but the stored string and
         # its byte-stability remain unchanged.
-        effective_system = active_system_prompt or ""
-        if agent.ephemeral_system_prompt:
-            effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+        effective_system = compose_api_system_prompt(
+            active_system_prompt or "",
+            agent.ephemeral_system_prompt or "",
+            _plugin_system_context,
+        )
         if effective_system:
             api_messages = [{"role": "system", "content": effective_system}] + api_messages
 

@@ -845,6 +845,8 @@ def _apply_extension_route_decision(self, source, event, decision):
         )
     else:
         event = dataclasses.replace(event, source=source, metadata=metadata)
+    if getattr(decision, "suppress_turn", False):
+        event.observed_only = True
     return source, event
 
 def _apply_extension_route_decision_safe(self, source, event, decision):

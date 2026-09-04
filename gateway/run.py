@@ -6516,9 +6516,22 @@ class TurnRunner:
         # _handle_message_with_agent (auto-reset note, first-contact
         # intro, voice-channel change).  Assigned unconditionally so a
         # reused cached agent never replays a stale note.
-        agent._gateway_turn_context_notes = "\n\n".join(
-            self._runner._consume_pending_turn_sidecar_notes(ctx.session_key)
+        _turn_notes = self._runner._consume_pending_turn_sidecar_notes(
+            ctx.session_key
         )
+        _augmentation = ctx.extension_augmentation
+        if _augmentation is not None:
+            _turn_notes.extend(
+                part for part in getattr(_augmentation, "user_context", ())
+                if isinstance(part, str) and part.strip()
+            )
+        agent._gateway_turn_context_notes = "\n\n".join(_turn_notes)
+        # Assigned unconditionally so a reused cached agent cannot replay a
+        # prior turn's extension context. The prologue consumes and clears it.
+        agent._gateway_turn_system_context = "\n\n".join(
+            part for part in getattr(_augmentation, "system_context", ())
+            if isinstance(part, str) and part.strip()
+        ) if _augmentation is not None else ""
 
         _bg_review_release = threading.Event()
         _bg_review_pending: list[str] = []
@@ -7160,7 +7173,32 @@ class TurnRunner:
             # inbound id (NOT event_message_id, which is the reply anchor).
             if ctx.inbound_message_id is not None:
                 _conversation_kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
-            result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
+            from agent.request_scoped_tools import bind_request_scoped_tools
+
+            _request_tools = (
+                getattr(_augmentation, "request_tools", ())
+                if _augmentation is not None else ()
+            )
+            with bind_request_scoped_tools(agent, _request_tools) as _request_binding:
+                result = agent.run_conversation(
+                    _api_run_message, **_conversation_kwargs
+                )
+                _turn_succeeded = not (
+                    isinstance(result, dict) and result.get("failed")
+                )
+                if _turn_succeeded:
+                    _request_binding.commit_success()
+                    for _callback in (
+                        getattr(_augmentation, "on_success", ())
+                        if _augmentation is not None else ()
+                    ):
+                        try:
+                            _callback()
+                        except Exception:
+                            logger.debug(
+                                "conversation extension success callback failed",
+                                exc_info=True,
+                            )
         finally:
             unregister_gateway_notify(_approval_session_key)
             # Cancel any pending clarify entries so blocked agent
@@ -18917,6 +18955,9 @@ class GatewayRunner(
         7. Return response
         """
         source = event.source
+        _extension_scope = ""
+        _extension_route_context = None
+        _extension_route_decision = None
 
         # 🔴 Cross-session leak guard. This handler runs inside a per-message
         # asyncio task created via create_task(), which snapshots the spawning
@@ -19014,6 +19055,11 @@ class GatewayRunner(
                         source, event = self._apply_extension_route_decision_safe(
                             source, event, _extension_route_decision
                         )
+                        event.metadata["_conversation_extension_route"] = {
+                            "scope": _extension_scope,
+                            "context": _extension_route_context,
+                            "decision": _extension_route_decision,
+                        }
         except Exception:
             logger.debug("inbound conversation-extension admission failed", exc_info=True)
 
@@ -19168,6 +19214,22 @@ class GatewayRunner(
                         )
                     # Record rate limit so subsequent messages are silently ignored
                     pairing_store._record_rate_limit(platform_name, source.user_id)
+            return None
+
+        # The ingress observer owns authenticated communication capture.  It
+        # runs after transport authorization but before commands, session
+        # mutation, or an agent turn. Catch-up events stop here after capture.
+        if _extension_route_context is not None and _extension_scope:
+            try:
+                _ce_runtime.observe_authenticated_ingress(
+                    _extension_route_context, scope=_extension_scope
+                )
+            except Exception:
+                logger.debug(
+                    "conversation extension ingress observation failed",
+                    exc_info=True,
+                )
+        if getattr(event, "observed_only", False):
             return None
 
         # Global emergency stop (`hermes pause`): give new turns a brief
@@ -20586,8 +20648,13 @@ class GatewayRunner(
 
         try:
             try:
-                _agent_result = await self._handle_message_with_agent(
-                    event, source, _quick_key, _run_generation
+                _agent_result = await self._run_agent_turn_with_policy(
+                    event=event,
+                    source=source,
+                    quick_key=_quick_key,
+                    run_generation=_run_generation,
+                    agent_kwargs={},
+                    policy_scope=_extension_scope or None,
                 )
             except TurnLeaseTimeoutError as exc:
                 # This is a rejected message, not a completed agent turn. Return
@@ -20605,6 +20672,41 @@ class GatewayRunner(
                     "protect the transcript, this message was not processed. "
                     "Wait for the active turn to finish, then resend it."
                 )
+            if _extension_route_decision is not None and _extension_scope:
+                try:
+                    _identity_metadata = (
+                        (getattr(event, "metadata", None) or {}).get(
+                            "_hermes_extension_identity"
+                        ) or {}
+                    )
+                    _ce_runtime.observe_turn_completion(
+                        scope=_extension_scope,
+                        session_key=_quick_key,
+                        runtime_profile=str(
+                            getattr(_extension_route_decision, "runtime_profile", "")
+                            or getattr(source, "profile", "")
+                        ),
+                        platform=str(
+                            getattr(getattr(source, "platform", None), "value", None)
+                            or getattr(source, "platform", "")
+                        ),
+                        sender_identity=str(getattr(source, "user_id", "") or ""),
+                        user_text=str(
+                            _identity_metadata.get("source_text")
+                            or getattr(event, "text", "")
+                            or ""
+                        ),
+                        assistant_text=str(_agent_result or ""),
+                        delivered=False,
+                        user_message_id=(
+                            str(event.message_id) if event.message_id else None
+                        ),
+                    )
+                except Exception:
+                    logger.debug(
+                        "conversation extension post-turn observation failed",
+                        exc_info=True,
+                    )
             try:
                 await self._run_post_turn_hooks(
                     agent_result=_agent_result,
@@ -21432,6 +21534,8 @@ class GatewayRunner(
                 pass
 
         event_metadata = getattr(event, "metadata", None) or {}
+        extension_route = event_metadata.get("_conversation_extension_route") or {}
+        extension_identity = event_metadata.get("_hermes_extension_identity") or {}
         expected_session_key = str(
             event_metadata.get("gateway_session_key") or ""
         ).strip()
@@ -23328,6 +23432,39 @@ class GatewayRunner(
         if turn_sidecar_notes and session_key:
             self._set_pending_turn_sidecar_notes(session_key, turn_sidecar_notes)
 
+        extension_augmentation = None
+        extension_scope = str(extension_route.get("scope") or "")
+        extension_decision = extension_route.get("decision")
+        if extension_scope and extension_decision is not None:
+            extension_augmentation = self._collect_extension_turn_augmentation(
+                scope=extension_scope,
+                session_key=session_key,
+                runtime_profile=str(
+                    getattr(extension_decision, "runtime_profile", "")
+                    or getattr(source, "profile", "")
+                ),
+                platform=str(
+                    getattr(getattr(source, "platform", None), "value", None)
+                    or getattr(source, "platform", "")
+                ),
+                sender_identity=str(getattr(source, "user_id", "") or ""),
+                chat_type=str(getattr(source, "chat_type", "") or ""),
+                user_text=str(
+                    extension_identity.get("source_text") or message_text or ""
+                ),
+                profile_home=str(self._resolve_profile_home_for_source(source)),
+                session_id=str(session_entry.session_id or ""),
+                principal=str(getattr(extension_decision, "principal", "") or ""),
+                subject_id=str(getattr(extension_decision, "subject_id", "") or ""),
+                turn_index=sum(
+                    1 for item in history
+                    if isinstance(item, dict) and item.get("role") == "user"
+                ),
+                now_timestamp=time.time(),
+                current_message_id=(str(event.message_id) if event.message_id else None),
+                conversation_history=tuple(history),
+            )
+
         # Bind this gateway run generation to the adapter's active-session
         # event so deferred post-delivery callbacks can be released by the
         # same run that registered them.
@@ -23374,6 +23511,7 @@ class GatewayRunner(
                 persist_user_timestamp=persist_user_timestamp,
                 persist_user_display_kind=persist_user_display_kind,
                 message_type=event.message_type,
+                extension_augmentation=extension_augmentation,
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
 
@@ -31328,6 +31466,7 @@ class GatewayRunner(
         persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None,
         message_type: Optional[str] = None,
+        extension_augmentation: Any = None,
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around the agent run.
 
@@ -31349,6 +31488,7 @@ class GatewayRunner(
                 persist_user_timestamp=persist_user_timestamp,
                 persist_user_display_kind=persist_user_display_kind,
                 message_type=message_type,
+                extension_augmentation=extension_augmentation,
             )
 
         profile_home = self._resolve_profile_home_for_source(source)
@@ -31363,6 +31503,7 @@ class GatewayRunner(
                 persist_user_timestamp=persist_user_timestamp,
                 persist_user_display_kind=persist_user_display_kind,
                 message_type=message_type,
+                extension_augmentation=extension_augmentation,
             )
 
     def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
@@ -31507,6 +31648,7 @@ class GatewayRunner(
         persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None,
         message_type: Optional[str] = None,
+        extension_augmentation: Any = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -31817,6 +31959,7 @@ class GatewayRunner(
             persist_user_message=persist_user_message,
             persist_user_timestamp=persist_user_timestamp,
             persist_user_display_kind=persist_user_display_kind,
+            extension_augmentation=extension_augmentation,
         )
         turn_runner = TurnRunner(self, turn_ctx)
         # Callback invoked by agent on tool lifecycle events — extracted to

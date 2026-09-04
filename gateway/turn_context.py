@@ -101,6 +101,8 @@ class TurnContext:
     # "internal_notification" for async-delegation/background notifications
     # (#82888). DB-only presentation metadata; never sent to the provider.
     persist_user_display_kind: Optional[str] = None
+    # One-turn contribution from the conversation-extension policy owner.
+    extension_augmentation: Any = None
     user_config: Any = None
     enabled_toolsets: Any = None
     disabled_toolsets: Any = None

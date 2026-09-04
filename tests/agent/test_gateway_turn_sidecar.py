@@ -19,8 +19,10 @@ import pytest
 from agent.turn_context import (
     append_notes_to_multimodal_content,
     build_turn_context,
+    compose_api_system_prompt,
     compose_user_api_content,
     consume_gateway_turn_context_notes,
+    consume_gateway_turn_system_context,
 )
 
 
@@ -142,6 +144,37 @@ class TestConsumeIsOneShot:
         agent = _FakeAgent()
         agent._gateway_turn_context_notes = ["not-a-string"]
         assert consume_gateway_turn_context_notes(agent) == ""
+
+    def test_system_context_consume_clears_the_attribute(self):
+        agent = _FakeAgent()
+        agent._gateway_turn_system_context = "LANE-B-SYSTEM"
+        assert consume_gateway_turn_system_context(agent) == "LANE-B-SYSTEM"
+        assert consume_gateway_turn_system_context(agent) == ""
+
+
+class TestEphemeralSystemContext:
+    def test_plugin_and_gateway_system_context_stay_off_user_sidecar(self):
+        agent = _FakeAgent()
+        agent._gateway_turn_system_context = "LANE-B-SYSTEM"
+        with patch(
+            "hermes_cli.plugins.invoke_hook",
+            return_value=[{"system_context": "TEXTURE-V2-SYSTEM"}],
+        ):
+            ctx = _build(agent)
+
+        assert ctx.plugin_system_context == (
+            "TEXTURE-V2-SYSTEM\n\nLANE-B-SYSTEM"
+        )
+        assert "api_content" not in ctx.messages[ctx.current_turn_user_idx]
+        assert agent._gateway_turn_system_context == ""
+
+    def test_system_context_is_appended_after_stable_prompt(self):
+        assert compose_api_system_prompt(
+            "STABLE", "HERMES-EPHEMERAL", "TEXTURE-V2-SYSTEM"
+        ) == "STABLE\n\nHERMES-EPHEMERAL\n\nTEXTURE-V2-SYSTEM"
+
+    def test_stable_prompt_is_byte_preserved_without_ephemeral_suffix(self):
+        assert compose_api_system_prompt("  STABLE  ", "", "") == "  STABLE  "
 
 
 class TestStringContentSidecarDelivery:
