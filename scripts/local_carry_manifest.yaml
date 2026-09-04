@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 51
-  total_changed_lines: 6001
-  modified_upstream_lines: 1686
+  paths: 52
+  total_changed_lines: 6017
+  modified_upstream_lines: 1698
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -254,6 +254,10 @@ paths:
   - path: tests/tools/test_delegate.py
     disposition: must-carry
     owner: macOS delegate path-equivalence test
+    evidence: *provider
+  - path: tests/tools/test_web_tools_config.py
+    disposition: must-carry
+    owner: web provider dependency-isolation tests
     evidence: *provider
   - path: tools/send_message_registry.py
     disposition: upstream
