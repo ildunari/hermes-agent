@@ -129,6 +129,14 @@ def _install_conversation_extension_host(self) -> None:
         install_gateway_host_operations,
         lifecycle_task_registry,
     )
+    from hermes_constants import get_hermes_home
+
+    # Capture the primary transport scope before extension callbacks enter a
+    # routed profile context. Serialized SessionSource rows intentionally omit
+    # the in-process authorization-home marker used by normal multiplex
+    # ingress, so durable-session probes must reconstruct it from the adapter
+    # that actually owns the transport.
+    primary_transport_home = Path(get_hermes_home())
 
     def _spawn(task) -> None:
         # Host owns the task object; the extension only ever holds the
@@ -365,6 +373,26 @@ def _install_conversation_extension_host(self) -> None:
                 return candidate
         return None
 
+    def _authorize_authenticated_dm_origin(origin) -> bool:
+        """Recheck one durable DM under its live transport's auth scope."""
+        platform = getattr(origin, "platform", None)
+        primary_adapter = (getattr(self, "adapters", None) or {}).get(platform)
+        if primary_adapter is not None:
+            origin._authorization_profile_home = primary_transport_home
+        try:
+            checker = getattr(
+                self,
+                "_is_user_authorized_for_source",
+                self._is_user_authorized,
+            )
+            return bool(checker(origin, allow_adapter_delegation=False))
+        except Exception:
+            logger.debug(
+                "authenticated DM authorization check failed",
+                exc_info=True,
+            )
+            return False
+
     def _is_authorized_existing_dm(
         platform_name: str,
         chat_id: str,
@@ -397,15 +425,7 @@ def _install_conversation_extension_host(self) -> None:
                 continue
             if str(getattr(origin, "chat_type", "") or "") != "dm":
                 continue
-            try:
-                return bool(
-                    self._is_user_authorized(origin, allow_adapter_delegation=False)
-                )
-            except Exception:
-                logger.debug(
-                    "authenticated DM authorization check failed", exc_info=True
-                )
-                return False
+            return _authorize_authenticated_dm_origin(origin)
 
         # Older multiplex versions could persist a correctly profiled session
         # row in the root state DB without publishing its route into the live
@@ -445,9 +465,7 @@ def _install_conversation_extension_host(self) -> None:
                 return False
             if origin.profile and origin.profile != profile_name:
                 return False
-            return bool(
-                self._is_user_authorized(origin, allow_adapter_delegation=False)
-            )
+            return _authorize_authenticated_dm_origin(origin)
         except Exception:
             logger.debug(
                 "authenticated DM durable-session authorization failed",
