@@ -530,6 +530,18 @@ class GatewayRuntimeFacade:
                 f"'{needed}' capability required for {action}()"
             )
 
+    def _operation(self, name: str) -> Any:
+        """Return the newest installed host operation, then the captured stub.
+
+        Extensions may register during executor-backed MCP discovery, before
+        ``GatewayRunner.start`` installs the complete host. Their facade must
+        upgrade when that host arrives; pinning non-lifecycle methods to the
+        early stub leaves a correctly started watcher unable to model, probe,
+        persist, or deliver until the next process restart.
+        """
+        live = gateway_host_operations()
+        return getattr(live, name, None) or getattr(self._host, name, None)
+
     # -- bounded actions ---------------------------------------------------
 
     def spawn_lifecycle_task(
@@ -566,10 +578,11 @@ class GatewayRuntimeFacade:
 
     def lookup_session(self, session_key: str) -> Optional[Mapping[str, Any]]:
         """Return an immutable session snapshot, never a live store handle."""
-        if self._host.lookup_session is None:
+        lookup = self._operation("lookup_session")
+        if lookup is None:
             return None
         try:
-            snapshot = self._host.lookup_session(session_key)
+            snapshot = lookup(session_key)
         except Exception:
             logger.debug("extension session lookup failed", exc_info=True)
             return None
@@ -579,9 +592,10 @@ class GatewayRuntimeFacade:
         self._require("create_initiated_child")
         if not isinstance(request, InitiatedTurnRequest):
             raise ValueError("request must be an InitiatedTurnRequest")
-        if self._host.create_initiated_child is None:
+        create = self._operation("create_initiated_child")
+        if create is None:
             raise CapabilityDenied("host does not provide initiated child creation")
-        return self._host.create_initiated_child(request)
+        return create(request)
 
     def load_initiated_turn_context(
         self, parent_session_id: str
@@ -590,7 +604,7 @@ class GatewayRuntimeFacade:
         self._require("load_initiated_turn_context")
         if not isinstance(parent_session_id, str) or not parent_session_id.strip():
             raise ValueError("parent_session_id is required")
-        loader = self._host.load_initiated_turn_context
+        loader = self._operation("load_initiated_turn_context")
         if loader is None:
             raise CapabilityDenied(
                 "host does not provide initiated-turn context loading"
@@ -603,7 +617,7 @@ class GatewayRuntimeFacade:
         self._require("call_auxiliary_model")
         if not isinstance(request, AuxiliaryModelRequest):
             raise ValueError("request must be an AuxiliaryModelRequest")
-        caller = self._host.call_auxiliary_model
+        caller = self._operation("call_auxiliary_model")
         if caller is None:
             raise CapabilityDenied("host does not provide auxiliary model calls")
         return str(caller(request) or "")
@@ -613,7 +627,7 @@ class GatewayRuntimeFacade:
         self._require("web_search")
         if not isinstance(request, WebSearchRequest):
             raise ValueError("request must be a WebSearchRequest")
-        search = self._host.web_search
+        search = self._operation("web_search")
         if search is None:
             raise CapabilityDenied("host does not provide web research")
         return search(request)
@@ -621,16 +635,17 @@ class GatewayRuntimeFacade:
     def list_cron_jobs(self, *, include_disabled: bool) -> tuple:
         """Return copied cron metadata for health inspection only."""
         self._require("list_cron_jobs")
-        reader = self._host.list_cron_jobs
+        reader = self._operation("list_cron_jobs")
         if reader is None:
             raise CapabilityDenied("host does not provide cron inspection")
         return tuple(reader(self._profile_home, bool(include_disabled)) or ())
 
     def inject_turn(self, *, session_key: str, text: str) -> bool:
         self._require("inject_turn")
-        if self._host.inject_turn is None:
+        inject = self._operation("inject_turn")
+        if inject is None:
             raise CapabilityDenied("host does not provide turn injection")
-        return bool(self._host.inject_turn(session_key, text))
+        return bool(inject(session_key, text))
 
     def send_authenticated_existing_dm(
         self, request: AuthenticatedDmRequest
@@ -639,11 +654,12 @@ class GatewayRuntimeFacade:
         self._require("send_authenticated_existing_dm")
         if not isinstance(request, AuthenticatedDmRequest):
             raise ValueError("request must be an AuthenticatedDmRequest")
-        if self._host.send_authenticated_existing_dm is None:
+        send = self._operation("send_authenticated_existing_dm")
+        if send is None:
             return AuthenticatedDmResult(
                 DmSendOutcome.DEFINITIVE_FAILURE, detail="capability_unavailable"
             )
-        return self._host.send_authenticated_existing_dm(request)
+        return send(request)
 
     def probe_authenticated_existing_dm(
         self, request: AuthenticatedDmProbeRequest
@@ -652,7 +668,7 @@ class GatewayRuntimeFacade:
         self._require("probe_authenticated_existing_dm")
         if not isinstance(request, AuthenticatedDmProbeRequest):
             raise ValueError("request must be an AuthenticatedDmProbeRequest")
-        probe = self._host.probe_authenticated_existing_dm
+        probe = self._operation("probe_authenticated_existing_dm")
         if probe is None:
             return AuthenticatedDmProbeResult(False, False, False, "capability_unavailable")
         return probe(request)
@@ -664,9 +680,10 @@ class GatewayRuntimeFacade:
         inline only when no host implementation exists (CLI, tests), which is
         correct there because those callers have no event loop to protect.
         """
-        if self._host.run_blocking is None:
+        run = self._operation("run_blocking")
+        if run is None:
             return func(*args, **kwargs)
-        return self._host.run_blocking(func, *args, **kwargs)
+        return run(func, *args, **kwargs)
 
     def describe(self) -> dict[str, Any]:
         """Bounded status snapshot: identity and capabilities only."""
