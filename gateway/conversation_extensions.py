@@ -210,6 +210,10 @@ class GatewayTurnContext:
 class GatewayTurnAugmentation:
     """Optional per-turn contributions from an extension.
 
+    ``system_context`` is trusted instruction-shaped guidance, but transport
+    semantics keep it off the byte-stable system message: core appends it only
+    to the API copy of the current user message and never persists or replays it.
+
     ``degraded`` is set by core (never by the plugin) when the extension
     failed or returned something malformed, so the caller can record a health
     signal while still serving the reply.

@@ -49,6 +49,7 @@ from agent.turn_context import (
     _review_fork_first_request_pending,
     build_turn_context,
     compose_api_system_prompt,
+    compose_current_user_transport_content,
     compose_user_api_content,
     reanchor_current_turn_user_idx,
 )
@@ -2184,7 +2185,7 @@ def run_conversation(
     current_turn_user_idx = _ctx.current_turn_user_idx
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
-    _plugin_system_context = _ctx.plugin_system_context
+    _plugin_transport_context = _ctx.plugin_transport_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
 
     # Commentary deduplication spans all provider continuations and tool calls
@@ -2564,6 +2565,12 @@ def run_conversation(
                     )
                     if _composed is not None:
                         api_msg["content"] = _composed
+                _transport_content = compose_current_user_transport_content(
+                    api_msg.get("content", ""),
+                    _plugin_transport_context,
+                )
+                if _transport_content is not None:
+                    api_msg["content"] = _transport_content
             elif (
                 isinstance(_api_content, str)
                 and _api_content
@@ -2637,14 +2644,13 @@ def run_conversation(
             # The signature field helps maintain reasoning continuity
             api_messages.append(api_msg)
 
-        # Build the final system message: cached prompt, Hermes ephemeral prompt,
-        # then API-call-only plugin/extension context.
+        # Build the final system message from Hermes-owned prompt text only.
         # Ephemeral additions are API-call-time only (not persisted to session DB).
         # External recall context is injected into the user message, not the system
         # prompt, so the stable cache prefix remains unchanged.
         #
-        # ``system_context`` deliberately changes only the suffix after the
-        # stable cached prompt and is never persisted to the transcript.
+        # Extension ``system_context`` is transported on the current user copy
+        # above; letting it touch this message breaks the cached system bytes.
         #
         # Hermes invariant: the system prompt is built ONCE per session
         # (cached on ``_cached_system_prompt``) and replayed verbatim on
@@ -2654,7 +2660,6 @@ def run_conversation(
         effective_system = compose_api_system_prompt(
             active_system_prompt or "",
             agent.ephemeral_system_prompt or "",
-            _plugin_system_context,
         )
         if effective_system:
             api_messages = [{"role": "system", "content": effective_system}] + api_messages

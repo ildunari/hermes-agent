@@ -32,6 +32,7 @@ import functools
 import inspect
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -118,6 +119,7 @@ _STALL_NOTIFY_SEND_TIMEOUT_SECONDS = 15.0
 _GATEWAY_PROXY_SSE_BUFFER_MAX_CHARS = 16 * 1024 * 1024
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 _GATEWAY_HYGIENE_PLATFORM = "gateway_hygiene"
+_EXTERNAL_CRON_TICKER_CONTRACT = Path("cron/ticker_external.json")
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"("  # transient/auxiliary status that should stay in logs, not gateway chats
@@ -2488,6 +2490,71 @@ def _multiplex_profile_homes(config: object) -> list[tuple[str, "Path"]]:
             profile_allowlist=getattr(config, "multiplex_profile_allowlist", None),
         )
     )
+
+
+def _external_cron_ticker_owns_profile(
+    profile_home: Path,
+    *,
+    now: Optional[float] = None,
+) -> bool:
+    """Return whether a profile's external ticker contract is fresh.
+
+    The central ticker rewrites this atomic JSON contract before dispatching
+    each profile. Missing, malformed, implausibly future-dated, or stale data
+    fails open to the gateway ticker so scheduled work is not orphaned.
+    """
+    try:
+        payload = json.loads(
+            (Path(profile_home) / _EXTERNAL_CRON_TICKER_CONTRACT).read_text(
+                encoding="utf-8"
+            )
+        )
+        if not isinstance(payload, dict) or not str(payload.get("kind") or "").strip():
+            return False
+        updated_at = payload.get("updated_at")
+        stale_after = payload.get("stale_after_seconds")
+        if (
+            isinstance(updated_at, bool)
+            or isinstance(stale_after, bool)
+            or not isinstance(updated_at, (int, float))
+            or not isinstance(stale_after, (int, float))
+        ):
+            return False
+        updated_at = float(updated_at)
+        stale_after = float(stale_after)
+        if (
+            not math.isfinite(updated_at)
+            or not math.isfinite(stale_after)
+            or stale_after <= 0
+        ):
+            return False
+        age = (time.time() if now is None else float(now)) - updated_at
+        return -stale_after <= age <= stale_after
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _in_process_cron_ticker_owns_profile(
+    profile_home: Path,
+    *,
+    now: Optional[float] = None,
+) -> bool:
+    """Complement of external ownership; exactly one ticker may dispatch."""
+    return not _external_cron_ticker_owns_profile(profile_home, now=now)
+
+
+def _gateway_cron_profile_gate(_profile_name: Optional[str], profile_home: Path) -> bool:
+    """Scheduler ``profile_gate`` backed by the external ownership contract."""
+    return _in_process_cron_ticker_owns_profile(Path(profile_home))
+
+
+def _gateway_cron_can_dispatch(runner: object, *, multiplex: bool) -> bool:
+    """Global drain gate plus single-profile external-ticker ownership."""
+    if bool(getattr(runner, "_draining", False)) or bool(
+        getattr(runner, "_external_drain_active", False)
+    ):
+        return False
+    return multiplex or _in_process_cron_ticker_owns_profile(Path(get_hermes_home()))
 
 
 def _enable_multiplex_log_routing(config: object) -> bool:
@@ -6528,7 +6595,7 @@ class TurnRunner:
         agent._gateway_turn_context_notes = "\n\n".join(_turn_notes)
         # Assigned unconditionally so a reused cached agent cannot replay a
         # prior turn's extension context. The prologue consumes and clears it.
-        agent._gateway_turn_system_context = "\n\n".join(
+        agent._gateway_turn_transport_context = "\n\n".join(
             part for part in getattr(_augmentation, "system_context", ())
             if isinstance(part, str) and part.strip()
         ) if _augmentation is not None else ""
@@ -34839,6 +34906,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 # cron through the default bot (even before its adapter connects,
                 # when profile_adapters[name] is still absent/empty).
                 cron_start_kwargs["default_profile"] = "default"
+                # A fresh support-owned central ticker contract owns this
+                # profile. Re-evaluate every cycle so stale/absent heartbeat
+                # falls back to the gateway without a restart.
+                cron_start_kwargs["profile_gate"] = _gateway_cron_profile_gate
                 logger.info(
                     "Cron scheduler will tick %d profile(s) under multiplex: %s",
                     len(profile_homes),
@@ -34854,8 +34925,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # in-process ticker polls local due jobs, so only it receives the local
     # external-drain dispatch gate.
     if isinstance(cron_provider, InProcessCronScheduler):
-        cron_start_kwargs["can_dispatch"] = lambda: not (
-            runner._draining or runner._external_drain_active
+        cron_start_kwargs["can_dispatch"] = lambda: _gateway_cron_can_dispatch(
+            runner,
+            multiplex=multiplex_cron,
         )
     cron_thread = threading.Thread(
         target=cron_provider.start,

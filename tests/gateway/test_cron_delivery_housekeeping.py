@@ -1,6 +1,7 @@
 """Gateway-independent draining of restart-safe cron deliveries."""
 
 from contextlib import contextmanager
+import json
 from types import SimpleNamespace
 
 import cron.scheduler as scheduler
@@ -17,6 +18,62 @@ class _OneTickStopEvent:
     def wait(self, timeout=None):
         self.waited = True
         return True
+
+
+def _write_external_owner(home, *, updated_at, stale_after_seconds=960):
+    cron_dir = home / "cron"
+    cron_dir.mkdir(parents=True)
+    (cron_dir / "ticker_external.json").write_text(json.dumps({
+        "kind": "profile-launchd",
+        "updated_at": updated_at,
+        "stale_after_seconds": stale_after_seconds,
+    }))
+
+
+def test_external_and_gateway_tickers_have_exactly_one_freshness_owner(
+    tmp_path, monkeypatch
+):
+    fresh = tmp_path / "fresh"
+    stale = tmp_path / "stale"
+    absent = tmp_path / "absent"
+    _write_external_owner(fresh, updated_at=995.0)
+    _write_external_owner(stale, updated_at=1.0, stale_after_seconds=10)
+
+    for home, external_owns in ((fresh, True), (stale, False), (absent, False)):
+        external = gateway_run._external_cron_ticker_owns_profile(home, now=1000.0)
+        gateway = gateway_run._in_process_cron_ticker_owns_profile(home, now=1000.0)
+        assert external is external_owns
+        assert int(external) + int(gateway) == 1
+
+    monkeypatch.setattr(gateway_run.time, "time", lambda: 1000.0)
+    assert gateway_run._gateway_cron_profile_gate("fresh", fresh) is False
+    assert gateway_run._gateway_cron_profile_gate("stale", stale) is True
+    assert gateway_run._gateway_cron_profile_gate("absent", absent) is True
+
+
+def test_external_ticker_contract_fails_open_to_gateway_on_invalid_data(tmp_path):
+    home = tmp_path / "invalid"
+    _write_external_owner(home, updated_at="not-a-number")
+
+    assert gateway_run._external_cron_ticker_owns_profile(home, now=1000.0) is False
+    assert gateway_run._in_process_cron_ticker_owns_profile(home, now=1000.0) is True
+
+
+def test_single_profile_gateway_dispatch_falls_back_after_external_stale(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "profile"
+    runner = SimpleNamespace(_draining=False, _external_drain_active=False)
+    monkeypatch.setattr(gateway_run, "get_hermes_home", lambda: home)
+    _write_external_owner(home, updated_at=100.0, stale_after_seconds=10)
+
+    monkeypatch.setattr(gateway_run.time, "time", lambda: 105.0)
+    assert gateway_run._gateway_cron_can_dispatch(runner, multiplex=False) is False
+
+    monkeypatch.setattr(gateway_run.time, "time", lambda: 111.0)
+    assert gateway_run._gateway_cron_can_dispatch(runner, multiplex=False) is True
+    runner._draining = True
+    assert gateway_run._gateway_cron_can_dispatch(runner, multiplex=False) is False
 
 
 def test_gateway_housekeeping_drains_cron_delivery_with_live_adapters(monkeypatch):
