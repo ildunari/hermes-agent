@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 62
-  total_changed_lines: 4597
-  modified_upstream_lines: 955
+  paths: 63
+  total_changed_lines: 4643
+  modified_upstream_lines: 993
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -253,6 +253,10 @@ paths:
   - path: tests/gateway/test_session.py
     disposition: must-carry
     owner: gateway-session-commands plugin contract
+    evidence: *command
+  - path: tests/computer_use/test_cua_no_overlay.py
+    disposition: must-carry
+    owner: isolated overlay policy fixture with separate macOS identity tests
     evidence: *command
   - path: tests/gateway/test_keep_drain_freshness_glue.py
     disposition: must-carry
