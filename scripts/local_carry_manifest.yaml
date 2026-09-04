@@ -239,6 +239,10 @@ paths:
     disposition: ops-support
     owner: hermes-studio-ops support tests
     evidence: *restart
+  - path: tests/hermes_cli/test_plugins.py
+    disposition: upstream
+    owner: normal plugin context-engine activation contract
+    evidence: *context_engine
   - path: tests/hermes_cli/test_runtime_provider_resolution.py
     disposition: upstream
     owner: core provider resolution tests
@@ -247,9 +251,29 @@ paths:
     disposition: must-carry
     owner: model-picker test isolation
     evidence: *provider
-  - path: tests/plugins/context_engine/test_user_context_engine_discovery.py
+  - path: website/docs/developer-guide/context-compression-and-caching.md
     disposition: upstream
-    owner: removed standalone context-engine seam tests
+    owner: context-engine plugin documentation
+    evidence: *context_engine
+  - path: website/docs/developer-guide/context-engine-plugin.md
+    disposition: upstream
+    owner: context-engine plugin documentation
+    evidence: *context_engine
+  - path: website/docs/user-guide/features/plugins.md
+    disposition: upstream
+    owner: context-engine plugin documentation
+    evidence: *context_engine
+  - path: website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/developer-guide/context-compression-and-caching.md
+    disposition: upstream
+    owner: translated context-engine plugin documentation
+    evidence: *context_engine
+  - path: website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/developer-guide/context-engine-plugin.md
+    disposition: upstream
+    owner: translated context-engine plugin documentation
+    evidence: *context_engine
+  - path: website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/features/plugins.md
+    disposition: upstream
+    owner: translated context-engine plugin documentation
     evidence: *context_engine
   - path: tests/run_agent/test_plugin_context_engine_init.py
     disposition: upstream
