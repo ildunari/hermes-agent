@@ -383,6 +383,8 @@ class AuthenticatedDmRequest:
     reservation_key: str
     expected_participants: tuple[str, ...] = ()
     expected_route_fingerprint: str = ""
+    profile_name: str = ""
+    session_id: str = ""
 
     def __post_init__(self) -> None:
         for name in ("platform", "chat_id", "text", "reservation_key"):
@@ -398,6 +400,8 @@ class AuthenticatedDmProbeRequest:
     platform: str
     chat_id: str
     expected_participants: tuple[str, ...]
+    profile_name: str = ""
+    session_id: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.platform, str) or not self.platform.strip():

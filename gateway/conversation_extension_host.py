@@ -365,7 +365,12 @@ def _install_conversation_extension_host(self) -> None:
                 return candidate
         return None
 
-    def _is_authorized_existing_dm(platform_name: str, chat_id: str) -> bool:
+    def _is_authorized_existing_dm(
+        platform_name: str,
+        chat_id: str,
+        profile_name: str = "",
+        session_id: str = "",
+    ) -> bool:
         """True only for a DM that still exists in the authorized session set."""
         try:
             platform = Platform(platform_name)
@@ -378,11 +383,13 @@ def _install_conversation_extension_host(self) -> None:
                 entries = list(store._entries.values())  # noqa: SLF001
         except Exception:
             logger.debug("authenticated DM authorization scan failed", exc_info=True)
-            return False
+            entries = []
 
         for entry in entries:
             origin = getattr(entry, "origin", None)
             if origin is None:
+                continue
+            if session_id and str(getattr(entry, "session_id", "") or "") != session_id:
                 continue
             if getattr(origin, "platform", None) != platform:
                 continue
@@ -399,7 +406,54 @@ def _install_conversation_extension_host(self) -> None:
                     "authenticated DM authorization check failed", exc_info=True
                 )
                 return False
-        return False
+
+        # Older multiplex versions could persist a correctly profiled session
+        # row in the root state DB without publishing its route into the live
+        # routing index. Proactive contacts retain the exact session id. Accept
+        # that durable lineage only when every stored route field matches and
+        # current authorization still passes; never search by recipient alone.
+        if not profile_name or not session_id:
+            return False
+        db = _session_db_for_parent(session_id)
+        if db is None:
+            return False
+        try:
+            import json
+            from gateway.session import SessionSource
+
+            row = db.get_session(session_id)
+            if not isinstance(row, Mapping):
+                return False
+            if str(row.get("profile_name") or "") != profile_name:
+                return False
+            if str(row.get("chat_id") or "") != str(chat_id):
+                return False
+            if str(row.get("chat_type") or "") != "dm":
+                return False
+            raw_origin = row.get("origin_json")
+            origin_data = (
+                json.loads(raw_origin)
+                if isinstance(raw_origin, str)
+                else raw_origin
+            )
+            if not isinstance(origin_data, Mapping):
+                return False
+            origin = SessionSource.from_dict(dict(origin_data))
+            if origin.platform != platform or str(origin.chat_id) != str(chat_id):
+                return False
+            if origin.chat_type != "dm":
+                return False
+            if origin.profile and origin.profile != profile_name:
+                return False
+            return bool(
+                self._is_user_authorized(origin, allow_adapter_delegation=False)
+            )
+        except Exception:
+            logger.debug(
+                "authenticated DM durable-session authorization failed",
+                exc_info=True,
+            )
+            return False
 
     async def _probe_authenticated_existing_dm(request):
         from gateway.conversation_extensions import (
@@ -410,7 +464,12 @@ def _install_conversation_extension_host(self) -> None:
         if not isinstance(request, AuthenticatedDmProbeRequest):
             raise ValueError("malformed authenticated DM probe request")
         adapter = _resolve_authenticated_dm_transport(request.platform)
-        authorized = _is_authorized_existing_dm(request.platform, request.chat_id)
+        authorized = _is_authorized_existing_dm(
+            request.platform,
+            request.chat_id,
+            request.profile_name,
+            request.session_id,
+        )
         if adapter is None:
             return AuthenticatedDmProbeResult(False, authorized, False, "transport_unavailable")
         resolver = getattr(adapter, "resolve_authenticated_existing_dm", None)
@@ -462,6 +521,8 @@ def _install_conversation_extension_host(self) -> None:
                     platform=request.platform,
                     chat_id=request.chat_id,
                     expected_participants=tuple(request.expected_participants),
+                    profile_name=request.profile_name,
+                    session_id=request.session_id,
                 )
             )
             if not (
@@ -477,7 +538,14 @@ def _install_conversation_extension_host(self) -> None:
             return await send_authenticated_existing_dm_async(
                 request,
                 resolve_transport=_resolve_authenticated_dm_transport,
-                is_authorized_existing_dm=_is_authorized_existing_dm,
+                is_authorized_existing_dm=lambda platform_name, chat_id: (
+                    _is_authorized_existing_dm(
+                        platform_name,
+                        chat_id,
+                        request.profile_name,
+                        request.session_id,
+                    )
+                ),
             )
         except Exception:
             # An unclassifiable failure is UNKNOWN, never a definitive
