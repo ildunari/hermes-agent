@@ -2874,6 +2874,11 @@ def _load_gateway_config_for_profile(profile: str | None) -> dict:
     )
 
 
+def _load_gateway_config_from_home(home: "Path") -> dict:
+    """Load one profile's raw config directly from its resolved Hermes home."""
+    return _load_gateway_config(Path(home) / "config.yaml")
+
+
 def _checkpoint_agent_kwargs(config: dict | None) -> dict:
     """Translate gateway checkpoint config into ``AIAgent`` constructor args.
     Gateway bypasses ``load_config()``, so defaults are here; legacy ``checkpoints: true`` works."""

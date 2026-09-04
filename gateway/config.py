@@ -73,6 +73,55 @@ def _normalize_multiplex_profile_allowlist(value: Any) -> Optional[List[str]]:
     return normalized
 
 
+def _normalize_permitted_conversation_routes(value: Any) -> Dict[str, List[str]]:
+    """Normalize the fail-closed transport-profile to runtime-profile route map."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        logger.warning(
+            "Invalid gateway.permitted_conversation_routes (expected a mapping, got %s); "
+            "permitting no cross-profile conversation routes",
+            type(value).__name__,
+        )
+        return {}
+
+    permitted: Dict[str, List[str]] = {}
+    for source_profile, targets in value.items():
+        if not isinstance(source_profile, str) or not source_profile.strip():
+            logger.warning(
+                "Skipping gateway.permitted_conversation_routes entry with invalid "
+                "transport profile %r",
+                source_profile,
+            )
+            continue
+        if isinstance(targets, str):
+            targets = [targets]
+        if not isinstance(targets, (list, tuple)):
+            logger.warning(
+                "Skipping gateway.permitted_conversation_routes entry %r "
+                "(expected a list of runtime profiles, got %s)",
+                source_profile,
+                type(targets).__name__,
+            )
+            continue
+        cleaned: List[str] = []
+        for target in targets:
+            if not isinstance(target, str) or not target.strip():
+                logger.warning(
+                    "Skipping invalid gateway.permitted_conversation_routes target %r "
+                    "for transport profile %r",
+                    target,
+                    source_profile,
+                )
+                continue
+            name = target.strip()
+            if name not in cleaned:
+                cleaned.append(name)
+        if cleaned:
+            permitted[source_profile.strip()] = cleaned
+    return permitted
+
+
 def _env_multiplex_profiles_override() -> "bool | None":
     """GATEWAY_MULTIPLEX_PROFILES operator override: True/False for a recognized token.
 
@@ -564,6 +613,9 @@ class GatewayConfig:
     # session keys, per-profile adapters/credentials). Allowlist None = serve all; [] = default only.
     multiplex_profiles: bool = False
     multiplex_profile_allowlist: Optional[List[str]] = None
+    # Extensions may propose a runtime profile, but core admits it only through
+    # this explicit transport-profile allowlist. Empty means no cross-profile route.
+    permitted_conversation_routes: Dict[str, List[str]] = field(default_factory=dict)
     # Public HTTPS endpoint for scoped RoomLink calls (an API key alone must never advertise a
     # route); HERMES_ROOM_LINK_URL overrides.
     room_link_url: Optional[str] = None
@@ -593,13 +645,16 @@ class GatewayConfig:
         "write_sessions_json", "always_log_local", "filter_silence_narration", "stt_enabled",
         "stt_echo_transcripts", "group_sessions_per_user", "thread_sessions_per_user",
         "max_concurrent_sessions", "multiplex_profiles", "multiplex_profile_allowlist",
-        "room_link_url", "systemd_watchdog_seconds", "loop_watchdog",
+        "permitted_conversation_routes", "room_link_url", "systemd_watchdog_seconds", "loop_watchdog",
         "loop_watchdog_probe_interval_s", "loop_watchdog_probe_timeout_s",
         "loop_watchdog_max_strikes", "unauthorized_dm_behavior",
     )
 
     def __post_init__(self) -> None:
         self.multiplex_profile_allowlist = _normalize_multiplex_profile_allowlist(self.multiplex_profile_allowlist)
+        self.permitted_conversation_routes = _normalize_permitted_conversation_routes(
+            self.permitted_conversation_routes
+        )
         self.systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(self.systemd_watchdog_seconds)
 
     def get_connected_platforms(self) -> List[Platform]:
@@ -755,6 +810,7 @@ class GatewayConfig:
             stt_echo_transcripts=_coerce_bool(stt_setting("stt_echo_transcripts", "echo_transcripts"), True),
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
             multiplex_profile_allowlist=pick("multiplex_profile_allowlist"),
+            permitted_conversation_routes=pick("permitted_conversation_routes"),
             room_link_url=room_link_url if isinstance(room_link_url, str) else None,
             systemd_watchdog_seconds=systemd_watchdog_seconds,
             loop_watchdog=_coerce_bool(pick("loop_watchdog"), True),

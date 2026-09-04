@@ -77,3 +77,31 @@ async def test_observed_only_reconnect_fires_after_auth_and_never_runs_agent(
         assert await runner._handle_message(_event()) is None
 
     assert order == ["auth", "observe"]
+
+
+@pytest.mark.asyncio
+async def test_unready_required_extension_refuses_ingress_before_auth(
+    monkeypatch, tmp_path
+):
+    from gateway import conversation_extension_runtime as runtime
+
+    order = []
+    runner = _runner(tmp_path, order)
+    runner._extension_profile_is_ready = lambda _scope: False
+    runner._extension_profile_unready_reason = lambda _scope: "ownership_conflict"
+
+    def must_not_run(*_args, **_kwargs):
+        pytest.fail("unready profile must be rejected before extension admission")
+
+    monkeypatch.setattr(runtime, "profile_requirements_satisfied", must_not_run)
+    monkeypatch.setattr(runtime, "build_route_context", must_not_run)
+    monkeypatch.setattr(runtime, "admit_and_route", must_not_run)
+    monkeypatch.setattr(runtime, "observe_authenticated_ingress", must_not_run)
+
+    with (
+        patch("gateway.run._load_gateway_config_for_profile", side_effect=must_not_run),
+        patch("hermes_cli.lifecycle.invoke_hook", return_value=[]),
+    ):
+        assert await runner._handle_message(_event()) is None
+
+    assert order == []

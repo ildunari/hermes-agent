@@ -2055,7 +2055,12 @@ class GatewayTurnMixin:
         media_types: Optional[List[str]] = None,
     ) -> None:
         """Profile-scoping wrapper around the background agent task (mirrors ``_run_agent``)."""
-        with self._profile_scope_for_source(source):
+        if not getattr(getattr(self, "config", None), "multiplex_profiles", False):
+            return await self._run_background_task_inner(
+                prompt, source, task_id, event_message_id, media_urls, media_types,
+            )
+        from gateway.run import _async_profile_runtime_scope
+        async with _async_profile_runtime_scope(self._resolve_profile_home_for_source(source)):
             return await self._run_background_task_inner(
                 prompt, source, task_id, event_message_id, media_urls, media_types,
             )
@@ -2564,8 +2569,13 @@ class GatewayTurnMixin:
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around ``_run_agent_inner`` (same keyword parameters; pass-through
         when multiplexing is off)."""
-        with self._profile_scope_for_source(source):
+        if not getattr(getattr(self, "config", None), "multiplex_profiles", False):
             return await self._run_agent_inner(message, context_prompt, history, source, session_id, **turn_kwargs)
+        from gateway.run import _async_profile_runtime_scope
+        async with _async_profile_runtime_scope(self._resolve_profile_home_for_source(source)):
+            return await self._run_agent_inner(
+                message, context_prompt, history, source, session_id, **turn_kwargs
+            )
 
     def _run_agent_display_settings(self, source: SessionSource) -> "GatewayRunner._RunAgentDisplay":
         """Resolve per-platform display, progress, status and streaming-surface settings for a turn."""

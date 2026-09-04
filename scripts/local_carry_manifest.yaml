@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 56
-  total_changed_lines: 4388
-  modified_upstream_lines: 838
+  paths: 58
+  total_changed_lines: 4508
+  modified_upstream_lines: 922
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -126,6 +126,10 @@ paths:
     disposition: plugin
     owner: poke plugin
     evidence: *conversation
+  - path: gateway/config.py
+    disposition: must-carry
+    owner: core conversation extension route policy
+    evidence: *conversation
   - path: gateway/run.py
     disposition: must-carry
     owner: core gateway seams
@@ -145,6 +149,10 @@ paths:
   - path: gateway/run_startup.py
     disposition: must-carry
     owner: conversation extension activation and liveness freshness
+    evidence: *conversation
+  - path: gateway/run_turn.py
+    disposition: must-carry
+    owner: off-loop multiplex profile turn scoping
     evidence: *conversation
   - path: gateway/turn_context.py
     disposition: must-carry

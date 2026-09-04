@@ -158,43 +158,50 @@ class GatewayInboundMixin:
             transport_profile = str(getattr(source, "profile", None) or "default")
             transport_home = str(self._resolve_profile_home_for_source(source))
             extension_scope, requirements_profile = self._admission_scope_for_source(source, transport_home)
-            if self._extension_profile_is_ready(extension_scope):
-                from gateway.run import _load_gateway_config_for_profile
-                config_raw = _load_gateway_config_for_profile(
-                    requirements_profile or getattr(source, "profile", None)
+            if not self._extension_profile_is_ready(extension_scope):
+                logger.error(
+                    "Refusing inbound message: profile %s conversation extension "
+                    "startup is unready (%s)",
+                    transport_profile,
+                    self._extension_profile_unready_reason(extension_scope),
                 )
-                requirements_ok, reason = extension_runtime.profile_requirements_satisfied(
-                    scope=extension_scope, config_raw=config_raw
+                return None
+            from gateway.run import _load_gateway_config_for_profile
+            config_raw = _load_gateway_config_for_profile(
+                requirements_profile or getattr(source, "profile", None)
+            )
+            requirements_ok, reason = extension_runtime.profile_requirements_satisfied(
+                scope=extension_scope, config_raw=config_raw
+            )
+            if not requirements_ok:
+                logger.error(
+                    "Refusing inbound message: profile %s requires a conversation "
+                    "extension that is not available (%s)", transport_profile, reason,
                 )
-                if not requirements_ok:
-                    logger.error(
-                        "Refusing inbound message: profile %s requires a conversation "
-                        "extension that is not available (%s)", transport_profile, reason,
+                return None
+            extension_context = extension_runtime.build_route_context(
+                event, transport_profile=transport_profile, transport_home=transport_home
+            )
+            if extension_context is not None:
+                decision = extension_runtime.admit_and_route(
+                    extension_context,
+                    scope=extension_scope,
+                    served_profiles=tuple(self._served_profile_names()),
+                    permitted_routes=self._permitted_extension_routes(),
+                )
+                if decision is not None and not decision.admitted:
+                    logger.warning(
+                        "Conversation extension denied inbound message (%s)",
+                        decision.reason or "denied",
                     )
                     return None
-                extension_context = extension_runtime.build_route_context(
-                    event, transport_profile=transport_profile, transport_home=transport_home
-                )
-                if extension_context is not None:
-                    decision = extension_runtime.admit_and_route(
-                        extension_context,
-                        scope=extension_scope,
-                        served_profiles=tuple(self._served_profile_names()),
-                        permitted_routes=self._permitted_extension_routes(),
-                    )
-                    if decision is not None and not decision.admitted:
-                        logger.warning(
-                            "Conversation extension denied inbound message (%s)",
-                            decision.reason or "denied",
-                        )
-                        return None
-                    if decision is not None:
-                        source, event = self._apply_extension_route_decision_safe(source, event, decision)
-                        event.metadata["_conversation_extension_route"] = {
-                            "scope": extension_scope,
-                            "context": extension_context,
-                            "decision": decision,
-                        }
+                if decision is not None:
+                    source, event = self._apply_extension_route_decision_safe(source, event, decision)
+                    event.metadata["_conversation_extension_route"] = {
+                        "scope": extension_scope,
+                        "context": extension_context,
+                        "decision": decision,
+                    }
         except Exception:
             logger.debug("inbound conversation-extension admission failed", exc_info=True)
 
