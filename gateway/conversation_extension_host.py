@@ -350,7 +350,9 @@ def _install_conversation_extension_host(self) -> None:
             logger.warning("extension turn injection failed", exc_info=True)
             return False
 
-    def _resolve_authenticated_dm_transport(platform_name: str):
+    def _resolve_authenticated_dm_transport(
+        platform_name: str, profile_name: str = ""
+    ):
         """Resolve the live adapter for exactly this platform. No fallback."""
         try:
             platform = Platform(platform_name)
@@ -359,11 +361,10 @@ def _install_conversation_extension_host(self) -> None:
         adapter = (getattr(self, "adapters", None) or {}).get(platform)
         if adapter is not None:
             return adapter
-        for profile_map in (getattr(self, "_profile_adapters", None) or {}).values():
-            candidate = (profile_map or {}).get(platform)
-            if candidate is not None:
-                return candidate
-        return None
+        profile_map = (getattr(self, "_profile_adapters", None) or {}).get(
+            str(profile_name or "")
+        )
+        return (profile_map or {}).get(platform)
 
     def _is_authorized_existing_dm(
         platform_name: str,
@@ -478,7 +479,9 @@ def _install_conversation_extension_host(self) -> None:
 
         if not isinstance(request, AuthenticatedDmProbeRequest):
             raise ValueError("malformed authenticated DM probe request")
-        adapter = _resolve_authenticated_dm_transport(request.platform)
+        adapter = _resolve_authenticated_dm_transport(
+            request.platform, request.profile_name
+        )
         authorized = _is_authorized_existing_dm(
             request.platform,
             request.chat_id,
@@ -552,7 +555,11 @@ def _install_conversation_extension_host(self) -> None:
                 )
             return await send_authenticated_existing_dm_async(
                 request,
-                resolve_transport=_resolve_authenticated_dm_transport,
+                resolve_transport=lambda platform_name: (
+                    _resolve_authenticated_dm_transport(
+                        platform_name, request.profile_name
+                    )
+                ),
                 is_authorized_existing_dm=lambda platform_name, chat_id: (
                     _is_authorized_existing_dm(
                         platform_name,
