@@ -658,6 +658,11 @@ class GatewayRuntimeFacade:
         self._require("send_authenticated_existing_dm")
         if not isinstance(request, AuthenticatedDmRequest):
             raise ValueError("request must be an AuthenticatedDmRequest")
+        if request.profile_name != self._profile_name:
+            return AuthenticatedDmResult(
+                DmSendOutcome.DEFINITIVE_FAILURE,
+                detail="facade_profile_mismatch",
+            )
         send = self._operation("send_authenticated_existing_dm")
         if send is None:
             return AuthenticatedDmResult(
@@ -672,6 +677,10 @@ class GatewayRuntimeFacade:
         self._require("probe_authenticated_existing_dm")
         if not isinstance(request, AuthenticatedDmProbeRequest):
             raise ValueError("request must be an AuthenticatedDmProbeRequest")
+        if request.profile_name != self._profile_name:
+            return AuthenticatedDmProbeResult(
+                False, False, False, "facade_profile_mismatch"
+            )
         probe = self._operation("probe_authenticated_existing_dm")
         if probe is None:
             return AuthenticatedDmProbeResult(False, False, False, "capability_unavailable")
