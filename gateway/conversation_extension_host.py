@@ -83,6 +83,7 @@ def install_early_lifecycle_scheduling() -> None:
             create_initiated_child=existing.create_initiated_child,
             inject_turn=existing.inject_turn,
             send_authenticated_existing_dm=existing.send_authenticated_existing_dm,
+            probe_authenticated_existing_dm=existing.probe_authenticated_existing_dm,
             call_auxiliary_model=existing.call_auxiliary_model,
             web_search=existing.web_search,
             list_cron_jobs=existing.list_cron_jobs,
@@ -324,7 +325,93 @@ def _install_conversation_extension_host(self) -> None:
             logger.warning("extension turn injection failed", exc_info=True)
             return False
 
-    def _send_authenticated_existing_dm(request):
+    def _resolve_authenticated_dm_transport(platform_name: str):
+        """Resolve the live adapter for exactly this platform. No fallback."""
+        try:
+            platform = Platform(platform_name)
+        except Exception:
+            return None
+        adapter = (getattr(self, "adapters", None) or {}).get(platform)
+        if adapter is not None:
+            return adapter
+        for profile_map in (getattr(self, "_profile_adapters", None) or {}).values():
+            candidate = (profile_map or {}).get(platform)
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _is_authorized_existing_dm(platform_name: str, chat_id: str) -> bool:
+        """True only for a DM that still exists in the authorized session set."""
+        try:
+            platform = Platform(platform_name)
+        except Exception:
+            return False
+        try:
+            store = self.session_store
+            with store._lock:  # noqa: SLF001 — read-only scan
+                store._ensure_loaded_locked()  # noqa: SLF001
+                entries = list(store._entries.values())  # noqa: SLF001
+        except Exception:
+            logger.debug("authenticated DM authorization scan failed", exc_info=True)
+            return False
+
+        for entry in entries:
+            origin = getattr(entry, "origin", None)
+            if origin is None:
+                continue
+            if getattr(origin, "platform", None) != platform:
+                continue
+            if str(getattr(origin, "chat_id", "") or "") != str(chat_id):
+                continue
+            if str(getattr(origin, "chat_type", "") or "") != "dm":
+                continue
+            try:
+                return bool(
+                    self._is_user_authorized(origin, allow_adapter_delegation=False)
+                )
+            except Exception:
+                logger.debug(
+                    "authenticated DM authorization check failed", exc_info=True
+                )
+                return False
+        return False
+
+    async def _probe_authenticated_existing_dm(request):
+        from gateway.conversation_extensions import (
+            AuthenticatedDmProbeRequest,
+            AuthenticatedDmProbeResult,
+        )
+
+        if not isinstance(request, AuthenticatedDmProbeRequest):
+            raise ValueError("malformed authenticated DM probe request")
+        adapter = _resolve_authenticated_dm_transport(request.platform)
+        authorized = _is_authorized_existing_dm(request.platform, request.chat_id)
+        if adapter is None:
+            return AuthenticatedDmProbeResult(False, authorized, False, "transport_unavailable")
+        resolver = getattr(adapter, "resolve_authenticated_existing_dm", None)
+        if not callable(resolver):
+            return AuthenticatedDmProbeResult(True, authorized, False, "participant_probe_unavailable")
+        try:
+            matched = resolver(request.chat_id, frozenset(request.expected_participants))
+            if asyncio.iscoroutine(matched):
+                matched = await matched
+        except Exception:
+            logger.debug("authenticated DM participant probe failed", exc_info=True)
+            return AuthenticatedDmProbeResult(True, authorized, False, "participant_probe_failed")
+        fingerprint = (
+            str(matched[1]).strip()
+            if isinstance(matched, (tuple, list)) and len(matched) >= 2 and matched[1]
+            else None
+        )
+        return AuthenticatedDmProbeResult(
+            True,
+            authorized,
+            bool(matched and fingerprint),
+            "ready" if authorized and matched else "participant_or_session_mismatch",
+            fingerprint,
+        )
+
+    async def _send_authenticated_existing_dm(request):
         """Send to an existing, already-authorized DM. Never creates, never falls back.
 
         The extension supplies only ``(platform, chat_id, text,
@@ -332,94 +419,40 @@ def _install_conversation_extension_host(self) -> None:
         credential: core resolves the transport itself and verifies the
         target is an existing authorized DM before sending.
         """
-        from gateway.authenticated_dm import (
-            send_authenticated_existing_dm as _send_impl,
-        )
+        from gateway.authenticated_dm import send_authenticated_existing_dm_async
         from gateway.conversation_extensions import (
             AuthenticatedDmResult,
             DmSendOutcome,
+            AuthenticatedDmProbeRequest,
         )
 
-        def _resolve_transport(platform_name: str):
-            """Resolve the live adapter for exactly this platform. No fallback."""
-            try:
-                platform = Platform(platform_name)
-            except Exception:
-                return None
-            adapter = (getattr(self, "adapters", None) or {}).get(platform)
-            if adapter is not None:
-                return adapter
-            # Secondary-profile adapters are equally valid transports, but
-            # we still only ever return an adapter for the SAME platform.
-            for profile_map in (
-                getattr(self, "_profile_adapters", None) or {}
-            ).values():
-                candidate = (profile_map or {}).get(platform)
-                if candidate is not None:
-                    return candidate
-            return None
-
-        def _is_authorized_existing_dm(platform_name: str, chat_id: str) -> bool:
-            """True only for a DM that already exists and is already authorized.
-
-            Requires a persisted session whose origin is a DM on this exact
-            platform/chat, and re-runs the live authorization check against
-            that stored origin. A chat we have never served, or one whose
-            authorization has since been revoked, is refused.
-            """
-            try:
-                platform = Platform(platform_name)
-            except Exception:
-                return False
-            try:
-                store = self.session_store
-                with store._lock:  # noqa: SLF001 — read-only scan
-                    store._ensure_loaded_locked()  # noqa: SLF001
-                    entries = list(store._entries.values())  # noqa: SLF001
-            except Exception:
-                logger.debug(
-                    "authenticated DM authorization scan failed", exc_info=True
-                )
-                return False
-
-            for entry in entries:
-                origin = getattr(entry, "origin", None)
-                if origin is None:
-                    continue
-                if getattr(origin, "platform", None) != platform:
-                    continue
-                if str(getattr(origin, "chat_id", "") or "") != str(chat_id):
-                    continue
-                if str(getattr(origin, "chat_type", "") or "") != "dm":
-                    continue
-                try:
-                    return bool(
-                        self._is_user_authorized(
-                            origin, allow_adapter_delegation=False
-                        )
-                    )
-                except Exception:
-                    logger.debug(
-                        "authenticated DM authorization check failed",
-                        exc_info=True,
-                    )
-                    return False
-            return False
-
-        def _run_coroutine(coro):
-            loop = getattr(self, "_gateway_loop", None)
-            if loop is None or loop.is_closed():
-                coro.close()
-                return None
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-            return future.result(timeout=30)
-
         try:
-            return _send_impl(
+            if not request.expected_participants or not request.expected_route_fingerprint:
+                return AuthenticatedDmResult(
+                    DmSendOutcome.DEFINITIVE_FAILURE,
+                    detail="participant_proof_required",
+                )
+            probe = await _probe_authenticated_existing_dm(
+                AuthenticatedDmProbeRequest(
+                    platform=request.platform,
+                    chat_id=request.chat_id,
+                    expected_participants=tuple(request.expected_participants),
+                )
+            )
+            if not (
+                probe.adapter_ready
+                and probe.authorized_existing_dm
+                and probe.participant_match
+                and probe.route_fingerprint == request.expected_route_fingerprint
+            ):
+                return AuthenticatedDmResult(
+                    DmSendOutcome.DEFINITIVE_FAILURE,
+                    detail="participant_or_route_mismatch",
+                )
+            return await send_authenticated_existing_dm_async(
                 request,
-                resolve_transport=_resolve_transport,
+                resolve_transport=_resolve_authenticated_dm_transport,
                 is_authorized_existing_dm=_is_authorized_existing_dm,
-                run_coroutine=_run_coroutine,
             )
         except Exception:
             # An unclassifiable failure is UNKNOWN, never a definitive
@@ -483,6 +516,7 @@ def _install_conversation_extension_host(self) -> None:
             create_initiated_child=_create_initiated_child,
             inject_turn=_inject_turn,
             send_authenticated_existing_dm=_send_authenticated_existing_dm,
+            probe_authenticated_existing_dm=_probe_authenticated_existing_dm,
             call_auxiliary_model=_call_auxiliary_model,
             web_search=_web_search,
             list_cron_jobs=_list_cron_jobs,

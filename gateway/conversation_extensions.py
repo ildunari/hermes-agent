@@ -71,6 +71,7 @@ _FACADE_CAPABILITY_REQUIREMENTS = {
     "load_initiated_turn_context": "initiated_turns",
     "create_initiated_child": "initiated_turns",
     "inject_turn": "turn_injection",
+    "probe_authenticated_existing_dm": "authenticated_dm",
     "send_authenticated_existing_dm": "authenticated_dm",
     "call_auxiliary_model": "auxiliary_model",
     "web_search": "web_research",
@@ -380,12 +381,45 @@ class AuthenticatedDmRequest:
     chat_id: str
     text: str
     reservation_key: str
+    expected_participants: tuple[str, ...] = ()
+    expected_route_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         for name in ("platform", "chat_id", "text", "reservation_key"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} is required")
+
+
+@dataclass(frozen=True)
+class AuthenticatedDmProbeRequest:
+    """Read-only proof that one configured participant still owns a live DM."""
+
+    platform: str
+    chat_id: str
+    expected_participants: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.platform, str) or not self.platform.strip():
+            raise ValueError("platform is required")
+        if not isinstance(self.chat_id, str) or not self.chat_id.strip():
+            raise ValueError("chat_id is required")
+        if not self.expected_participants or any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.expected_participants
+        ):
+            raise ValueError("expected_participants is required")
+
+
+@dataclass(frozen=True)
+class AuthenticatedDmProbeResult:
+    """Bounded readiness result; no adapter, GUID, or credential escapes core."""
+
+    adapter_ready: bool
+    authorized_existing_dm: bool
+    participant_match: bool
+    detail: str = ""
+    route_fingerprint: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -415,7 +449,10 @@ class GatewayHostOperations:
     create_initiated_child: Optional[Callable[[InitiatedTurnRequest], Mapping[str, Any]]] = None
     inject_turn: Optional[Callable[[str, str], bool]] = None
     send_authenticated_existing_dm: Optional[
-        Callable[[AuthenticatedDmRequest], AuthenticatedDmResult]
+        Callable[[AuthenticatedDmRequest], Any]
+    ] = None
+    probe_authenticated_existing_dm: Optional[
+        Callable[[AuthenticatedDmProbeRequest], Any]
     ] = None
     call_auxiliary_model: Optional[Callable[[AuxiliaryModelRequest], str]] = None
     web_search: Optional[Callable[[WebSearchRequest], Any]] = None
@@ -597,7 +634,7 @@ class GatewayRuntimeFacade:
 
     def send_authenticated_existing_dm(
         self, request: AuthenticatedDmRequest
-    ) -> AuthenticatedDmResult:
+    ) -> Any:
         """Send to an existing authenticated DM; never creates or falls back."""
         self._require("send_authenticated_existing_dm")
         if not isinstance(request, AuthenticatedDmRequest):
@@ -607,6 +644,18 @@ class GatewayRuntimeFacade:
                 DmSendOutcome.DEFINITIVE_FAILURE, detail="capability_unavailable"
             )
         return self._host.send_authenticated_existing_dm(request)
+
+    def probe_authenticated_existing_dm(
+        self, request: AuthenticatedDmProbeRequest
+    ) -> Any:
+        """Read-only adapter, session-auth, and participant-identity proof."""
+        self._require("probe_authenticated_existing_dm")
+        if not isinstance(request, AuthenticatedDmProbeRequest):
+            raise ValueError("request must be an AuthenticatedDmProbeRequest")
+        probe = self._host.probe_authenticated_existing_dm
+        if probe is None:
+            return AuthenticatedDmProbeResult(False, False, False, "capability_unavailable")
+        return probe(request)
 
     def run_blocking(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Run *func* on the host's worker pool, off the event loop.
@@ -1519,6 +1568,8 @@ def authorize_tool_dispatch(
 __all__ = [
     "ALL_CAPABILITIES",
     "AuthenticatedDmRequest",
+    "AuthenticatedDmProbeRequest",
+    "AuthenticatedDmProbeResult",
     "AuthenticatedDmResult",
     "AuxiliaryModelRequest",
     "CAPABILITY_FIELDS",
