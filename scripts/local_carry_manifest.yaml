@@ -17,6 +17,7 @@ required_support:
   - support/hermes-update-ops/verify_deployed_turn.py
   - support/hermes-studio-ops/src/hermes_studio_ops/restart_surfaces.py
   - support/hermes-studio-ops/src/hermes_studio_ops/profile_cron_tick.py
+  - support/hermes-studio-ops/src/hermes_studio_ops/setup_profile_cron.py
   - support/hermes-runtime-support/src/hermes_runtime_support/alias_billing_guard.py
   - support/hermes-runtime-support/src/hermes_runtime_support/authenticated_dm.py
   - support/hermes-runtime-support/src/hermes_runtime_support/cli_command_context.py
