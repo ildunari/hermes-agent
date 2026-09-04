@@ -2,8 +2,8 @@ version: 1
 base_ref: origin/main
 limits:
   paths: 53
-  total_changed_lines: 6540
-  modified_upstream_lines: 1740
+  total_changed_lines: 6557
+  modified_upstream_lines: 1752
 
 required_support:
   - support/hermes-update-ops/README.md
