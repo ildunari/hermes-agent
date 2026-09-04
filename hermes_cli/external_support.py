@@ -68,7 +68,10 @@ def load_support_module(import_name: str, relative_source: str) -> ModuleType:
             try:
                 module = _load_source(import_name, candidate)
             except Exception as exc:
-                failures.append(f"{candidate}: {exc}")
+                raise RuntimeError(
+                    f"Hermes support module {import_name!r} exists at the "
+                    f"authoritative root source path {candidate} but failed to load: {exc}"
+                ) from exc
             else:
                 _MODULES[import_name] = module
                 return module

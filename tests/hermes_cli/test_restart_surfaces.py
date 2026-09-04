@@ -7,6 +7,8 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from hermes_cli import external_support, restart_surfaces
 
 
@@ -93,3 +95,26 @@ def test_external_support_prefers_root_source_package_over_installed(tmp_path, m
 
     assert loaded.value == 42
     assert loaded.__file__ == str(package / "main.py")
+
+
+def test_external_support_does_not_mask_broken_root_source_with_installed_copy(
+    tmp_path, monkeypatch
+):
+    root_home = tmp_path / "root" / ".hermes"
+    relative = "support/example/src/example_support/main.py"
+    package = root_home / "plugins" / "support/example/src/example_support"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text(
+        "raise RuntimeError('broken authoritative source')\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(external_support.Path, "home", lambda: tmp_path / "root")
+    monkeypatch.setattr(external_support, "_MODULES", {})
+    monkeypatch.setattr(
+        external_support.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(value="stale-installed-shadow"),
+    )
+
+    with pytest.raises(RuntimeError, match="authoritative root source path"):
+        external_support.load_support_module("example_support.main", relative)
