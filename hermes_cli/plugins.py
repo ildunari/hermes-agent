@@ -7257,3 +7257,18 @@ def get_plugin_toolsets() -> List[tuple]:
         result.append((ts_key, label, desc))
 
     return result
+
+
+def get_loaded_plugin_module(plugin_id: str) -> Any | None:
+    """Return one enabled plugin's isolated module by key or manifest name.
+
+    Directory plugins are intentionally imported under ``hermes_plugins.*``;
+    callers must not assume their source directory is a top-level package.
+    """
+    manager = get_plugin_manager()
+    for key, loaded in manager._plugins.items():
+        if not loaded.enabled:
+            continue
+        if key == plugin_id or loaded.manifest.name == plugin_id:
+            return loaded.module
+    return None

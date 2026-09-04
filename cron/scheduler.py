@@ -3353,9 +3353,17 @@ def _deliver_result(
             # the small generic dispatch seam needed to honor a persisted cron
             # delivery profile. Import lazily so installations without Poke are
             # unchanged unless a job explicitly requests this feature.
-            from poke.operations.cron_delivery_profile import (
-                validate_delegated_delivery,
+            from hermes_cli.plugins import discover_plugins, get_loaded_plugin_module
+
+            discover_plugins()
+            policy_plugin = get_loaded_plugin_module("poke")
+            validate_delegated_delivery = getattr(
+                policy_plugin, "validate_delegated_delivery", None
             )
+            if not callable(validate_delegated_delivery):
+                raise RuntimeError(
+                    "delivery_profile requires the enabled Poke delivery policy plugin"
+                )
 
             source_home = _get_hermes_home().resolve()
             if not targets:
