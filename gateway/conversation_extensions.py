@@ -68,16 +68,26 @@ KNOWN_CAPABILITIES = frozenset(CAPABILITY_FIELDS)
 # Capabilities the facade requires before exposing each bounded host action.
 _FACADE_CAPABILITY_REQUIREMENTS = {
     "spawn_lifecycle_task": "lifecycle",
+    "load_initiated_turn_context": "initiated_turns",
     "create_initiated_child": "initiated_turns",
     "inject_turn": "turn_injection",
     "send_authenticated_existing_dm": "authenticated_dm",
+    "call_auxiliary_model": "auxiliary_model",
+    "web_search": "web_research",
+    "list_cron_jobs": "health",
 }
 
 # Capabilities that are host-granted rather than callback-backed. A plugin
 # declares them to request a bounded host action; there is no matching
 # bundle field because the host owns the implementation.
 _HOST_GRANTED_CAPABILITIES = frozenset(
-    {"initiated_turns", "turn_injection", "authenticated_dm"}
+    {
+        "initiated_turns",
+        "turn_injection",
+        "authenticated_dm",
+        "auxiliary_model",
+        "web_research",
+    }
 )
 
 ALL_CAPABILITIES = KNOWN_CAPABILITIES | _HOST_GRANTED_CAPABILITIES
@@ -317,6 +327,36 @@ class InitiatedTurnRequest:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class InitiatedTurnContext:
+    """Immutable parent context for extension-owned initiated composition."""
+
+    parent_session_id: str
+    session_key: str
+    system_prompt: str
+    history: tuple[Mapping[str, str], ...]
+
+
+@dataclass(frozen=True)
+class AuxiliaryModelRequest:
+    """Strict no-fallback auxiliary inference requested by an extension."""
+
+    task: str
+    provider: str
+    model: str
+    messages: tuple[Mapping[str, str], ...]
+    reasoning_effort: str
+    max_tokens: int = 500
+
+
+@dataclass(frozen=True)
+class WebSearchRequest:
+    """Bounded ordinary web search requested by an extension."""
+
+    query: str
+    limit: int = 5
+
+
 class DmSendOutcome(str, Enum):
     """Tri-state result of an authenticated existing-DM send."""
 
@@ -369,10 +409,18 @@ class GatewayHostOperations:
     spawn_task: Optional[Callable[[GatewayBackgroundTask], Any]] = None
     cancel_tasks: Optional[Callable[[str, str, int], Any]] = None
     lookup_session: Optional[Callable[[str], Optional[Mapping[str, Any]]]] = None
+    load_initiated_turn_context: Optional[
+        Callable[[str, str, str], Optional[InitiatedTurnContext]]
+    ] = None
     create_initiated_child: Optional[Callable[[InitiatedTurnRequest], Mapping[str, Any]]] = None
     inject_turn: Optional[Callable[[str, str], bool]] = None
     send_authenticated_existing_dm: Optional[
         Callable[[AuthenticatedDmRequest], AuthenticatedDmResult]
+    ] = None
+    call_auxiliary_model: Optional[Callable[[AuxiliaryModelRequest], str]] = None
+    web_search: Optional[Callable[[WebSearchRequest], Any]] = None
+    list_cron_jobs: Optional[
+        Callable[[str, bool], tuple[Mapping[str, Any], ...]]
     ] = None
     #: Run a blocking callable off the gateway event loop. An owner of a
     #: durable domain necessarily performs SQLite work, and doing it inline
@@ -497,6 +545,49 @@ class GatewayRuntimeFacade:
         if self._host.create_initiated_child is None:
             raise CapabilityDenied("host does not provide initiated child creation")
         return self._host.create_initiated_child(request)
+
+    def load_initiated_turn_context(
+        self, parent_session_id: str
+    ) -> Optional[InitiatedTurnContext]:
+        """Return a copied parent transcript for initiated-turn composition."""
+        self._require("load_initiated_turn_context")
+        if not isinstance(parent_session_id, str) or not parent_session_id.strip():
+            raise ValueError("parent_session_id is required")
+        loader = self._host.load_initiated_turn_context
+        if loader is None:
+            raise CapabilityDenied(
+                "host does not provide initiated-turn context loading"
+            )
+        context = loader(self._profile_home, self._profile_name, parent_session_id)
+        return context if isinstance(context, InitiatedTurnContext) else None
+
+    def call_auxiliary_model(self, request: AuxiliaryModelRequest) -> str:
+        """Run one strict host-routed auxiliary request with no fallback."""
+        self._require("call_auxiliary_model")
+        if not isinstance(request, AuxiliaryModelRequest):
+            raise ValueError("request must be an AuxiliaryModelRequest")
+        caller = self._host.call_auxiliary_model
+        if caller is None:
+            raise CapabilityDenied("host does not provide auxiliary model calls")
+        return str(caller(request) or "")
+
+    def web_search(self, request: WebSearchRequest) -> Any:
+        """Run one bounded host-owned ordinary web search."""
+        self._require("web_search")
+        if not isinstance(request, WebSearchRequest):
+            raise ValueError("request must be a WebSearchRequest")
+        search = self._host.web_search
+        if search is None:
+            raise CapabilityDenied("host does not provide web research")
+        return search(request)
+
+    def list_cron_jobs(self, *, include_disabled: bool) -> tuple:
+        """Return copied cron metadata for health inspection only."""
+        self._require("list_cron_jobs")
+        reader = self._host.list_cron_jobs
+        if reader is None:
+            raise CapabilityDenied("host does not provide cron inspection")
+        return tuple(reader(self._profile_home, bool(include_disabled)) or ())
 
     def inject_turn(self, *, session_key: str, text: str) -> bool:
         self._require("inject_turn")
@@ -1429,6 +1520,7 @@ __all__ = [
     "ALL_CAPABILITIES",
     "AuthenticatedDmRequest",
     "AuthenticatedDmResult",
+    "AuxiliaryModelRequest",
     "CAPABILITY_FIELDS",
     "CapabilityDenied",
     "ConversationExtensionRegistry",
@@ -1451,6 +1543,8 @@ __all__ = [
     "GatewayTurnContext",
     "GatewayTurnResult",
     "InitiatedTurnRequest",
+    "InitiatedTurnContext",
+    "WebSearchRequest",
     "KNOWN_CAPABILITIES",
     "LifecycleTaskRegistry",
     "RequiredExtension",

@@ -2710,6 +2710,35 @@ def load_gateway_config_for_runner() -> "GatewayConfig":
         return cfg
 
 
+async def load_gateway_config_for_runner_async() -> "GatewayConfig":
+    """Load gateway config while keeping only secret hydration off-loop.
+
+    ``load_gateway_config()`` may discover plugins as part of platform config
+    resolution.  Conversation extensions registered by that discovery must run
+    on the gateway event-loop thread so their lifecycle tasks can be scheduled.
+    Moving the whole config loader into ``asyncio.to_thread`` therefore drops
+    extension startup.  Hydrate the one blocking secret-source step in a
+    worker, then perform the scoped config reload on the owning loop.
+    """
+    cfg = load_gateway_config()
+    if not getattr(cfg, "multiplex_profiles", False):
+        return cfg
+    try:
+        home = get_hermes_home()
+    except Exception:
+        return cfg
+    try:
+        secrets = await asyncio.to_thread(_load_profile_secret_scope, Path(home))
+        with _profile_runtime_scope(Path(home), secrets):
+            return load_gateway_config()
+    except Exception:
+        logger.debug(
+            "multiplex default-scope config reload failed; using unscoped load",
+            exc_info=True,
+        )
+        return cfg
+
+
 async def _discover_gateway_mcp_tools(config: object) -> None:
     """Run startup MCP discovery for every profile this gateway serves.
 
@@ -34259,12 +34288,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         )
 
     # The default multiplex config load may hydrate profile secret sources
-    # (1Password, vaults, and similar blocking providers). start_gateway()
-    # already owns the event loop, so resolve that default in a worker before
-    # constructing the runner. Explicit config injection stays unchanged.
+    # (1Password, vaults, and similar blocking providers). Keep that blocking
+    # step in a worker, but leave config/plugin discovery on the gateway loop so
+    # conversation extensions can schedule their lifecycle tasks there.
+    # Explicit config injection stays unchanged.
     resolved_config = config
     if resolved_config is None:
-        resolved_config = await asyncio.to_thread(load_gateway_config_for_runner)
+        resolved_config = await load_gateway_config_for_runner_async()
     runner = GatewayRunner(resolved_config)
     # Multiplex: swap the launch-home file handlers for per-profile routers so
     # each profile's records land in its own logs/ (#82936). Must run after

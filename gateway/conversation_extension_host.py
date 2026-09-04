@@ -70,9 +70,13 @@ def install_early_lifecycle_scheduling() -> None:
             spawn_task=_spawn,
             cancel_tasks=lifecycle_task_registry.cancel,
             lookup_session=existing.lookup_session,
+            load_initiated_turn_context=existing.load_initiated_turn_context,
             create_initiated_child=existing.create_initiated_child,
             inject_turn=existing.inject_turn,
             send_authenticated_existing_dm=existing.send_authenticated_existing_dm,
+            call_auxiliary_model=existing.call_auxiliary_model,
+            web_search=existing.web_search,
+            list_cron_jobs=existing.list_cron_jobs,
             run_blocking=existing.run_blocking or asyncio.to_thread,
         )
     )
@@ -151,6 +155,85 @@ def _install_conversation_extension_host(self) -> None:
             logger.debug("extension session lookup failed", exc_info=True)
             return None
 
+    def _session_db_for_parent(parent_session_id: str):
+        """Resolve the sync DB that actually owns a multiplexed parent."""
+        candidates = []
+        try:
+            current = getattr(self, "_session_db", None)
+            candidates.append(getattr(current, "_db", current))
+        except Exception:
+            pass
+        handles = getattr(self, "_session_db_handles", None)
+        lock = getattr(self, "_session_db_handles_lock", None)
+        try:
+            if lock is not None:
+                with lock:
+                    candidates.extend(
+                        getattr(value, "_db", value)
+                        for value in (handles or {}).values()
+                    )
+            else:
+                candidates.extend(
+                    getattr(value, "_db", value)
+                    for value in (handles or {}).values()
+                )
+        except Exception:
+            logger.debug("could not snapshot session DB handles", exc_info=True)
+        seen = set()
+        for db in candidates:
+            if db is None or id(db) in seen:
+                continue
+            seen.add(id(db))
+            try:
+                if db.get_session(parent_session_id) is not None:
+                    return db
+            except Exception:
+                continue
+        return None
+
+    def _load_initiated_turn_context(
+        profile_home: str, profile_name: str, parent_session_id: str
+    ):
+        """Copy the minimum parent state needed for plugin-owned composition."""
+        from gateway.conversation_extensions import InitiatedTurnContext
+
+        db = _session_db_for_parent(parent_session_id)
+        if db is None:
+            return None
+        try:
+            parent = db.get_session(parent_session_id)
+            messages = db.get_messages(parent_session_id)
+        except Exception:
+            logger.debug("initiated-turn context read failed", exc_info=True)
+            return None
+        if not isinstance(parent, Mapping):
+            return None
+        parent_profile = str(parent.get("profile_name") or parent.get("profile") or "")
+        if parent_profile and parent_profile != str(profile_name):
+            logger.warning(
+                "refusing cross-profile initiated context read for %s",
+                profile_name,
+            )
+            return None
+        session_key = str(parent.get("session_key") or "").strip()
+        if not session_key:
+            return None
+        history = []
+        for message in messages or ():
+            if not isinstance(message, Mapping):
+                continue
+            role = str(message.get("role") or "")
+            content = message.get("content")
+            if role not in {"user", "assistant", "tool"} or not isinstance(content, str):
+                continue
+            history.append({"role": role, "content": content})
+        return InitiatedTurnContext(
+            parent_session_id=parent_session_id,
+            session_key=session_key,
+            system_prompt=str(parent.get("system_prompt") or ""),
+            history=tuple(history),
+        )
+
     def _create_initiated_child(request) -> Dict[str, Any]:
         """Create a bounded agent-initiated child turn for an existing session.
 
@@ -183,7 +266,7 @@ def _install_conversation_extension_host(self) -> None:
         if not parent_session_id:
             return {"created": False, "reason": "unknown_session"}
 
-        session_db = getattr(self, "_session_db", None)
+        session_db = _session_db_for_parent(str(parent_session_id))
         if session_db is None:
             return {"created": False, "reason": "session_db_unavailable"}
 
@@ -337,14 +420,63 @@ def _install_conversation_extension_host(self) -> None:
                 DmSendOutcome.UNKNOWN, detail="host_error"
             )
 
+    def _call_auxiliary_model(request) -> str:
+        from agent.auxiliary_client import call_llm
+        from gateway.conversation_extensions import AuxiliaryModelRequest
+
+        if not isinstance(request, AuxiliaryModelRequest):
+            raise ValueError("malformed auxiliary model request")
+        response = call_llm(
+            task=request.task,
+            provider=request.provider,
+            model=request.model,
+            messages=[dict(message) for message in request.messages],
+            max_tokens=int(request.max_tokens),
+            request_overrides={"reasoning_effort": request.reasoning_effort},
+            allow_fallback=False,
+        )
+        if getattr(response, "_hermes_resolved_route", None) != {
+            "provider": request.provider,
+            "model": request.model,
+        }:
+            raise RuntimeError("resolved auxiliary route mismatch")
+        choices = getattr(response, "choices", None) or []
+        content = (
+            getattr(getattr(choices[0], "message", None), "content", None)
+            if choices
+            else None
+        )
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("empty auxiliary model response")
+        return content.strip()
+
+    def _web_search(request):
+        from gateway.conversation_extensions import WebSearchRequest
+        from tools.web_tools import web_search_tool
+
+        if not isinstance(request, WebSearchRequest):
+            raise ValueError("malformed web search request")
+        return web_search_tool(request.query, limit=max(1, min(int(request.limit), 10)))
+
+    def _list_cron_jobs(profile_home: str, include_disabled: bool):
+        from cron.jobs import list_jobs, use_cron_store
+
+        with use_cron_store(profile_home):
+            jobs = list_jobs(include_disabled=include_disabled)
+        return tuple(dict(job) for job in jobs if isinstance(job, Mapping))
+
     install_gateway_host_operations(
         GatewayHostOperations(
             spawn_task=_spawn,
             cancel_tasks=lifecycle_task_registry.cancel,
             lookup_session=_lookup_session,
+            load_initiated_turn_context=_load_initiated_turn_context,
             create_initiated_child=_create_initiated_child,
             inject_turn=_inject_turn,
             send_authenticated_existing_dm=_send_authenticated_existing_dm,
+            call_auxiliary_model=_call_auxiliary_model,
+            web_search=_web_search,
+            list_cron_jobs=_list_cron_jobs,
             run_blocking=_run_blocking,
         )
     )

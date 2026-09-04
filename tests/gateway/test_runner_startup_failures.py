@@ -11,15 +11,24 @@ from gateway.status import read_runtime_status
 
 
 @pytest.mark.asyncio
-async def test_start_gateway_loads_default_config_off_event_loop(monkeypatch, tmp_path):
-    """Default profile secret hydration must not block the gateway loop."""
+async def test_start_gateway_hydrates_default_secrets_off_event_loop(
+    monkeypatch, tmp_path
+):
+    """Secret hydration is off-loop while config/plugin discovery stays on it."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    caller_thread = threading.current_thread().name
     loader_threads = []
-    config = GatewayConfig()
+    hydration_threads = []
+    config = GatewayConfig(multiplex_profiles=True)
 
     def fake_load_config():
         loader_threads.append(threading.current_thread().name)
         return config
+
+    def fake_load_secret_scope(home):
+        assert home == tmp_path
+        hydration_threads.append(threading.current_thread().name)
+        return {}
 
     class _CleanExitRunner:
         def __init__(self, received):
@@ -39,13 +48,16 @@ async def test_start_gateway_loads_default_config_off_event_loop(monkeypatch, tm
     monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
     monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
     monkeypatch.setattr("hermes_logging.setup_logging", lambda hermes_home, mode: tmp_path)
-    monkeypatch.setattr("gateway.run.load_gateway_config_for_runner", fake_load_config)
+    monkeypatch.setattr("gateway.run.load_gateway_config", fake_load_config)
+    monkeypatch.setattr("gateway.run.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.run._load_profile_secret_scope", fake_load_secret_scope)
     monkeypatch.setattr("gateway.run.GatewayRunner", _CleanExitRunner)
 
     from gateway.run import start_gateway
 
     assert await start_gateway(config=None, replace=False, verbosity=None) is True
-    assert loader_threads and loader_threads[0] != threading.current_thread().name
+    assert loader_threads == [caller_thread, caller_thread]
+    assert hydration_threads and hydration_threads[0] != caller_thread
 
 
 @pytest.mark.parametrize(
