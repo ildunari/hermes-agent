@@ -25,10 +25,11 @@ Plugin engines are **never auto-activated** — the user must explicitly set `co
 
 ## Directory structure
 
-Each context engine lives in `plugins/context_engine/<name>/`:
+Third-party context engines are normal plugins. A category layout keeps them
+organized while still using the standard `PluginManager` discovery path:
 
 ```
-plugins/context_engine/lcm/
+~/.hermes/plugins/context_engine/lcm/
 ├── __init__.py      # exports the ContextEngine subclass
 ├── plugin.yaml      # metadata (name, description, version)
 └── ...              # any other modules your engine needs
@@ -188,21 +189,21 @@ Engine tools are injected into the agent's tool list at startup and dispatched a
 
 ## Registration
 
-### Via directory (recommended)
+### Via normal plugin system (recommended)
 
-Place your engine in `plugins/context_engine/<name>/`. The `__init__.py` must export a `ContextEngine` subclass. The discovery system finds and instantiates it automatically.
-
-### Via general plugin system
-
-A general plugin can also register a context engine:
+Place the plugin under `~/.hermes/plugins/` (flat or one category level deep),
+add its manifest name or path-derived key to `plugins.enabled`, and register the
+engine from `register(ctx)`:
 
 ```python
 def register(ctx):
-    engine = LCMEngine(context_length=200000)
+    engine = LCMEngine(threshold=ctx.get_config("threshold", 0.75))
     ctx.register_context_engine(engine)
 ```
 
 Only one engine can be registered. A second plugin attempting to register is rejected with a warning.
+The in-tree `plugins/context_engine/<name>/` loader is reserved for bundled
+engines shipped with Hermes.
 
 ## Lifecycle
 

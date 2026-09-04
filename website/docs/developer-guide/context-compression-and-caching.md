@@ -24,8 +24,8 @@ The engine is responsible for:
 - Tracking token usage from API responses
 
 Selection is config-driven via `context.engine` in `config.yaml`. The resolution order:
-1. Check `plugins/context_engine/<name>/` directory
-2. Check general plugin system (`register_context_engine()`)
+1. Check the normal plugin system (`register_context_engine()`)
+2. Check the bundled `plugins/context_engine/<name>/` directory
 3. Fall back to built-in `ContextCompressor`
 
 Plugin engines are **never auto-activated** — the user must explicitly set `context.engine` to the plugin's name. The default `"compressor"` always uses the built-in.

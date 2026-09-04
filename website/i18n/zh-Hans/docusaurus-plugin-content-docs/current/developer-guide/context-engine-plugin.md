@@ -25,10 +25,10 @@ context:
 
 ## 目录结构
 
-每个 context engine 位于 `plugins/context_engine/<name>/`：
+第三方 context engine 使用普通插件系统；分类目录仍由 `PluginManager` 发现：
 
 ```
-plugins/context_engine/lcm/
+~/.hermes/plugins/context_engine/lcm/
 ├── __init__.py      # 导出 ContextEngine 子类
 ├── plugin.yaml      # 元数据（name、description、version）
 └── ...              # 引擎所需的其他模块
@@ -126,19 +126,19 @@ def handle_tool_call(self, name, args, **kwargs):
 
 ## 注册
 
-### 通过目录（推荐）
+### 通过通用插件系统（推荐）
 
-将引擎放置于 `plugins/context_engine/<name>/`。`__init__.py` 必须导出一个 `ContextEngine` 子类。发现系统会自动找到并实例化它。
-
-### 通过通用插件系统
-
-通用插件也可以注册 context engine：
+将插件放在 `~/.hermes/plugins/`（平铺或一层分类目录），在
+`plugins.enabled` 中启用 manifest 名称或路径派生 key，并在
+`register(ctx)` 中注册 context engine：
 
 ```python
 def register(ctx):
-    engine = LCMEngine(context_length=200000)
+    engine = LCMEngine(threshold=ctx.get_config("threshold", 0.75))
     ctx.register_context_engine(engine)
 ```
+
+仓库内的 `plugins/context_engine/<name>/` 加载器仅用于 Hermes 随附的内置引擎。
 
 只能注册一个引擎。第二个尝试注册的插件将被拒绝并发出警告。
 

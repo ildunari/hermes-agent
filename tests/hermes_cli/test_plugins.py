@@ -2017,11 +2017,11 @@ class TestPluginCommands:
         """Context engine lookup should work before any explicit discover_plugins() call."""
         hermes_home = tmp_path / "hermes_test"
         plugins_dir = hermes_home / "plugins"
-        plugin_dir = plugins_dir / "engine-plugin"
+        plugin_dir = plugins_dir / "context_engine" / "hermes-lcm"
         plugin_dir.mkdir(parents=True, exist_ok=True)
         (plugin_dir / "plugin.yaml").write_text(
             yaml.dump({
-                "name": "engine-plugin",
+                "name": "hermes-lcm",
                 "version": "0.1.0",
                 "description": "Test engine plugin",
             })
@@ -2029,9 +2029,11 @@ class TestPluginCommands:
         (plugin_dir / "__init__.py").write_text(
             "from agent.context_engine import ContextEngine\n\n"
             "class StubEngine(ContextEngine):\n"
+            "    def __init__(self, threshold):\n"
+            "        self.threshold_percent = threshold\n\n"
             "    @property\n"
             "    def name(self):\n"
-            "        return 'stub-engine'\n\n"
+            "        return 'lcm'\n\n"
             "    def update_from_response(self, usage):\n"
             "        return None\n\n"
             "    def should_compress(self, prompt_tokens):\n"
@@ -2039,11 +2041,20 @@ class TestPluginCommands:
             "    def compress(self, messages, current_tokens):\n"
             "        return messages\n\n"
             "def register(ctx):\n"
-            "    ctx.register_context_engine(StubEngine())\n"
+            "    ctx.register_context_engine(StubEngine(ctx.get_config('context_threshold', 0.35)))\n"
         )
         # Opt-in: plugins are opt-in by default, so enable in config.yaml
         (hermes_home / "config.yaml").write_text(
-            yaml.safe_dump({"plugins": {"enabled": ["engine-plugin"]}})
+            yaml.safe_dump({
+                "plugins": {
+                    "enabled": ["hermes-lcm"],
+                    "entries": {
+                        "context_engine/hermes-lcm": {
+                            "settings": {"context_threshold": 0.61}
+                        }
+                    },
+                }
+            })
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
@@ -2052,7 +2063,8 @@ class TestPluginCommands:
         with patch.object(plugins_mod, "_plugin_manager", None):
             engine = plugins_mod.get_plugin_context_engine()
             assert engine is not None
-            assert engine.name == "stub-engine"
+            assert engine.name == "lcm"
+            assert engine.threshold_percent == 0.61
 
     def test_plugin_manager_scoped_by_hermes_home_override(self, tmp_path):
         """set_hermes_home_override() must get its own manager per profile.

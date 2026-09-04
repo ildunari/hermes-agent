@@ -2725,8 +2725,8 @@ def init_agent(
 
     # Select context engine: config-driven (like memory providers).
     # 1. Check config.yaml context.engine setting
-    # 2. Check plugins/context_engine/<name>/ directory (repo-shipped)
-    # 3. Check general plugin system (user-installed plugins)
+    # 2. Check the normal plugin system (user-installed plugins)
+    # 3. Check plugins/context_engine/<name>/ directory (repo-shipped)
     # 4. Fall back to built-in ContextCompressor
     _selected_engine = None
     _copy_failed = False
@@ -2738,74 +2738,51 @@ def init_agent(
     except Exception:
         pass
 
-    if _engine_name == "compressor":
-        # Clear standalone-engine values left by an earlier in-process
-        # construction under the same lock used by plugin construction.
+    if _engine_name != "compressor":
+        # User-installed context engines are ordinary plugins. Discovery runs
+        # inside the active profile scope, and PluginContext owns profile-local
+        # settings without any process-global environment mutation.
+        _candidate = None
         try:
-            from plugins.context_engine import context_engine_construction_scope
-
-            with context_engine_construction_scope(_agent_cfg, _engine_name):
-                pass
-        except Exception as _ce_bridge_err:
-            _ra().logger.warning(
-                "Could not reset context-engine environment for compressor: %s",
-                _ce_bridge_err,
-            )
-    else:
-        # Standalone engines read profile-scoped settings from environment.
-        # Bridge and construct under one lock so multiplex profiles cannot
-        # observe one another's LCM settings or HERMES_HOME.
-        try:
-            from plugins.context_engine import (
-                context_engine_construction_scope,
-                load_context_engine,
-            )
-
-            with context_engine_construction_scope(
-                _agent_cfg,
-                _engine_name,
-                hermes_home=str(get_hermes_home()),
-            ):
-                _selected_engine = load_context_engine(_engine_name)
-        except Exception as _ce_load_err:
-            _load_failed = True
-            _ra().logger.warning(
-                "Context engine '%s' standalone load failed (%s: %s); "
-                "trying remaining fallbacks",
-                _engine_name,
-                type(_ce_load_err).__name__,
-                _ce_load_err,
-            )
-
-        # Try general plugin system as fallback
-        if _selected_engine is None:
+            from hermes_cli.plugins import get_plugin_context_engine
+            _candidate = get_plugin_context_engine()
+        except Exception:
             _candidate = None
+        if _candidate is not None and _candidate.name == _engine_name:
+            # Deep-copy the shared plugin singleton so a child agent's
+            # update_model() can't mutate the parent's compressor (#42449).
+            # Copy can fail for engines holding uncopyable state (locks, DB
+            # connections, clients); in that case fall back to the built-in
+            # compressor with an ACCURATE message rather than silently
+            # mislabelling it "not found".
+            import copy
             try:
-                from hermes_cli.plugins import get_plugin_context_engine
-                _candidate = get_plugin_context_engine()
-            except Exception:
-                _candidate = None
-            if _candidate is not None and _candidate.name == _engine_name:
-                # Deep-copy the shared plugin singleton so a child agent's
-                # update_model() can't mutate the parent's compressor (#42449).
-                # Copy can fail for engines holding uncopyable state (locks, DB
-                # connections, clients); in that case fall back to the built-in
-                # compressor with an ACCURATE message rather than silently
-                # mislabelling it "not found".
-                import copy
-                try:
-                    _selected_engine = copy.deepcopy(_candidate)
-                except Exception as _copy_err:
-                    _copy_failed = True
-                    _ra().logger.warning(
-                        "Context engine '%s' could not be safely copied for this "
-                        "agent (%s) — falling back to built-in compressor. Plugin "
-                        "engines that hold uncopyable state (locks, DB connections) "
-                        "should implement __deepcopy__ to copy only mutable budget "
-                        "state.",
-                        _engine_name, _copy_err,
-                    )
-                    _selected_engine = None
+                _selected_engine = copy.deepcopy(_candidate)
+            except Exception as _copy_err:
+                _copy_failed = True
+                _ra().logger.warning(
+                    "Context engine '%s' could not be safely copied for this "
+                    "agent (%s) — falling back to built-in compressor. Plugin "
+                    "engines that hold uncopyable state (locks, DB connections) "
+                    "should implement __deepcopy__ to copy only mutable budget "
+                    "state.",
+                    _engine_name, _copy_err,
+                )
+                _selected_engine = None
+
+        # Bundled engines retain their historical in-tree discovery path.
+        if _selected_engine is None and not _copy_failed:
+            try:
+                from plugins.context_engine import load_context_engine
+                _selected_engine = load_context_engine(_engine_name)
+            except Exception as _ce_load_err:
+                _load_failed = True
+                _ra().logger.warning(
+                    "Bundled context engine '%s' load failed (%s: %s)",
+                    _engine_name,
+                    type(_ce_load_err).__name__,
+                    _ce_load_err,
+                )
 
         if _selected_engine is None and not _copy_failed and not _load_failed:
             _ra().logger.warning(

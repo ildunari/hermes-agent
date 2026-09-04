@@ -136,7 +136,7 @@ def register(ctx):
 | `plugins/platforms/<name>/` | Gateway 频道适配器（`ctx.register_platform()`） | `PluginManager`（kind: `platform`，深一层） |
 | `plugins/image_gen/<name>/` | 图像生成后端（`ctx.register_image_gen_provider()`） | `PluginManager`（kind: `backend`，深一层） |
 | `plugins/memory/<name>/` | Memory provider（继承 `MemoryProvider`） | **独立加载器**，位于 `plugins/memory/__init__.py`（kind: `exclusive` — 同时只有一个激活） |
-| `plugins/context_engine/<name>/` | 上下文压缩引擎（`ctx.register_context_engine()`） | **独立加载器**，位于 `plugins/context_engine/__init__.py`（同时只有一个激活） |
+| `plugins/context_engine/<name>/` | 上下文压缩引擎（`ctx.register_context_engine()`） | 用户插件使用 `PluginManager`；内置引擎保留仓库内加载器（同时只有一个激活） |
 | `plugins/model-providers/<name>/` | LLM provider profile（`register_provider(ProviderProfile(...))`） | **独立加载器**，位于 `providers/__init__.py`（首次调用 `get_provider_profile()` 时懒加载扫描） |
 
 `~/.hermes/plugins/model-providers/<name>/` 和 `~/.hermes/plugins/memory/<name>/` 下的用户插件会覆盖同名内置插件 — `register_provider()` / `register_memory_provider()` 中后写者胜出。放入一个目录即可替换内置实现，无需修改仓库。
@@ -175,7 +175,7 @@ hermes plugins disable <name>     # 从允许列表移除并添加到禁用列�
 | **内置平台插件**（IRC、Teams 等，位于 `plugins/platforms/`） | 自动加载，使所有内置 gateway 频道可用。实际频道通过 `config.yaml` 中的 `gateway.platforms.<name>.enabled` 开启。 |
 | **内置后端**（`plugins/image_gen/` 等下的图像生成 provider） | 自动加载，使默认后端"开箱即用"。通过 `config.yaml` 中的 `<category>.provider` 选择（例如 `image_gen.provider: openai`）。 |
 | **Memory provider**（`plugins/memory/`） | 全部发现；同时只有一个激活，由 `config.yaml` 中的 `memory.provider` 选择。 |
-| **Context engine**（`plugins/context_engine/`） | 全部发现；同时只有一个激活，由 `config.yaml` 中的 `context.engine` 选择。 |
+| **内置 Context engine**（`plugins/context_engine/`） | 全部发现；同时只有一个激活，由 `config.yaml` 中的 `context.engine` 选择。用户安装的 context engine 仍是需显式启用的普通插件。 |
 | **Model provider**（`plugins/model-providers/`） | `plugins/model-providers/` 下的所有内置 provider 在首次调用 `get_provider_profile()` 时发现并注册。用户通过 `--provider` 或 `config.yaml` 一次选择一个。 |
 | **pip 安装的 `backend` 插件** | 通过 `plugins.enabled` 选择加入（与通用插件相同）。 |
 | **用户安装的平台**（位于 `~/.hermes/plugins/platforms/`） | 通过 `plugins.enabled` 选择加入 — 第三方 gateway 适配器需要明确同意。 |
