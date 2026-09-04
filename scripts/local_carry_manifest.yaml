@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 61
-  total_changed_lines: 4593
-  modified_upstream_lines: 951
+  paths: 62
+  total_changed_lines: 4597
+  modified_upstream_lines: 955
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -79,6 +79,10 @@ evidence_templates:
     artifact: signed Studio and MacBook bundles with exact commit stamps
 
 paths:
+  - path: apps/desktop/electron/managed-ssh-update.test.ts
+    disposition: upstream
+    owner: portable POSIX managed-update contract test
+    evidence: *desktop
   - path: apps/desktop/package.json
     disposition: must-carry
     owner: monotonic local Desktop release version
