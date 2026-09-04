@@ -409,8 +409,12 @@ class TestParallelClientConfig:
         os.environ.pop("PARALLEL_API_KEY", None)
         sys.modules.pop("parallel", None)
 
-    def test_creates_client_with_key(self):
+    def test_creates_client_with_key(self, monkeypatch):
         """PARALLEL_API_KEY set → creates Parallel client."""
+        monkeypatch.setattr(
+            "plugins.web.parallel.provider._ensure_parallel_sdk_installed",
+            lambda: None,
+        )
         with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
             from tools.web_tools import _get_parallel_client
             from parallel import Parallel
@@ -424,8 +428,12 @@ class TestParallelClientConfig:
         with pytest.raises(ValueError, match="PARALLEL_API_KEY"):
             _get_parallel_client()
 
-    def test_singleton_returns_same_instance(self):
+    def test_singleton_returns_same_instance(self, monkeypatch):
         """Second call returns cached client."""
+        monkeypatch.setattr(
+            "plugins.web.parallel.provider._ensure_parallel_sdk_installed",
+            lambda: None,
+        )
         with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
             from tools.web_tools import _get_parallel_client
             client1 = _get_parallel_client()
