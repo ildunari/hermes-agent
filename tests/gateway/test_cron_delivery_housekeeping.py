@@ -61,6 +61,13 @@ def test_external_ticker_contract_fails_open_to_gateway_on_invalid_data(tmp_path
     _write_external_owner(home, updated_at=1061.0)
     assert gateway_run._external_cron_ticker_owns_profile(home, now=1000.0) is False
 
+    payload_path = home / "cron" / "ticker_external.json"
+    payload = json.loads(payload_path.read_text())
+    payload["kind"] = "some-other-owner"
+    payload["updated_at"] = 1000.0
+    payload_path.write_text(json.dumps(payload))
+    assert gateway_run._external_cron_ticker_owns_profile(home, now=1000.0) is False
+
 
 def test_single_profile_gateway_dispatch_falls_back_after_external_stale(
     tmp_path, monkeypatch

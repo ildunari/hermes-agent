@@ -2510,7 +2510,7 @@ def _external_cron_ticker_owns_profile(
                 encoding="utf-8"
             )
         )
-        if not isinstance(payload, dict) or not str(payload.get("kind") or "").strip():
+        if not isinstance(payload, dict) or payload.get("kind") != "profile-launchd":
             return False
         updated_at = payload.get("updated_at")
         stale_after = payload.get("stale_after_seconds")
