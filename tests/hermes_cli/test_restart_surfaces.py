@@ -97,6 +97,28 @@ def test_external_support_prefers_root_source_package_over_installed(tmp_path, m
     assert loaded.__file__ == str(package / "main.py")
 
 
+def test_external_support_ignores_profile_home_for_root_support(tmp_path, monkeypatch):
+    machine_home = tmp_path / "account"
+    profile_home = machine_home / ".hermes" / "profiles" / "poke"
+    relative = "support/example/src/example_support/main.py"
+    package = machine_home / ".hermes" / "plugins" / "support/example/src/example_support"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "main.py").write_text("value = 'root-support'\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(profile_home))
+    monkeypatch.delenv("HERMES_ROOT", raising=False)
+    monkeypatch.setattr(external_support.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        "pwd.getpwuid", lambda _uid: SimpleNamespace(pw_dir=str(machine_home))
+    )
+    monkeypatch.setattr(external_support, "_MODULES", {})
+
+    loaded = external_support.load_support_module("example_support.main", relative)
+
+    assert loaded.value == "root-support"
+    assert loaded.__file__ == str(package / "main.py")
+
+
 def test_external_support_does_not_mask_broken_root_source_with_installed_copy(
     tmp_path, monkeypatch
 ):

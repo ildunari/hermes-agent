@@ -74,11 +74,6 @@ class GatewayCommandRuntimeMixin:
                 "Failed to bind cwd override for task %s", task_id, exc_info=True
             )
 
-    def _session_personality_prompt(self, session_key: str) -> str:
-        entry = self._session_entry_for_key(session_key)
-        value = getattr(entry, "personality_override", None) if entry else None
-        return str(value.get("prompt") or "").strip() if isinstance(value, dict) else ""
-
     async def _handle_detached_surface_restart_command(self, event, canonical: str) -> str:
         """Queue cross-surface restart work outside the receiving gateway."""
         from hermes_cli.restart_surfaces import enqueue_detached_restart

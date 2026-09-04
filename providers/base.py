@@ -100,10 +100,6 @@ class ProviderProfile:
     keyless: bool = False
     api_key_placeholder: str = ""
 
-    # Local gateways must not become the active provider merely because a
-    # compatibility token remains in the environment.
-    exclude_from_env_auto_select: bool = False
-
     # OpenAI-wire gateways that front Claude may support Anthropic cache
     # envelopes even though their transport is Chat Completions.
     openai_wire_claude_prompt_caching: bool = False
@@ -425,15 +421,6 @@ def keyless_api_key_placeholder(provider_id: str) -> str | None:
     ):
         return profile.api_key_placeholder
     return None
-
-
-def profile_excludes_env_auto_select(provider_id: str) -> bool:
-    """Return whether ambient environment keys may auto-select a provider."""
-    profile = _provider_profile(provider_id)
-    return bool(
-        profile is not None
-        and getattr(profile, "exclude_from_env_auto_select", False)
-    )
 
 
 def keyless_provider_status_for_auth(provider_id: str, pconfig) -> dict[str, Any] | None:

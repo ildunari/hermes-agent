@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import os
 import sys
 import threading
 from pathlib import Path
@@ -12,9 +13,33 @@ from types import ModuleType
 _MODULES: dict[str, ModuleType] = {}
 _LOCK = threading.RLock()
 
+def _root_hermes_home() -> Path:
+    """Return the OS-account Hermes root, never a cron profile's fake HOME."""
+    explicit = os.environ.get("HERMES_ROOT", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    apparent_home = Path.home()
+    parts = apparent_home.parts
+    is_profile_home = any(
+        parts[index] == ".hermes" and parts[index + 1] == "profiles"
+        for index in range(len(parts) - 1)
+    )
+    if not is_profile_home:
+        return apparent_home / ".hermes"
+    try:
+        import pwd
+
+        account_home = str(pwd.getpwuid(os.getuid()).pw_dir or "").strip()
+        if account_home:
+            return Path(account_home) / ".hermes"
+    except (ImportError, KeyError, OSError):
+        pass
+    return apparent_home / ".hermes"
+
+
 def _source_candidate(relative_source: Path) -> Path:
-    """Support is root-global; profile plugin directories are shared symlinks."""
-    return Path.home() / ".hermes" / "plugins" / relative_source
+    """Support is root-global; profile HOME values must not redirect it."""
+    return _root_hermes_home() / "plugins" / relative_source
 
 def _load_source(import_name: str, path: Path) -> ModuleType:
     package_name, _, _module_name = import_name.rpartition(".")

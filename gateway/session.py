@@ -801,10 +801,9 @@ class SessionEntry:
     platform: Optional[Platform] = None
     chat_type: str = "dm"
 
-    # Session-local command preferences. CWD survives conversation resets for
-    # the same chat/thread; personality is cleared by a normal /new boundary.
+    # Session-local working directory. It survives conversation resets for
+    # the same chat/thread.
     cwd_override: Optional[str] = None
-    personality_override: Optional[Dict[str, Any]] = None
 
     # Lightweight persisted key/value state scoped to this session entry
     # (e.g. Slack thread-context watermarks). Survives gateway restarts via
@@ -894,7 +893,6 @@ class SessionEntry:
             "platform": self.platform.value if self.platform else None,
             "chat_type": self.chat_type,
             "cwd_override": self.cwd_override,
-            "personality_override": self.personality_override,
             "metadata": self.metadata,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -997,11 +995,6 @@ class SessionEntry:
             platform=platform,
             chat_type=data.get("chat_type", "dm"),
             cwd_override=data.get("cwd_override"),
-            personality_override=(
-                dict(data["personality_override"])
-                if isinstance(data.get("personality_override"), dict)
-                else None
-            ),
             metadata=dict(data.get("metadata") or {}),
             input_tokens=data.get("input_tokens", 0),
             output_tokens=data.get("output_tokens", 0),
@@ -3378,24 +3371,6 @@ class SessionStore:
             if entry is None:
                 return None
             entry.cwd_override = normalized or None
-            entry.updated_at = _now()
-            self._save()
-            return entry
-
-    def set_session_personality_override(
-        self,
-        session_key: str,
-        personality_override: Optional[Dict[str, Any]],
-    ) -> Optional[SessionEntry]:
-        """Persist a personality overlay for one live conversation."""
-        with self._lock:
-            self._ensure_loaded_locked()
-            entry = self._entries.get(session_key)
-            if entry is None:
-                return None
-            entry.personality_override = (
-                dict(personality_override) if personality_override else None
-            )
             entry.updated_at = _now()
             self._save()
             return entry

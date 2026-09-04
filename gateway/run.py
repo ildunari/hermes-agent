@@ -6013,14 +6013,6 @@ class TurnRunner:
         )
         if cfg_channel_prompt:
             combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
-        session_personality = self._runner._session_personality_prompt(
-            ctx.session_key
-        )
-        if session_personality:
-            combined_ephemeral = (
-                combined_ephemeral + "\n\n" + session_personality
-            ).strip()
-
         max_iterations = _current_max_iterations()
 
         try:
