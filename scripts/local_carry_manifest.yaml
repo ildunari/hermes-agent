@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 53
-  total_changed_lines: 6703
-  modified_upstream_lines: 1752
+  paths: 54
+  total_changed_lines: 6770
+  modified_upstream_lines: 1815
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -219,6 +219,10 @@ paths:
     disposition: must-carry
     owner: gateway off-loop startup hydration contract
     evidence: *conversation
+  - path: tests/gateway/test_handoff_watcher_async_db.py
+    disposition: must-carry
+    owner: gateway off-loop session-store initialization contract
+    evidence: *active_work
   - path: tests/gateway/test_conversation_extension_early_lifecycle.py
     disposition: must-carry
     owner: gateway extension lifecycle thread-affinity contract
