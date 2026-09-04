@@ -110,10 +110,6 @@ paths:
     disposition: upstream
     owner: core plugin tool seam
     evidence: *conversation
-  - path: agent/turn_context.py
-    disposition: must-carry
-    owner: API-only conversation extension system-context seam
-    evidence: *conversation
   - path: agent/transports/chat_completions.py
     disposition: upstream
     owner: core provider transport seam
