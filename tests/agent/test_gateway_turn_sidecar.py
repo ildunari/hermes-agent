@@ -11,10 +11,7 @@ cannot apply and the fact would otherwise silently drop.
 
 from __future__ import annotations
 
-import copy
 import types
-from types import SimpleNamespace
-from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
@@ -22,11 +19,8 @@ import pytest
 from agent.turn_context import (
     append_notes_to_multimodal_content,
     build_turn_context,
-    compose_api_system_prompt,
-    compose_current_user_transport_content,
     compose_user_api_content,
     consume_gateway_turn_context_notes,
-    consume_gateway_turn_transport_context,
 )
 
 
@@ -148,95 +142,6 @@ class TestConsumeIsOneShot:
         agent = _FakeAgent()
         agent._gateway_turn_context_notes = ["not-a-string"]
         assert consume_gateway_turn_context_notes(agent) == ""
-
-    def test_transport_context_consume_clears_the_attribute(self):
-        agent = _FakeAgent()
-        agent._gateway_turn_transport_context = "LANE-B-SYSTEM"
-        assert consume_gateway_turn_transport_context(agent) == "LANE-B-SYSTEM"
-        assert consume_gateway_turn_transport_context(agent) == ""
-
-
-class TestEphemeralTransportContext:
-    def test_plugin_and_gateway_system_context_stay_off_user_sidecar(self):
-        agent = _FakeAgent()
-        agent._gateway_turn_transport_context = "LANE-B-SYSTEM"
-        with patch(
-            "hermes_cli.plugins.invoke_hook",
-            return_value=[{"system_context": "TEXTURE-V2-SYSTEM"}],
-        ):
-            ctx = _build(agent)
-
-        assert ctx.plugin_transport_context == (
-            "TEXTURE-V2-SYSTEM\n\nLANE-B-SYSTEM"
-        )
-        assert "api_content" not in ctx.messages[ctx.current_turn_user_idx]
-        assert agent._gateway_turn_transport_context == ""
-
-    def test_transport_context_appends_to_current_user_copy(self):
-        assert compose_current_user_transport_content(
-            "hello", "TEXTURE-V2-SYSTEM"
-        ) == "hello\n\nTEXTURE-V2-SYSTEM"
-
-    def test_stable_prompt_is_byte_preserved_without_ephemeral_suffix(self):
-        assert compose_api_system_prompt("  STABLE  ", "") == "  STABLE  "
-
-    def test_two_turn_texture_changes_only_api_bound_current_user(self):
-        from run_agent import AIAgent
-
-        with (
-            patch("run_agent.get_tool_definitions", return_value=[]),
-            patch("run_agent.check_toolset_requirements", return_value={}),
-            patch("run_agent.OpenAI"),
-        ):
-            agent = AIAgent(
-                api_key="test-key-1234567890",
-                base_url="https://openrouter.ai/api/v1",
-                quiet_mode=True,
-                skip_context_files=True,
-                skip_memory=True,
-            )
-        agent.client = MagicMock()
-        agent._cached_system_prompt = "BYTE-STABLE\nSYSTEM"
-        agent.client.chat.completions.create.side_effect = [
-            SimpleNamespace(
-                choices=[SimpleNamespace(
-                    message=SimpleNamespace(content="first answer", tool_calls=None),
-                    finish_reason="stop",
-                )],
-                usage=None,
-            ),
-            SimpleNamespace(
-                choices=[SimpleNamespace(
-                    message=SimpleNamespace(content="second answer", tool_calls=None),
-                    finish_reason="stop",
-                )],
-                usage=None,
-            ),
-        ]
-
-        with (
-            patch("hermes_cli.plugins.invoke_hook", return_value=[]),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            agent._gateway_turn_transport_context = "TEXTURE-TURN-1"
-            first = agent.run_conversation("first question")
-            first_history = copy.deepcopy(first["messages"])
-            agent._gateway_turn_transport_context = "TEXTURE-TURN-2"
-            second = agent.run_conversation(
-                "second question", conversation_history=first_history
-            )
-
-        first_wire = agent.client.chat.completions.create.call_args_list[0].kwargs["messages"]
-        second_wire = agent.client.chat.completions.create.call_args_list[1].kwargs["messages"]
-        assert first_wire[0] == {"role": "system", "content": "BYTE-STABLE\nSYSTEM"}
-        assert second_wire[0] == first_wire[0]
-        assert first_wire[-1]["content"] == "first question\n\nTEXTURE-TURN-1"
-        assert second_wire[-1]["content"] == "second question\n\nTEXTURE-TURN-2"
-        assert second_wire[1]["content"] == "first question"
-        assert all("TEXTURE" not in str(message) for message in second["messages"])
-
 
 class TestStringContentSidecarDelivery:
     def test_notes_ride_the_api_content_sidecar(self):

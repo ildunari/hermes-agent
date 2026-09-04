@@ -6593,13 +6593,6 @@ class TurnRunner:
                 if isinstance(part, str) and part.strip()
             )
         agent._gateway_turn_context_notes = "\n\n".join(_turn_notes)
-        # Assigned unconditionally so a reused cached agent cannot replay a
-        # prior turn's extension context. The prologue consumes and clears it.
-        agent._gateway_turn_transport_context = "\n\n".join(
-            part for part in getattr(_augmentation, "system_context", ())
-            if isinstance(part, str) and part.strip()
-        ) if _augmentation is not None else ""
-
         _bg_review_release = threading.Event()
         _bg_review_pending: list[str] = []
         _bg_review_pending_lock = threading.Lock()

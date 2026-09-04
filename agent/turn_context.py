@@ -163,36 +163,6 @@ def compose_user_api_content(
     return content + "\n\n" + "\n\n".join(injections)
 
 
-def compose_api_system_prompt(
-    stable_prompt: str,
-    hermes_ephemeral: str,
-) -> str:
-    """Compose Hermes-owned system text without extension-owned guidance."""
-    result = stable_prompt if isinstance(stable_prompt, str) else ""
-    if isinstance(hermes_ephemeral, str) and hermes_ephemeral.strip():
-        result += "\n\n" + hermes_ephemeral
-    return result
-
-
-def compose_current_user_transport_content(
-    content: Any,
-    transport_context: str,
-) -> Any:
-    """Append one-turn guidance to the API copy of the current user message.
-
-    This channel is deliberately later than ``api_content`` composition: it is
-    model-facing for every continuation in this turn, but is never stamped onto
-    the live message, persisted, or replayed as historical conversation.
-    """
-    if not isinstance(transport_context, str) or not transport_context.strip():
-        return None
-    if isinstance(content, str):
-        return content + "\n\n" + transport_context
-    if isinstance(content, list):
-        return [*content, {"type": "text", "text": transport_context}]
-    return None
-
-
 def substitute_api_content(api_msg: Dict[str, Any]) -> Optional[str]:
     """Pop the ``api_content`` sidecar and substitute it into ``content``.
 
@@ -256,22 +226,6 @@ def consume_gateway_turn_context_notes(agent: Any) -> str:
         except Exception:
             pass
     return notes if isinstance(notes, str) else ""
-
-
-def consume_gateway_turn_transport_context(agent: Any) -> str:
-    """Consume API-call-only current-user context staged by the gateway.
-
-    Unlike ``api_content`` sidecar notes, this value is appended only to the
-    transport copy of the current user message. A cached agent may serve many
-    conversations, so clearing it here makes the channel strictly one turn.
-    """
-    context = getattr(agent, "_gateway_turn_transport_context", "") or ""
-    if hasattr(agent, "_gateway_turn_transport_context"):
-        try:
-            agent._gateway_turn_transport_context = ""
-        except Exception:
-            pass
-    return context if isinstance(context, str) else ""
 
 
 def append_notes_to_multimodal_content(content: Any, notes: str) -> bool:
@@ -609,8 +563,6 @@ class TurnContext:
     should_review_memory: bool = False
     # Context contributed by ``pre_llm_call`` plugins (appended to user message).
     plugin_user_context: str = ""
-    # One-turn context appended only to the API copy of the current user.
-    plugin_transport_context: str = ""
     # External-memory prefetch result, reused across loop iterations.
     ext_prefetch_cache: str = ""
     # Turn-start preflight already proved an immediate retry ineffective.
@@ -1512,10 +1464,8 @@ def build_turn_context(
         )
         agent._persist_user_message_idx = current_turn_user_idx
 
-    # Plugin hook: pre_llm_call. ``context`` remains replayable user-message
-    # context; ``system_context`` is one-turn guidance on the current API user.
+    # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""
-    plugin_transport_context = ""
     try:
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
@@ -1532,7 +1482,6 @@ def build_turn_context(
             sender_id=getattr(agent, "_user_id", None) or "",
         )
         _ctx_parts: list[str] = []
-        _system_ctx_parts: list[str] = []
         # Spill oversized per-hook context to disk so a runaway plugin
         # can't inflate every subsequent turn's prompt. Ported from
         # openai/codex PR #21069 ("Spill large hook outputs from context").
@@ -1547,11 +1496,7 @@ def build_turn_context(
             _spill_config_cached = None
         for r in _pre_results:
             _piece: str = ""
-            _target = _ctx_parts
-            if isinstance(r, dict) and r.get("system_context"):
-                _piece = str(r["system_context"])
-                _target = _system_ctx_parts
-            elif isinstance(r, dict) and r.get("context"):
+            if isinstance(r, dict) and r.get("context"):
                 _piece = str(r["context"])
             elif isinstance(r, str) and r.strip():
                 _piece = r
@@ -1567,11 +1512,9 @@ def build_turn_context(
                     )
                 except Exception as _spill_exc:
                     logger.warning("hook context spill failed: %s", _spill_exc)
-            _target.append(_piece)
+            _ctx_parts.append(_piece)
         if _ctx_parts:
             plugin_user_context = "\n\n".join(_ctx_parts)
-        if _system_ctx_parts:
-            plugin_transport_context = "\n\n".join(_system_ctx_parts)
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
 
@@ -1597,14 +1540,6 @@ def build_turn_context(
                 if plugin_user_context
                 else _gateway_notes
             )
-
-    _gateway_transport_context = consume_gateway_turn_transport_context(agent)
-    if _gateway_transport_context:
-        plugin_transport_context = (
-            plugin_transport_context + "\n\n" + _gateway_transport_context
-            if plugin_transport_context
-            else _gateway_transport_context
-        )
 
     # Per-turn file-mutation verifier state.
     agent._turn_failed_file_mutations = {}
@@ -1769,7 +1704,6 @@ def build_turn_context(
         current_turn_user_idx=current_turn_user_idx,
         should_review_memory=should_review_memory,
         plugin_user_context=plugin_user_context,
-        plugin_transport_context=plugin_transport_context,
         ext_prefetch_cache=ext_prefetch_cache,
         preflight_compression_blocked=_preflight_compression_blocked,
     )

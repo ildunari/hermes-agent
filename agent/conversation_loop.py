@@ -48,8 +48,6 @@ from agent.turn_context import (
     _compression_warrants_another_preflight_pass,
     _review_fork_first_request_pending,
     build_turn_context,
-    compose_api_system_prompt,
-    compose_current_user_transport_content,
     compose_user_api_content,
     reanchor_current_turn_user_idx,
 )
@@ -2185,7 +2183,6 @@ def run_conversation(
     current_turn_user_idx = _ctx.current_turn_user_idx
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
-    _plugin_transport_context = _ctx.plugin_transport_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
 
     # Commentary deduplication spans all provider continuations and tool calls
@@ -2565,12 +2562,6 @@ def run_conversation(
                     )
                     if _composed is not None:
                         api_msg["content"] = _composed
-                _transport_content = compose_current_user_transport_content(
-                    api_msg.get("content", ""),
-                    _plugin_transport_context,
-                )
-                if _transport_content is not None:
-                    api_msg["content"] = _transport_content
             elif (
                 isinstance(_api_content, str)
                 and _api_content
@@ -2644,23 +2635,22 @@ def run_conversation(
             # The signature field helps maintain reasoning continuity
             api_messages.append(api_msg)
 
-        # Build the final system message from Hermes-owned prompt text only.
+        # Build the final system message: cached prompt + ephemeral system prompt.
         # Ephemeral additions are API-call-time only (not persisted to session DB).
         # External recall context is injected into the user message, not the system
         # prompt, so the stable cache prefix remains unchanged.
-        #
-        # Extension ``system_context`` is transported on the current user copy
-        # above; letting it touch this message breaks the cached system bytes.
-        #
+        # NOTE: Plugin context from pre_llm_call hooks is injected into the
+        # user message (see injection block above), NOT the system prompt.
+        # This is intentional — system prompt modifications break the prompt
+        # cache prefix. The system prompt is reserved for Hermes internals.
         # Hermes invariant: the system prompt is built ONCE per session
         # (cached on ``_cached_system_prompt``) and replayed verbatim on
         # every turn. ``apply_anthropic_cache_control`` may split its stable
         # prefix into content blocks on the wire, but the stored string and
         # its byte-stability remain unchanged.
-        effective_system = compose_api_system_prompt(
-            active_system_prompt or "",
-            agent.ephemeral_system_prompt or "",
-        )
+        effective_system = active_system_prompt or ""
+        if agent.ephemeral_system_prompt:
+            effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
         if effective_system:
             api_messages = [{"role": "system", "content": effective_system}] + api_messages
 
