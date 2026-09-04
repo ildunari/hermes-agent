@@ -493,16 +493,20 @@ def _install_conversation_extension_host(self) -> None:
 
         if not isinstance(request, AuxiliaryModelRequest):
             raise ValueError("malformed auxiliary model request")
+        route_info: dict[str, str] = {}
         response = call_llm(
             task=request.task,
             provider=request.provider,
             model=request.model,
             messages=[dict(message) for message in request.messages],
             max_tokens=int(request.max_tokens),
-            request_overrides={"reasoning_effort": request.reasoning_effort},
-            allow_fallback=False,
+            reasoning_config={
+                "enabled": request.reasoning_effort != "none",
+                "effort": request.reasoning_effort,
+            },
+            route_info=route_info,
         )
-        if getattr(response, "_hermes_resolved_route", None) != {
+        if route_info != {
             "provider": request.provider,
             "model": request.model,
         }:

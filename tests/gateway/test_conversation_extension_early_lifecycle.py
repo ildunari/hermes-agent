@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -89,4 +90,42 @@ async def test_early_facade_upgrades_to_full_host_operations():
         assert facade.call_auxiliary_model(request) == "OK"
     finally:
         lifecycle_task_registry.reset_for_tests()
+        reset_gateway_host_operations()
+
+
+def test_full_host_auxiliary_model_uses_supported_pinned_route(monkeypatch):
+    from agent import auxiliary_client
+    from gateway.run import GatewayRunner
+
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured.update(kwargs)
+        kwargs["route_info"].update({
+            "provider": "openai-codex",
+            "model": "gpt-5.6-sol",
+        })
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="OK"))]
+        )
+
+    monkeypatch.setattr(auxiliary_client, "call_llm", fake_call_llm)
+    reset_gateway_host_operations()
+    try:
+        object.__new__(GatewayRunner)._install_conversation_extension_host()
+        request = AuxiliaryModelRequest(
+            task="proactive_gate",
+            provider="openai-codex",
+            model="gpt-5.6-sol",
+            messages=({"role": "user", "content": "Reply exactly OK."},),
+            reasoning_effort="low",
+            max_tokens=4,
+        )
+
+        assert gateway_host_operations().call_auxiliary_model(request) == "OK"
+        assert captured["reasoning_config"] == {"enabled": True, "effort": "low"}
+        assert captured["max_tokens"] == 4
+        assert "request_overrides" not in captured
+        assert "allow_fallback" not in captured
+    finally:
         reset_gateway_host_operations()
