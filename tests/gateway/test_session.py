@@ -1658,3 +1658,21 @@ class TestGatewayRoutingTable:
         assert recovered.session_id == entry.session_id
         restarted._db.close()
 
+
+
+def test_cwd_binding_survives_reload_reset_and_switch(tmp_path):
+    from gateway.config import GatewayConfig, Platform
+    from gateway.session import SessionSource, SessionStore
+
+    store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="cwd-test", user_id="owner")
+    entry = store.get_or_create_session(source)
+    key = entry.session_key
+    assert entry.cwd_override is None
+    assert store.set_session_cwd(key, " /tmp/project ").cwd_override == "/tmp/project"
+    reloaded = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+    assert reloaded.lookup_by_session_key(key).cwd_override == "/tmp/project"
+    assert reloaded.reset_session(key).cwd_override == "/tmp/project"
+    assert reloaded.switch_session(key, entry.session_id).cwd_override == "/tmp/project"
+    assert reloaded.get_or_create_session(source, force_new=True).cwd_override == "/tmp/project"
+    assert reloaded.set_session_cwd(key, None).cwd_override is None
