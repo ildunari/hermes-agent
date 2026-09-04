@@ -14709,6 +14709,18 @@ class GatewayRunner(
         self.delivery_router.adapters = self.adapters
         self._wire_teams_pipeline_runtime()
 
+        # Extensions can register during executor-backed MCP discovery, but
+        # their lifecycle factories stay parked until transports are connected
+        # and the full host is useful. Releasing earlier records a false dead
+        # readiness snapshot, then sleeps for the watcher's full 30-minute
+        # cadence before it can recover.
+        try:
+            from gateway.conversation_extension_host import _mark_full_host_ready
+
+            _mark_full_host_ready()
+        except Exception:
+            logger.debug("could not release extension lifecycle tasks", exc_info=True)
+
         try:
             self._activate_conversation_extensions_for_served_profiles()
         except Exception:

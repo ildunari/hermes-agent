@@ -548,7 +548,6 @@ def _install_conversation_extension_host(self) -> None:
             run_blocking=_run_blocking,
         )
     )
-    _mark_full_host_ready()
 
 def _served_profile_names(self) -> tuple[str, ...]:
     """Return every profile this gateway process actually serves.

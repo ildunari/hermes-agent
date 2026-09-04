@@ -3,7 +3,10 @@ import threading
 
 import pytest
 
-from gateway.conversation_extension_host import install_early_lifecycle_scheduling
+from gateway.conversation_extension_host import (
+    _mark_full_host_ready,
+    install_early_lifecycle_scheduling,
+)
 from gateway.conversation_extensions import (
     AuxiliaryModelRequest,
     GatewayBackgroundTask,
@@ -43,6 +46,9 @@ async def test_early_lifecycle_marshals_worker_registration_to_gateway_loop():
         from gateway.run import GatewayRunner
 
         object.__new__(GatewayRunner)._install_conversation_extension_host()
+        await asyncio.sleep(0)
+        assert not started.is_set()
+        _mark_full_host_ready()
         await asyncio.wait_for(started.wait(), timeout=1)
 
         assert factory_threads == [owner_thread]
