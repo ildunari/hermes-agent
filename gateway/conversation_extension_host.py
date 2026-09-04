@@ -41,19 +41,28 @@ def install_early_lifecycle_scheduling() -> None:
     if existing.spawn_task is not None:
         return
 
+    # MCP discovery is intentionally blocking and runs in an executor.  A
+    # plugin discovered there still registers its conversation extension from
+    # that worker thread.  Capture the gateway's owning loop now so lifecycle
+    # factories can always be marshalled back to it instead of relying on the
+    # registration thread having a running loop.
+    owner_loop = asyncio.get_running_loop()
+
     def _spawn(task) -> None:
+        async def _run_factory():
+            return await _coerce_awaitable(task.factory())
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            logger.warning(
-                "No running loop; refusing to start extension task %s",
-                task.task_key,
+            loop = None
+        if loop is owner_loop:
+            handle = owner_loop.create_task(
+                _run_factory(),
+                name=f"ext:{task.extension_id}:{task.task_key}:{task.generation}",
             )
-            raise
-        handle = loop.create_task(
-            _coerce_awaitable(task.factory()),
-            name=f"ext:{task.extension_id}:{task.task_key}:{task.generation}",
-        )
+        else:
+            handle = asyncio.run_coroutine_threadsafe(_run_factory(), owner_loop)
         lifecycle_task_registry.record(task, handle)
 
     def _coerce_awaitable(value):
