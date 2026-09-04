@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 50
-  total_changed_lines: 5995
-  modified_upstream_lines: 1684
+  paths: 51
+  total_changed_lines: 6001
+  modified_upstream_lines: 1685
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -251,6 +251,10 @@ paths:
     disposition: must-carry
     owner: local carry ratchet tests
     evidence: *ratchet
+  - path: tests/tools/test_delegate.py
+    disposition: must-carry
+    owner: macOS delegate path-equivalence test
+    evidence: *provider
   - path: tools/send_message_registry.py
     disposition: upstream
     owner: core platform registry
