@@ -22,7 +22,7 @@ class _OneTickStopEvent:
 
 def _write_external_owner(home, *, updated_at, stale_after_seconds=960):
     cron_dir = home / "cron"
-    cron_dir.mkdir(parents=True)
+    cron_dir.mkdir(parents=True, exist_ok=True)
     (cron_dir / "ticker_external.json").write_text(json.dumps({
         "kind": "profile-launchd",
         "updated_at": updated_at,
@@ -57,6 +57,9 @@ def test_external_ticker_contract_fails_open_to_gateway_on_invalid_data(tmp_path
 
     assert gateway_run._external_cron_ticker_owns_profile(home, now=1000.0) is False
     assert gateway_run._in_process_cron_ticker_owns_profile(home, now=1000.0) is True
+
+    _write_external_owner(home, updated_at=1061.0)
+    assert gateway_run._external_cron_ticker_owns_profile(home, now=1000.0) is False
 
 
 def test_single_profile_gateway_dispatch_falls_back_after_external_stale(

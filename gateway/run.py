@@ -120,6 +120,7 @@ _GATEWAY_PROXY_SSE_BUFFER_MAX_CHARS = 16 * 1024 * 1024
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 _GATEWAY_HYGIENE_PLATFORM = "gateway_hygiene"
 _EXTERNAL_CRON_TICKER_CONTRACT = Path("cron/ticker_external.json")
+_EXTERNAL_CRON_TICKER_MAX_FUTURE_SKEW_SECONDS = 60.0
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"("  # transient/auxiliary status that should stay in logs, not gateway chats
@@ -2529,7 +2530,7 @@ def _external_cron_ticker_owns_profile(
         ):
             return False
         age = (time.time() if now is None else float(now)) - updated_at
-        return -stale_after <= age <= stale_after
+        return -_EXTERNAL_CRON_TICKER_MAX_FUTURE_SKEW_SECONDS <= age <= stale_after
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
 
