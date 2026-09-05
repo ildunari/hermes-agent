@@ -462,7 +462,6 @@ _TEXT_SENDERS = {
     **{name: partial(_registry_standalone_send, name)
        for name in ("whatsapp", "email", "sms", "dingtalk", "feishu", "wecom")},
     "signal": lambda pc, cid, chunk, tid: _send_signal(pc.extra, cid, chunk),
-    "bluebubbles": lambda pc, cid, chunk, tid: _send_bluebubbles(pc.extra, cid, chunk),
     "qqbot": lambda pc, cid, chunk, tid: _send_qqbot(pc, cid, chunk),
     "yuanbao": lambda pc, cid, chunk, tid: _send_yuanbao(cid, chunk)}
 
@@ -486,6 +485,15 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     from gateway.platforms.base import BasePlatformAdapter
     max_len = _platform_max_length(platform)
     chunks = BasePlatformAdapter.truncate_message(message, max_len) if max_len else [message]
+    if platform_name == "bluebubbles":
+        from tools.send_message_registry import try_send_via_registry
+        async def send_bluebubbles_chunk(chunk, is_last):
+            result = await try_send_via_registry(
+                platform, pconfig, chat_id, chunk, thread_id=thread_id,
+                media_files=media_files if is_last else [], force_document=force_document,
+            )
+            return result if result is not None else {"error": "Platform plugin not registered or missing standalone_sender_fn"}
+        return await _send_chunks(chunks, send_bluebubbles_chunk)
     if platform_name == "discord" or (media_files and platform_name in _PLUGIN_STANDALONE_MEDIA):
         return await _send_plugin_standalone(platform_name, pconfig, chat_id, message, chunks, media_files,
                                              thread_id=thread_id, max_len=max_len, force_document=force_document)

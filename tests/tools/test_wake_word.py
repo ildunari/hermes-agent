@@ -213,6 +213,9 @@ def _install_fake_openwakeword(monkeypatch):
     monkeypatch.setitem(sys.modules, "openwakeword", oww)
     monkeypatch.setitem(sys.modules, "openwakeword.model", model_mod)
     monkeypatch.setattr("tools.lazy_deps.ensure", lambda *a, **k: None)
+    # The fake model does not provide a real tflite runtime. Supply the
+    # dependency probe explicitly so this test stays focused on model setup.
+    monkeypatch.setattr("tools.wake_word.ensure_tflite_runtime", lambda: True)
     return calls
 
 

@@ -141,6 +141,8 @@ def _stub_uvicorn_run(monkeypatch):
             pass
 
     monkeypatch.setattr(uvicorn, "Config", _FakeConfig)
+    # The server is simulated; do not probe the operator's live dashboard port.
+    monkeypatch.setattr(web_server, "_port_bind_conflict", lambda *_args: False)
     monkeypatch.setattr(uvicorn, "Server", lambda config: _FakeServer())
     return captured
 

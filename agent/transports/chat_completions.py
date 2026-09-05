@@ -5,7 +5,7 @@ provider-specific work lives in build_kwargs (max_tokens, reasoning, extra_body)
 """
 
 import json
-from typing import Any
+from typing import Any, Literal, Mapping
 from urllib.parse import urlparse
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
@@ -324,6 +324,34 @@ def _sanitize_message(msg: Any, strip_extra_content: bool) -> dict | None:
     return out_msg if strip_keys or copied_tool_calls is not None else None
 
 
+def _normalize_response_tool_name(
+    wire_name: str,
+    *,
+    profile: Any | None = None,
+    phase: Literal["stream_delta", "final_tool_call"] = "final_tool_call",
+    model: str | None = None,
+    request_wire_aliases: Mapping[str, str] | None = None,
+) -> str:
+    """Apply a provider profile's inbound tool-name restoration hook."""
+    if not isinstance(wire_name, str) or not wire_name:
+        return wire_name
+    normalizer = getattr(profile, "response_tool_name_normalizer", None)
+    if normalizer is None:
+        return wire_name
+
+    from providers.base import ToolNameNormalizeContext
+
+    return normalizer(
+        wire_name,
+        ToolNameNormalizeContext(
+            phase=phase,
+            provider=str(getattr(profile, "name", "") or ""),
+            model=model,
+            request_wire_aliases=request_wire_aliases,
+        ),
+    )
+
+
 class ChatCompletionsTransport(ProviderTransport):
     """Transport for api_mode='chat_completions'."""
 
@@ -481,8 +509,12 @@ class ChatCompletionsTransport(ProviderTransport):
                 extra_body = {k: v for k, v in extra_body.items() if k in ("thinking_config", "thinkingConfig")}
             if extra_body:
                 api_kwargs["extra_body"] = extra_body
-        return _finish_kwargs(
+        api_kwargs = _finish_kwargs(
             api_kwargs, sanitized, params, supports_prompt_cache_key=bool(getattr(profile, "supports_prompt_cache_key", False)),
+        )
+        return profile.finalize_api_kwargs(
+            api_kwargs, model=model, base_url=params.get("base_url"),
+            reasoning_config=reasoning_config, session_id=params.get("session_id"),
         )
 
     def normalize_response(self, response: Any, **kwargs) -> NormalizedResponse:
@@ -498,7 +530,7 @@ class ChatCompletionsTransport(ProviderTransport):
 
         tool_calls = None
         if getattr(msg, "tool_calls", None):
-            tool_calls = [tc for tc in (self._normalize_tool_call(tc) for tc in msg.tool_calls) if tc is not None]
+            tool_calls = [tc for tc in (self._normalize_tool_call(tc, profile=kwargs.get("provider_profile"), model=kwargs.get("model"), normalized=getattr(response, "_tool_names_normalized", False)) for tc in msg.tool_calls) if tc is not None]
 
         usage = Usage.from_openai(response.usage) if hasattr(response, "usage") and response.usage else None
 
@@ -527,7 +559,7 @@ class ChatCompletionsTransport(ProviderTransport):
             reasoning=getattr(msg, "reasoning", None), usage=usage, provider_data=provider_data or None,
         )
 
-    def _normalize_tool_call(self, tc: Any) -> ToolCall | None:
+    def _normalize_tool_call(self, tc: Any, *, profile=None, model=None, normalized=False) -> ToolCall | None:
         """One SDK tool call -> ToolCall; None when it lacks a function/name (matches Relay's codec)."""
         tc_function = getattr(tc, "function", None)
         name = getattr(tc_function, "name", None)
@@ -539,6 +571,8 @@ class ChatCompletionsTransport(ProviderTransport):
             name = "tool_search" if name == _XAI_TOOL_SEARCH_ALIAS else name
         else:
             name = alias_map.get(name, name)
+        if not normalized:
+            name = _normalize_response_tool_name(name, profile=profile, model=model, request_wire_aliases=alias_map)
         arguments = getattr(tc_function, "arguments", None)
         extra = _attr_or_model_extra(tc, "extra_content")
         return ToolCall(

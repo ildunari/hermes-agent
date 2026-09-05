@@ -411,10 +411,7 @@ class TestParallelClientConfig:
 
     def test_creates_client_with_key(self, monkeypatch):
         """PARALLEL_API_KEY set → creates Parallel client."""
-        monkeypatch.setattr(
-            "plugins.web.parallel.provider._ensure_parallel_sdk_installed",
-            lambda: None,
-        )
+        monkeypatch.setattr("plugins.web._common.lazy_ensure", lambda _feature: None)
         with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
             from plugins.web.parallel.provider import _get_sync_client as _get_parallel_client
             from parallel import Parallel
@@ -430,10 +427,7 @@ class TestParallelClientConfig:
 
     def test_singleton_returns_same_instance(self, monkeypatch):
         """Second call returns cached client."""
-        monkeypatch.setattr(
-            "plugins.web.parallel.provider._ensure_parallel_sdk_installed",
-            lambda: None,
-        )
+        monkeypatch.setattr("plugins.web._common.lazy_ensure", lambda _feature: None)
         with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
             from plugins.web.parallel.provider import _get_sync_client as _get_parallel_client
             client1 = _get_parallel_client()

@@ -4,6 +4,12 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_personal_skills_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 SCRIPT_PATH = (
@@ -744,7 +750,6 @@ def test_messaging_settings_handles_invalid_utf8_in_telegram_allowlist(tmp_path:
     assert items and items[0]["status"] == "migrated"
     env_text = (target / ".env").read_text(encoding="utf-8")
     assert "123456789" in env_text
-
 
 
 
