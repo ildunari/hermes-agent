@@ -602,3 +602,19 @@ paths:
       runtime_caller: background log polling and bootstrap key generation
       interface_test: process registry, keygen, executable grammar and mocked audio
       artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: hermes_cli/web_server_dashboard.py
+    disposition: upstream
+    owner: request-time SSH bootstrap token consistency
+    evidence:
+      registration: native dashboard SPA and headless route mounting
+      runtime_caller: SSH token adoption after web server module import
+      interface_test: headless post-mount token regression and auth checks
+      artifact: real SSH bootstrap token rejected before fix; seven focused tests pass
+  - path: tests/hermes_cli/test_web_server.py
+    disposition: upstream
+    owner: request-time SSH bootstrap token consistency
+    evidence:
+      registration: native dashboard SPA and headless route mounting
+      runtime_caller: SSH token adoption after web server module import
+      interface_test: headless post-mount token regression and auth checks
+      artifact: real SSH bootstrap token rejected before fix; seven focused tests pass
