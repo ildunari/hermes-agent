@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 98
-  total_changed_lines: 5518
-  modified_upstream_lines: 1615
+  paths: 105
+  total_changed_lines: 5631
+  modified_upstream_lines: 1672
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -546,3 +546,59 @@ paths:
     disposition: must-carry
     owner: portable current-runtime fixture
     evidence: *ratchet
+  - path: docker/stage2-hook.sh
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tests/tools/test_execution_flag_detection.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tests/tools/test_process_registry.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tests/tools/test_transcription_tools.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tests/tools/test_voice_mode.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tests/tools/test_wake_word.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tools/process_registry.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
