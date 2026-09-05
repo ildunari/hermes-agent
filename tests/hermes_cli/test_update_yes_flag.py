@@ -9,10 +9,37 @@ Covers:
 """
 
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
+from hermes_cli import main as hermes_main
 from hermes_cli.main import cmd_update
+
+
+@pytest.fixture(autouse=True)
+def _patch_gateway_discovery(monkeypatch, tmp_path):
+    """Keep full update flows away from the live macOS gateway supervisor."""
+    import hermes_cli.gateway as hermes_gateway
+
+    monkeypatch.setattr(hermes_gateway, "find_gateway_pids", lambda **_kwargs: [])
+    monkeypatch.setattr(hermes_gateway, "supports_systemd_services", lambda: False)
+    monkeypatch.setattr(
+        hermes_gateway, "find_profile_gateway_processes", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        hermes_gateway,
+        "get_launchd_plist_path",
+        lambda: tmp_path / "absent-hermes-test-launchagent.plist",
+    )
+    monkeypatch.setattr(hermes_gateway, "launchd_gateway_labels_for_install", lambda: [])
+    # The update reload/purge phase can replace the gateway module object and
+    # discard the seams above. These tests cover prompt behavior, so keep that
+    # unrelated runtime refresh out of the mocked flow.
+    monkeypatch.setattr(hermes_main, "_reload_updated_runtime_modules", lambda: None)
+    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda *a, **k: None)
 
 
 def _make_run_side_effect(

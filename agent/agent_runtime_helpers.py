@@ -1531,6 +1531,11 @@ def anthropic_prompt_cache_policy(
                 return custom_prompt_caching, custom_prompt_caching and is_anthropic_wire
         except Exception as _cap_exc:
             logger.debug("custom-provider prompt_caching capability lookup failed: %s", _cap_exc)
+    # Provider plugins can declare cache markers for Claude on an OpenAI wire.
+    from providers import get_provider_profile
+    profile = get_provider_profile(provider_lower)
+    if is_claude and eff_api_mode == "chat_completions" and getattr(profile, "openai_wire_claude_prompt_caching", False):
+        return True, False
     # MiniMax-M3 uses server-side automatic prefix caching; explicit markers are dead weight.
     # Checked BEFORE the native-Anthropic return since provider="anthropic" may point at a MiniMax
     # proxy.

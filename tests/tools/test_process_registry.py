@@ -851,7 +851,7 @@ class TestEnvPollerIncrementalRead:
         assert "O=0" in cmd
 
     @pytest.mark.skipif(not shutil.which("sh"), reason="needs a POSIX sh")
-    def test_read_command_holds_back_a_split_utf8_sequence(self, tmp_path):
+    def test_read_command_holds_back_a_split_utf8_sequence(self, tmp_path, monkeypatch):
         """A multibyte character straddling two polls must not be split.
 
         The backend decodes each execute() result on its own, so returning
@@ -861,6 +861,10 @@ class TestEnvPollerIncrementalRead:
         string must come back decodable, with at most 3 bytes held back and
         nothing held back once the trailing character is complete.
         """
+        shadow = tmp_path / "od"
+        shadow.write_text("#!/bin/sh\nexit 99\n")
+        shadow.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
         full = "hé😀中a\n€bz🚀".encode()
         log = tmp_path / "bg.log"
         quoted = shlex.quote(str(log))
@@ -1884,6 +1888,12 @@ class TestSystemdCgroupIsolation:
     cgroup, so an OOM in a memory-heavy worker lets systemd-oomd kill the
     ENTIRE gateway cgroup, taking down the messaging control plane.
     """
+
+    @pytest.fixture(autouse=True)
+    def _linux_scope_platform(self, monkeypatch):
+        # These mocked systemd flows run on every host. Darwin-specific tests
+        # below explicitly override the flag to verify the no-op branch.
+        monkeypatch.setattr("tools.process_registry._IS_LINUX", True)
 
     @pytest.fixture()
     def _gateway_identity(self, monkeypatch):

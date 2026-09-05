@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from contextlib import nullcontext
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -576,7 +576,12 @@ class TestProfileScopedPlatformEventHandler:
         dispatch = AsyncMock()
         runner._handle_gateway_platform_event = dispatch
         handler = runner._make_default_profile_platform_event_handler()
-        with patch("gateway.run._profile_runtime_scope", side_effect=lambda _home: nullcontext()):
+
+        @asynccontextmanager
+        async def profile_scope(_home):
+            yield
+
+        with patch("gateway.run._async_profile_runtime_scope", side_effect=profile_scope):
             asyncio.run(handler({"event_type": "reaction"}, source))
 
         resolver.assert_called_once_with(source)

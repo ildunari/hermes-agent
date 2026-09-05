@@ -5955,7 +5955,14 @@ def _build_call_kwargs(
     # ``extra_body.reasoning`` fallback.
     projection = _project_provider_profile(provider, provider_norm, model, effective_base, reasoning_config)
     kwargs.update(projection.top_level)
-    if merged_extra := _merge_aux_extra_body(extra_body, projection, reasoning_config, provider_norm):
+    merged_extra = _merge_aux_extra_body(extra_body, projection, reasoning_config, provider_norm)
+    from providers import get_provider_profile
+    profile = get_provider_profile(provider_norm)
+    if profile is not None:
+        merged_extra = profile.normalize_auxiliary_extra_body(
+            merged_extra, model=model, base_url=effective_base, reasoning_config=reasoning_config,
+        )
+    if merged_extra:
         kwargs["extra_body"] = merged_extra
     # Anthropic Messages adapters take reasoning via a private kwarg that plain OpenAI SDK clients
     # would reject; Portal Claude is dual-wire, so include it only when the catalog id selects

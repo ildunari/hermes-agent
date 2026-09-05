@@ -472,6 +472,8 @@ class SessionEntry:
     display_name: Optional[str] = None
     platform: Optional[Platform] = None
     chat_type: str = "dm"
+    # Working directory belongs to the route and survives conversation resets.
+    cwd_override: Optional[str] = None
     # Small, JSON-serializable per-entry state (e.g. Slack thread watermarks).
     metadata: Dict[str, Any] = field(default_factory=dict)
     # Token tracking
@@ -523,6 +525,7 @@ class SessionEntry:
     # Fields (de)serialized verbatim, in wire order (``from_dict`` reads them with
     # ``data.get(name, <dataclass default>)``), split around the three ISO-datetime/token keys.
     _PLAIN_FIELDS = (
+        "cwd_override",
         "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
         "total_tokens", "last_prompt_tokens", "estimated_cost_usd", "cost_status",
         "expiry_finalized", "suspended", "resume_pending", "resume_reason",
@@ -619,6 +622,8 @@ def is_shared_multi_user_session(
     isolation rules in :func:`build_session_key`)."""
     if source.chat_type == "dm":
         return False
+    if source.platform == Platform.BLUEBUBBLES and source.chat_type == "group":
+        return True
     return not (thread_sessions_per_user if source.thread_id else group_sessions_per_user)
 
 
@@ -650,6 +655,15 @@ def build_session_key(
     session per platform. Groups add the participant id only when ``group_sessions_per_user`` and
     not in a thread (threads are shared unless ``thread_sessions_per_user``).
     """
+    # Routed BlueBubbles groups retain one conversation per profile, not per sender.
+    if source.platform == Platform.BLUEBUBBLES and source.chat_type == "group":
+        group_ns = _session_key_namespace(
+            str(source.chat_id_alt).split(":", 1)[1]
+            if str(source.chat_id_alt or "").startswith("hermes-profile:") else profile
+        )
+        return ":".join([group_ns, source.platform.value, source.chat_type]
+                        + ([source.chat_id] if source.chat_id else [])
+                        + ([source.thread_id] if source.thread_id else []))
     is_dm = source.chat_type == "dm"
     chat_id = source.chat_id
     if is_dm and source.platform == Platform.WHATSAPP:
@@ -1003,6 +1017,7 @@ class SessionStore(
             chat_type=source.chat_type, was_auto_reset=decision.reset_reason is not None,
             auto_reset_reason=decision.reset_reason, reset_had_activity=decision.reset_had_activity,
             prev_session_id=decision.prev_session_id,
+            cwd_override=observed.cwd_override if observed else None,
         )
         with self._lock:
             current = self._entries.get(session_key)
@@ -1036,6 +1051,18 @@ class SessionStore(
         # Metadata-only: single-row UPSERT, outside ``_lock``.
         self._save_entry(session_key)
         self._record_gateway_session_peer(peer_sid, session_key, peer_origin, display_name=peer_name)
+
+    def set_session_cwd(self, session_key: str, cwd_override: Optional[str]) -> Optional[SessionEntry]:
+        """Persist a working-directory binding for one chat/thread."""
+        normalized = str(cwd_override).strip() if cwd_override else None
+        with self._lock:
+            entry = self._entry_locked(session_key)
+            if entry is None:
+                return None
+            entry.cwd_override = normalized or None
+            entry.updated_at = _now()
+            self._save()
+            return entry
 
     def get_session_metadata(self, session_key: str, key: str, default: Any = None) -> Any:
         """Return a metadata value stored on a live session entry."""
@@ -1082,7 +1109,6 @@ class SessionStore(
                 session_key, old_entry, session_id, now,
                 display_name=display_name if display_name is not None else old_entry.display_name,
                 is_fresh_reset=True,
-                cwd_override=old_entry.cwd_override,
             )
             db_create_kwargs = self._session_create_kwargs(
                 session_id=session_id, session_key=session_key, origin=old_entry.origin,
@@ -1101,6 +1127,7 @@ class SessionStore(
         new_entry = SessionEntry(
             session_key=session_key, session_id=session_id, created_at=now, updated_at=now,
             origin=old_entry.origin, platform=old_entry.platform, chat_type=old_entry.chat_type,
+            cwd_override=old_entry.cwd_override,
             **fields,
         )
         self._entries[session_key] = new_entry

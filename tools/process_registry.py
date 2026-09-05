@@ -1045,10 +1045,10 @@ class ProcessRegistry:
             # the lead's declared length (3xx=2, 34x-35x=3, 36x-37x=4) exceeds the bytes
             # present, trim to before it. Complete sequences and ASCII tails untouched.
             f'N=0; P=$S; while [ "$P" -gt "$O" ] && [ "$N" -lt 3 ]; do '
-            f"B=$(tail -c +$P {quoted_log_path} 2>/dev/null | head -c 1 | od -An -to1 | tr -dc '0-9'); "
+            f"B=$(tail -c +$P {quoted_log_path} 2>/dev/null | head -c 1 | command -p od -An -to1 | tr -dc '0-9'); "
             f'case "$B" in 2[0-7][0-7]) P=$((P-1)); N=$((N+1));; *) break;; esac; done; '
             f'if [ "$N" -gt 0 ] || [ "$P" -eq "$S" ]; then '
-            f"B=$(tail -c +$P {quoted_log_path} 2>/dev/null | head -c 1 | od -An -to1 | tr -dc '0-9'); "
+            f"B=$(tail -c +$P {quoted_log_path} 2>/dev/null | head -c 1 | command -p od -An -to1 | tr -dc '0-9'); "
             f'case "$B" in 3[0-3][0-7]) L=2;; 3[4-5][0-7]) L=3;; 3[6-7][0-7]) L=4;; *) L=1;; esac; '
             f'if [ "$L" -gt $((N+1)) ]; then S=$((P-1)); fi; fi; '
             f'echo "$S $O"; '

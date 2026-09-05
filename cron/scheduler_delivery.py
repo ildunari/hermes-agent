@@ -1599,6 +1599,12 @@ def _deliver_result(
     standalone fallback. ``for_failure=True`` routes failure-category notices through the job's
     ``failure_deliver`` override when present (NS-788). Returns None on success, else an error."""
     targets = _resolve_delivery_targets(job, for_failure=for_failure)
+    from gateway.platform_registry import cron_delivery_validation_errors
+    target_validation_errors = cron_delivery_validation_errors(job, targets)
+    rejected_validation_errors = [error for error in target_validation_errors if error is not None]
+    if targets and len(rejected_validation_errors) == len(targets):
+        return "; ".join(rejected_validation_errors)
+
     if not targets:
         return _unresolved_delivery_outcome(job, for_failure)
 
@@ -1667,15 +1673,61 @@ def _deliver_result(
     _, mirror_text = BasePlatformAdapter.extract_media(content)
     mirror_text = (mirror_text or "").strip()
 
+    delivery_profile = job.get("delivery_profile")
     try:
-        config = load_gateway_config()
+        if delivery_profile is None:
+            config = load_gateway_config()
+        else:
+            # Poke owns the product-specific validation policy; core keeps only
+            # the small generic dispatch seam needed to honor a persisted cron
+            # delivery profile. Import lazily so installations without Poke are
+            # unchanged unless a job explicitly requests this feature.
+            from hermes_cli.plugins import discover_plugins, get_loaded_plugin_module
+
+            discover_plugins()
+            policy_plugin = get_loaded_plugin_module("poke")
+            validate_delegated_delivery = getattr(
+                policy_plugin, "validate_delegated_delivery", None
+            )
+            if not callable(validate_delegated_delivery):
+                raise RuntimeError(
+                    "delivery_profile requires the enabled Poke delivery policy plugin"
+                )
+
+            source_home = _sched._get_hermes_home().resolve()
+            if not targets:
+                raise ValueError("delegated delivery requires one explicit target")
+            first = targets[0]
+            if any(
+                target.get("platform") != first.get("platform")
+                or target.get("chat_id") != first.get("chat_id")
+                for target in targets
+            ):
+                raise ValueError("delegated delivery cannot fan out across destinations")
+            _, config, _, _ = validate_delegated_delivery(
+                source_home,
+                str(delivery_profile),
+                {
+                    "platform": str(first["platform"]),
+                    "address": str(first["chat_id"]),
+                    "target": str(job.get("deliver") or ""),
+                },
+            )
+            # Never borrow a source profile's adapter for delegated delivery;
+            # the operator profile is outbound-only and must not gain ingress.
+            adapters = None
     except Exception as e:
         msg = f"failed to load gateway config: {e}"
         logger.error("Job '%s': %s", job["id"], msg)
+        if rejected_validation_errors:
+            return "; ".join([*rejected_validation_errors, msg])
         return msg
 
-    delivery_errors = []
-    for target in targets:
+    delivery_errors = list(rejected_validation_errors)
+
+    for target_index, target in enumerate(targets):
+        if target_validation_errors[target_index] is not None:
+            continue
         # bot-chat targets bypass gateway adapters: output becomes an inbound turn in the target
         # profile's Bot Chat via the chat CLI lane. Must precede the Platform enum, which lacks it.
         if target["platform"] == BOT_CHAT_PLATFORM:

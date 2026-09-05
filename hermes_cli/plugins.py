@@ -458,6 +458,8 @@ class PluginContext:
         self, name: str, toolset: str, schema: dict, handler: Callable,
         check_fn: Callable | None = None, requires_env: list | None = None, is_async: bool = False,
         description: str = "", emoji: str = "", override: bool = False,
+        max_result_size_chars: int | float | None = None,
+        dynamic_schema_overrides: Callable | None = None,
     ) -> Optional[PluginRegistration]:
         """Register a tool in the global registry and track it as plugin-provided. ``override=True``
         replaces a same-named built-in (without it a name claimed by another toolset is rejected) and
@@ -485,6 +487,8 @@ class PluginContext:
             name=name, toolset=toolset, schema=schema, handler=handler, check_fn=check_fn,
             requires_env=requires_env, is_async=is_async, description=description, emoji=emoji,
             override=override, scope=scope,
+            max_result_size_chars=max_result_size_chars,
+            dynamic_schema_overrides=dynamic_schema_overrides,
         )
         registered = registry.snapshot_registration(name, scope=scope)
         handle = None
@@ -807,6 +811,11 @@ class PluginContext:
         )
         logger.debug("Plugin %s registered platform: %s", self.manifest.name, name)
         return handle
+
+    def register_gateway_conversation_extension(self, extension) -> Optional[PluginRegistration]:
+        """Register an atomic, profile-scoped conversation policy bundle."""
+        from gateway.plugin_extension_registration import register_plugin_conversation_extension
+        return register_plugin_conversation_extension(self, extension)
 
     def register_slack_action_handler(
         self, action_id: Any, callback: Callable,
@@ -2124,3 +2133,18 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+
+def get_loaded_plugin_module(plugin_id: str) -> Any | None:
+    """Return one enabled plugin's isolated module by key or manifest name.
+
+    Directory plugins are intentionally imported under ``hermes_plugins.*``;
+    callers must not assume their source directory is a top-level package.
+    """
+    manager = get_plugin_manager()
+    for key, loaded in manager._plugins.items():
+        if not loaded.enabled:
+            continue
+        if key == plugin_id or loaded.manifest.name == plugin_id:
+            return loaded.module
+    return None

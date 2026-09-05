@@ -61,6 +61,11 @@ def _patch_gateway_discovery():
     with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
          patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
          patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]), \
+         patch(
+             "hermes_cli.gateway.get_launchd_plist_path",
+             return_value=Path("/definitely-not-a-hermes-test-launchagent.plist"),
+         ), \
+         patch("hermes_cli.gateway.launchd_gateway_labels_for_install", return_value=[]), \
          patch("hermes_cli.update_inventory.collect_runtime_inventory", return_value=None), \
          patch("hermes_cli.update_inventory.report_unaccounted_runtimes", return_value=False), \
          patch.object(hermes_main, "_fleet_probe_expected_runtimes", lambda *a, **kw: False), \
@@ -96,6 +101,11 @@ def _setup_update_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(hermes_config, "migrate_config", lambda **kw: {"env_added": [], "config_added": []})
     monkeypatch.setattr(hermes_main, "_upgrade_pip_before_lazy_refresh", lambda *a, **kw: None)
     monkeypatch.setattr(hermes_main, "_refresh_active_lazy_features", lambda *a, **kw: True)
+    # Full update tests stop before the runtime reload/purge concerns. Those
+    # operations would rebuild hermes_cli.gateway and discard the mock seams
+    # used to keep the live launchd fleet out of the test.
+    monkeypatch.setattr(hermes_main, "_reload_updated_runtime_modules", lambda: None)
+    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda *a, **kw: None)
 
 
 

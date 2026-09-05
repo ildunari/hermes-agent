@@ -627,6 +627,9 @@ class GatewayStartupMixin:
                 loop_heartbeat_forever(
                     interval_s=DEFAULT_HEARTBEAT_INTERVAL_S,
                     start_time=getattr(self, "_gateway_started_at", 0.0),
+                    extra_provider=lambda: {
+                        "active_agents": self._active_work_count()
+                    },
                 )
             )
             # PERMANENT watcher tag so the scale-to-zero idle check doesn't count it as busy forever.
@@ -1238,6 +1241,10 @@ class GatewayStartupMixin:
     async def start(self) -> bool:
         """Start the gateway and all configured platform adapters."""
         logger.info("Starting Hermes Gateway...")
+        try:
+            self._install_conversation_extension_host()
+        except Exception:
+            logger.debug("could not install extension host operations", exc_info=True)
         self._start_install_faulthandler()
         self._start_log_startup_environment()
         if await self._abort_startup_if_shutdown_requested():
@@ -1283,6 +1290,15 @@ class GatewayStartupMixin:
             return True
         self.delivery_router.adapters = self.adapters
         self._wire_teams_pipeline_runtime()
+        try:
+            from gateway.conversation_extension_host import _mark_full_host_ready
+            _mark_full_host_ready()
+        except Exception:
+            logger.debug("could not release extension lifecycle tasks", exc_info=True)
+        try:
+            self._activate_conversation_extensions_for_served_profiles()
+        except Exception:
+            logger.error("conversation extension startup activation failed", exc_info=True)
         self._running = True
         self._install_plugin_message_injector()
         self._update_runtime_status("running")
