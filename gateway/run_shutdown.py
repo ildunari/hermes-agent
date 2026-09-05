@@ -1414,6 +1414,10 @@ class GatewayShutdownMixin:
         ctx.started_at = time.monotonic()
         self._running = False
         self._clear_plugin_message_injector()
+        try:
+            self._fire_extension_gateway_stop()
+        except Exception:
+            logger.debug("conversation extension gateway-stop teardown failed", exc_info=True)
         self._draining = True
         # getattr-guards: shutdown-path test doubles may lack the room worker / systemd watchdog.
         stop_room_worker = getattr(self, "_stop_hosted_room_worker", None)

@@ -2553,7 +2553,7 @@ def run_one_job(
                     if cancel_event is not None
                     else lost_ownership
                 ),
-                execution_token=execution_token))
+                execution_token=execution_token, probe_run_snapshot=probe_run_snapshot))
     finally:
         with _running_lock:
             executions = _running_fire_owners.get(job["id"])
@@ -2691,6 +2691,8 @@ class _RunDelivery:
     incident_acked: bool = False
     failure_incident_id: Optional[str] = None
     side_effect_ownership_lost: bool = False
+    probe_run_snapshot: Optional[dict] = None
+    deliver_content: str = ""
 
 
 def _save_compose_deliver(
@@ -2723,6 +2725,7 @@ def _save_compose_deliver(
         output_file=output_file)
     # Whitespace-only == empty: skip delivery; the guard below marks it a soft failure.
     d.should_deliver = bool(deliver_content.strip()) and not _silent_alert
+    d.deliver_content = deliver_content
     # Not a substring check: bare "SILENT"/"NO_REPLY" or a report quoting "[SILENT]" must
     # not be swallowed; bracketed-prefix / trailing-line tolerance is kept.
     if d.should_deliver and d.success and _is_cron_silence_response(deliver_content):
@@ -2787,6 +2790,14 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
     """mark_job_run (owner-fenced) + execution ledger row for a run that reached delivery."""
     job = d.job
     mark_kwargs = {"delivery_error": d.delivery_error}
+    snapshot = d.probe_run_snapshot
+    if snapshot is not None:
+        mark_kwargs["probe_run_snapshot"] = snapshot
+        nonce, generation = str(snapshot.get("nonce") or ""), str(snapshot.get("generation") or "")
+        if (nonce and generation and d.should_deliver and d.success and d.delivery_error is None
+                and d.deliver_content.strip() == f"HERMES_PROACTIVE_ALARM_PROBE_ACK_REQUEST {nonce} {generation}"
+                and job.get("deliver") == snapshot.get("target") and job.get("script") == snapshot.get("script")):
+            mark_kwargs["delivery_ack_metadata"] = dict(snapshot)
     if fire_owner is not None:
         mark_kwargs["expected_fire_owner"] = fire_owner
     if d.blocked_config:
@@ -2855,6 +2866,7 @@ def _run_one_job_body(
     job: dict, *, adapters=None, loop=None, verbose: bool = False,
     extra_prompt: Optional[str] = None, fire_claim_lost: Optional[_CancelEventLike] = None,
     execution_token: Optional[object] = None,
+    probe_run_snapshot: Optional[dict] = None,
 ) -> bool:
     fence = _FireOwnership(job, fire_claim_lost)
     fire_owner = fence.owner
@@ -2956,7 +2968,7 @@ def _run_one_job_body(
 
         # Agent is still live through delivery; wrap ALL of save/compose/deliver in try/finally so a
         # raise anywhere still tears the deferred agent down.
-        d = _RunDelivery(job=job, success=success, error=error)
+        d = _RunDelivery(job=job, success=success, error=error, probe_run_snapshot=probe_run_snapshot)
         try:
             _save_compose_deliver(
                 d, fence, final_response, output, adapters=adapters, loop=loop, verbose=verbose,

@@ -149,6 +149,66 @@ class GatewayInboundMixin:
             )
             return None
 
+        extension_runtime = None
+        extension_context = None
+        extension_scope = None
+        try:
+            from gateway import conversation_extension_runtime as extension_runtime
+
+            transport_profile = str(getattr(source, "profile", None) or "default")
+            transport_home = str(self._resolve_profile_home_for_source(source))
+            extension_scope, requirements_profile = self._admission_scope_for_source(source, transport_home)
+            if not self._extension_profile_is_ready(extension_scope):
+                logger.error(
+                    "Refusing inbound message: profile %s conversation extension "
+                    "startup is unready (%s)",
+                    transport_profile,
+                    self._extension_profile_unready_reason(extension_scope),
+                )
+                return None
+            from gateway.run import _load_gateway_config_for_profile
+            config_raw = _load_gateway_config_for_profile(
+                requirements_profile or getattr(source, "profile", None)
+            )
+            requirements_ok, reason = extension_runtime.profile_requirements_satisfied(
+                scope=extension_scope, config_raw=config_raw
+            )
+            if not requirements_ok:
+                logger.error(
+                    "Refusing inbound message: profile %s requires a conversation "
+                    "extension that is not available (%s)", transport_profile, reason,
+                )
+                return None
+            extension_context = extension_runtime.build_route_context(
+                event, transport_profile=transport_profile, transport_home=transport_home
+            )
+            if extension_context is not None:
+                decision = extension_runtime.admit_and_route(
+                    extension_context,
+                    scope=extension_scope,
+                    served_profiles=tuple(self._served_profile_names()),
+                    permitted_routes=self._permitted_extension_routes(),
+                )
+                if decision is not None and not decision.admitted:
+                    logger.warning(
+                        "Conversation extension denied inbound message (%s)",
+                        decision.reason or "denied",
+                    )
+                    return None
+                if decision is not None:
+                    source, event = self._apply_extension_route_decision_safe(source, event, decision)
+                    event.metadata["_conversation_extension_route"] = {
+                        "scope": extension_scope,
+                        "context": extension_context,
+                        "decision": decision,
+                    }
+        except Exception:
+            # Admission is a security/identity boundary. The extension contract
+            # requires denials and errors to drop the message; continuing would
+            # bypass required Poke/Guest routing and tool policy.
+            logger.warning("Dropping inbound message: conversation-extension admission failed", exc_info=True)
+            return None
+
         is_internal = bool(getattr(event, "internal", False))  # e.g. background-process notifications
 
         # Ignored-channel guard runs FIRST — before startup-restore queueing, plugin hooks, auth,
@@ -195,6 +255,15 @@ class GatewayInboundMixin:
                 and self._get_unauthorized_dm_behavior(source.platform, profile=source.profile) == "pair"
             ):
                 await self._hm_offer_pairing_code(source)
+            return None
+        if extension_context is not None and extension_scope and extension_runtime is not None:
+            try:
+                extension_runtime.observe_authenticated_ingress(
+                    extension_context, scope=extension_scope
+                )
+            except Exception:
+                logger.debug("conversation extension ingress observation failed", exc_info=True)
+        if getattr(event, "observed_only", False):
             return None
         return event, source, False
 

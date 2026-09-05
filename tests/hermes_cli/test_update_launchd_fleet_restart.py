@@ -213,6 +213,14 @@ class TestGetServicePidsScoping:
         monkeypatch.setattr(
             gw, "_locate_launchd_gateway_service", lambda label: located[label]
         )
+        # The implementation also performs a defensive launchctl list prefix scan
+        # after the exact per-label probes. Keep that scan hermetic; the exact
+        # label fixtures above remain the behavior under test.
+        monkeypatch.setattr(
+            gw.subprocess,
+            "run",
+            lambda *args, **kwargs: _completed(0, ""),
+        )
 
     def test_all_profiles_returns_every_gateway_service_pid(self, monkeypatch):
         """The update sweep's exclude-set must protect ALL freshly-restarted
@@ -289,6 +297,14 @@ def _fleet(monkeypatch, tmp_path, *, current, labels, located,
     monkeypatch.setattr(gw, "get_launchd_plist_path", lambda: plist)
     monkeypatch.setattr(gw, "launchd_gateway_labels_for_install", lambda: list(labels))
     monkeypatch.setattr(gw, "_locate_launchd_gateway_service", fake_locate)
+    # The implementation also performs a defensive launchctl list prefix scan
+    # after the exact per-label probes. Keep that scan hermetic; the exact
+    # label fixtures above remain the behavior under test.
+    monkeypatch.setattr(
+        gw.subprocess,
+        "run",
+        lambda *args, **kwargs: _completed(0, ""),
+    )
     monkeypatch.setattr(gw, "_launchd_service_registered", fake_registered)
     monkeypatch.setattr(
         gw,
@@ -646,9 +662,12 @@ class TestIncompleteWarningMentionsLaunchctl:
         _warn_incomplete_gateway_fleet_restart(["ai.hermes.gateway-merit-ops"])
         out = capsys.readouterr().out
         assert "Update incomplete" in out
-        assert "launchctl kickstart -k" in out
+        assert "launchctl bootstrap" in out
 
-    def test_systemd_units_keep_systemctl_hint(self, capsys):
+    def test_systemd_units_keep_systemctl_hint(self, monkeypatch, capsys):
+        # This test exercises the non-macOS branch while the suite runs on the
+        # Mac Studio; production selects the branch from the live platform.
+        monkeypatch.setattr(gw, "is_macos", lambda: False)
         _warn_incomplete_gateway_fleet_restart(["hermes-gateway-coder"])
         out = capsys.readouterr().out
         assert "systemctl" in out

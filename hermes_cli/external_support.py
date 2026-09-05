@@ -29,7 +29,7 @@ def _root_hermes_home() -> Path:
     try:
         import pwd
 
-        account_home = str(pwd.getpwuid(os.getuid()).pw_dir or "").strip()
+        account_home = str(pwd.getpwuid(os.getuid()).pw_dir or "").strip()  # windows-footgun: ok — pwd import gates POSIX
         if account_home:
             return Path(account_home) / ".hermes"
     except (ImportError, KeyError, OSError):

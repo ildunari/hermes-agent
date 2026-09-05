@@ -2241,6 +2241,10 @@ def mark_job_run(
     can't be taken, the job is missing, or ``expected_fire_owner`` no longer holds the fire claim.
     """
     def apply(jobs, _i, job):
+        current_binding = job.get("probe_binding")
+        completion_binding = probe_run_snapshot if probe_run_snapshot is not None else delivery_ack_metadata
+        if isinstance(completion_binding, dict) and completion_binding != current_binding:
+            return False
         if expected_fire_owner is not None:
             claim = job.get("fire_claim")
             if not isinstance(claim, dict) or claim.get("by") != expected_fire_owner:
@@ -2250,6 +2254,9 @@ def mark_job_run(
                 return False
         now = _hermes_now().isoformat()
         _record_run_outcome(job, success, error, delivery_error, status, now)
+        if (success and delivery_error is None and isinstance(delivery_ack_metadata, dict)
+                and isinstance(current_binding, dict) and delivery_ack_metadata == current_binding):
+            job["last_probe_delivery_ack"] = {**delivery_ack_metadata, "run_at": now}
         _advance_after_run(job, now)
         save_jobs(jobs)
         return True

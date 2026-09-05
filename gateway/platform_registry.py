@@ -84,6 +84,7 @@ class PlatformEntry:
     # after the shared-key loop, before ``_apply_env_overrides``. May set ``os.environ`` (guard
     # with ``not os.getenv(...)`` to keep env > YAML). Contract: docs/developer-guide/adding-platform-adapters.md.
     apply_yaml_config_fn: Optional[Callable[[dict, dict], Optional[dict]]] = None
+    cron_delivery_validator_fn: Optional[Callable[[dict, dict], bool | str]] = None
     cron_deliver_env_var: str = ""  # home-channel env var read for cron ``deliver=<name>``
     # ``(target_ref) -> Optional[(chat_id, thread_id)]`` run before channel-directory
     # fallback so plugins can declare native target syntax; None = continue resolution.
@@ -385,3 +386,58 @@ class PlatformRegistry:
 
 # Module-level singleton
 platform_registry = PlatformRegistry()
+
+
+def cron_delivery_validation_errors(
+    job: dict,
+    targets: list[dict],
+) -> list[Optional[str]]:
+    """Run ``PlatformEntry.cron_delivery_validator_fn`` for each target."""
+    try:
+        from hermes_cli.plugins import discover_plugins
+
+        discover_plugins()  # idempotent; materializes user platform overrides
+    except Exception:
+        logger.debug("Cron delivery plugin discovery failed", exc_info=True)
+
+    errors: list[Optional[str]] = []
+    for target in targets:
+        platform_name = str(target.get("platform") or "").strip().lower()
+        try:
+            entry = platform_registry.get(platform_name) if platform_name else None
+        except Exception:
+            logger.debug(
+                "Cron delivery platform lookup failed for %s",
+                platform_name or "<missing>",
+                exc_info=True,
+            )
+            entry = None
+        validator = getattr(entry, "cron_delivery_validator_fn", None) if entry else None
+        if validator is None:
+            errors.append(None)
+            continue
+
+        try:
+            result = validator(dict(job), dict(target))
+        except Exception as exc:
+            errors.append(
+                f"cron delivery validator for platform '{platform_name}' failed closed "
+                f"after raising {type(exc).__name__}"
+            )
+            continue
+
+        if result is True:
+            errors.append(None)
+        elif result is False:
+            errors.append(
+                f"cron delivery validator rejected target {platform_name}:"
+                f"{target.get('chat_id', '')}"
+            )
+        elif isinstance(result, str) and result.strip():
+            errors.append(result.strip())
+        else:
+            errors.append(
+                f"cron delivery validator for platform '{platform_name}' failed closed "
+                f"after returning malformed {type(result).__name__} result"
+            )
+    return errors

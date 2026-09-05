@@ -122,6 +122,7 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     monkeypatch.setattr(update_cmd_deps, "_update_node_dependencies", lambda: [])
     monkeypatch.setattr(update_cmd, "_purge_stale_hermes_modules", lambda: None)
     monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
+    monkeypatch.setattr(hermes_main, "_reload_updated_runtime_modules", lambda: None)
 
     import hermes_cli.gateway as hermes_gateway
 
@@ -132,6 +133,12 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     monkeypatch.setattr(
         hermes_gateway, "find_profile_gateway_processes", lambda *a, **k: []
     )
+    monkeypatch.setattr(
+        hermes_gateway,
+        "get_launchd_plist_path",
+        lambda: tmp_path / "absent-hermes-test-launchagent.plist",
+    )
+    monkeypatch.setattr(hermes_gateway, "launchd_gateway_labels_for_install", lambda: [])
     monkeypatch.setattr(
         "hermes_cli.update_receipt.collect_fleet_versions",
         lambda **k: [],

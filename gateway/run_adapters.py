@@ -17,7 +17,7 @@ import os
 import time
 import weakref as _weakref
 from agent.async_utils import consume_detached_task_result
-from contextvars import Context
+from contextvars import Context, copy_context
 from datetime import datetime, timedelta, timezone
 from gateway.config import Platform, platform_binds_port as _platform_binds_port
 from gateway.platforms.base import BasePlatformAdapter
@@ -486,7 +486,9 @@ class GatewayAdapterLifecycleMixin:
             """One poll of the CURRENTLY-SCOPED store; ``profile_name`` (None = root) routes delivery
             to that profile's OWN adapter. A closure, not a method: tests bind ``_handoff_watcher`` onto
             a ``SimpleNamespace`` with only ``_session_db``/``_running``/``_process_handoff``."""
-            session_db = getattr(self, "_session_db", None)
+            session_db = await asyncio.to_thread(
+                copy_context().run, getattr, self, "_session_db", None
+            )
             if session_db is None:
                 return
             pending = await session_db.list_pending_handoffs()
@@ -1363,25 +1365,25 @@ class GatewayAdapterLifecycleMixin:
 
     def _make_profile_platform_event_handler(self, profile_name: str):
         """Bind platform-event auth and hook dispatch to one multiplex profile."""
-        from gateway.run import _profile_runtime_scope
+        from gateway.run import _async_profile_runtime_scope
         profile_home = self._profile_home_or_none(profile_name)
 
         async def _handler(event, source):
             if getattr(source, "profile", None) is None:
                 source.profile = profile_name
-            with self._scope_or_null(_profile_runtime_scope, profile_home):
+            async with self._scope_or_null(_async_profile_runtime_scope, profile_home):
                 return await self._handle_gateway_platform_event(event, source)
 
         return _handler
 
     def _make_default_profile_platform_event_handler(self):
         """Scope primary-transport events to their routed multiplex profile."""
-        from gateway.run import _profile_runtime_scope, get_hermes_home
+        from gateway.run import _async_profile_runtime_scope, get_hermes_home
         default_home = Path(get_hermes_home())
 
         async def _handler(event, source):
             source._authorization_profile_home = default_home
-            with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
+            async with _async_profile_runtime_scope(self._resolve_profile_home_for_source(source)):
                 return await self._handle_gateway_platform_event(event, source)
 
         return _handler

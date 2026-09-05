@@ -4,6 +4,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 
 import pytest
@@ -50,6 +51,14 @@ def test_real_binaries_execute_leading_dash_program_payload(
     if shutil.which(tool) is None or (needs_tty and shutil.which("script") is None):
         pytest.skip(f"{tool} or script is not installed")
 
+    # The modeled flags below belong to GNU sort/man-db. BSD utilities do
+    # not implement the same executable-option grammar.
+    if tool in {"sort", "man"}:
+        version = subprocess.run([tool, "--version"], capture_output=True, text=True)
+        expected = "GNU" if tool == "sort" else "man-db"
+        if expected not in version.stdout:
+            pytest.skip(f"{tool} lacks the required {expected} implementation")
+
     marker = tmp_path / "executed"
     payload = tmp_path / "-payload-marker"
     payload.write_text("#!/bin/sh\nprintf executed > \"$MARKER\"\ncat\n")
@@ -70,7 +79,8 @@ def test_real_binaries_execute_leading_dash_program_payload(
     }
     argv = [tool, *resolved_args]
     if needs_tty:
-        argv = ["script", "-qec", shlex.join(argv), "/dev/null"]
+        argv = (["script", "-q", "/dev/null", *argv] if sys.platform == "darwin"
+                else ["script", "-qec", shlex.join(argv), "/dev/null"])
 
     subprocess.run(argv, input=input_text, text=True, capture_output=True, env=env, timeout=20)
 

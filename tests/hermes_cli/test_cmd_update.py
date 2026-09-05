@@ -90,9 +90,18 @@ def _patch_gateway_discovery():
     Discovery returning nothing makes the phase a clean no-op for every test
     in this module (none of them assert on gateway restarts).
     """
+    from pathlib import Path
+
     with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
          patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
-         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]):
+         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]), \
+         patch(
+             "hermes_cli.gateway.get_launchd_plist_path",
+             return_value=Path("/definitely-not-a-hermes-test-launchagent.plist"),
+         ), \
+         patch("hermes_cli.gateway.launchd_gateway_labels_for_install", return_value=[]), \
+         patch("hermes_cli.main._reload_updated_runtime_modules"), \
+         patch("hermes_cli.main._purge_stale_hermes_modules"):
         yield
 
 
