@@ -618,3 +618,19 @@ paths:
       runtime_caller: SSH token adoption after web server module import
       interface_test: headless post-mount token regression and auth checks
       artifact: real SSH bootstrap token rejected before fix; seven focused tests pass
+  - path: apps/desktop/src/app/settings/gateway-settings.tsx
+    disposition: upstream
+    owner: preserve explicit clearing of SSH identity overrides
+    evidence:
+      registration: Desktop connection settings save payload
+      runtime_caller: save and reconnect preserves blank rather than omitted SSH key
+      interface_test: GatewaySettings clearing saved key regression
+      artifact: focused component tests passed; signed Desktop deployment receipt
+  - path: apps/desktop/src/app/settings/gateway-settings.test.tsx
+    disposition: upstream
+    owner: preserve explicit clearing of SSH identity overrides
+    evidence:
+      registration: Desktop connection settings save payload
+      runtime_caller: save and reconnect preserves blank rather than omitted SSH key
+      interface_test: GatewaySettings clearing saved key regression
+      artifact: focused component tests passed; signed Desktop deployment receipt
