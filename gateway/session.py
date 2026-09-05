@@ -622,6 +622,8 @@ def is_shared_multi_user_session(
     isolation rules in :func:`build_session_key`)."""
     if source.chat_type == "dm":
         return False
+    if source.platform == Platform.BLUEBUBBLES and source.chat_type == "group":
+        return True
     return not (thread_sessions_per_user if source.thread_id else group_sessions_per_user)
 
 
@@ -653,6 +655,15 @@ def build_session_key(
     session per platform. Groups add the participant id only when ``group_sessions_per_user`` and
     not in a thread (threads are shared unless ``thread_sessions_per_user``).
     """
+    # Routed BlueBubbles groups retain one conversation per profile, not per sender.
+    if source.platform == Platform.BLUEBUBBLES and source.chat_type == "group":
+        group_ns = _session_key_namespace(
+            str(source.chat_id_alt).split(":", 1)[1]
+            if str(source.chat_id_alt or "").startswith("hermes-profile:") else profile
+        )
+        return ":".join([group_ns, source.platform.value, source.chat_type]
+                        + ([source.chat_id] if source.chat_id else [])
+                        + ([source.thread_id] if source.thread_id else []))
     is_dm = source.chat_type == "dm"
     chat_id = source.chat_id
     if is_dm and source.platform == Platform.WHATSAPP:

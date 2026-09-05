@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 63
-  total_changed_lines: 4643
-  modified_upstream_lines: 993
+  paths: 74
+  total_changed_lines: 4983
+  modified_upstream_lines: 1285
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -257,7 +257,11 @@ paths:
   - path: tests/computer_use/test_cua_no_overlay.py
     disposition: must-carry
     owner: isolated overlay policy fixture with separate macOS identity tests
-    evidence: *command
+    evidence:
+      registration: computer-use overlay policy test fixture
+      runtime_caller: embedded CUA daemon startup
+      interface_test: test_cua_no_overlay and test_computer_use_cua_macos_identity
+      artifact: focused 92-test continuation PASS receipt
   - path: tests/gateway/test_keep_drain_freshness_glue.py
     disposition: must-carry
     owner: core gateway lifecycle tests
@@ -321,4 +325,48 @@ paths:
   - path: tools/send_message_registry.py
     disposition: upstream
     owner: core platform registry
+    evidence: *bluebubbles
+  - path: agent/agent_runtime_helpers.py
+    disposition: must-carry
+    owner: generic provider profile runtime seam
+    evidence: *provider
+  - path: agent/chat_completion_helpers.py
+    disposition: must-carry
+    owner: generic provider profile runtime seam
+    evidence: *provider
+  - path: agent/transports/chat_completions.py
+    disposition: must-carry
+    owner: generic provider profile runtime seam
+    evidence: *provider
+  - path: apps/desktop/electron/remote-lifecycle.test.ts
+    disposition: must-carry
+    owner: portable managed Desktop update mutex
+    evidence: *desktop
+  - path: apps/desktop/electron/remote-lifecycle.ts
+    disposition: must-carry
+    owner: portable managed Desktop update mutex
+    evidence: *desktop
+  - path: cron/scheduler_delivery.py
+    disposition: must-carry
+    owner: generic validated cron delivery seam
+    evidence: *proactive_alarm
+  - path: gateway/config_env.py
+    disposition: must-carry
+    owner: explicit platform disable remains authoritative
+    evidence: *conversation
+  - path: gateway/platform_registry.py
+    disposition: must-carry
+    owner: generic validated cron delivery seam
+    evidence: *proactive_alarm
+  - path: hermes_cli/commands_platforms.py
+    disposition: must-carry
+    owner: platform command menu capacity
+    evidence: *command
+  - path: hermes_cli/runtime_provider.py
+    disposition: must-carry
+    owner: generic provider profile runtime seam
+    evidence: *provider
+  - path: tools/send_message_tool.py
+    disposition: must-carry
+    owner: registry-first plugin message delivery
     evidence: *bluebubbles
