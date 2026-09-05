@@ -634,3 +634,23 @@ paths:
       runtime_caller: save and reconnect preserves blank rather than omitted SSH key
       interface_test: GatewaySettings clearing saved key regression
       artifact: focused component tests passed; signed Desktop deployment receipt
+  - path: apps/desktop/electron/main.ts
+    disposition: upstream
+    owner: installed Desktop identity independent of local backend checkout
+    evidence: *desktop
+  - path: apps/desktop/src/app/shell/hooks/use-statusbar-items.tsx
+    disposition: upstream
+    owner: installed Desktop identity independent of local backend checkout
+    evidence: *desktop
+  - path: apps/desktop/src/global.d.ts
+    disposition: upstream
+    owner: installed Desktop identity independent of local backend checkout
+    evidence: *desktop
+  - path: apps/desktop/src/lib/version-status.ts
+    disposition: upstream
+    owner: installed Desktop identity independent of local backend checkout
+    evidence: *desktop
+  - path: apps/desktop/src/lib/version-status.test.ts
+    disposition: upstream
+    owner: installed Desktop identity independent of local backend checkout
+    evidence: *desktop

@@ -13,6 +13,19 @@ const backend = (over: Partial<Parameters<typeof resolveVersionStatus>[0]> = {})
   resolveVersionStatus({ applying: false, copy, remote: true, restarting: false, target: 'backend', ...over })
 
 describe('resolveVersionStatus', () => {
+  it('uses the installed client stamp instead of an unrelated backend checkout count', () => {
+    const status = client({ remote: true, version: '0.21.0', sha: 'bb84ee2', behind: 5021,
+      updateAvailable: true, installedCommit: '41821517932bb6a73a5e2150ed6424ef2db17d37' })
+    expect(status.label).toBe('client v0.21.0')
+    expect(status.detail).toBe('4182151')
+    expect(status.tooltip).not.toContain('5021')
+  })
+
+  it('retains known counts when the checkout matches the installed build', () => {
+    expect(client({ version: '0.21.0', sha: '4182151', behind: 24,
+      installedCommit: '41821517932bb6a73a5e2150ed6424ef2db17d37' }).label).toBe('v0.21.0 (+24)')
+  })
+
   it('labels a current local client with its version and sha detail', () => {
     const status = client({ sha: 'abc1234', version: '0.4.2' })
 
