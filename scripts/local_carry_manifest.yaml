@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 94
-  total_changed_lines: 5396
-  modified_upstream_lines: 1538
+  paths: 98
+  total_changed_lines: 5518
+  modified_upstream_lines: 1615
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -530,3 +530,19 @@ paths:
       runtime_caller: state maintenance and scratch validation
       interface_test: resumed seven fixtures and Darwin holder regression suite
       artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: apps/desktop/scripts/after-pack.mjs
+    disposition: must-carry
+    owner: external machine-local signing hook
+    evidence: *desktop
+  - path: apps/desktop/scripts/after-pack.test.mjs
+    disposition: must-carry
+    owner: external machine-local signing hook
+    evidence: *desktop
+  - path: tests/test_hermes_state.py
+    disposition: must-carry
+    owner: portable current-runtime fixture
+    evidence: *ratchet
+  - path: tests/tools/test_file_tools.py
+    disposition: must-carry
+    owner: portable current-runtime fixture
+    evidence: *ratchet
