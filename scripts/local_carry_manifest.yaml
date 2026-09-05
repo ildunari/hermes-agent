@@ -79,6 +79,42 @@ evidence_templates:
     artifact: signed Studio and MacBook bundles with exact commit stamps
 
 paths:
+  - path: agent/subagent_lifecycle.py
+    disposition: upstream
+    owner: generic trusted detached subagent lifecycle
+    evidence: *conversation
+  - path: agent/subagent_lifecycle_detached.py
+    disposition: upstream
+    owner: generic trusted detached subagent lifecycle
+    evidence: *conversation
+  - path: agent/tool_executor.py
+    disposition: upstream
+    owner: generic trusted detached subagent lifecycle
+    evidence: *conversation
+  - path: model_tools.py
+    disposition: upstream
+    owner: generic trusted detached subagent lifecycle
+    evidence: *conversation
+  - path: tools/delegate_tool.py
+    disposition: upstream
+    owner: generic trusted detached subagent lifecycle
+    evidence: *conversation
+  - path: tools/delegate_tool_child_run.py
+    disposition: upstream
+    owner: generic trusted detached subagent lifecycle
+    evidence: *conversation
+  - path: tests/agent/test_subagent_lifecycle_detached.py
+    disposition: upstream
+    owner: generic trusted detached subagent lifecycle
+    evidence: *conversation
+  - path: tests/gateway/test_detached_subagent_facade.py
+    disposition: upstream
+    owner: generic trusted detached subagent lifecycle
+    evidence: *conversation
+  - path: website/docs/developer-guide/subagent-lifecycle-api.md
+    disposition: upstream
+    owner: generic trusted detached subagent lifecycle
+    evidence: *conversation
   - path: apps/desktop/electron/managed-ssh-update.test.ts
     disposition: upstream
     owner: portable POSIX managed-update contract test

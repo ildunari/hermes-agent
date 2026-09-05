@@ -76,6 +76,7 @@ _FACADE_CAPABILITY_REQUIREMENTS = {
     "call_auxiliary_model": "auxiliary_model",
     "web_search": "web_research",
     "list_cron_jobs": "health",
+    "bind_subagent_session": "detached_subagents",
 }
 
 # Capabilities that are host-granted rather than callback-backed. A plugin
@@ -88,6 +89,7 @@ _HOST_GRANTED_CAPABILITIES = frozenset(
         "authenticated_dm",
         "auxiliary_model",
         "web_research",
+        "detached_subagents",
     }
 )
 
@@ -385,12 +387,37 @@ class AuthenticatedDmRequest:
     expected_route_fingerprint: str = ""
     profile_name: str = ""
     session_id: str = ""
+    attachments: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("platform", "chat_id", "text", "reservation_key"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} is required")
+        from pathlib import Path
+        if (not isinstance(self.attachments, tuple) or len(self.attachments) > 10
+                or any(not isinstance(p, str) or not p or len(p) > 4096
+                       or "\x00" in p or not Path(p).is_absolute() for p in self.attachments)):
+            raise ValueError("attachments must contain at most ten absolute local file paths")
+
+
+@dataclass(frozen=True)
+class SubagentSessionRequest:
+    """Assertions checked by the host against an existing authenticated origin.
+
+    A multiplex host may resolve a different runtime profile only when the saved
+    session's routing authority permits it. This request grants no authority.
+    """
+    session_key: str
+    parent_session_id: str
+    runtime_profile: str
+    scope_id: str
+    principal: str
+
+    def __post_init__(self):
+        if any(not isinstance(v, str) or not v.strip() or len(v) > 4096
+               for v in (self.session_key, self.parent_session_id, self.runtime_profile, self.scope_id, self.principal)):
+            raise ValueError("All detached session assertions are required")
 
 
 @dataclass(frozen=True)
@@ -468,6 +495,7 @@ class GatewayHostOperations:
     #: would stall every other conversation. The host owns the thread pool;
     #: the extension only supplies the callable.
     run_blocking: Optional[Callable[..., Any]] = None
+    bind_subagent_session: Optional[Callable[[SubagentSessionRequest], Any]] = None
 
 
 class GatewayRuntimeFacade:
@@ -547,6 +575,23 @@ class GatewayRuntimeFacade:
         return getattr(live, name, None) or getattr(self._host, name, None)
 
     # -- bounded actions ---------------------------------------------------
+
+    def bind_subagent_session(self, request: SubagentSessionRequest):
+        """Resolve saved authority through the host; never use an active-turn ContextVar."""
+        self._require("bind_subagent_session")
+        if not isinstance(request, SubagentSessionRequest):
+            raise ValueError("Expected SubagentSessionRequest")
+        bind = self._operation("bind_subagent_session")
+        if bind is None:
+            raise CapabilityDenied("Host does not provide detached session reconstruction")
+        result = bind(request)
+        from agent.subagent_lifecycle_detached import SubagentSessionBinding
+        if (not isinstance(result, SubagentSessionBinding)
+                or result.identity.session_id != request.parent_session_id
+                or result.identity.scope_id != request.scope_id
+                or result.identity.principal != request.principal):
+            raise CapabilityDenied("Host returned a mismatched detached session binding")
+        return result
 
     def spawn_lifecycle_task(
         self, task_key: str, factory: Callable[[], Any]
@@ -1625,6 +1670,7 @@ __all__ = [
     "GatewayTurnResult",
     "InitiatedTurnRequest",
     "InitiatedTurnContext",
+    "SubagentSessionRequest",
     "WebSearchRequest",
     "KNOWN_CAPABILITIES",
     "LifecycleTaskRegistry",

@@ -819,6 +819,10 @@ def handle_function_call(
         function_args = {}
     trace = list(tool_request_middleware_trace or [])
     function_name = _LEGACY_TOOL_ALIASES.get(function_name, function_name)
+    from agent.subagent_lifecycle_detached import manager as detached_lifecycle
+    denial = detached_lifecycle.tool_denial(task_id, function_name)
+    if denial:
+        return json.dumps({"error": denial})
     ids = _CallIds(task_id, session_id, tool_call_id, turn_id, api_request_id)
     start = time.monotonic()
 

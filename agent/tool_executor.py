@@ -650,6 +650,9 @@ def _dispatch_authorized_once(
 
     block_message, block_error_type = scope_block, "tool_scope_block"
     if block_message is None:
+        from agent.subagent_lifecycle_detached import manager as detached_lifecycle
+        block_message = detached_lifecycle.tool_denial(getattr(agent, "_subagent_id", None), ref.name)
+    if block_message is None:
         block_error_type = "plugin_block"
         resolve = lambda: _pre_tool_block(agent, ref)  # noqa: E731
         block_message, ref.args = resolve() if authorization_gate is None else authorization_gate.run(resolve)

@@ -58,6 +58,11 @@ class SubagentLaunchRequest:
     correlation_id: Optional[str] = None
     metadata: Mapping[str, Any] = dataclasses.field(default_factory=dict)
     timeout_seconds: Optional[float] = None
+    provider: Optional[str] = None
+    base_url: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+    job_id: Optional[str] = None
+    deadline_at: Optional[float] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -242,6 +247,35 @@ class SubagentLifecycleService:
     def __init__(self, parent_agent_resolver: Callable[[], Any]) -> None:
         self._parent_agent_resolver = parent_agent_resolver
 
+    def bind_session(self, identity, *, parent_factory, notification_target):
+        """Host-only registration of authenticated immutable reconstruction context.
+
+        Plugins obtain the resulting token through the registered gateway facade;
+        factories are trusted host code, never model tool arguments.
+        """
+        from agent.subagent_lifecycle_detached import manager
+        return manager.bind(identity, parent_factory, notification_target)
+
+    def detached_launch(self, binding, request):
+        from agent.subagent_lifecycle_detached import manager
+        return manager.launch(binding, request)
+
+    def detached_status(self, binding, handle):
+        from agent.subagent_lifecycle_detached import manager
+        return manager.operation(binding, handle, "status")
+
+    def detached_result(self, binding, handle):
+        from agent.subagent_lifecycle_detached import manager
+        return manager.operation(binding, handle, "result")
+
+    def detached_cancel(self, binding, handle, *, reason):
+        from agent.subagent_lifecycle_detached import manager
+        return manager.cancel(binding, handle, reason)
+
+    def detached_steer(self, binding, handle, *, text):
+        from agent.subagent_lifecycle_detached import manager
+        return manager.steer(binding, handle, text)
+
     def launch(self, request: SubagentLaunchRequest) -> SubagentHandle:
         parent = self._parent_agent_resolver()
         if parent is None:
@@ -257,11 +291,15 @@ class SubagentLifecycleService:
                 raise SubagentLifecycleError("Duplicate correlation_id for this parent session.")
         # Lazy: delegate construction stays internal, plugins never import private delegation helpers.
         from tools.delegate_tool import _build_child_preserving_parent_tools, DEFAULT_MAX_ITERATIONS
-        child = _build_child_preserving_parent_tools(
-            task_index=0, goal=request.goal, context=request.context,
-            toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
-            model=request.model, max_iterations=DEFAULT_MAX_ITERATIONS, task_count=1, parent_agent=parent, role=request.role,
-        )
+        if any(value is not None for value in (request.provider, request.base_url, request.reasoning_effort)):
+            from agent.subagent_lifecycle_detached import build_child
+            child = build_child(parent, request)
+        else:
+            child = _build_child_preserving_parent_tools(
+                task_index=0, goal=request.goal, context=request.context,
+                toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
+                model=request.model, max_iterations=DEFAULT_MAX_ITERATIONS, task_count=1, parent_agent=parent, role=request.role,
+            )
         subagent_id = str(getattr(child, "_subagent_id", "") or "")
         if not subagent_id:
             raise SubagentLifecycleError("Hermes failed to assign a child identity.")
@@ -368,7 +406,9 @@ class SubagentLifecycleService:
             is_dict = isinstance(raw, dict)
             raw = raw if is_dict else {}
             status = str(raw.get("status", "error"))
-            if status == "interrupted":
+            if record.state == SubagentState.CANCEL_REQUESTED:
+                state = SubagentState.CANCELLED
+            elif status == "interrupted":
                 state = SubagentState.CANCELLED if record.state == SubagentState.CANCEL_REQUESTED else SubagentState.INTERRUPTED
             else:
                 state = SubagentState.SUCCEEDED if status == "completed" else SubagentState.FAILED
