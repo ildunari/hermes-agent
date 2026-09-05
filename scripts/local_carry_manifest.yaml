@@ -21,10 +21,14 @@ required_support:
   - support/hermes-runtime-support/src/hermes_runtime_support/alias_billing_guard.py
   - support/hermes-runtime-support/src/hermes_runtime_support/authenticated_dm.py
   - support/hermes-runtime-support/src/hermes_runtime_support/cli_command_context.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extensions.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extension_host.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extension_runtime.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_ownership.py
   - support/hermes-runtime-support/src/hermes_runtime_support/gateway_command_context.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/subagent_lifecycle.py
+  - support/hermes-runtime-support/docs/subagent-lifecycle.md
+  - support/hermes-runtime-support/tests/test_subagent_lifecycle.py
 
 evidence_templates:
   provider: &provider
@@ -79,42 +83,6 @@ evidence_templates:
     artifact: signed Studio and MacBook bundles with exact commit stamps
 
 paths:
-  - path: agent/subagent_lifecycle.py
-    disposition: upstream
-    owner: generic trusted detached subagent lifecycle
-    evidence: *conversation
-  - path: agent/subagent_lifecycle_detached.py
-    disposition: upstream
-    owner: generic trusted detached subagent lifecycle
-    evidence: *conversation
-  - path: agent/tool_executor.py
-    disposition: upstream
-    owner: generic trusted detached subagent lifecycle
-    evidence: *conversation
-  - path: model_tools.py
-    disposition: upstream
-    owner: generic trusted detached subagent lifecycle
-    evidence: *conversation
-  - path: tools/delegate_tool.py
-    disposition: upstream
-    owner: generic trusted detached subagent lifecycle
-    evidence: *conversation
-  - path: tools/delegate_tool_child_run.py
-    disposition: upstream
-    owner: generic trusted detached subagent lifecycle
-    evidence: *conversation
-  - path: tests/agent/test_subagent_lifecycle_detached.py
-    disposition: upstream
-    owner: generic trusted detached subagent lifecycle
-    evidence: *conversation
-  - path: tests/gateway/test_detached_subagent_facade.py
-    disposition: upstream
-    owner: generic trusted detached subagent lifecycle
-    evidence: *conversation
-  - path: website/docs/developer-guide/subagent-lifecycle-api.md
-    disposition: upstream
-    owner: generic trusted detached subagent lifecycle
-    evidence: *conversation
   - path: apps/desktop/electron/managed-ssh-update.test.ts
     disposition: upstream
     owner: portable POSIX managed-update contract test

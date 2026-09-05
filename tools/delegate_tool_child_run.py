@@ -645,7 +645,7 @@ class _ChildRun:
         from tools.delegate_tool import (_get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb)
         from tools.daemon_pool import DaemonThreadPoolExecutor
         child, task_index = self.child, self.task_index
-        child_timeout = None if getattr(self.child, "_lifecycle_owns_deadline", False) else _get_child_timeout()
+        child_timeout = _get_child_timeout()
         executor = DaemonThreadPoolExecutor(
             max_workers=1, initializer=_set_subagent_approval_cb, initargs=(_get_subagent_approval_callback(),),
         )

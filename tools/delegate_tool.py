@@ -123,7 +123,6 @@ def _build_child_agent(
     override_acp_args: Optional[List[str]] = None,
     # Legacy; accepted for wire compat but ignored (capability is depth-derived).
     role: str = "leaf",
-    override_reasoning_config: Optional[Dict[str, Any]] = None,
 ):
     """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
     inheritance so children can run on a different provider:model pair."""
@@ -171,8 +170,6 @@ def _build_child_agent(
         request_overrides = dict(override_request_overrides)
     else:
         request_overrides = {} if override_provider else dict(getattr(parent_agent, "request_overrides", {}) or {})
-    if override_reasoning_config is not None:
-        rt["reasoning_config"] = dict(override_reasoning_config)
     parent_sid = getattr(parent_agent, "session_id", None)
     child_session_db = _open_child_session_db(parent_agent)
     with delegated_child_context():

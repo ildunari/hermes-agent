@@ -393,8 +393,8 @@ class PluginContext:
     def subagent_lifecycle(self) -> Any:
         """Plugin-safe subagent lifecycle service: serializable handles and immutable snapshots,
         never a live agent or private registry."""
-        from agent.subagent_lifecycle import SubagentLifecycleService, get_active_subagent_parent
-        return SubagentLifecycleService(get_active_subagent_parent)
+        from agent.subagent_lifecycle import get_active_subagent_parent
+        return (sys.modules.get("hermes_runtime_support.subagent_lifecycle") or importlib.import_module("hermes_cli.external_support").load_support_module("hermes_runtime_support.subagent_lifecycle", "support/hermes-runtime-support/src/hermes_runtime_support/subagent_lifecycle.py")).NativeSubagentLifecycleService(get_active_subagent_parent)
 
     @property
     def profile_name(self) -> str:
