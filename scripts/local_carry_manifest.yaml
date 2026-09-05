@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 114
-  total_changed_lines: 5766
-  modified_upstream_lines: 1755
+  paths: 116
+  total_changed_lines: 5799
+  modified_upstream_lines: 1757
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -146,6 +146,14 @@ paths:
   - path: gateway/config.py
     disposition: must-carry
     owner: core conversation extension route policy
+    evidence: *conversation
+  - path: gateway/config_loader.py
+    disposition: must-carry
+    owner: startup route permission YAML bridge
+    evidence: *conversation
+  - path: tests/gateway/test_permitted_routes_loading.py
+    disposition: must-carry
+    owner: startup route permissions and fail-closed precedence regression
     evidence: *conversation
   - path: gateway/run.py
     disposition: must-carry
