@@ -176,8 +176,8 @@ def _enable_from_env(
     A multiplex secondary profile pins ``enabled: false`` to share the default profile's listener
     yet inherits the process env; without this guard env presence would force-enable it and trip
     MultiplexConfigError. By default the ``_enabled_explicit`` marker is READ (the plugin-enable
-    and relay passes still need it) and the disable is warned once; port-binding platforms POP it
-    (terminal branch) and stay silent.
+    and relay passes still need it) and the disable is warned once. Port-binding platforms stay
+    silent but retain the marker until the final scrub so plugins cannot re-enable them.
     """
     platform_config = config.platforms.setdefault(platform, PlatformConfig())
     extra = platform_config.extra
@@ -294,7 +294,7 @@ def _api_server(config: GatewayConfig) -> None:
     key = getenv("API_SERVER_KEY")
     if not _has_usable_api_server_key(key):
         return
-    extra = _enable_from_env(config, Platform.API_SERVER, pop_marker=True, warn=False).extra
+    extra = _enable_from_env(config, Platform.API_SERVER, warn=False).extra
     extra["key"] = key
     _csv_extras(extra, (("cors_origins", getenv("API_SERVER_CORS_ORIGINS")),))
     _env_extras(extra, (("port", "API_SERVER_PORT", _INT), ("host", "API_SERVER_HOST"), ("model_name", "API_SERVER_MODEL_NAME")))
@@ -302,7 +302,7 @@ def _api_server(config: GatewayConfig) -> None:
 
 def _webhook(config: GatewayConfig) -> None:
     if is_truthy_value(getenv("WEBHOOK_ENABLED")):
-        extra = _enable_from_env(config, Platform.WEBHOOK, pop_marker=True, warn=False).extra
+        extra = _enable_from_env(config, Platform.WEBHOOK, warn=False).extra
         _env_extras(extra, (("port", "WEBHOOK_PORT", _INT), ("secret", "WEBHOOK_SECRET")))
 
 

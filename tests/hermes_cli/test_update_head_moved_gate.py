@@ -92,6 +92,10 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
         hermes_main, "_stash_local_changes_if_needed", lambda *a, **k: None
     )
     monkeypatch.setattr(hermes_main, "_clear_bytecode_cache", lambda *a, **k: 0)
+    # The update's module-refresh phase would reload the gateway module and
+    # discard the test seam before the post-update fleet verification runs.
+    monkeypatch.setattr(hermes_main, "_reload_updated_runtime_modules", lambda: None)
+    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda *a, **k: None)
     monkeypatch.setattr(
         hermes_main, "_record_bytecode_fingerprint", lambda *a, **k: None
     )
@@ -127,6 +131,15 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     monkeypatch.setattr(
         hermes_gateway, "find_profile_gateway_processes", lambda *a, **k: []
     )
+    # The post-update fleet phase still checks the invoking macOS LaunchAgent
+    # independently of process discovery. Keep this test on its mocked update
+    # path and away from the real gateway supervisor.
+    monkeypatch.setattr(
+        hermes_gateway,
+        "get_launchd_plist_path",
+        lambda: tmp_path / "absent-hermes-test-launchagent.plist",
+    )
+    monkeypatch.setattr(hermes_gateway, "launchd_gateway_labels_for_install", lambda: [])
 
 
 def test_update_success_when_head_moves(monkeypatch, tmp_path, capsys):

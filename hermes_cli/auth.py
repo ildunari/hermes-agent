@@ -1282,6 +1282,8 @@ def _plugin_aliases() -> Dict[str, str]:
     try:
         from providers import list_providers as _lp
         for _pp in _lp():
+            if _pp.name not in PROVIDER_REGISTRY:
+                _register_plugin_provider(_pp)
             for _alias in _pp.aliases:
                 aliases.setdefault(_alias, _pp.name)
     except Exception:
@@ -1773,6 +1775,10 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
     pconfig = PROVIDER_REGISTRY.get(provider_id)
     if not pconfig or pconfig.auth_type != "api_key":
         return {"configured": False}
+    from providers.base import keyless_provider_status_for_auth
+    keyless_status = keyless_provider_status_for_auth(provider_id, pconfig)
+    if keyless_status is not None:
+        return keyless_status
     status = {
         "configured": True, "provider": provider_id, "name": pconfig.name, "key_source": "keyless",
         "base_url": pconfig.inference_base_url, "logged_in": True}
@@ -2005,6 +2011,13 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
             provider=provider_id, code="invalid_provider")
 
     api_key, key_source = _resolve_api_key_provider_secret(provider_id, pconfig)
+    try:
+        from providers.base import apply_keyless_api_key
+        api_key, key_source = apply_keyless_api_key(
+            provider_id, api_key, key_source
+        )
+    except Exception:
+        pass
     # No-auth LM Studio: a placeholder so runtime / auxiliary_client see the local server as
     # configured. doctor still reports unconfigured because the status path uses the raw secret.
     if not api_key and provider_id == "lmstudio":

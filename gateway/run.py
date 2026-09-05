@@ -1674,7 +1674,10 @@ async def _reclaim_stale(runner: object) -> None:
     """Fail handoffs left in ``running`` by a gateway that died mid-dispatch (once per store at startup).
     ``running`` is only set for one in-process dispatch, so a leftover row belongs to a dead process and
     blocks ``request_handoff`` for that session forever. Defensive: a raising reclaim aborts startup."""
-    reclaim = getattr(getattr(runner, "_session_db", None), "reclaim_stale_running_handoffs", None)
+    session_db = await asyncio.to_thread(
+        copy_context().run, getattr, runner, "_session_db", None
+    )
+    reclaim = getattr(session_db, "reclaim_stale_running_handoffs", None)
     if not callable(reclaim):
         return
     try:
@@ -2859,6 +2862,23 @@ def _load_gateway_config(config_path: "Path | None" = None) -> dict:
     return raw
 
 
+def _load_gateway_config_for_profile(profile: str | None) -> dict:
+    """Load one profile's raw config without changing the process-wide home."""
+    if not profile or not str(profile).strip():
+        return _load_gateway_config()
+    profile = str(profile).strip()
+    if profile == os.getenv("HERMES_PROFILE"):
+        return _load_gateway_config()
+    return _load_gateway_config(
+        Path.home() / ".hermes" / "profiles" / profile / "config.yaml"
+    )
+
+
+def _load_gateway_config_from_home(home: "Path") -> dict:
+    """Load one profile's raw config directly from its resolved Hermes home."""
+    return _load_gateway_config(Path(home) / "config.yaml")
+
+
 def _checkpoint_agent_kwargs(config: dict | None) -> dict:
     """Translate gateway checkpoint config into ``AIAgent`` constructor args.
     Gateway bypasses ``load_config()``, so defaults are here; legacy ``checkpoints: true`` works."""
@@ -3324,7 +3344,8 @@ def _instantiate_builtin_adapter(platform: Platform, config: Any) -> Optional[Ba
 
 
 class GatewayRunner(
-    GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin,
+    GatewayAuthorizationMixin, GatewayCommandRuntimeMixin, ConversationExtensionHostMixin,
+    GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin,
     GatewayVoiceMixin, GatewayAdapterLifecycleMixin, GatewayTopicThreadsMixin, GatewayTurnMixin,
     GatewayShutdownMixin, GatewayBusySessionMixin, GatewayConfigLoadersMixin, GatewayStartupMixin,
     GatewaySessionWatchersMixin, GatewayNotificationsMixin, GatewayInboundMixin, GatewayGoalsMixin,
@@ -4607,7 +4628,9 @@ def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
             profile_adapters = getattr(runner, "_profile_adapters", {}).get(profile_name)
         if profile_adapters is None:
             continue
-        with _profile_runtime_scope(profile_home or get_hermes_home()):
+        with _profile_runtime_scope(
+            profile_home or get_hermes_home(), hydrate_secrets=False
+        ):
             if profile_name is not None and not profile_adapters and adapters:
                 routes = sched_preflight._primary_profile_routes_for_current_home()
                 if routes:
@@ -5290,7 +5313,16 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     _start_gateway_configure_logging(verbosity)
 
-    runner = GatewayRunner(config)
+    try:
+        from gateway.conversation_extension_host import install_early_lifecycle_scheduling
+        install_early_lifecycle_scheduling()
+    except Exception:
+        logger.debug("could not install early extension lifecycle scheduling", exc_info=True)
+
+    resolved_config = config
+    if resolved_config is None:
+        resolved_config = await load_gateway_config_for_runner_async()
+    runner = GatewayRunner(resolved_config)
     # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
     # land in its own logs/. Must run after the runner resolved (possibly None) config and setup_logging.
     # See #82936.

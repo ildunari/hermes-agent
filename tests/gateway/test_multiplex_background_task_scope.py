@@ -34,7 +34,7 @@ class TestBackgroundTaskProfileScope:
             GatewayRunner,
             "_resolve_profile_home_for_source",
             return_value=Path("/fake/profile"),
-        ), mock.patch("gateway.run._profile_runtime_scope") as scope:
+        ), mock.patch("gateway.run._load_profile_secret_scope", return_value={"TEST_SCOPE": "fixture"}), mock.patch("gateway.run._profile_runtime_scope") as scope:
             scope.return_value.__enter__ = mock.MagicMock()
             scope.return_value.__exit__ = mock.MagicMock(return_value=False)
             asyncio.run(
@@ -43,7 +43,6 @@ class TestBackgroundTaskProfileScope:
                 )
             )
 
-        scope.assert_called_once_with(Path("/fake/profile"))
+        scope.assert_called_once_with(Path("/fake/profile"), {"TEST_SCOPE": "fixture"})
         inner.assert_awaited_once()
-
 

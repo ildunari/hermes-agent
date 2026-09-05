@@ -913,7 +913,9 @@ finally:
 sys.exit(result.returncode if result is not None else 1)
 `.trim()
 
-  return `python3 -c ${shq(script)} ${shq(mutexPath)} ${shq(command)}`
+  // mutexPath is already a shell expression from expandRemotePath. Quoting
+  // it again creates a different, literal quote-containing lock pathname.
+  return `python3 -c ${shq(script)} ${mutexPath} ${shq(command)}`
 }
 
 /**

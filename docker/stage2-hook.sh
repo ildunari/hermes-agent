@@ -494,7 +494,7 @@ elif ! grep -q '^API_SERVER_KEY=..*' "$HERMES_HOME/.env" 2>/dev/null; then
             (umask 077 && as_hermes touch "$HERMES_HOME/.env") 2>/dev/null || true
         fi
         if [ -f "$HERMES_HOME/.env" ]; then
-            _gen_key=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+            _gen_key=$(head -c 32 /dev/urandom | command -p od -An -tx1 | tr -d ' \n')
             if [ -n "$_gen_key" ]; then
                 # Drop an empty assignment line if the seed left one behind,
                 # then append the generated key. The append is guarded: on a

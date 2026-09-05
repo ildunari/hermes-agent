@@ -8,6 +8,7 @@ the guest entry point applies it directly.
 """
 
 import sqlite3
+import sys
 
 import pytest
 
@@ -40,14 +41,15 @@ def test_guest_barriers_apply_configured_synchronous(monkeypatch, tmp_path):
         conn.close()
 
 
-def test_guest_barriers_leave_synchronous_alone_when_unset(monkeypatch, tmp_path):
+def test_guest_barriers_preserve_platform_durability_when_unset(monkeypatch, tmp_path):
     _config(monkeypatch, {})
     conn = sqlite3.connect(tmp_path / "state.db")
     try:
         conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("PRAGMA synchronous=1")
         apply_durability_barriers(conn)
-        assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+        # macOS guest connections inherit the mandatory FULL safety barrier.
+        assert conn.execute("PRAGMA synchronous").fetchone()[0] == (2 if sys.platform == "darwin" else 1)
     finally:
         conn.close()
 

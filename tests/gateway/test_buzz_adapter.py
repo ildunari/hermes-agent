@@ -3060,16 +3060,19 @@ class TestInboundMediaAuthorizationGate:
         assert result.raw_response is None
 
     @pytest.mark.asyncio
-    async def test_live_media_redacts_long_path_before_bounding(self, tmp_path):
+    async def test_live_media_redacts_long_path_before_bounding(self, tmp_path, monkeypatch):
         parent = tmp_path
         private_parts = []
         for index in range(6):
             part = f"private-{index}-" + ("x" * 150)
             private_parts.append(part)
             parent = parent / part
-            parent.mkdir()
         media = parent / "handoff.txt"
-        media.write_text("safe handoff", encoding="utf-8")
+        # Exercise redaction beyond the error bound without exceeding macOS's
+        # filesystem path limit. The upload itself is mocked below as well.
+        original_is_file = Path.is_file
+        monkeypatch.setattr(Path, "is_file", lambda path: path == media or original_is_file(path))
+        assert len(str(media)) > 900
         adapter = _make_adapter()
         adapter._run_cli = AsyncMock(
             return_value=(

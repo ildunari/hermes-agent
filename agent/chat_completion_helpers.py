@@ -2616,13 +2616,34 @@ class _BedrockStream:
         return _with_stream_emitters(self.agent, self._poll)
 
 
+def _normalize_streamed_tool_name(agent, wire_name: str, api_kwargs: dict) -> str:
+    """Restore a complete streamed tool name before display callbacks see it."""
+    if not isinstance(wire_name, str) or not wire_name:
+        return wire_name
+    try:
+        from agent.transports.chat_completions import _normalize_response_tool_name
+        from providers import get_provider_profile
+
+        transport = agent._get_transport("chat_completions")
+        return _normalize_response_tool_name(
+            wire_name,
+            profile=get_provider_profile(getattr(agent, "provider", "") or ""),
+            phase="stream_delta",
+            model=api_kwargs.get("model") or getattr(agent, "model", None),
+            request_wire_aliases=getattr(transport, "_last_wire_aliases", None),
+        )
+    except Exception:
+        return wire_name
+
+
 class _ToolCallAccumulator:
     """Assemble streamed tool-call deltas into complete ``tool_calls`` entries
     (``acc``: slot index -> entry dict). Ollama-compatible endpoints reuse index 0
     for every call in a parallel batch, distinguishing them only by id, so a new
     id at an already-seen raw index is redirected to a fresh slot."""
 
-    def __init__(self):
+    def __init__(self, normalize_name=lambda name: name):
+        self.normalize_name = normalize_name
         self.acc: dict = {}
         self._notified: set = set()
         self._last_id_at_idx: dict = {}      # raw_index -> last seen non-empty id
@@ -2665,7 +2686,7 @@ class _ToolCallAccumulator:
             if getattr(tc_function, "name", None):
                 # Assignment, not +=: names arrive complete and some providers (MiniMax via
                 # NVIDIA NIM) resend the full name every chunk — += gives "read_fileread_file".
-                entry["function"]["name"] = tc_function.name
+                entry["function"]["name"] = self.normalize_name(tc_function.name)
             if getattr(tc_function, "arguments", None):
                 parts.append(tc_function.arguments)
         extra = getattr(tc_delta, "extra_content", None)
@@ -2919,7 +2940,7 @@ class _StreamingCall:
         content_parts: list = []
         reasoning_parts: list = []
         pending_text_parts: list[str] = []
-        tool_calls = _ToolCallAccumulator()
+        tool_calls = _ToolCallAccumulator(lambda name: _normalize_streamed_tool_name(self.agent, name, self.api_kwargs))
         tool_calls_acc = tool_calls.acc
         finish_reason = model_name = usage_obj = None
         role = "assistant"
@@ -3111,7 +3132,7 @@ class _StreamingCall:
             raise provider_stream_error
         flush_pending()
         message = SimpleNamespace(role=role, content=full_content, tool_calls=mock_tool_calls, reasoning_content=full_reasoning)
-        return SimpleNamespace(id="stream-" + str(uuid.uuid4()), model=model_name, usage=usage_obj,
+        return SimpleNamespace(id="stream-" + str(uuid.uuid4()), model=model_name, usage=usage_obj, _tool_names_normalized=True,
             choices=[SimpleNamespace(index=0, message=message, finish_reason=effective_finish_reason)])
 
     # ── anthropic_messages wire ─────────────────────────────────────────

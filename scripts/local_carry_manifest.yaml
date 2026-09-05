@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 63
-  total_changed_lines: 5565
-  modified_upstream_lines: 1990
+  paths: 105
+  total_changed_lines: 5631
+  modified_upstream_lines: 1672
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -72,8 +72,25 @@ evidence_templates:
     runtime_caller: cron scheduler delivery and atomic probe completion
     interface_test: Poke proactive scheduler, transport, gate, rollout, and status suites
     artifact: exact probe ACK persisted after operator-profile delivery
+  desktop: &desktop
+    registration: Desktop package version and signed artifact build
+    runtime_caller: updater Desktop staging and activation
+    interface_test: updater version monotonicity and artifact identity tests
+    artifact: signed Studio and MacBook bundles with exact commit stamps
 
 paths:
+  - path: apps/desktop/electron/managed-ssh-update.test.ts
+    disposition: upstream
+    owner: portable POSIX managed-update contract test
+    evidence: *desktop
+  - path: apps/desktop/package.json
+    disposition: must-carry
+    owner: monotonic local Desktop release version
+    evidence: *desktop
+  - path: package-lock.json
+    disposition: must-carry
+    owner: monotonic local Desktop release version
+    evidence: *desktop
   - path: cron/jobs.py
     disposition: must-carry
     owner: generic proactive probe completion seam
@@ -82,18 +99,6 @@ paths:
     disposition: must-carry
     owner: generic plugin validation and delegated cron delivery seams
     evidence: *proactive_alarm
-  - path: agent/agent_runtime_helpers.py
-    disposition: upstream
-    owner: core provider prompt-cache policy
-    evidence: *provider
-  - path: agent/chat_completion_helpers.py
-    disposition: upstream
-    owner: core chat-completions streaming seam
-    evidence: *provider
-  - path: agent/conversation_loop.py
-    disposition: upstream
-    owner: core response normalization seam
-    evidence: *provider
   - path: agent/agent_init.py
     disposition: must-carry
     owner: core context-engine seam
@@ -102,22 +107,10 @@ paths:
     disposition: must-carry
     owner: core provider fallback seam
     evidence: *provider
-  - path: agent/context_compressor.py
-    disposition: upstream
-    owner: core context engine
-    evidence: *context_engine
   - path: agent/request_scoped_tools.py
     disposition: upstream
     owner: core plugin tool seam
     evidence: *conversation
-  - path: agent/transports/chat_completions.py
-    disposition: upstream
-    owner: core provider transport seam
-    evidence: *provider
-  - path: cli.py
-    disposition: must-carry
-    owner: core restart dispatch seam
-    evidence: *restart
   - path: gateway/active_work.py
     disposition: upstream
     owner: core gateway lifecycle
@@ -130,10 +123,6 @@ paths:
     disposition: plugin
     owner: gateway-session-commands plugin
     evidence: *command
-  - path: gateway/config.py
-    disposition: upstream
-    owner: core gateway configuration
-    evidence: *conversation
   - path: gateway/conversation_extension_host.py
     disposition: upstream
     owner: core conversation extension seam
@@ -154,13 +143,33 @@ paths:
     disposition: plugin
     owner: poke plugin
     evidence: *conversation
-  - path: gateway/platform_registry.py
-    disposition: upstream
-    owner: core platform registry
-    evidence: *bluebubbles
+  - path: gateway/config.py
+    disposition: must-carry
+    owner: core conversation extension route policy
+    evidence: *conversation
   - path: gateway/run.py
     disposition: must-carry
     owner: core gateway seams
+    evidence: *conversation
+  - path: gateway/run_adapters.py
+    disposition: must-carry
+    owner: off-loop profile handoff store resolution
+    evidence: *active_work
+  - path: gateway/run_inbound.py
+    disposition: must-carry
+    owner: conversation extension admission and observation
+    evidence: *conversation
+  - path: gateway/run_shutdown.py
+    disposition: must-carry
+    owner: conversation extension lifecycle teardown
+    evidence: *conversation
+  - path: gateway/run_startup.py
+    disposition: must-carry
+    owner: conversation extension activation and liveness freshness
+    evidence: *conversation
+  - path: gateway/run_turn.py
+    disposition: must-carry
+    owner: off-loop multiplex profile turn scoping
     evidence: *conversation
   - path: gateway/turn_context.py
     disposition: must-carry
@@ -171,18 +180,18 @@ paths:
     owner: core gateway session
     evidence: *active_work
   - path: gateway/shutdown_watchdog.py
-    disposition: upstream
+    disposition: must-carry
     owner: core gateway lifecycle
     evidence: *active_work
   - path: gateway/status.py
-    disposition: upstream
+    disposition: must-carry
     owner: core gateway status
     evidence: *active_work
   - path: hermes_cli/alias_billing_guard.py
     disposition: plugin
     owner: VibeProxy and OpenCodex provider policy
     evidence: *provider
-  - {path: hermes_cli/auth.py, disposition: upstream, owner: core provider credential resolution, evidence: *provider}
+  - {path: hermes_cli/auth.py, disposition: must-carry, owner: generic keyless provider credential seam, evidence: *provider}
   - path: hermes_cli/command_context.py
     disposition: plugin
     owner: gateway-session-commands plugin
@@ -197,11 +206,6 @@ paths:
     disposition: ops-support
     owner: hermes-studio-ops support package
     evidence: *restart
-  - {path: hermes_cli/runtime_provider.py, disposition: upstream, owner: core provider resolution, evidence: *provider}
-  - path: plugins/context_engine/__init__.py
-    disposition: upstream
-    owner: bundled context-engine plugin seam
-    evidence: *context_engine
   - path: providers/base.py
     disposition: upstream
     owner: core provider profile seam
@@ -238,6 +242,10 @@ paths:
     disposition: must-carry
     owner: production conversation extension turn-wiring contract
     evidence: *conversation
+  - path: tests/gateway/test_gateway_platform_event_hook.py
+    disposition: must-carry
+    owner: off-loop multiplex platform event coverage
+    evidence: *conversation
   - path: tests/agent/test_gateway_turn_sidecar.py
     disposition: must-carry
     owner: API-only conversation extension context tests
@@ -246,6 +254,14 @@ paths:
     disposition: must-carry
     owner: gateway-session-commands plugin contract
     evidence: *command
+  - path: tests/computer_use/test_cua_no_overlay.py
+    disposition: must-carry
+    owner: isolated overlay policy fixture with separate macOS identity tests
+    evidence:
+      registration: computer-use overlay policy test fixture
+      runtime_caller: embedded CUA daemon startup
+      interface_test: test_cua_no_overlay and test_computer_use_cua_macos_identity
+      artifact: focused 92-test continuation PASS receipt
   - path: tests/gateway/test_keep_drain_freshness_glue.py
     disposition: must-carry
     owner: core gateway lifecycle tests
@@ -310,7 +326,279 @@ paths:
     disposition: upstream
     owner: core platform registry
     evidence: *bluebubbles
+  - path: agent/agent_runtime_helpers.py
+    disposition: must-carry
+    owner: generic provider profile runtime seam
+    evidence: *provider
+  - path: agent/chat_completion_helpers.py
+    disposition: must-carry
+    owner: generic provider profile runtime seam
+    evidence: *provider
+  - path: agent/transports/chat_completions.py
+    disposition: must-carry
+    owner: generic provider profile runtime seam
+    evidence: *provider
+  - path: apps/desktop/electron/remote-lifecycle.test.ts
+    disposition: must-carry
+    owner: portable managed Desktop update mutex
+    evidence: *desktop
+  - path: apps/desktop/electron/remote-lifecycle.ts
+    disposition: must-carry
+    owner: portable managed Desktop update mutex
+    evidence: *desktop
+  - path: cron/scheduler_delivery.py
+    disposition: must-carry
+    owner: generic validated cron delivery seam
+    evidence: *proactive_alarm
+  - path: gateway/config_env.py
+    disposition: must-carry
+    owner: explicit platform disable remains authoritative
+    evidence: *conversation
+  - path: gateway/platform_registry.py
+    disposition: must-carry
+    owner: generic validated cron delivery seam
+    evidence: *proactive_alarm
+  - path: hermes_cli/commands_platforms.py
+    disposition: must-carry
+    owner: platform command menu capacity
+    evidence: *command
+  - path: hermes_cli/runtime_provider.py
+    disposition: must-carry
+    owner: generic provider profile runtime seam
+    evidence: *provider
   - path: tools/send_message_tool.py
-    disposition: upstream
-    owner: core platform registry
+    disposition: must-carry
+    owner: registry-first plugin message delivery
     evidence: *bluebubbles
+  - path: scripts/run_tests_parallel.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: scripts/run_tests_parallel.py
+      artifact: continuation focused test receipts
+  - path: tests/gateway/test_multiplex_background_task_scope.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/gateway/test_multiplex_background_task_scope.py
+      artifact: continuation focused test receipts
+  - path: tests/gateway/test_systemd_notify.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/gateway/test_systemd_notify.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_cmd_update.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_cmd_update.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_commands.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_commands.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_update_fleet_restart_pending.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_update_fleet_restart_pending.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_update_head_moved_gate.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_update_head_moved_gate.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_update_launchd_fleet_restart.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_update_launchd_fleet_restart.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_update_yes_flag.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_update_yes_flag.py
+      artifact: continuation focused test receipts
+  - path: tests/scripts/test_contributor_map.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/scripts/test_contributor_map.py
+      artifact: continuation focused test receipts
+  - path: tests/skills/test_openclaw_migration.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/skills/test_openclaw_migration.py
+      artifact: continuation focused test receipts
+  - path: tests/test_guest_durability_barriers.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/test_guest_durability_barriers.py
+      artifact: continuation focused test receipts
+  - path: hermes_state_holders.py
+    disposition: upstream
+    owner: Darwin zero-descriptor success proof
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/gateway/test_buzz_adapter.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/hermes_cli/test_dashboard_auth_gate.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/hermes_cli/test_session_recovery_lost_and_found.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/hermes_cli/test_update_autostash.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/state/test_state_db_holders.py
+    disposition: upstream
+    owner: Darwin zero-descriptor success proof
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/tools/test_approval.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/tools/test_code_kernel.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: apps/desktop/scripts/after-pack.mjs
+    disposition: must-carry
+    owner: external machine-local signing hook
+    evidence: *desktop
+  - path: apps/desktop/scripts/after-pack.test.mjs
+    disposition: must-carry
+    owner: external machine-local signing hook
+    evidence: *desktop
+  - path: tests/test_hermes_state.py
+    disposition: must-carry
+    owner: portable current-runtime fixture
+    evidence: *ratchet
+  - path: tests/tools/test_file_tools.py
+    disposition: must-carry
+    owner: portable current-runtime fixture
+    evidence: *ratchet
+  - path: docker/stage2-hook.sh
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tests/tools/test_execution_flag_detection.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tests/tools/test_process_registry.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tests/tools/test_transcription_tools.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tests/tools/test_voice_mode.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tests/tools/test_wake_word.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts
+  - path: tools/process_registry.py
+    disposition: upstream
+    owner: POSIX system utility resolution and portable test fixtures
+    evidence:
+      registration: canonical test runner and shell utility resolution
+      runtime_caller: background log polling and bootstrap key generation
+      interface_test: process registry, keygen, executable grammar and mocked audio
+      artifact: completed core coverage and focused 113, 183 and 142-pass receipts

@@ -218,7 +218,7 @@ class TestSlackNativeSlashes:
 
 
     def test_telegram_parity(self):
-        """Every Telegram bot command must be registerable on Slack too.
+        """Every built-in Telegram bot command must be registerable on Slack too.
 
         This catches the old behavior where Slack users couldn't invoke
         commands like /btw natively. If a future command surfaces on
@@ -230,7 +230,9 @@ class TestSlackNativeSlashes:
         from parity checks since they cannot be registered on Slack.
         """
         slack_names = {n for n, _d, _h in slack_native_slashes()}
-        tg_names = {n for n, _d in telegram_bot_commands()}
+        # Operator plugins can exceed Slack's cap and remain callable through
+        # /hermes; this core contract must not depend on installed plugins.
+        tg_names = {n for n, _d in telegram_bot_commands(include_plugins=False)}
         # Some Telegram names have underscores where Slack uses hyphens
         # (e.g. set_home vs sethome). Normalize both sides for comparison.
         def _norm(s: str) -> str:
