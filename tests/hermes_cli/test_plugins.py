@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
 import yaml
 
 from hermes_cli.plugins import (
@@ -2390,3 +2392,25 @@ class TestDispatchToolWithoutCliRef:
             assert calls[0][1].get("parent_agent") is None
         finally:
             registry.deregister("_test_dispatch_probe")
+
+
+def test_plugin_tool_preserves_result_limit_and_dynamic_schema(tmp_path, monkeypatch):
+    from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+    from tools.registry import registry
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    manager = PluginManager()
+    context = PluginContext(manager=manager, manifest=PluginManifest(name="tool-options", source="user"))
+    name = "plugin_options_regression"
+    try:
+        context.register_tool(
+            name=name, toolset="tool-options", schema={"parameters": {"type": "object"}},
+            handler=lambda args: "result", max_result_size_chars=80_000,
+            dynamic_schema_overrides=lambda: {"description": "runtime description"},
+        )
+        entry = registry.snapshot_registration(name, scope=manager.scope_key)
+        assert entry is not None
+        assert entry.max_result_size_chars == 80_000
+        assert registry.get_definitions({name})[0]["function"]["description"] == "runtime description"
+    finally:
+        registry.deregister(name, scope=manager.scope_key)

@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 86
-  total_changed_lines: 5195
-  modified_upstream_lines: 1401
+  paths: 94
+  total_changed_lines: 5396
+  modified_upstream_lines: 1538
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -466,3 +466,67 @@ paths:
       runtime_caller: scratch validation on Mac Studio
       interface_test: tests/test_guest_durability_barriers.py
       artifact: continuation focused test receipts
+  - path: hermes_state_holders.py
+    disposition: upstream
+    owner: Darwin zero-descriptor success proof
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/gateway/test_buzz_adapter.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/hermes_cli/test_dashboard_auth_gate.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/hermes_cli/test_session_recovery_lost_and_found.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/hermes_cli/test_update_autostash.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/state/test_state_db_holders.py
+    disposition: upstream
+    owner: Darwin zero-descriptor success proof
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/tools/test_approval.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
+  - path: tests/tools/test_code_kernel.py
+    disposition: upstream
+    owner: portable isolated validation fixture
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: state maintenance and scratch validation
+      interface_test: resumed seven fixtures and Darwin holder regression suite
+      artifact: resume 475-pass and Darwin 19-pass receipts plus independent review

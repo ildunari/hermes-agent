@@ -125,6 +125,32 @@ def canonical_sqlite_path(path: str) -> str:
     return os.path.normcase(os.path.abspath(path.removesuffix(" (deleted)")))
 
 
+def _darwin_proves_empty_fd_table(pid: int) -> bool:
+    """Confirm the zero-fd success that psutil 7.2.2 misreports as RuntimeError.
+
+    Darwin proc_pidfdlist returns count * sizeof(proc_fdinfo), including zero
+    on success. Never infer emptiness from a process name or a failed syscall.
+    See apple-oss-distributions/xnu bsd/kern/proc_info.c:proc_pidfdlist.
+    """
+    if sys.platform != "darwin":
+        return False
+    try:
+        import ctypes
+
+        library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        query = library.proc_pidinfo
+        query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                          ctypes.c_void_p, ctypes.c_int]
+        query.restype = ctypes.c_int
+        # One proc_fdinfo (int fd, uint32 type) suffices to disprove emptiness.
+        buffer = ctypes.create_string_buffer(8)
+        ctypes.set_errno(0)
+        count = query(pid, 1, 0, buffer, len(buffer))  # PROC_PIDLISTFDS
+        return count == 0 and ctypes.get_errno() == 0
+    except Exception:
+        return False
+
+
 def foreign_state_db_holders(db_path: Path) -> List[Tuple[int, str]]:
     """Return foreign holders of the DB or one of its WAL sidecars.
 
@@ -231,12 +257,22 @@ def foreign_state_db_holders(db_path: Path) -> List[Tuple[int, str]]:
     if psutil is None:
         return [(-1, "open-file scan unavailable")]
     try:
-        for process in psutil.process_iter(["pid", "open_files"]):
+        for process in psutil.process_iter(["pid"]):
             info = process.info
             pid = int(info["pid"])
             if pid == os.getpid():
                 continue
-            for opened in info.get("open_files") or ():
+            try:
+                opened_files = process.open_files()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                # Match process_iter(as_dict)'s existing disappearance/access handling.
+                continue
+            except RuntimeError as exc:
+                if (str(exc) == "proc_pidinfo(PROC_PIDLISTFDS) 2/2 syscall failed"
+                        and _darwin_proves_empty_fd_table(pid)):
+                    continue
+                raise
+            for opened in opened_files:
                 path = getattr(opened, "path", "")
                 if path and canonical_sqlite_path(path) in watched:
                     holders.append((pid, path))
