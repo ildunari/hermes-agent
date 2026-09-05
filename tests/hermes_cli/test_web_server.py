@@ -5117,6 +5117,22 @@ class TestHeadlessServeTokenPage:
         assert "web UI disabled" in resp.json()["error"]
         assert ws._SESSION_TOKEN not in resp.text
 
+    def test_root_uses_token_adopted_after_routes_were_mounted(self, monkeypatch):
+        client, ws = self._headless_client(monkeypatch, gated=False)
+        from starlette.requests import Request
+        previous = ws._SESSION_TOKEN
+        try:
+            ws._apply_ssh_session_token('new-ssh-startup-token')
+            response = client.get('/')
+            match = re.search(r'window\.__HERMES_SESSION_TOKEN__\s*=\s*("(?:\\.|[^"\\])*")', response.text)
+            assert match
+            token = json.loads(match.group(1))
+            assert token == 'new-ssh-startup-token'
+            request = Request({'type': 'http', 'headers': [(b'x-hermes-session-token', token.encode())]})
+            assert ws._has_valid_session_token(request)
+        finally:
+            ws._apply_ssh_session_token(previous)
+
     def test_non_root_paths_stay_404_json(self, monkeypatch):
         client, ws = self._headless_client(monkeypatch, gated=False)
         for route in ("/chat", "/api/status-page", "/assets/index-abc.js"):
