@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 74
-  total_changed_lines: 4983
-  modified_upstream_lines: 1285
+  paths: 86
+  total_changed_lines: 5195
+  modified_upstream_lines: 1401
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -370,3 +370,99 @@ paths:
     disposition: must-carry
     owner: registry-first plugin message delivery
     evidence: *bluebubbles
+  - path: scripts/run_tests_parallel.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: scripts/run_tests_parallel.py
+      artifact: continuation focused test receipts
+  - path: tests/gateway/test_multiplex_background_task_scope.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/gateway/test_multiplex_background_task_scope.py
+      artifact: continuation focused test receipts
+  - path: tests/gateway/test_systemd_notify.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/gateway/test_systemd_notify.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_cmd_update.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_cmd_update.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_commands.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_commands.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_update_fleet_restart_pending.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_update_fleet_restart_pending.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_update_head_moved_gate.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_update_head_moved_gate.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_update_launchd_fleet_restart.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_update_launchd_fleet_restart.py
+      artifact: continuation focused test receipts
+  - path: tests/hermes_cli/test_update_yes_flag.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/hermes_cli/test_update_yes_flag.py
+      artifact: continuation focused test receipts
+  - path: tests/scripts/test_contributor_map.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/scripts/test_contributor_map.py
+      artifact: continuation focused test receipts
+  - path: tests/skills/test_openclaw_migration.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/skills/test_openclaw_migration.py
+      artifact: continuation focused test receipts
+  - path: tests/test_guest_durability_barriers.py
+    disposition: upstream
+    owner: hermetic and portable validation on macOS
+    evidence:
+      registration: canonical isolated test runner
+      runtime_caller: scratch validation on Mac Studio
+      interface_test: tests/test_guest_durability_barriers.py
+      artifact: continuation focused test receipts
