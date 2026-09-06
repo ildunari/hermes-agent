@@ -96,6 +96,9 @@ class SessionSource:
     # over the authenticated relay WebSocket. ``platform`` is the UNDERLYING platform, not
     # ``relay``, so authz must key upstream trust off THIS flag.
     delivered_via_upstream_relay: bool = False
+    # Trusted local admission identity; never accepted from serialized peer input.
+    # Separates a permanent DM identity from its transport reply address.
+    conversation_id: Optional[str] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # Mirror scope_id/guild_id onto each other (scope_id wins) so readers of EITHER agree.
@@ -665,7 +668,7 @@ def build_session_key(
                         + ([source.chat_id] if source.chat_id else [])
                         + ([source.thread_id] if source.thread_id else []))
     is_dm = source.chat_type == "dm"
-    chat_id = source.chat_id
+    chat_id = (getattr(source, "conversation_id", None) or source.chat_id) if is_dm else source.chat_id
     if is_dm and source.platform == Platform.WHATSAPP:
         chat_id = canonical_whatsapp_identifier(chat_id)
     # Discord auto-thread continuity: key a channel-initiating message on the thread it WILL be
