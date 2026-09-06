@@ -660,7 +660,7 @@ def _dispatch_authorized_once(
         import sys
         policy = sys.modules.get("gateway.conversation_extensions")
         if policy is not None:
-            block_message = policy.authorize_tool_dispatch(ref.name, ref.args)
+            block_message = policy.authorize_tool_dispatch(ref.name, ref.args, task_id=ref.task_id)
             block_error_type = "extension_policy"
 
     guardrail_decision = None

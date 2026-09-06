@@ -21,6 +21,7 @@ required_support:
   - support/hermes-runtime-support/src/hermes_runtime_support/alias_billing_guard.py
   - support/hermes-runtime-support/src/hermes_runtime_support/authenticated_dm.py
   - support/hermes-runtime-support/src/hermes_runtime_support/cli_command_context.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/contact_workspace.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extensions.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extension_host.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extension_runtime.py
