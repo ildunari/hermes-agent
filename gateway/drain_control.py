@@ -3,9 +3,10 @@
 Versioned transactions survive restarts/expiry and require native owner release.
 The legacy dashboard marker below retains its epoch and one-hour expiry behavior.
 
-No control channel exists into a running gateway, so begin/cancel-drain writes
-(or removes) ``{HERMES_HOME}/.drain_request.json`` and a gateway watcher reacts;
-an ACTIVE marker means ``gateway_state -> "draining"``.  Two lenient staleness
+Legacy dashboard begin/cancel-drain writes (or removes)
+``{HERMES_HOME}/.drain_request.json`` and a gateway watcher reacts;
+transactional maintenance instead uses the native gateway control socket.
+An ACTIVE marker means ``gateway_state -> "draining"``. Two legacy staleness
 signals (either suffices): epoch mismatch (HERMES_HOME is a durable volume on
 Hermes Cloud, so a marker survives the restart a drain-gated action ends in and
 would park the fresh gateway in ``draining`` forever) and expiry (same-epoch
@@ -158,7 +159,7 @@ def drain_requested(*, home: Optional[Path] = None) -> bool:
     gateway in ``draining`` (NS-570). A marker whose ``requested_at`` is older than
     :data:`DRAIN_REQUEST_MAX_AGE_SECONDS` is likewise treated as absent: it is a same-epoch orphan whose
     drain-gated action completed without a restart and was never cancelled (#85433). Both staleness checks
-    are lenient (see :func:`_marker_epoch_is_stale` / :func:`_marker_is_expired`): a legacy/corrupt marker
+    are lenient (see :func:`_active_drain_body` / :func:`_marker_is_expired`): a legacy/corrupt marker
     with no epoch and no timestamp, or an environment without ``/proc``, still reads as drain-active.
     """
     return _active_drain_body(home) is not None

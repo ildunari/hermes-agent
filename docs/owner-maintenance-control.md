@@ -55,3 +55,31 @@ compute child only. Messaging gateways, cron owners, standalone TUI/PTY owners,
 and older runtimes are **unsupported** here. Support must match every affected PID
 to a supported owner or defer; zero messaging counters are not a desktop barrier.
 The initial legacy transition and production activation remain lead-owned.
+
+## Native messaging gateway and profile ticker
+
+Messaging uses the existing private gateway socket, not the HTTP endpoint above:
+`query_gateway_control(Path(home), "owner_maintenance", body={...})` accepts
+`action: status|begin|release` and returns an unwrapped protocol-version-1
+`owners` list with `owner_kind: gateway`. `None` is a refusal, never idle proof.
+Begin/release require the exact `owner_generation` and `request_token`; final
+release adds `finalize_bootstrap: true` and
+`expected_owner_generations: [current_generation]`.
+
+The gateway's versioned `.drain_request.json` survives replacement and does not
+expire. Its control socket starts before held adapter startup, so a replacement
+can acknowledge maintenance before normal transport readiness. Startup and cron
+pre-registration reservations count as active work. Held turns retain their
+native caller/queue and recheck Stop generations on release. Unsupported cron
+providers refuse maintenance rather than claim coverage. Legacy dashboard drain
+expiry remains unchanged outside a versioned transaction.
+
+The support-owned profile ticker is a separate lock gate, not a resident process
+owner. Its `maintenance_control(action, body, root_home=...)` reports its
+import-captured `code_sha256`, full native profile allowlist, lock/active receipts,
+`covered_pids`, `quiescent`, and admission/bootstrap state. Begin requires a token;
+release/finalization additionally require the executing source hash. The marker
+is `<root>/state/profile-cron-ticker.maintenance.json`. Busy unregistered locks,
+malformed or legacy receipts, and unknown active children never prove idleness.
+Controllers must execute a hash-pinned helper; choosing a state root does not
+choose or attest its code. Live legacy bootstrap still requires separate proof.
