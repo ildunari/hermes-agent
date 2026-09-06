@@ -20,11 +20,11 @@ logger = logging.getLogger("gateway.session")
 
 
 def _origin_json(source) -> Optional[str]:
-    """``source.to_dict()`` as JSON, or None when absent/unserializable."""
+    """Trusted-local source representation as JSON, or None when absent/unserializable."""
     if source is None:
         return None
     try:
-        return json.dumps(source.to_dict())
+        return json.dumps(source.to_persistence_dict())
     except Exception:
         return None
 

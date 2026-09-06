@@ -183,6 +183,70 @@ async def test_dispatch_uses_stored_origin_and_adapter_message_path():
 
 
 @pytest.mark.asyncio
+async def test_restart_injection_crosses_real_adapter_with_persisted_identity(
+    tmp_path, monkeypatch,
+):
+    import hermes_state
+
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+    sessions_dir = tmp_path / "sessions"
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="transport-address",
+        chat_type="dm",
+        user_id="owner",
+        conversation_id="contact-stable",
+    )
+    store = SessionStore(sessions_dir=sessions_dir, config=GatewayConfig())
+    entry = store.get_or_create_session(source, refresh_origin=True)
+    store.close_all_db_handles()
+    (sessions_dir / "sessions.json").unlink()
+
+    restarted = SessionStore(sessions_dir=sessions_dir, config=GatewayConfig())
+    recovered = restarted.lookup_by_session_key(entry.session_key)
+    assert recovered.origin.conversation_id == "contact-stable"
+
+    adapter = _RoutingAdapter()
+    handler = AsyncMock(return_value=None)
+    adapter.set_message_handler(handler)
+    runner = _runner(recovered, adapter)
+
+    accepted = await runner._dispatch_plugin_message_injection(
+        session_key=entry.session_key,
+        content="continue after restart",
+        plugin_id="notify-plugin",
+    )
+    assert accepted is True
+    await asyncio.gather(*tuple(adapter._background_tasks), return_exceptions=True)
+    handler.assert_awaited_once()
+    delivered = handler.await_args.args[0]
+    assert delivered.source.conversation_id == "contact-stable"
+    assert build_session_key(delivered.source) == entry.session_key
+    restarted.close_all_db_handles()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("internal", [False, True])
+async def test_session_resolution_refreshes_origin_only_on_authenticated_ingress(internal):
+    entry = _entry()
+    runner = _runner(entry)
+    runner._recover_telegram_topic_thread_id = MagicMock(return_value=None)
+    runner._cache_session_source = MagicMock()
+    runner._is_telegram_topic_lane = MagicMock(return_value=False)
+    runner._async_session_store.get_or_create_session = AsyncMock(return_value=entry)
+    event = SimpleNamespace(metadata={}, internal=internal, source=entry.origin)
+
+    resolved = await runner._hmwa_resolve_session(event, entry.origin)
+
+    assert resolved == (entry.origin, entry, entry.session_key)
+    runner._async_session_store.get_or_create_session.assert_awaited_once_with(
+        entry.origin,
+        touch_activity=not internal,
+        refresh_origin=not internal,
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("entry", "with_adapter"),
     [

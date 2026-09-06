@@ -292,7 +292,9 @@ class GatewayTurnMixin:
             # Internal wakes observe reset policy without counting as user activity, or periodic
             # notifications keep the routing key alive across every daily/idle boundary.
             session_entry = await self.async_session_store.get_or_create_session(
-                source, touch_activity=not bool(getattr(event, "internal", False)),
+                source,
+                touch_activity=not bool(getattr(event, "internal", False)),
+                refresh_origin=not bool(getattr(event, "internal", False)),
             )
         session_key = session_entry.session_key
         if not strict_session and pinned_session_id:
