@@ -8,6 +8,38 @@ import pytest
 from gateway import drain_control as dc
 
 
+@pytest.mark.parametrize("legacy_before_owner", [False, True])
+def test_begin_preserves_active_legacy_drain(tmp_path, legacy_before_owner):
+    if legacy_before_owner:
+        dc.write_drain_request(home=tmp_path, principal="independent-operator")
+    owner = dc.GatewayMaintenance(tmp_path)
+    if not legacy_before_owner:
+        dc.write_drain_request(home=tmp_path, principal="independent-operator")
+    original = owner.path.read_bytes()
+    with pytest.raises(ValueError, match="legacy drain"):
+        owner.begin(owner.generation, "tx")
+    assert owner.path.read_bytes() == original
+    assert dc.drain_requested(home=tmp_path)
+    assert owner.request_token is None and owner.released_request_token is None
+    dc.clear_drain_request(home=tmp_path)
+    owner.begin(owner.generation, "tx")
+    assert owner.closed
+
+
+@pytest.mark.parametrize("operation", ["release", "finalize"])
+def test_completed_transaction_replay_preserves_later_legacy_drain(tmp_path, operation):
+    owner = dc.GatewayMaintenance(tmp_path)
+    owner.begin(owner.generation, "tx")
+    owner.release(owner.generation, "tx")
+    owner.finalize(owner.generation, "tx")
+    dc.write_drain_request(home=tmp_path, principal="independent-operator")
+    original = owner.path.read_bytes()
+    with pytest.raises(ValueError, match="legacy drain"):
+        getattr(owner, operation)(owner.generation, "tx")
+    assert owner.path.read_bytes() == original
+    assert dc.drain_requested(home=tmp_path)
+
+
 def test_transaction_survives_expiry_restart_and_requires_matching_release(tmp_path):
     owner = dc.GatewayMaintenance(tmp_path)
     owner.begin(owner.generation, "transaction")

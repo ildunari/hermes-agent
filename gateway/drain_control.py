@@ -235,9 +235,17 @@ class GatewayMaintenance:
         if not isinstance(token, str) or not token or len(token) > 256:
             raise ValueError("request_token required (1..256 characters)")
 
+    def _reject_active_legacy_drain(self):
+        # Called under the marker lock: an independent pause has no transaction
+        # token, but that is not permission to replace or release its authority.
+        body = _active_drain_body(self.home)
+        if body is not None and "protocol_version" not in body:
+            raise ValueError("active legacy drain owns the gateway marker")
+
     def begin(self, generation, token):
         with self.lock, _FileLock(self.path.with_suffix(".lock")):
             self._validate(generation, token)
+            self._reject_active_legacy_drain()
             if not self.provider_supported:
                 raise ValueError("cron provider lacks native maintenance admission support")
             if self.released_request_token == token:
@@ -252,8 +260,9 @@ class GatewayMaintenance:
             self.released_request_token = None
 
     def release(self, generation, token):
-        with self.lock:
+        with self.lock, _FileLock(self.path.with_suffix(".lock")):
             self._validate(generation, token)
+            self._reject_active_legacy_drain()
             if not self.provider_supported:
                 raise ValueError("cron provider lacks native maintenance admission support")
             held = self._token()
@@ -267,6 +276,7 @@ class GatewayMaintenance:
     def finalize(self, generation, token):
         with self.lock, _FileLock(self.path.with_suffix(".lock")):
             self._validate(generation, token)
+            self._reject_active_legacy_drain()
             if self.closed or self.released_request_token != token or self._token() not in (None, token):
                 raise ValueError("gateway must acknowledge release before bootstrap finalization")
             self.path.unlink(missing_ok=True)
