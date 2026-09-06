@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 118
-  total_changed_lines: 5807
-  modified_upstream_lines: 1770
+  paths: 119
+  total_changed_lines: 4284
+  modified_upstream_lines: 1855
 
 required_support:
   - support/hermes-runtime-support/tests/gateway/test_continuity_native_seams.py
