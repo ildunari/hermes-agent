@@ -815,6 +815,12 @@ class ToolRegistry:
         if not entry:
             return tool_error(f"Unknown tool: {name}")
         try:
+            # Recheck the resolved tool and final args, including nested/bridge calls.
+            policy = sys.modules.get("gateway.conversation_extensions")
+            if policy is not None:
+                denial = policy.authorize_tool_dispatch(name, args)
+                if denial is not None:
+                    return denial
             if entry.is_async:
                 from model_tools import _run_async
                 result = _run_async(entry.handler(args, **kwargs))

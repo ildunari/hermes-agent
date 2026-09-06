@@ -655,6 +655,14 @@ def _dispatch_authorized_once(
         block_message, ref.args = resolve() if authorization_gate is None else authorization_gate.run(resolve)
         state.args = ref.args
 
+    # Inline tools bypass the registry; every path checks the post-hook args here.
+    if block_message is None:
+        import sys
+        policy = sys.modules.get("gateway.conversation_extensions")
+        if policy is not None:
+            block_message = policy.authorize_tool_dispatch(ref.name, ref.args)
+            block_error_type = "extension_policy"
+
     guardrail_decision = None
     if block_message is None:
         guardrail_decision = agent._tool_guardrails.before_call(ref.name, ref.args)

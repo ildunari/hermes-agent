@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 116
+  paths: 118
   total_changed_lines: 5807
-  modified_upstream_lines: 1757
+  modified_upstream_lines: 1770
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -111,6 +111,14 @@ paths:
     disposition: must-carry
     owner: core provider fallback seam
     evidence: *provider
+  - path: agent/tool_executor.py
+    disposition: must-carry
+    owner: final conversation policy check for inline and rewritten tool calls
+    evidence: *conversation
+  - path: tools/registry.py
+    disposition: must-carry
+    owner: final conversation policy check for registry and nested tool calls
+    evidence: *conversation
   - path: agent/request_scoped_tools.py
     disposition: upstream
     owner: core plugin tool seam
