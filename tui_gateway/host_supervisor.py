@@ -34,7 +34,8 @@ MUTATOR_ROUTE_TABLE: dict[str, str] = {
 
 _REGISTRY_NAME = "dashboard-compute-host.json"
 _RESPAWN_WINDOW_SECS = 300.0
-_SHUTDOWN_TIMEOUT_SECS = 10.0
+HOST_DRAIN_SECS = 10.0
+_SHUTDOWN_TIMEOUT_SECS = HOST_DRAIN_SECS + 2.0
 # Late control-ack handlers: a compress that outlives its RPC waiter can run for the full
 # compression ceiling plus a stall-fallback retry, so keep registrations past that — bounded.
 # See #97948.

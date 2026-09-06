@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Collection
 
-from tui_gateway.host_supervisor import MUTATOR_ROUTE_TABLE, _build_sha
+from tui_gateway.host_supervisor import MUTATOR_ROUTE_TABLE, _build_sha, HOST_DRAIN_SECS
 
 
 def now_ns() -> int:
@@ -41,7 +41,7 @@ class _HostTransport:
 
 
 # Slice of ``ComputeHost.shutdown``'s budget held back for the post-drain finalize: the
-# supervisor SIGKILLs the host 10s (= default ``wait``) after SIGTERM, so a drain that ate
+# supervisor gives the host its drain budget plus exit slack, so a drain that ate
 # the whole budget would leave the flush racing that kill and persist nothing.
 _FLUSH_RESERVE_SECS = 1.0
 
@@ -65,6 +65,7 @@ class ComputeHost:
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers or _default_workers(), thread_name_prefix="compute-host-turn")
         self._closed = threading.Event()
+        self._shutdown_lock = threading.Lock()
         self._parent_pid = os.getppid()
         self._boot_id = uuid.uuid4().hex
         self._progress_counter = 0
@@ -96,7 +97,13 @@ class ComputeHost:
         self._closed.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
 
-    def shutdown(self, *, reason: str = "shutdown", wait: float = 10.0) -> None:
+    def shutdown(self, *, reason: str = "shutdown", wait: float = HOST_DRAIN_SECS) -> None:
+        with self._shutdown_lock:
+            if self._closed.is_set():
+                return
+            self._drain_shutdown(reason=reason, wait=wait)
+
+    def _drain_shutdown(self, *, reason: str, wait: float) -> None:
         """Drain in-flight turns, then finalize every session.
 
         ``_finalize_session`` is a one-shot latch, so finalizing before the drain would spend
@@ -144,9 +151,8 @@ class ComputeHost:
             getattr(self, handler)(frame)
 
     def _handle_shutdown(self, frame: dict[str, Any]) -> None:
+        self.shutdown(reason="shutdown")
         self.emit({"type": "shutdown.ack", "request_id": frame.get("request_id")})
-        # Explicit shutdown is a clean close; SIGTERM and orphan paths do the durability flush.
-        self.close()
 
     def _track_turn_future(self, future: concurrent.futures.Future, sid: str) -> None:
         """Track an in-flight turn; the done callback pops it or the map grows forever."""
@@ -465,13 +471,13 @@ def run_host(stdin: Any = None, stdout: Any = None) -> None:
     stdin = stdin or sys.stdin
     host = ComputeHost(stdout=stdout or sys.stdout)
     shutting_down = threading.Event()
+    shutdown_frame = None
+    shutdown_reason = "stdin_closed"
 
     def _signal_handler(_signum, _frame) -> None:
-        if shutting_down.is_set():
-            return
+        nonlocal shutdown_reason
+        shutdown_reason = "sigterm"
         shutting_down.set()
-        host.shutdown(reason="sigterm")
-        raise SystemExit(0)
     with contextlib.suppress(Exception):
         signal.signal(signal.SIGTERM, _signal_handler)
         signal.signal(signal.SIGINT, _signal_handler)
@@ -481,6 +487,7 @@ def run_host(stdin: Any = None, stdout: Any = None) -> None:
         "hermes_home": os.environ.get("HERMES_HOME", "")})
 
     def _reader() -> None:
+        nonlocal shutdown_frame
         for raw in stdin:
             if host._closed.is_set():
                 break
@@ -492,19 +499,24 @@ def run_host(stdin: Any = None, stdout: Any = None) -> None:
             if not isinstance(frame, dict):
                 host.emit({"type": "error", "message": "frame must be an object"})
                 continue
-            host.handle_frame(frame)
             if frame.get("type") == "shutdown":
-                os._exit(0)
+                shutdown_frame = frame
+                shutting_down.set()
+                return
+            host.handle_frame(frame)
             if host._closed.is_set():
                 break
     reader = threading.Thread(target=_reader, name="compute-host-control-reader", daemon=True)
     reader.start()
     try:
-        while not host._closed.wait(0.2):
+        while not shutting_down.wait(0.2) and not host._closed.is_set():
             if not reader.is_alive():
                 break
     finally:
-        host.shutdown(reason="stdin_closed", wait=2.0)
+        if shutdown_frame is not None:
+            host.handle_frame(shutdown_frame)
+        else:
+            host.shutdown(reason=shutdown_reason, wait=2.0 if shutdown_reason == "stdin_closed" else HOST_DRAIN_SECS)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -514,7 +526,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())
+    # The bounded drain has already flushed idle sessions. Python's executor atexit
+    # hook would otherwise wait forever for a stuck turn we deliberately retained.
+    os._exit(main())
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
