@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 118
-  total_changed_lines: 5807
-  modified_upstream_lines: 1770
+  paths: 126
+  total_changed_lines: 4775
+  modified_upstream_lines: 1855
 
 required_support:
   - support/hermes-update-ops/README.md
@@ -86,6 +86,38 @@ evidence_templates:
     artifact: signed Studio and MacBook bundles with exact commit stamps
 
 paths:
+  - path: agent/interrupt_control.py
+    disposition: upstream
+    owner: cancellation admission attribution without user content
+    evidence: *active_work
+  - path: agent/interrupt_diagnostics.py
+    disposition: upstream
+    owner: bounded cancellation identity and source diagnostics
+    evidence: *active_work
+  - path: tests/agent/test_interrupt_attribution.py
+    disposition: upstream
+    owner: cancellation privacy and explicit stop regression coverage
+    evidence: *active_work
+  - path: tui_gateway/session_compression.py
+    disposition: upstream
+    owner: context engine safe live configuration contract
+    evidence: *context_engine
+  - path: tests/tui_gateway/test_compression_config_context_engine.py
+    disposition: upstream
+    owner: built-in and third-party engine configuration parity
+    evidence: *context_engine
+  - path: tui_gateway/compute_host.py
+    disposition: upstream
+    owner: bounded explicit shutdown and durable finalization
+    evidence: *active_work
+  - path: tui_gateway/host_supervisor.py
+    disposition: upstream
+    owner: supervisor deadline preserves compute host drain budget
+    evidence: *active_work
+  - path: tests/tui_gateway/test_compute_host_shutdown_protocol.py
+    disposition: upstream
+    owner: native shutdown protocol durability regression coverage
+    evidence: *active_work
   - path: apps/desktop/electron/managed-ssh-update.test.ts
     disposition: upstream
     owner: portable POSIX managed-update contract test
