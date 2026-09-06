@@ -59,6 +59,7 @@ def test_admission_is_attributed_without_private_payloads(caplog, kind):
     assert event["session_id_sha256"] == hashlib.sha256(agent.session_id.encode()).hexdigest()
     assert event["api_request_id_sha256"] == hashlib.sha256(agent._current_api_request_id.encode()).hexdigest()
     assert event["activity_generation"] == 7
+    assert event["source"].endswith(".test_admission_is_attributed_without_private_payloads")
     assert secret not in caplog.text + repr(event)
     assert "session-private" not in repr(event)
     assert "request-private" not in repr(event)
