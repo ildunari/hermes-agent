@@ -614,7 +614,16 @@ class GatewayShutdownMixin:
             try:
                 # Off-thread: a synchronous marker read at 1s cadence can stall 30s+ under host I/O
                 # pressure and take every platform heartbeat down.
-                if await asyncio.to_thread(drain_requested):
+                owner = getattr(self, "_maintenance_owner", None)
+                released_bootstrap = (await asyncio.to_thread(owner._token)
+                                      if owner is not None and owner.released_request_token else None)
+                if owner is not None and (owner.closed or (
+                    owner.released_request_token and released_bootstrap == owner.released_request_token
+                )):
+                    requested = owner.closed
+                else:
+                    requested = await asyncio.to_thread(drain_requested)
+                if requested:
                     self._enter_external_drain()
                     # API and cron work live outside messaging's _running_agents map; refresh the
                     # aggregate while an external caller polls this reversible drain state.

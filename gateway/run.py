@@ -5140,8 +5140,14 @@ async def _start_gateway_start_control_socket(runner):
                 "pausing": accepted, "already_stopping": not accepted,
                 "pid": os.getpid(), "drain_timeout": _drain}
 
+        from gateway.drain_control import gateway_maintenance, gateway_maintenance_control
+        from gateway.control_socket import build_status_payload
+        owner = gateway_maintenance(runner)
         _control_server = GatewayControlServer(
-            verb_handlers={"pause-for-update": _pause_for_update_handler})
+            verb_handlers={"pause-for-update": _pause_for_update_handler,
+                           "status": lambda: {**build_status_payload(),
+                                              "owner_maintenance": owner.status(runner)}},
+            body_handlers={"owner_maintenance": lambda body: gateway_maintenance_control(runner, body)})
         if not await _control_server.start():
             _control_server = None
         else:
@@ -5162,6 +5168,10 @@ def _start_gateway_start_cron_and_housekeeping(runner):
     multiplex_cron = bool(getattr(runner.config, "multiplex_profiles", False))
     cron_provider = scheduler_for_profile_mode(
         resolve_cron_scheduler(), multiplex_profiles=multiplex_cron)
+    # Unknown providers retain their normal runtime behavior, but cannot claim
+    # a maintenance barrier without a verified admission contract.
+    from gateway.drain_control import gateway_maintenance
+    gateway_maintenance(runner).provider_supported = type(cron_provider) is InProcessCronScheduler
     cron_start_kwargs: Dict[str, Any] = {"adapters": runner.adapters, "loop": asyncio.get_running_loop()}
 
     # Multiplex: tell the ticker which profile homes to tick, else secondary profiles' jobs never run.

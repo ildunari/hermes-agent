@@ -124,7 +124,8 @@ class GatewayControlServer:
     because its control socket couldn't bind; consumers fall back to the scan layer."""
 
     def __init__(self, home: Optional[Path] = None, *,
-                 verb_handlers: Optional[dict[str, Callable[[], dict[str, Any]]]] = None) -> None:
+                 verb_handlers: Optional[dict[str, Callable[[], dict[str, Any]]]] = None,
+                 body_handlers: Optional[dict[str, Callable[[dict], dict[str, Any]]]] = None) -> None:
         if home is None:
             from gateway.status import _get_process_hermes_home
             home = _get_process_hermes_home()
@@ -135,6 +136,7 @@ class GatewayControlServer:
         self._pointer_file: Optional[Path] = None
         self._handlers: dict[str, Callable[[], dict[str, Any]]] = {
             "identify": build_identify_payload, "status": build_status_payload, **(verb_handlers or {})}
+        self._body_handlers = body_handlers or {}
 
     async def start(self) -> bool:
         """Bind and start serving. Returns True on success, False otherwise."""
@@ -206,7 +208,13 @@ class GatewayControlServer:
                 raise ValueError("request must be a JSON object")
             request_id, verb = request.get("id"), request.get("verb")
             handler = self._handlers.get(verb) if isinstance(verb, str) else None
-            if handler is None:
+            if isinstance(verb, str) and verb in self._body_handlers:
+                body = request.get("body", {})
+                if not isinstance(body, dict):
+                    raise ValueError("body must be an object")
+                response = {"ok": True, "protocol": CONTROL_PROTOCOL_VERSION,
+                            "result": self._body_handlers[verb](body)}
+            elif handler is None:
                 response: dict[str, Any] = {"ok": False, "error": f"unknown verb: {verb!r}",
                                             "protocol": CONTROL_PROTOCOL_VERSION, "supported_verbs": sorted(self._handlers)}
             else:
@@ -264,11 +272,13 @@ class _PipeControlProtocol(asyncio.Protocol):
                 self._transport.close()
 
 
-def query_gateway_control(home: Path, verb: str, *, timeout: float = _DEFAULT_CLIENT_TIMEOUT) -> Optional[dict[str, Any]]:
+def query_gateway_control(home: Path, verb: str, *, timeout: float = _DEFAULT_CLIENT_TIMEOUT,
+                          body: Optional[dict] = None) -> Optional[dict[str, Any]]:
     """Ask the gateway serving ``home`` a control verb; returns its ``result`` payload. Any failure (no/stale
     socket, timeout, malformed answer, ``ok: false``) returns None so callers fall back to the scan layer.
     Never raises."""
-    request = json.dumps({"verb": verb, "id": 1, "protocol": CONTROL_PROTOCOL_VERSION}).encode("utf-8") + b"\n"
+    request = json.dumps({"verb": verb, "id": 1, "protocol": CONTROL_PROTOCOL_VERSION,
+                          "body": body or {}}).encode("utf-8") + b"\n"
     query = _query_windows_pipe if _IS_WINDOWS else _query_unix_socket
     try:
         raw = query(Path(home), request, timeout)

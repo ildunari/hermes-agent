@@ -2567,6 +2567,25 @@ class GatewayTurnMixin:
         self, message: str, context_prompt: str, history: List[Dict[str, Any]],
         source: SessionSource, session_id: str, **turn_kwargs,
     ) -> Dict[str, Any]:
+        owner = getattr(self, "_maintenance_owner", None)
+        if owner is None:
+            return await self._run_agent_in_profile(message, context_prompt, history, source, session_id, **turn_kwargs)
+        # Retain the native caller/queue until release; never turn a maintenance
+        # refusal into a completed internal resume or discard queued followups.
+        if not await owner.wait_until_open(self, queued=True):
+            return {"final_response": "", "interrupted": True}
+        generation, key = turn_kwargs.get("run_generation"), turn_kwargs.get("session_key")
+        if generation is not None and key and not self._is_session_run_current(key, generation):
+            return {"final_response": "", "interrupted": True}
+        with owner.admission() as admitted:
+            if not admitted:
+                raise RuntimeError("gateway admission changed outside its event loop")
+            return await self._run_agent_in_profile(message, context_prompt, history, source, session_id, **turn_kwargs)
+
+    async def _run_agent_in_profile(
+        self, message: str, context_prompt: str, history: List[Dict[str, Any]],
+        source: SessionSource, session_id: str, **turn_kwargs,
+    ) -> Dict[str, Any]:
         """Profile-scoping wrapper around ``_run_agent_inner`` (same keyword parameters; pass-through
         when multiplexing is off)."""
         if not getattr(getattr(self, "config", None), "multiplex_profiles", False):

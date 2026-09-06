@@ -1241,6 +1241,17 @@ class GatewayStartupMixin:
     async def start(self) -> bool:
         """Start the gateway and all configured platform adapters."""
         logger.info("Starting Hermes Gateway...")
+        from gateway.drain_control import gateway_maintenance
+        owner = gateway_maintenance(self)
+        if not await owner.wait_until_open(self):
+            return True
+        with owner.admission() as admitted:
+            if not admitted:
+                raise RuntimeError("gateway startup admission changed outside its event loop")
+            return await self._start_admitted()
+
+    async def _start_admitted(self) -> bool:
+        """Startup owns a reservation until adapters and restore have finished."""
         try:
             self._install_conversation_extension_host()
         except Exception:

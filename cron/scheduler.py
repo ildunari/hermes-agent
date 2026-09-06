@@ -3739,6 +3739,18 @@ def _sweep_mcp_orphans_when_all_done(futures: list) -> None:
 
 def tick(
     verbose: bool = True, adapters=None, loop=None, sync: bool = True, *, can_dispatch=None):
+    # A gateway maintenance begin must see ticks that passed admission but have
+    # not yet registered their executor jobs. The reservation transfers to those
+    # existing job records before this context exits.
+    from gateway.drain_control import gateway_cron_admission
+    with gateway_cron_admission() as admitted:
+        if not admitted:
+            return 0
+        return _tick_admitted(verbose, adapters, loop, sync, can_dispatch=can_dispatch)
+
+
+def _tick_admitted(
+    verbose: bool = True, adapters=None, loop=None, sync: bool = True, *, can_dispatch=None):
     """Check and run all due jobs. File-locked so only one tick runs at a time (gateway ticker vs
     standalone daemon / manual tick). ``can_dispatch``: optional gate; false leaves due jobs for the
     next allowed tick. Returns the number of jobs executed (0 if another tick holds the lock)."""
