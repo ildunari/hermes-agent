@@ -390,8 +390,28 @@ def _run_post_turn_followups(
             if isinstance(steer, str) and steer.strip():
                 with session["history_lock"]:
                     _enqueue_prompt(session, steer, session.get("transport"))
+            if goal_followup:
+                with session["history_lock"]:
+                    session["_maintenance_goal_followup"] = (
+                        int(session.get("_queued_prompt_generation", 0)), goal_followup)
             return
         _run_admitted_post_turn_followups(rid, sid, session, result, goal_followup)
+
+
+def _resume_maintenance_work() -> None:
+    """Resume native queues after release; claims and retries use normal admission."""
+    from tui_gateway.owner_maintenance import get_owner
+    owner = get_owner()
+    with owner.lock:
+        if owner.closed:
+            return
+        with _sessions_lock:
+            sessions = list(_sessions.items())
+        for sid, session in sessions:
+            with session["history_lock"]:
+                if session.get("running") or session.get("_closing") or session.get("_finalized"):
+                    continue
+            _run_post_turn_followups("maintenance-release", sid, session, {}, None)
 
 
 def _run_admitted_post_turn_followups(
@@ -406,6 +426,12 @@ def _run_admitted_post_turn_followups(
             _enqueue_prompt(session, steer, session.get("transport"))
     if _drain_queued_prompt(rid, sid, session):
         return
+    with session["history_lock"]:
+        pending_goal = session.pop("_maintenance_goal_followup", None)
+        generation = int(session.get("_queued_prompt_generation", 0))
+    if (not goal_followup and pending_goal and pending_goal[0] == generation
+            and _active_goal_manager(session) is not None):
+        goal_followup = pending_goal[1]
     if goal_followup:
         with session["history_lock"]:
             if session.get("running"):

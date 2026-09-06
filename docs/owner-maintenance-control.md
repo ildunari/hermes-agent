@@ -35,6 +35,12 @@ a preactivation transaction. An untouched open owner may acknowledge cancellatio
 when the matching persisted token exists. Releases retain `released_request_token`
 for retries after a lost response.
 
+Release pumps native queued work once the serving and compute owners are open.
+Repeated release cannot duplicate a claimed prompt. A goal continuation held during
+maintenance stays on its native session and contributes to queued work; dispatch
+rechecks the native persisted GoalManager and Stop's queue generation, so paused
+or cancelled goals are not revived. User messages retain priority over goals.
+
 After verifying every replacement and releasing every owner, repeat release with
 `finalize_bootstrap: true` and `expected_owner_generations: [...]` containing the
 exact current endpoint inventory. Every owner must be open and released under the

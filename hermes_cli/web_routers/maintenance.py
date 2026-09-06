@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -9,6 +10,7 @@ from hermes_cli.dashboard_auth.token_auth import register_token_route
 from tui_gateway.owner_maintenance import MaintenanceConflict, get_owner, local_status
 
 router = APIRouter(prefix="/api/maintenance")
+_control_lock = threading.RLock()
 for _action in ("status", "begin", "release"):
     register_token_route(f"/api/maintenance/{_action}")
 
@@ -40,8 +42,9 @@ def control(action: str, body: dict):
     owner = get_owner()
     if action not in {"status", "begin", "release"}:
         raise MaintenanceConflict("unsupported maintenance action")
-    # Serializes local admissions with the complete generation check and action.
-    with owner.lock:
+    # Do not hold the admission lock across child RPC: a turn.end callback on the
+    # supervisor reader needs it to drain queues before that reader can deliver acks.
+    with _control_lock:
         owners = inventory()
         if action == "status":
             generation = body.get("owner_generation")
@@ -56,6 +59,11 @@ def control(action: str, body: dict):
         else:
             raise MaintenanceConflict("stale owner generation")
         owners = inventory()
+        if action == "release" and not any(o["admissions_closed"] for o in owners):
+            server = sys.modules.get("tui_gateway.server")
+            if server is not None:
+                server._resume_maintenance_work()
+            owners = inventory()
         if body.get("finalize_bootstrap"):
             expected = body.get("expected_owner_generations")
             actual = [o["owner_generation"] for o in owners]

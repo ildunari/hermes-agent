@@ -97,6 +97,8 @@ class OwnerMaintenance:
                     active += bool(not session.get("_compute_host_active") and
                                    (session.get("running") or (thread and thread.is_alive())))
                     queued += bool(session.get("queued_prompt")) + len(session.get("queued_prompts") or [])
+                    pending_goal = session.get("_maintenance_goal_followup")
+                    queued += bool(pending_goal and pending_goal[0] == int(session.get("_queued_prompt_generation", 0)))
                     key = session.get("session_key")
                 approval = sys.modules.get("tools.approval")
                 if approval is not None and key:

@@ -197,6 +197,8 @@ class ComputeHost:
                     active_turns=sum(f.running() for f in futures),
                     queued_turns=sum(not f.running() and not f.done() for f in futures))
             self.emit({"type": "maintenance.ack", "request_id": frame.get("request_id"), "owner": state})
+            if action == "release" and hasattr(server, "_resume_maintenance_work"):
+                server._resume_maintenance_work()
         except (MaintenanceConflict, OSError, ValueError) as exc:
             self.emit({"type": "maintenance.error", "request_id": frame.get("request_id"), "message": str(exc)})
 
