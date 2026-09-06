@@ -26,7 +26,9 @@ required_support:
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extension_host.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_extension_runtime.py
   - support/hermes-runtime-support/src/hermes_runtime_support/conversation_ownership.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/conversation_turn_bridge.py
   - support/hermes-runtime-support/src/hermes_runtime_support/gateway_command_context.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/opportunity_host.py
   - support/hermes-runtime-support/src/hermes_runtime_support/subagent_lifecycle.py
   - support/hermes-runtime-support/docs/subagent-lifecycle.md
   - support/hermes-runtime-support/tests/test_subagent_lifecycle.py
