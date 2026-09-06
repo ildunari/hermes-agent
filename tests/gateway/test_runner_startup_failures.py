@@ -39,7 +39,8 @@ async def test_start_gateway_hydrates_default_secrets_off_event_loop(
             self.exit_code = None
             self.adapters = {}
 
-        async def start(self):
+        async def start(self, *, maintenance_admitted=False):
+            assert maintenance_admitted
             return True
 
         async def stop(self):
@@ -149,7 +150,8 @@ async def test_start_gateway_verbosity_imports_redacting_formatter(monkeypatch, 
             self.exit_code = None
             self.adapters = {}
 
-        async def start(self):
+        async def start(self, *, maintenance_admitted=False):
+            assert maintenance_admitted
             assert self._platform_lock_takeover_on_start is False
             return True
 
@@ -289,7 +291,8 @@ async def test_start_gateway_replace_writes_takeover_marker_before_sigterm(
             self.exit_code = None
             self.adapters = {}
 
-        async def start(self):
+        async def start(self, *, maintenance_admitted=False):
+            assert maintenance_admitted
             return True
 
         async def stop(self):
@@ -497,7 +500,8 @@ async def test_start_gateway_propagates_fatal_config_exit_code(monkeypatch, tmp_
             self.exit_code = GATEWAY_FATAL_CONFIG_EXIT_CODE
             self.adapters = {}
 
-        async def start(self):
+        async def start(self, *, maintenance_admitted=False):
+            assert maintenance_admitted
             return True
 
         async def stop(self):

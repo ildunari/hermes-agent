@@ -5394,35 +5394,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     if not _start_gateway_claim_pid_file():
         return False
 
-    # Right after the PID claim (which makes us authoritative); non-fatal — consumers fall back to scan.
-    _control_server = await _start_gateway_start_control_socket(runner)
-
-    def _lifecycle_record_startup() -> None:
-        # Report if the previous life died uncleanly (SIGKILL / OOM / VM death), then claim the
-        # sentinel for this life. After the PID-file claim so a --replace loser can't clobber it.
-        from gateway.lifecycle_ledger import record_startup
-        record_startup()
-
-    def _start_keepalive() -> None:
-        from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive
-        start_nous_auth_keepalive()
-
-    _best_effort(_lifecycle_record_startup, "Lifecycle ledger startup record failed: %s")
-    _best_effort(_start_keepalive, "Nous auth keepalive did not start: %s")
-    _ensure_windows_gateway_venv_imports()
-
-    # discover_mcp_tools() blocks up to 120s; on the loop thread it would freeze platform heartbeats.
+    # PID authority precedes the reservation; the reservation precedes socket
+    # exposure and covers discovery through the runner's admitted startup.
+    from gateway.run_startup import start_gateway_with_admission
     try:
-        # MCP tool discovery — run in an executor so the asyncio event loop stays responsive even when a
-        # configured MCP server is slow or unreachable.  discover_mcp_tools() uses a blocking 120s wait
-        # internally; calling it from the loop thread would freeze platform heartbeats (Discord shard,
-        # Telegram polling) until it returned. See #16856.
-        await _discover_gateway_mcp_tools(runner.config)
-    except Exception as e:
-        logger.debug("MCP tool discovery failed: %s", e)
-
-    try:
-        success = await runner.start()
+        success, _control_server = await start_gateway_with_admission(runner)
     except BaseException:
         _shutdown_gateway_health_export(runner)
         raise

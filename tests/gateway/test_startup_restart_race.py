@@ -189,7 +189,8 @@ async def test_start_gateway_does_not_start_cron_after_aborted_startup(tmp_path,
             self.exit_code = GATEWAY_SERVICE_RESTART_EXIT_CODE
             self._gateway_health_export_runtime = ExportRuntime()
 
-        async def start(self):
+        async def start(self, *, maintenance_admitted=False):
+            assert maintenance_admitted
             return True
 
         async def wait_for_shutdown(self):

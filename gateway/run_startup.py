@@ -34,6 +34,58 @@ from typing import Any, Dict, Optional, Tuple
 logger = logging.getLogger("gateway.run")
 
 
+async def start_gateway_with_admission(runner):
+    """Expose control while held; reserve open startup before the socket can yield."""
+    from contextlib import ExitStack
+    from gateway.drain_control import gateway_maintenance
+    from gateway.run import (
+        _best_effort, _discover_gateway_mcp_tools, _ensure_windows_gateway_venv_imports,
+        _start_gateway_start_control_socket,
+    )
+    owner = gateway_maintenance(runner)
+    with ExitStack() as reservations:
+        admitted = reservations.enter_context(owner.admission())
+        control_server = await _start_gateway_start_control_socket(runner)
+        if not admitted:
+            if not await owner.wait_until_open(runner):
+                return True, control_server
+            admitted = reservations.enter_context(owner.admission())
+            if not admitted:
+                raise RuntimeError("gateway startup admission changed before reservation")
+
+        def record_startup():
+            from gateway.lifecycle_ledger import record_startup
+            record_startup()
+
+        def start_keepalive():
+            from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive
+            start_nous_auth_keepalive()
+
+        _best_effort(record_startup, "Lifecycle ledger startup record failed: %s")
+        _best_effort(start_keepalive, "Nous auth keepalive did not start: %s")
+        _ensure_windows_gateway_venv_imports()
+        discovery = asyncio.create_task(_discover_gateway_mcp_tools(runner.config))
+        try:
+            await asyncio.shield(discovery)
+        except asyncio.CancelledError:
+            # Cancelling the caller does not stop executor imports. Transfer the
+            # existing reservation until discovery actually finishes.
+            held = reservations.pop_all()
+            def finished(task):
+                try:
+                    if not task.cancelled():
+                        task.exception()
+                finally:
+                    held.close()
+            discovery.add_done_callback(finished)
+            raise
+        except Exception as exc:
+            logger.debug("MCP tool discovery failed: %s", exc)
+        # Begin may close admission during discovery. This startup was already
+        # admitted and must finish, not wait on a hold that is draining itself.
+        return await runner.start(maintenance_admitted=True), control_server
+
+
 class GatewayStartupMixin:
     """Startup sequence, resume/restore and handoff methods for GatewayRunner."""
 
@@ -1238,11 +1290,15 @@ class GatewayStartupMixin:
         # marker (prior-instantiation markers are ignored via epoch).
         self._spawn_supervised(self._drain_control_watcher, "drain_control_watcher")
 
-    async def start(self) -> bool:
+    async def start(self, *, maintenance_admitted: bool = False) -> bool:
         """Start the gateway and all configured platform adapters."""
         logger.info("Starting Hermes Gateway...")
         from gateway.drain_control import gateway_maintenance
         owner = gateway_maintenance(self)
+        if maintenance_admitted:
+            if not owner.pending_admissions:
+                raise RuntimeError("gateway startup requires an existing reservation")
+            return await self._start_admitted()
         if not await owner.wait_until_open(self):
             return True
         with owner.admission() as admitted:
