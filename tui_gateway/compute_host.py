@@ -55,7 +55,9 @@ class ComputeHost:
     _FRAME_HANDLERS: dict[str, str] = {
         "turn.start": "_handle_turn_start", "interrupt": "_handle_interrupt",
         "respond": "_handle_respond", "reload_mcp": "_handle_reload_mcp",
-        "control": "_handle_control", "shutdown": "_handle_shutdown"}
+        "control": "_handle_control", "shutdown": "_handle_shutdown",
+        "maintenance.status": "_handle_maintenance", "maintenance.begin": "_handle_maintenance",
+        "maintenance.release": "_handle_maintenance"}
 
     def __init__(
         self, *, stdout: Any = None, max_workers: int | None = None,
@@ -66,8 +68,10 @@ class ComputeHost:
             max_workers=max_workers or _default_workers(), thread_name_prefix="compute-host-turn")
         self._closed = threading.Event()
         self._shutdown_lock = threading.Lock()
+        from tui_gateway.owner_maintenance import get_owner
+        self._maintenance = get_owner()
         self._parent_pid = os.getppid()
-        self._boot_id = uuid.uuid4().hex
+        self._boot_id = self._maintenance.generation
         self._progress_counter = 0
         self._progress_lock = threading.Lock()
         # Future -> the ``sid`` whose turn it runs; ``shutdown`` leaves live sids unfinalized.
@@ -112,6 +116,8 @@ class ComputeHost:
         Sessions still running at the deadline are skipped (unfinalized keeps them
         recoverable; atexit ``server._shutdown_sessions`` may re-finalize them).
         """
+        with self._maintenance.lock:
+            self._maintenance.stopping = True
         self._closed.set()
         budget = max(0.0, wait)
         deadline = time.monotonic() + budget - min(_FLUSH_RESERVE_SECS, budget / 2.0)
@@ -135,7 +141,10 @@ class ComputeHost:
             return
         skip = set(skip_sids or ())
         for sid, session in list(server._sessions.items()):
-            if sid in skip:
+            # Native follow-up turns can outlive the originally submitted future.
+            # Their session remains the authority even after that future was popped.
+            run_thread = session.get("_run_thread")
+            if sid in skip or session.get("running") or (run_thread and run_thread.is_alive()):
                 continue
             with contextlib.suppress(Exception):
                 server._finalize_session(session, end_reason=f"compute_host_{reason}")
@@ -165,8 +174,31 @@ class ComputeHost:
             self._turn_futures.pop(future, None)
 
     def _handle_turn_start(self, frame: dict[str, Any]) -> None:
-        future = self._executor.submit(self._run_real_turn, dict(frame))
-        self._track_turn_future(future, str(frame.get("sid") or ""))
+        with self._maintenance.lock:
+            if self._maintenance.closed or self._closed.is_set():
+                self._reply("turn.error", str(frame.get("sid") or ""), frame.get("request_id"),
+                            reason="maintenance", message="owner admissions closed")
+                return
+            future = self._executor.submit(self._run_real_turn, dict(frame))
+            self._track_turn_future(future, str(frame.get("sid") or ""))
+
+    def _handle_maintenance(self, frame: dict[str, Any]) -> None:
+        from tui_gateway.owner_maintenance import MaintenanceConflict
+        try:
+            action = frame["type"].removeprefix("maintenance.")
+            if action != "status":
+                getattr(self._maintenance, action)(frame.get("owner_generation"), frame.get("request_token"))
+            from tui_gateway import server
+            with server._sessions_lock:
+                sessions = list(server._sessions.values())
+            with self._maintenance.lock, self._turn_futures_lock:
+                futures = list(self._turn_futures)
+                state = self._maintenance.status(sessions,
+                    active_turns=sum(f.running() for f in futures),
+                    queued_turns=sum(not f.running() and not f.done() for f in futures))
+            self.emit({"type": "maintenance.ack", "request_id": frame.get("request_id"), "owner": state})
+        except (MaintenanceConflict, OSError, ValueError) as exc:
+            self.emit({"type": "maintenance.error", "request_id": frame.get("request_id"), "message": str(exc)})
 
     def _guarded(
         self, frame: dict[str, Any], error_kind: str, body: Callable, *,
@@ -228,6 +260,7 @@ class ComputeHost:
                     self._reply("turn.error", sid, request_id, message="session busy")
                     return
                 session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
+                session["_maintenance_turn_admitted"] = True
                 server._start_inflight_turn(session, inflight)
             self._reply("turn.started", sid, request_id, started_ns=now_ns())
             with contextlib.suppress(Exception):

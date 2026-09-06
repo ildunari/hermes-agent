@@ -118,14 +118,19 @@ _KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
 def _notif_release_turn(session: dict) -> None:
     with session["history_lock"]:
         session["running"] = False
+        session.pop("_maintenance_turn_admitted", None)
 
 
 def _notif_claim_turn(session: dict) -> bool:
     """Claim the idle session (running=True) under history_lock; False if a turn is live."""
-    with session["history_lock"]:
-        claimed = not session.get("running")
+    from tui_gateway.owner_maintenance import get_owner
+    owner = get_owner()
+    with owner.lock, session["history_lock"]:
+        if owner.closed or session.get("running"):
+            return False
         session["running"] = True
-        return claimed
+        session["_maintenance_turn_admitted"] = True
+        return True
 
 
 def _notif_log_failure(what: str, exc: BaseException) -> None:

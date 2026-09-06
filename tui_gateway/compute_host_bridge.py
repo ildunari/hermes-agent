@@ -20,6 +20,24 @@ _compute_host_supervisor_lock = threading.Lock()
 _COMPUTE_HOST_COMPRESS_WAIT_CAP_SECS = 630.0
 
 
+def _existing_compute_owner_maintenance(action="status", **params):
+    """Maintenance must never create a child merely to prove a missing owner idle."""
+    with _compute_host_supervisor_lock:
+        supervisor = _compute_host_supervisor
+    return None if supervisor is None else supervisor.maintenance(action, **params)
+
+
+def _finalize_compute_owner_maintenance(generation, clear_bootstrap):
+    with _compute_host_supervisor_lock:
+        supervisor = _compute_host_supervisor
+        if supervisor is None:
+            if generation is not None:
+                raise RuntimeError("compute owner disappeared during maintenance finalization")
+            clear_bootstrap()
+        else:
+            supervisor.finalize_maintenance(generation, clear_bootstrap)
+
+
 def _turn_isolation_enabled(cfg: dict | None = None) -> bool:
     if os.environ.get("HERMES_COMPUTE_HOST_CHILD") == "1":
         return False
@@ -274,4 +292,6 @@ def _adopt_late_compute_host_compress_ack(sid: str, session: dict, ack: dict, *,
 
 def register(server) -> None:
     """Publish this module's helpers + handlers onto ``server``, rebound to its globals."""
+    from tui_gateway.owner_maintenance import get_owner
+    get_owner(server._hermes_home)
     bind_module(globals(), server, skip=("_",))

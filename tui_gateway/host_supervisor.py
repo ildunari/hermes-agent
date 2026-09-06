@@ -44,7 +44,7 @@ _LATE_CONTROL_MAX = 64
 # Host frames whose ``request_id`` resolves a pending/late control waiter.
 _CONTROL_REPLY_TYPES = frozenset({
     "control.ack", "control.error", "respond.ack", "respond.error", "interrupt.ack",
-    "reload_mcp.ack", "shutdown.ack"})
+    "reload_mcp.ack", "shutdown.ack", "maintenance.ack", "maintenance.error"})
 
 
 def append_log_record(path: str | Path, record: str) -> None:
@@ -257,6 +257,24 @@ class HostSupervisor:
         request_id = uuid.uuid4().hex
         frame = {"type": "respond", "sid": sid, "request_id": request_id, "params": dict(params)}
         return self._await_reply(frame, request_id, timeout)
+
+    def maintenance(self, action: str, *, owner_generation=None, request_token=None,
+                    timeout: float = 10.0) -> dict:
+        """Control an existing owner only: a missing/crashed child is not an idle owner."""
+        if action not in {"status", "begin", "release"}:
+            raise ValueError("unknown maintenance action")
+        if not self.is_running():
+            raise RuntimeError("compute owner unavailable")
+        request_id = uuid.uuid4().hex
+        return self._await_reply({"type": f"maintenance.{action}", "request_id": request_id,
+            "owner_generation": owner_generation, "request_token": request_token}, request_id, timeout)
+
+    def finalize_maintenance(self, generation, clear_bootstrap):
+        """Pin the native child generation against respawn while committing release."""
+        with self._lock:
+            if not self.is_running() or self._hello.get("boot_id") != generation:
+                raise RuntimeError("compute owner changed during maintenance finalization")
+            clear_bootstrap()
 
     def reload_mcp(self, sid: str, *, request_id: str | None = None) -> dict:
         payload = {"type": "reload_mcp", "sid": sid, "request_id": request_id or uuid.uuid4().hex}

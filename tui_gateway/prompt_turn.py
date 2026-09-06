@@ -82,6 +82,20 @@ def _plan_goal_compression_recovery(
 def _admit_prompt_turn(
     sid: str, session: dict, text: Any, image_paths: list[str] | None,
     queued_prompt_generation: int | None) -> tuple[list[str], Any] | None:
+    from tui_gateway.owner_maintenance import get_owner
+    owner = get_owner()
+    with owner.lock:
+        with session["history_lock"]:
+            reserved = session.pop("_maintenance_turn_admitted", False)
+            if owner.closed and not reserved:
+                session["running"] = False
+                return None
+        return _admit_unfenced_prompt_turn(sid, session, text, image_paths, queued_prompt_generation)
+
+
+def _admit_unfenced_prompt_turn(
+    sid: str, session: dict, text: Any, image_paths: list[str] | None,
+    queued_prompt_generation: int | None) -> tuple[list[str], Any] | None:
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
@@ -365,6 +379,22 @@ def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str
 
 
 def _run_post_turn_followups(
+    rid, sid: str, session: dict, result: Any, goal_followup: str | None) -> None:
+    from tui_gateway.owner_maintenance import get_owner
+    owner = get_owner()
+    with owner.lock:
+        if owner.closed:
+            # Keep user steering in its native queue; completion notifications remain
+            # unclaimed so the poller can deliver them after release.
+            steer = result.get("pending_steer") if isinstance(result, dict) else None
+            if isinstance(steer, str) and steer.strip():
+                with session["history_lock"]:
+                    _enqueue_prompt(session, steer, session.get("transport"))
+            return
+        _run_admitted_post_turn_followups(rid, sid, session, result, goal_followup)
+
+
+def _run_admitted_post_turn_followups(
     rid, sid: str, session: dict, result: Any, goal_followup: str | None) -> None:
     """Chain whatever should run after ``running`` was released.  Order: a mid-turn user
     prompt wins over every auto follow-up (drain it, skip the rest); a leftover /steer is

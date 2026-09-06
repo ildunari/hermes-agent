@@ -277,6 +277,15 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
 
 
 def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
+    from tui_gateway.owner_maintenance import get_owner
+    owner = get_owner()
+    with owner.lock:
+        if owner.closed:
+            return False
+        return _drain_admitted_queued_prompt(rid, sid, session)
+
+
+def _drain_admitted_queued_prompt(rid, sid: str, session: dict) -> bool:
     """Fire a queued next-turn prompt if one is waiting and the session is idle. True when dispatched: the caller
     skips lower-priority follow-ups this cycle (the user's message wins)."""
     with session["history_lock"]:

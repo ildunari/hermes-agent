@@ -523,6 +523,7 @@ def _lock_in_submit_turn(
             if err is not None:
                 return err, {}
         session["running"] = True
+        session["_maintenance_turn_admitted"] = True
         session["_turn_cancel_requested"] = False
         session["last_active"] = time.time()
         if hosted_task is not None:
@@ -533,6 +534,15 @@ def _lock_in_submit_turn(
 
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
+    from tui_gateway.owner_maintenance import get_owner
+    owner = get_owner()
+    with owner.lock:
+        if owner.closed:
+            return _err(rid, 5031, "owner admissions closed for maintenance")
+        return _submit_admitted_prompt(rid, params)
+
+
+def _submit_admitted_prompt(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
     sid = params.get("session_id", "")
     raw_text = params.get("text", "")
