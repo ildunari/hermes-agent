@@ -100,6 +100,32 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     cc = getattr(agent, "context_compressor", None)
     if cc is None:
         return
+    from agent.context_compressor import ContextCompressor
+    if not isinstance(cc, ContextCompressor):
+        # Plugins own compaction policy, including early triggers and protected
+        # tails. Only the existing model lifecycle contract belongs to the host.
+        import inspect
+        from agent.model_metadata import get_model_context_length
+
+        runtime = {key: getattr(agent, key, "") or "" for key in
+                   ("model", "base_url", "api_key", "provider", "api_mode")}
+        context_length = model_cfg.get("context_length")
+        try:
+            context_length = int(context_length) if context_length is not None else None
+        except (TypeError, ValueError):
+            context_length = None
+        context_length = get_model_context_length(
+            runtime["model"], base_url=runtime["base_url"], api_key=runtime["api_key"],
+            provider=runtime["provider"], config_context_length=context_length,
+            custom_providers=cfg.get("custom_providers"),
+        )
+        # Older engines predate provider/api_mode. Filter by signature rather
+        # than retrying TypeError, which could be a failure inside the engine.
+        parameters = inspect.signature(cc.update_model).parameters
+        if not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+            runtime = {key: value for key, value in runtime.items() if key in parameters}
+        cc.update_model(context_length=context_length, **runtime)
+        return
     # tail_mode: unknown/absent values land on the ctor default ("lean"), matching agent_init.
     default_tail = str(_compressor_ctor_default("tail_mode", "lean"))
     mode = str(compression.get("tail_mode", default_tail) or default_tail).strip().lower()
@@ -161,11 +187,11 @@ def _sync_agent_compression_with_config(sid: str, session: dict) -> None:
     cfg = _load_cfg() or {}
     signature = _tui_compression_config_signature(cfg)
     seen = session.get("config_compression_seen")
-    session["config_compression_seen"] = signature
     if signature == seen:
         return
     try:
         _apply_live_compression_config(agent, cfg)
+        session["config_compression_seen"] = signature
     except Exception as e:
         logger.warning("Could not apply live compression config for %s: %s", sid, e)
 
