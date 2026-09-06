@@ -9,6 +9,7 @@ import threading
 from typing import Optional
 
 from agent.interrupt_compat import request_hard_interrupt
+from agent.interrupt_diagnostics import record_cancellation
 from tools.interrupt import request_yield as _request_yield
 from tools.interrupt import set_interrupt as _set_interrupt
 
@@ -101,11 +102,17 @@ class InterruptControlMixin:
         generation claim — published only if the turn's generation still matches at the final mutation edge;
         returns False if the turn resumed meanwhile.
         """
+        diagnostic_reason = (
+            "generation_guarded_interrupt" if require_generation is not None
+            else "hard_cancel" if hard_cancel else "soft_interrupt"
+        )
         if require_generation is not None:
             # RESERVE the claim under the SAME lock `_touch_activity` stamps with; real progress invalidates
             # it and it is CONSUMED at the final mutation edge, so a resumed turn abandons the abort.
             with self._liveness_activity_lock():
                 if getattr(self, "_turn_liveness_activity_generation", 0) != require_generation:
+                    record_cancellation(self, reason=diagnostic_reason, outcome="declined_generation",
+                                        required_generation=require_generation)
                     return False
                 self._turn_liveness_abort_claim = require_generation
 
@@ -123,6 +130,8 @@ class InterruptControlMixin:
             _hard_event = getattr(self, "_hard_interrupt_requested", None) if hard_cancel else None
             if _hard_event is not None:
                 _hard_event.set()
+            record_cancellation(self, reason=diagnostic_reason, outcome="accepted",
+                                required_generation=require_generation)
 
         def _fence():  # re-read each time: a finished commit may replace or clear the slot
             return vars(self).get("_active_compression_commit_fence") if hard_cancel else None
@@ -145,6 +154,8 @@ class InterruptControlMixin:
                 # activity stamp, or the stamp landed first and the abort declines without publishing.
                 with self._liveness_activity_lock():
                     if getattr(self, "_turn_liveness_abort_claim", None) != require_generation:
+                        record_cancellation(self, reason=diagnostic_reason, outcome="declined_generation",
+                                            required_generation=require_generation)
                         return False
                     self._turn_liveness_abort_claim = None
                     _publish_interrupt_state()
@@ -273,6 +284,7 @@ class InterruptControlMixin:
             )
             self._interrupt_requested = True
             self._interrupt_message = None
+            record_cancellation(self, reason="redirect", outcome="accepted")
 
         # Interrupt only the model request — no fan-out to tool workers / child agents as interrupt() does.
         _execution_thread_id = getattr(self, "_execution_thread_id", None)
