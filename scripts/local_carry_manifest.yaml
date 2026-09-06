@@ -1,11 +1,12 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 126
-  total_changed_lines: 4775
-  modified_upstream_lines: 1855
+  paths: 138
+  total_changed_lines: 5673
+  modified_upstream_lines: 2028
 
 required_support:
+  - support/hermes-studio-ops/src/hermes_studio_ops/owner_maintenance_client.py
   - support/hermes-update-ops/README.md
   - support/hermes-update-ops/hermes_checkpoint.py
   - support/hermes-update-ops/hermes_update_service.py
@@ -86,6 +87,54 @@ evidence_templates:
     artifact: signed Studio and MacBook bundles with exact commit stamps
 
 paths:
+  - path: docs/owner-maintenance-control.md
+    disposition: upstream
+    owner: authenticated maintenance protocol and recovery contract
+    evidence: *active_work
+  - path: hermes_cli/web_routers/maintenance.py
+    disposition: upstream
+    owner: authenticated serving and compute owner maintenance control
+    evidence: *active_work
+  - path: hermes_cli/web_server.py
+    disposition: upstream
+    owner: maintenance route registration
+    evidence: *active_work
+  - path: tests/hermes_cli/test_owner_maintenance_http.py
+    disposition: upstream
+    owner: authenticated maintenance and retained work release regression coverage
+    evidence: *active_work
+  - path: tests/tui_gateway/test_owner_maintenance.py
+    disposition: upstream
+    owner: native admission and shutdown race invariants
+    evidence: *active_work
+  - path: tests/tui_gateway/test_owner_maintenance_protocol.py
+    disposition: upstream
+    owner: subprocess maintenance and shutdown durability
+    evidence: *active_work
+  - path: tui_gateway/compute_host_bridge.py
+    disposition: upstream
+    owner: existing compute owner maintenance delegation
+    evidence: *active_work
+  - path: tui_gateway/methods_prompt.py
+    disposition: upstream
+    owner: prompt admission fence
+    evidence: *active_work
+  - path: tui_gateway/owner_maintenance.py
+    disposition: upstream
+    owner: transaction bound admission and restart bootstrap hold
+    evidence: *active_work
+  - path: tui_gateway/prompt_turn.py
+    disposition: upstream
+    owner: preserve accepted and deferred work across maintenance
+    evidence: *active_work
+  - path: tui_gateway/session_auto_continue.py
+    disposition: upstream
+    owner: retain queued prompts during maintenance
+    evidence: *active_work
+  - path: tui_gateway/session_notifications.py
+    disposition: upstream
+    owner: native notification admission fencing
+    evidence: *active_work
   - path: agent/interrupt_control.py
     disposition: upstream
     owner: cancellation admission attribution without user content
