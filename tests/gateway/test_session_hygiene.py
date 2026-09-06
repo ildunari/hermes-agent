@@ -54,40 +54,6 @@ def _make_large_history_tokens(target_tokens: int) -> list:
     return _make_history(n_msgs, content_size=content_size)
 
 
-@pytest.mark.asyncio
-async def test_detached_hygiene_construction_preserves_gateway_session_key(monkeypatch):
-    from gateway.run import GatewayRunner
-    import run_agent
-
-    start_calls = []
-
-    class CapturingAgent:
-        def __init__(self, **kwargs):
-            self.platform = kwargs.get("platform")
-            self._gateway_session_key = kwargs.get("gateway_session_key")
-            start_calls.append((kwargs["session_id"], self._gateway_session_key))
-
-    monkeypatch.setattr(run_agent, "AIAgent", CapturingAgent)
-    runner = object.__new__(GatewayRunner)
-    runner._session_db = SimpleNamespace(
-        get_session=AsyncMock(return_value={"system_prompt": "persisted"}),
-        _db=object(),
-    )
-    entry = SessionEntry(
-        session_key="agent:main:telegram:dm:contact-stable",
-        session_id="session-1",
-        created_at=datetime.now(),
-        updated_at=datetime.now(),
-    )
-
-    agent, _session_db = await runner._hmwa_hygiene_build_agent(
-        "test-model", {"api_key": "test"}, entry, entry.session_key,
-    )
-
-    assert agent._gateway_session_key == entry.session_key
-    assert start_calls == [(entry.session_id, entry.session_key)]
-
-
 class HygieneCaptureAdapter(BasePlatformAdapter):
     def __init__(self):
         super().__init__(PlatformConfig(enabled=True, token="fake-token"), Platform.TELEGRAM)

@@ -6,6 +6,9 @@ limits:
   modified_upstream_lines: 1770
 
 required_support:
+  - support/hermes-runtime-support/tests/gateway/test_continuity_native_seams.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/conversation_route_promotion.py
+  - support/hermes-runtime-support/src/hermes_runtime_support/conversation_history_recovery.py
   - support/hermes-update-ops/README.md
   - support/hermes-update-ops/hermes_checkpoint.py
   - support/hermes-update-ops/hermes_update_service.py
@@ -197,6 +200,10 @@ paths:
   - path: gateway/turn_context.py
     disposition: must-carry
     owner: per-turn conversation extension augmentation seam
+    evidence: *conversation
+  - path: gateway/session_recovery.py
+    disposition: must-carry
+    owner: trusted local conversation origin persistence codec
     evidence: *conversation
   - path: gateway/session.py
     disposition: must-carry

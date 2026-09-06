@@ -56,21 +56,6 @@ class TestSessionSourceRoundtrip:
         assert restored.chat_id == "cli"
         assert restored.chat_type == "dm"  # default value preserved
 
-    def test_trusted_identity_is_local_persistence_only(self):
-        source = SessionSource(
-            platform=Platform.TELEGRAM,
-            chat_id="reply-address",
-            conversation_id="contact-stable",
-        )
-
-        wire = source.to_dict()
-        assert "conversation_id" not in wire
-        assert SessionSource.from_dict({**wire, "conversation_id": "forged"}).conversation_id is None
-
-        persisted = source.to_persistence_dict()
-        assert persisted["conversation_id"] == "contact-stable"
-        assert SessionSource.from_persistence_dict(persisted).conversation_id == "contact-stable"
-
 
 class TestSessionSourceDescription:
     def test_local_cli(self):
@@ -1672,44 +1657,6 @@ class TestGatewayRoutingTable:
         recovered = restarted.get_or_create_session(self._source())
         assert recovered.session_id == entry.session_id
         restarted._db.close()
-
-    def test_authenticated_alias_refresh_updates_routing_mirror_and_account_db(self, tmp_path):
-        config = GatewayConfig()
-        store = SessionStore(sessions_dir=tmp_path, config=config)
-        phone = SessionSource(
-            platform=Platform.TELEGRAM,
-            chat_id="+15550000001",
-            chat_type="dm",
-            user_id="owner",
-            conversation_id="contact-stable",
-        )
-        email = replace(phone, chat_id="owner@example.test")
-        stale_wake = replace(phone)
-
-        entry = store.get_or_create_session(phone, refresh_origin=True)
-        refreshed = store.get_or_create_session(email, refresh_origin=True)
-        assert refreshed.session_id == entry.session_id
-        assert refreshed.origin.chat_id == "owner@example.test"
-
-        internal = store.get_or_create_session(
-            stale_wake, touch_activity=False, refresh_origin=False,
-        )
-        assert internal.origin.chat_id == "owner@example.test"
-
-        row_origin = json.loads(store._db.get_session(entry.session_id)["origin_json"])
-        assert row_origin["chat_id"] == "owner@example.test"
-        assert row_origin["conversation_id"] == "contact-stable"
-        mirror = json.loads((tmp_path / "sessions.json").read_text())
-        assert mirror[entry.session_key]["origin"]["chat_id"] == "owner@example.test"
-        assert mirror[entry.session_key]["origin"]["conversation_id"] == "contact-stable"
-
-        store.close_all_db_handles()
-        restarted = SessionStore(sessions_dir=tmp_path, config=config)
-        recovered = restarted.lookup_by_session_key(entry.session_key)
-        assert recovered.session_id == entry.session_id
-        assert recovered.origin.chat_id == "owner@example.test"
-        assert recovered.origin.conversation_id == "contact-stable"
-        restarted.close_all_db_handles()
 
 
 
