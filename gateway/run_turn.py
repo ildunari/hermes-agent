@@ -292,7 +292,9 @@ class GatewayTurnMixin:
             # Internal wakes observe reset policy without counting as user activity, or periodic
             # notifications keep the routing key alive across every daily/idle boundary.
             session_entry = await self.async_session_store.get_or_create_session(
-                source, touch_activity=not bool(getattr(event, "internal", False)),
+                source,
+                touch_activity=not bool(getattr(event, "internal", False)),
+                refresh_origin=not bool(getattr(event, "internal", False)),
             )
         session_key = session_entry.session_key
         if not strict_session and pinned_session_id:
@@ -1100,7 +1102,9 @@ class GatewayTurnMixin:
             _hyg_codex_outcome, session_entry.session_id, _hyg_codex_auto, f"{plan.approx_tokens:,}",
         )
 
-    async def _hmwa_hygiene_build_agent(self, _hyg_model, _hyg_runtime, session_entry):
+    async def _hmwa_hygiene_build_agent(
+        self, _hyg_model, _hyg_runtime, session_entry, session_key,
+    ):
         """Build the detached hygiene ``AIAgent`` with the live session's system prompt. Returns
         ``(agent, sync_session_db)``."""
         from gateway.run import _GATEWAY_HYGIENE_PLATFORM, _seed_hygiene_system_prompt
@@ -1127,6 +1131,7 @@ class GatewayTurnMixin:
             **_hyg_runtime, model=_hyg_model, max_iterations=4, quiet_mode=True,
             skip_memory=not _hyg_checkpoint_required, enabled_toolsets=["memory"],
             session_id=session_entry.session_id, session_db=_hyg_session_db,
+            gateway_session_key=session_key,
         )
         _seed_hygiene_system_prompt(_hyg_agent, _hyg_session_row)
         # A rebuilt (not retained) prompt is deliberately stale for every real gateway surface.
@@ -1141,7 +1146,9 @@ class GatewayTurnMixin:
         continue with (compressed or original) on ``attempt.history``."""
         from gateway.run import HygieneTurnHoldExceeded
         from agent.conversation_compression import CompressionCommitFence
-        _hyg_agent, _hyg_session_db = await self._hmwa_hygiene_build_agent(_hyg_model, _hyg_runtime, session_entry)
+        _hyg_agent, _hyg_session_db = await self._hmwa_hygiene_build_agent(
+            _hyg_model, _hyg_runtime, session_entry, session_key,
+        )
         attempt.agent = _hyg_agent
         try:
             # Hygiene owns the session binding, so prefer in-place compaction over minting a

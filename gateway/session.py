@@ -96,6 +96,9 @@ class SessionSource:
     # over the authenticated relay WebSocket. ``platform`` is the UNDERLYING platform, not
     # ``relay``, so authz must key upstream trust off THIS flag.
     delivered_via_upstream_relay: bool = False
+    # Trusted local admission identity; never accepted from serialized peer input.
+    # Separates a permanent DM identity from its transport reply address.
+    conversation_id: Optional[str] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # Mirror scope_id/guild_id onto each other (scope_id wins) so readers of EITHER agree.
@@ -144,6 +147,18 @@ class SessionSource:
         _optional(self._OPTIONAL_TAIL)
         return d
 
+    def to_persistence_dict(self) -> Dict[str, Any]:
+        """Trusted-local representation used by gateway session storage.
+
+        ``conversation_id`` is admission-derived identity and therefore remains absent from the
+        wire codec above. The local routing index must retain it across a restart so an internal
+        wake derives the same stable session key as authenticated ingress.
+        """
+        data = self.to_dict()
+        if self.conversation_id:
+            data["conversation_id"] = self.conversation_id
+        return data
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionSource":
         plain = {
@@ -157,6 +172,15 @@ class SessionSource:
             scope_id=data.get("scope_id", data.get("guild_id")),
             auto_thread_created=bool(data.get("auto_thread_created", False)), **plain,
         )
+
+    @classmethod
+    def from_persistence_dict(cls, data: Dict[str, Any]) -> "SessionSource":
+        """Restore trusted-local fields in addition to the public wire representation."""
+        source = cls.from_dict(data)
+        conversation_id = data.get("conversation_id")
+        if isinstance(conversation_id, str) and conversation_id:
+            source.conversation_id = conversation_id
+        return source
 
 
 @dataclass
@@ -552,13 +576,13 @@ class SessionEntry:
             # Defence-in-depth against an unsanitized dict stored directly.
             result["model_override"] = sanitize_model_override(self.model_override)
         if self.origin:
-            result["origin"] = self.origin.to_dict()
+            result["origin"] = self.origin.to_persistence_dict()
         return result
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionEntry":
         origin = data.get("origin")
-        origin = SessionSource.from_dict(origin) if isinstance(origin, dict) else None
+        origin = SessionSource.from_persistence_dict(origin) if isinstance(origin, dict) else None
         platform = None
         if data.get("platform"):
             try:
@@ -665,7 +689,7 @@ def build_session_key(
                         + ([source.chat_id] if source.chat_id else [])
                         + ([source.thread_id] if source.thread_id else []))
     is_dm = source.chat_type == "dm"
-    chat_id = source.chat_id
+    chat_id = (getattr(source, "conversation_id", None) or source.chat_id) if is_dm else source.chat_id
     if is_dm and source.platform == Platform.WHATSAPP:
         chat_id = canonical_whatsapp_identifier(chat_id)
     # Discord auto-thread continuity: key a channel-initiating message on the thread it WILL be
@@ -773,6 +797,7 @@ class SessionStore(
         self._fast_persisted_entries: Dict[str, tuple[int, str]] = {}
         self._inflight_lock = threading.Lock()
         self._inflight_sessions: Dict[str, _SessionFlight] = {}
+        self._origin_refresh_lock = threading.Lock()
         # An unscoped legacy Slack key is claimed once per process (two workspaces must not both
         # revive one session).
         self._legacy_slack_claim_lock = threading.Lock()
@@ -858,10 +883,13 @@ class SessionStore(
 
     def get_or_create_session(
         self, source: SessionSource, force_new: bool = False, touch_activity: bool = True,
+        refresh_origin: bool = False,
     ) -> SessionEntry:
         """Single-flight session lookup/create per routing key: overlapping calls for one key (even
         concurrent ``force_new``) share the owner's result so only one transition and SQLite row is
-        created. ``touch_activity=False`` (internal events) preserves the user-activity clock."""
+        created. ``touch_activity=False`` (internal events) preserves the user-activity clock.
+        ``refresh_origin=True`` is reserved for authenticated ingress: it records the latest reply
+        address without letting a stale internal wake replace trusted routing state."""
         session_key = self._generate_session_key(source)
         inflight_lock = self._lazy("_inflight_lock", threading.Lock)
         self._lazy("_inflight_sessions", dict)
@@ -879,12 +907,16 @@ class SessionStore(
             assert slot.result is not None
             if touch_activity:
                 self.update_session(slot.result.session_key)
+            if refresh_origin:
+                return self._refresh_persisted_origin(slot.result, source)
             return slot.result
 
         try:
             slot.result = self._get_or_create_session_impl(
                 source, force_new=force_new, touch_activity=touch_activity,
             )
+            if refresh_origin:
+                slot.result = self._refresh_persisted_origin(slot.result, source)
             return slot.result
         except BaseException as exc:
             slot.error = exc
@@ -893,6 +925,34 @@ class SessionStore(
             slot.event.set()
             with inflight_lock:
                 self._inflight_sessions.pop(session_key, None)
+
+    def _refresh_persisted_origin(
+        self, entry: SessionEntry, source: SessionSource,
+    ) -> SessionEntry:
+        """Persist the latest authenticated transport route for an existing stable identity."""
+        with self._lazy("_origin_refresh_lock", threading.Lock):
+            with self._lock:
+                current = self._entry_locked(entry.session_key)
+                if current is None or current.session_id != entry.session_id:
+                    return entry
+                old_origin = current.origin
+                if (
+                    old_origin is source
+                    or (
+                        old_origin is not None
+                        and old_origin.to_persistence_dict() == source.to_persistence_dict()
+                    )
+                ):
+                    return current
+                current.origin = source
+            # Origin identity affects key derivation after restart, so this structural refresh must
+            # update both the primary routing table and the sessions.json fallback mirror.
+            self._save_entries()
+            self._record_gateway_session_peer(
+                current.session_id, current.session_key, source,
+                display_name=current.display_name,
+            )
+            return current
 
     def _get_or_create_session_impl(
         self, source: SessionSource, force_new: bool = False, touch_activity: bool = True,
