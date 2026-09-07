@@ -8,9 +8,7 @@
  * to the stock "Electron" icon/name (the bug when the stamp lived only in
  * install.ps1, which the update path doesn't use).
  *
- * An explicit HERMES_DESKTOP_AFTERPACK_HOOK runs first on any platform; its
- * failures abort packaging. Built-in stamping is Windows-only: rcedit edits
- * PE resources, irrelevant on macOS/Linux where the
+ * Windows-only: rcedit edits PE resources, irrelevant on macOS/Linux where the
  * app identity comes from the bundle Info.plist / desktop entry. Best-effort:
  * a stamp failure must never fail an otherwise-good build (worst case is the
  * stock icon, not a broken app), so we log and resolve rather than throw.
@@ -22,19 +20,10 @@
  */
 
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
 
 import { stampExeIdentity } from './set-exe-identity.mjs'
 
 export default async function afterPack(context) {
-  // Explicit operator hook keeps machine-specific signing outside core.
-  // Unlike cosmetic Windows stamping, signing failures must fail the build.
-  const externalHook = process.env.HERMES_DESKTOP_AFTERPACK_HOOK
-  if (externalHook) {
-    const { default: runHook } = await import(pathToFileURL(path.resolve(externalHook)).href)
-    await runHook(context)
-  }
-
   if (context.electronPlatformName !== 'win32') {
     return
   }

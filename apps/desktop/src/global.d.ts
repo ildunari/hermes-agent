@@ -588,8 +588,6 @@ export interface HermesTerminalExit {
 
 export interface DesktopVersionInfo {
   appVersion: string
-  /** Immutable packaged-client identity, independent of a local backend clone. */
-  buildCommit?: string | null
   electronVersion: string
   nodeVersion: string
   platform: string

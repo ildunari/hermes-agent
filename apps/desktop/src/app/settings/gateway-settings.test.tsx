@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const getConnectionConfig = vi.fn()
@@ -36,20 +36,6 @@ afterEach(() => {
 })
 
 describe('GatewaySettings', () => {
-  it('sends an explicit blank when clearing a saved SSH key override', async () => {
-    const sshConnection = { ...localConnection, mode: 'ssh', sshHost: 'studio', sshKeyPath: '/old/key' }
-    getConnectionConfig.mockResolvedValue(sshConnection)
-    const applyConnectionConfig = vi.fn().mockResolvedValue({ ...sshConnection, sshKeyPath: '' })
-    Object.assign(window.hermesDesktop, { applyConnectionConfig })
-    const { GatewaySettings } = await import('./gateway-settings')
-    render(<GatewaySettings />)
-    fireEvent.change(await screen.findByDisplayValue('/old/key'), { target: { value: '' } })
-    fireEvent.click(screen.getByRole('button', { name: /save and reconnect/i }))
-    await waitFor(() => expect(applyConnectionConfig).toHaveBeenCalledWith(
-      expect.objectContaining({ sshHost: 'studio', sshKeyPath: '' })
-    ))
-  })
-
   it('loads the machine-level connection config (no profile scoping)', async () => {
     const { GatewaySettings } = await import('./gateway-settings')
 

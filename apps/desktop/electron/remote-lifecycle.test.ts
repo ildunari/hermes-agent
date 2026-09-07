@@ -854,7 +854,6 @@ done
     })
 
     await exec(command, { shell: '/bin/bash' })
-    assert.equal(await readFile(path.join(directory, 'home', '.hermes-update-in-progress.mutex'), 'utf8'), '')
 
     for (let attempt = 0; attempt < 40; attempt += 1) {
       try {

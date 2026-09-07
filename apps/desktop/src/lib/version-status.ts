@@ -38,8 +38,6 @@ export interface VersionStatusInput {
   restarting: boolean
   /** Client only: short commit sha of the running build. */
   sha?: null | string
-  /** Packaged client stamp; local-checkout counts apply only when it matches. */
-  installedCommit?: null | string
   target: UpdateTarget
   /** An update the commit count can't express (shallow clones, pip installs). */
   updateAvailable?: boolean
@@ -66,21 +64,11 @@ export function resolveVersionStatus({
   remote,
   restarting,
   sha = null,
-  installedCommit = null,
   target,
   updateAvailable,
   version = null
 }: VersionStatusInput): VersionStatusResult {
   const client = target === 'client'
-  if (client && installedCommit) {
-    if (!sha || !installedCommit.startsWith(sha)) {
-      // Unknown installed-build distance must not inherit an unrelated clone's count.
-      behind = 0
-      updateAvailable = false
-      branch = undefined
-    }
-    sha = installedCommit.slice(0, 7)
-  }
   const busy = applying || restarting
   // updateAvailable covers every "behind but uncountable" shape: shallow
   // installer clones (behind === null upstream, coalesced to 0 by callers),
@@ -114,7 +102,7 @@ export function resolveVersionStatus({
     .join(' · ')
 
   return {
-    detail: client && version && sha && !busy && (!remote || installedCommit) ? sha : undefined,
+    detail: client && version && sha && !busy && !remote ? sha : undefined,
     hasUpdate: !busy && available,
     label: busy ? `${base} · ${restarting ? copy.restart : copy.update}` : `${base}${hint}`,
     tooltip: tooltip || undefined,

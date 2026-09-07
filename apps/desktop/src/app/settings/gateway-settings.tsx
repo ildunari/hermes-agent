@@ -480,8 +480,7 @@ export function GatewaySettings({ embedded = false }: { embedded?: boolean } = {
     sshHost: state.sshHost.trim(),
     sshUser: state.sshUser.trim() || undefined,
     sshPort: state.sshPort,
-    // An explicit blank clears the saved override; undefined preserves it.
-    sshKeyPath: state.sshKeyPath.trim(),
+    sshKeyPath: state.sshKeyPath.trim() || undefined,
     sshRemoteHermesPath: state.sshRemoteHermesPath.trim(),
     // Preserve an intentional blank so an existing remote-profile mapping can
     // be cleared instead of being mistaken for an omitted field.

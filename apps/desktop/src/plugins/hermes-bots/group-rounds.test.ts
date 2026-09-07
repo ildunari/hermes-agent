@@ -317,9 +317,8 @@ describe('threads', () => {
     expect(first).toBeTruthy()
     expect(second).toBeTruthy()
     expect(first).not.toBe(second)
-    // Same-millisecond entries use ID ordering; assert association, not array position.
-    expect(log(room, 'Rooms').find(entry => entry.text === 'first topic')?.thread).toBe(first)
-    expect(log(room, 'Rooms').find(entry => entry.text === 'second topic')?.thread).toBe(second)
+    expect(log(room, 'Rooms')[0].thread).toBe(first)
+    expect(log(room, 'Rooms')[1].thread).toBe(second)
   })
 
   it('continues an explicit thread and scopes the member delta to it', async () => {

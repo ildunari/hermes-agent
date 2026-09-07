@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 145
-  total_changed_lines: 6596
-  modified_upstream_lines: 2547
+  paths: 131
+  total_changed_lines: 6410
+  modified_upstream_lines: 2458
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/native_owner_controls.py
@@ -191,22 +191,6 @@ paths:
     disposition: upstream
     owner: native shutdown protocol durability regression coverage
     evidence: *active_work
-  - path: apps/desktop/electron/managed-ssh-update.test.ts
-    disposition: upstream
-    owner: portable POSIX managed-update contract test
-    evidence: *desktop
-  - path: apps/desktop/package.json
-    disposition: must-carry
-    owner: monotonic local Desktop release version
-    evidence: *desktop
-  - path: apps/desktop/src/plugins/hermes-bots/group-rounds.test.ts
-    disposition: upstream
-    owner: thread association regression independent of same-millisecond ID ordering
-    evidence:
-      registration: Vitest UI project
-      runtime_caller: group round composer-send regression fixture
-      interface_test: group-rounds.test.ts thread association cases
-      artifact: same-millisecond assertion stability without production code changes
   - path: package-lock.json
     disposition: must-carry
     owner: monotonic local Desktop release version
@@ -478,14 +462,6 @@ paths:
     disposition: must-carry
     owner: generic provider profile runtime seam
     evidence: *provider
-  - path: apps/desktop/electron/remote-lifecycle.test.ts
-    disposition: must-carry
-    owner: portable managed Desktop update mutex
-    evidence: *desktop
-  - path: apps/desktop/electron/remote-lifecycle.ts
-    disposition: must-carry
-    owner: portable managed Desktop update mutex
-    evidence: *desktop
   - path: cron/scheduler_delivery.py
     disposition: must-carry
     owner: generic validated cron delivery seam
@@ -670,14 +646,6 @@ paths:
       runtime_caller: state maintenance and scratch validation
       interface_test: resumed seven fixtures and Darwin holder regression suite
       artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
-  - path: apps/desktop/scripts/after-pack.mjs
-    disposition: must-carry
-    owner: external machine-local signing hook
-    evidence: *desktop
-  - path: apps/desktop/scripts/after-pack.test.mjs
-    disposition: must-carry
-    owner: external machine-local signing hook
-    evidence: *desktop
   - path: tests/test_hermes_state.py
     disposition: must-carry
     owner: portable current-runtime fixture
@@ -758,39 +726,3 @@ paths:
       runtime_caller: SSH token adoption after web server module import
       interface_test: headless post-mount token regression and auth checks
       artifact: real SSH bootstrap token rejected before fix; seven focused tests pass
-  - path: apps/desktop/src/app/settings/gateway-settings.tsx
-    disposition: upstream
-    owner: preserve explicit clearing of SSH identity overrides
-    evidence:
-      registration: Desktop connection settings save payload
-      runtime_caller: save and reconnect preserves blank rather than omitted SSH key
-      interface_test: GatewaySettings clearing saved key regression
-      artifact: focused component tests passed; signed Desktop deployment receipt
-  - path: apps/desktop/src/app/settings/gateway-settings.test.tsx
-    disposition: upstream
-    owner: preserve explicit clearing of SSH identity overrides
-    evidence:
-      registration: Desktop connection settings save payload
-      runtime_caller: save and reconnect preserves blank rather than omitted SSH key
-      interface_test: GatewaySettings clearing saved key regression
-      artifact: focused component tests passed; signed Desktop deployment receipt
-  - path: apps/desktop/electron/main.ts
-    disposition: upstream
-    owner: installed Desktop identity independent of local backend checkout
-    evidence: *desktop
-  - path: apps/desktop/src/app/shell/hooks/use-statusbar-items.tsx
-    disposition: upstream
-    owner: installed Desktop identity independent of local backend checkout
-    evidence: *desktop
-  - path: apps/desktop/src/global.d.ts
-    disposition: upstream
-    owner: installed Desktop identity independent of local backend checkout
-    evidence: *desktop
-  - path: apps/desktop/src/lib/version-status.ts
-    disposition: upstream
-    owner: installed Desktop identity independent of local backend checkout
-    evidence: *desktop
-  - path: apps/desktop/src/lib/version-status.test.ts
-    disposition: upstream
-    owner: installed Desktop identity independent of local backend checkout
-    evidence: *desktop
