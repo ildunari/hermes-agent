@@ -199,6 +199,14 @@ paths:
     disposition: must-carry
     owner: monotonic local Desktop release version
     evidence: *desktop
+  - path: apps/desktop/src/plugins/hermes-bots/group-rounds.test.ts
+    disposition: upstream
+    owner: thread association regression independent of same-millisecond ID ordering
+    evidence:
+      registration: Vitest UI project
+      runtime_caller: group round composer-send regression fixture
+      interface_test: group-rounds.test.ts thread association cases
+      artifact: same-millisecond assertion stability without production code changes
   - path: package-lock.json
     disposition: must-carry
     owner: monotonic local Desktop release version
