@@ -510,14 +510,6 @@ paths:
       runtime_caller: scratch validation on Mac Studio
       interface_test: tests/gateway/test_systemd_notify.py
       artifact: continuation focused test receipts
-  - path: tests/hermes_cli/test_cmd_update.py
-    disposition: upstream
-    owner: hermetic and portable validation on macOS
-    evidence:
-      registration: canonical isolated test runner
-      runtime_caller: scratch validation on Mac Studio
-      interface_test: tests/hermes_cli/test_cmd_update.py
-      artifact: continuation focused test receipts
   - path: tests/hermes_cli/test_commands.py
     disposition: upstream
     owner: hermetic and portable validation on macOS
@@ -549,14 +541,6 @@ paths:
       registration: canonical isolated test runner
       runtime_caller: scratch validation on Mac Studio
       interface_test: tests/hermes_cli/test_update_launchd_fleet_restart.py
-      artifact: continuation focused test receipts
-  - path: tests/hermes_cli/test_update_yes_flag.py
-    disposition: upstream
-    owner: hermetic and portable validation on macOS
-    evidence:
-      registration: canonical isolated test runner
-      runtime_caller: scratch validation on Mac Studio
-      interface_test: tests/hermes_cli/test_update_yes_flag.py
       artifact: continuation focused test receipts
   - path: tests/scripts/test_contributor_map.py
     disposition: upstream
