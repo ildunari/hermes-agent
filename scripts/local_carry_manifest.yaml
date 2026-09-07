@@ -1,9 +1,9 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 144
-  total_changed_lines: 6583
-  modified_upstream_lines: 2542
+  paths: 145
+  total_changed_lines: 6596
+  modified_upstream_lines: 2547
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/native_owner_controls.py
