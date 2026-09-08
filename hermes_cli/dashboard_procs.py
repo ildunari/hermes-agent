@@ -556,10 +556,23 @@ def _valid_lockfile_payload(parsed: object, ownership_id: str) -> bool:
 
 
 def _lock_owned_serve_pids(base_dir: Path | None = None) -> set[int]:
-    """PIDs claimed by valid ``{hermes_home}/desktop-ssh/<ownershipId>/backend.lock.json`` records
-    (best-effort: a bad record contributes no PID; never raises)."""
+    """PIDs claimed by valid SSH ownership records.
+
+    Desktop's SSH writer uses the shared default home, even when the serving
+    backend has a profile-scoped HERMES_HOME. Also preserve ownership records
+    under a custom active home. An explicit base_dir scans only that directory.
+    """
     import json
-    root = base_dir if base_dir is not None else _hermes_home_dir() / _REMOTE_LOCK_SUBDIR
+
+    if base_dir is None:
+        # This is the SSH writer's machine-scoped namespace, not the profile
+        # root (get_default_hermes_root also follows custom HERMES_HOME).
+        roots = {
+            Path.home() / ".hermes" / _REMOTE_LOCK_SUBDIR,
+            _hermes_home_dir() / _REMOTE_LOCK_SUBDIR,
+        }
+        return set().union(*(_lock_owned_serve_pids(root) for root in roots))
+    root = base_dir
     owned: set[int] = set()
     try:
         entries = list(root.iterdir()) if root.is_dir() else []

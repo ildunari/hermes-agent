@@ -161,6 +161,32 @@ def test_lock_owned_serve_pids_reads_valid_backend_lock(tmp_path):
     assert _lock_owned_serve_pids(base_dir=lock_root) == {7777}
 
 
+def test_named_profile_reap_preserves_shared_and_custom_home_owners(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    profile = tmp_path / "custom-home" / "profiles" / "coding"
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    owners = [(tmp_path / ".hermes", "b" * 32, 7777), (profile, "c" * 32, 8888)]
+    for home, oid, pid in owners:
+        directory = home / "desktop-ssh" / oid
+        directory.mkdir(parents=True)
+        (directory / "backend.lock.json").write_text(
+            json.dumps(_valid_lock_payload(pid, oid, "d" * 16))
+        )
+
+    assert _lock_owned_serve_pids() == {7777, 8888}
+    assert _lock_owned_serve_pids(profile / "desktop-ssh") == {8888}
+    with (
+        patch("hermes_cli.dashboard_procs._scan_dashboard_processes", return_value=[]) as scan,
+        patch("os.kill") as kill,
+    ):
+        result = _reap_orphaned_desktop_local_serves(sleep_fn=lambda _: None)
+    assert {7777, 8888} <= scan.call_args.kwargs["exclude_pids"]
+    assert result["matched"] == []
+    kill.assert_not_called()
+
+
 def test_valid_lockfile_payload_rejects_wrong_owner_and_shape():
     oid = "f" * 32
     nonce = "d" * 16
