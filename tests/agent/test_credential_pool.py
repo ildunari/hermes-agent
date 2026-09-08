@@ -24,6 +24,102 @@ def _jwt_with_claims(claims: dict) -> str:
     return f"{_part({'alg': 'none', 'typ': 'JWT'})}.{_part(claims)}.sig"
 
 
+def _codex_jwt(account_id: str, *, exp: int) -> str:
+    return _jwt_with_claims({
+        "exp": exp,
+        "https://api.openai.com/auth": {"chatgpt_account_id": account_id},
+    })
+
+
+@pytest.mark.parametrize("singleton_in_root", [False, True])
+@pytest.mark.parametrize("independent_account_id", ["acct-B", None])
+def test_codex_refresh_sync_preserves_independent_manual_account(
+    tmp_path, monkeypatch, singleton_in_root, independent_account_id
+):
+    """Loader refresh may sync only manual rows belonging to the singleton account."""
+    root_home = tmp_path / "hermes-root"
+    hermes_home = root_home / "profiles" / "browser" if singleton_in_root else root_home
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HOME", str(tmp_path / "fake-home"))
+    now = int(time.time())
+    singleton_access = _codex_jwt("acct-A", exp=now + 3600)
+    same_account_old = _codex_jwt("acct-A", exp=now - 60)
+    independent_old = (
+        _codex_jwt(independent_account_id, exp=now - 60)
+        if independent_account_id
+        else _jwt_with_claims({"exp": now - 60})
+    )
+    independent_new = _codex_jwt("acct-B", exp=now + 3600)
+    providers = {
+        "openai-codex": {
+            "tokens": {
+                "access_token": singleton_access,
+                "refresh_token": "acct-A-r1",
+            },
+        },
+    }
+    pool_rows = [
+        {
+            "id": "same-account",
+            "label": "account A alias",
+            "auth_type": "oauth",
+            "priority": 0,
+            "source": "manual:device_code",
+            "access_token": same_account_old,
+            "refresh_token": "acct-A-r0",
+        },
+        {
+            "id": "independent",
+            "label": "account B",
+            "auth_type": "oauth",
+            "priority": 1,
+            "source": "manual:device_code",
+            "access_token": independent_old,
+            "refresh_token": "acct-B-r0",
+        },
+    ]
+    hermes_home.mkdir(parents=True)
+    (hermes_home / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {} if singleton_in_root else providers,
+        "credential_pool": {"openai-codex": pool_rows},
+    }))
+    if singleton_in_root:
+        root_home.mkdir(exist_ok=True)
+        (root_home / "auth.json").write_text(json.dumps({"version": 1, "providers": providers}))
+
+    refresh_calls = []
+
+    def fake_refresh(access_token, refresh_token):
+        refresh_calls.append((access_token, refresh_token))
+        assert access_token == independent_old
+        assert refresh_token == "acct-B-r0"
+        return {
+            "access_token": independent_new,
+            "refresh_token": "acct-B-r1",
+            "last_refresh": "2026-09-08T00:00:00Z",
+        }
+
+    monkeypatch.setattr("hermes_cli.auth.refresh_codex_oauth_pure", fake_refresh)
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    pool.select()
+    entries = {entry.id: entry for entry in pool.entries()}
+
+    assert entries["same-account"].access_token == singleton_access
+    assert entries["same-account"].refresh_token == "acct-A-r1"
+    assert entries["independent"].access_token == independent_new
+    assert entries["independent"].refresh_token == "acct-B-r1"
+    assert refresh_calls == [(independent_old, "acct-B-r0")]
+    persisted = json.loads((hermes_home / "auth.json").read_text())
+    persisted_by_id = {entry["id"]: entry for entry in persisted["credential_pool"]["openai-codex"]}
+    assert persisted_by_id["independent"]["access_token"] == independent_new
+    singleton_store = json.loads(((root_home if singleton_in_root else hermes_home) / "auth.json").read_text())
+    assert singleton_store["providers"]["openai-codex"]["tokens"]["access_token"] == singleton_access
+
+
 
 
 

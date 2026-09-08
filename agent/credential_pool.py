@@ -1220,8 +1220,8 @@ class CredentialPool(CredentialPoolAdminMixin):
         under ``_auth_store_lock`` while the pool entry may sit frozen behind
         a ``last_error_reset_at`` hours in the future; without this sync every
         request fails with "no available entries" despite fresh credentials on
-        disk. Only singleton-seeded entries apply — env/API-key rows have no
-        auth.json shadow.
+        disk. Codex manual aliases apply only when their JWT account matches
+        the singleton; independent manual/env/API-key rows have no shadow.
         """
         spec = _TOKENS_SINGLETON_PROVIDERS.get(self.provider)
         if spec is None:
@@ -1240,6 +1240,13 @@ class CredentialPool(CredentialPoolAdminMixin):
             store_access = tokens.get("access_token", "")
             store_refresh = tokens.get("refresh_token", "")
             entry_refresh = entry.refresh_token or ""
+            if is_codex and entry.source == SOURCE_MANUAL_DEVICE_CODE:
+                entry_auth = _decode_jwt_claims(entry.access_token).get("https://api.openai.com/auth")
+                store_auth = _decode_jwt_claims(store_access).get("https://api.openai.com/auth")
+                entry_account = entry_auth.get("chatgpt_account_id") if isinstance(entry_auth, dict) else None
+                store_account = store_auth.get("chatgpt_account_id") if isinstance(store_auth, dict) else None
+                if not isinstance(entry_account, str) or entry_account != store_account:
+                    return entry
             # Adopt when either side differs: a fresh refresh_token from
             # another process means our pair is consumed/stale.
             should_adopt = bool(store_access) and (
