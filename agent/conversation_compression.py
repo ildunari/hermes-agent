@@ -2964,10 +2964,16 @@ def _publish_rotated_compaction(
     old_title = agent._session_db.get_session_title(agent.session_id)
     new_session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     from agent.context_compressor import _DB_PERSISTED_MARKER
+    from agent.session_persistence import _runtime_model_config
+
+    model_config = _runtime_model_config(agent, agent._session_init_model_config)
+    # None is the effective normal tier, not permission to reapply a profile
+    # priority default when this continuation resumes.
+    model_config["service_tier"] = getattr(agent, "service_tier", None) or "normal"
     agent._session_db.publish_compression_child(
         parent_session_id=old_session_id, child_session_id=new_session_id,
         source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"), model=agent.model,
-        model_config=agent._session_init_model_config, system_prompt=new_system_prompt, messages=compressed,
+        model_config=model_config, system_prompt=new_system_prompt, messages=compressed,
         cwd=getattr(agent, "working_directory", None), profile_name=_profile_for_child,
         compression_lock_holder=lease.holder, require_compression_lease=lease.holder is not None,
         require_lease_refresh=lease.holder is not None, lease_ttl_seconds=lease.ttl,

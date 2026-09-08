@@ -27,6 +27,7 @@ import json
 import types
 from unittest.mock import MagicMock, patch
 
+from agent.session_persistence import _runtime_model_config
 import hermes_cli.runtime_provider as rp
 from hermes_state import SessionDB
 
@@ -69,7 +70,6 @@ class TestRuntimeModelConfigPersistsEntryIdentity:
     def test_persists_menu_key_instead_of_resolved_custom(self, monkeypatch):
         monkeypatch.setattr(rp, "load_config", lambda: LEGACY_LIST_CONFIG)
 
-        from tui_gateway.server import _runtime_model_config
 
         config = _runtime_model_config(_custom_agent())
 
@@ -83,7 +83,6 @@ class TestRuntimeModelConfigPersistsEntryIdentity:
     def test_keeps_bare_custom_when_no_entry_matches(self, monkeypatch):
         monkeypatch.setattr(rp, "load_config", lambda: {})
 
-        from tui_gateway.server import _runtime_model_config
 
         config = _runtime_model_config(_custom_agent())
 
@@ -95,7 +94,6 @@ class TestRuntimeModelConfigPersistsEntryIdentity:
 
         monkeypatch.setattr(rp, "load_config", _boom)
 
-        from tui_gateway.server import _runtime_model_config
 
         agent = _custom_agent()
         agent.provider = "anthropic"
@@ -136,7 +134,6 @@ class TestResumeRoundTrip:
         monkeypatch.setattr(rp, "load_config", lambda: LEGACY_LIST_CONFIG)
 
         from tui_gateway.server import (
-            _runtime_model_config,
             _stored_session_runtime_overrides,
         )
 
@@ -217,7 +214,6 @@ class TestBareCustomNoBaseUrlHealsFromConfig:
         monkeypatch.setattr(rp, "load_config", lambda: NAMED_CONFIG)
         monkeypatch.setattr(rp, "_get_model_config", lambda: NAMED_CONFIG["model"])
 
-        from tui_gateway.server import _runtime_model_config
 
         agent = _custom_agent(base_url="")  # the regression vector
         config = _runtime_model_config(agent)
@@ -734,7 +730,6 @@ class TestRuntimeModelConfigDropsStaleKeys:
     def test_falsy_provider_drops_stale_existing_provider(self):
         """Agent inherits the profile default (empty provider): the previously
         persisted provider must NOT survive the merge."""
-        from tui_gateway.server import _runtime_model_config
 
         existing = {
             "model": "deepseek/deepseek-v4-flash-0731",
@@ -752,7 +747,6 @@ class TestRuntimeModelConfigDropsStaleKeys:
     def test_falsy_model_drops_stale_existing_model(self):
         """Mirror the provider rule: an empty agent model cannot keep the row's
         old model as its own."""
-        from tui_gateway.server import _runtime_model_config
 
         agent = _agent_like(model="", provider="nous")
         existing = {"model": "meituan/longcat-2.0:free", "provider": "nous"}
@@ -762,7 +756,6 @@ class TestRuntimeModelConfigDropsStaleKeys:
         assert config["provider"] == "nous"
 
     def test_truthy_provider_overwrites_stale_existing(self):
-        from tui_gateway.server import _runtime_model_config
 
         existing = {
             "model": "deepseek/deepseek-v4-flash-0731",
@@ -780,7 +773,6 @@ class TestRuntimeModelConfigDropsStaleKeys:
         the row's billing provider (the profile default) instead of the stale
         VeniceAI/empero route."""
         from tui_gateway.server import (
-            _runtime_model_config,
             _stored_session_runtime_overrides,
         )
 
@@ -821,7 +813,6 @@ class TestRuntimeModelConfigDropsStaleKeys:
             model="deepseek/deepseek-v4-flash-0731",
         )
 
-        from tui_gateway.server import _runtime_model_config
 
         row = db.get_session("desync1")
         assert row is not None
@@ -840,7 +831,6 @@ class TestRuntimeModelConfigDropsStaleKeys:
         """First write (no existing row): the merge starts from an empty dict
         and reflects only the agent's current identity — no stale keys, no
         crash on the None existing_config."""
-        from tui_gateway.server import _runtime_model_config
 
         config = _runtime_model_config(_agent_like(provider="nous"), None)
 
