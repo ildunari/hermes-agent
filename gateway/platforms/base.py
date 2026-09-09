@@ -3479,6 +3479,7 @@ class BasePlatformAdapter(ABC):
     async def handle_message(self, event: MessageEvent) -> None:
         """Process an incoming message; returns quickly by spawning a background
         task so new messages (and interrupts) can arrive while an agent runs."""
+        event._gateway_accepted = False
         if not self._message_handler:
             return
         if event.allow_gateway_control:
@@ -3501,7 +3502,7 @@ class BasePlatformAdapter(ABC):
             await self._handle_message_while_active(event, session_key)
             return
         # Guard installed synchronously BEFORE the task spawns so a second message can't race in.
-        self._start_session_processing(event, session_key)
+        event._gateway_accepted = self._start_session_processing(event, session_key)
 
     async def _handle_message_while_active(self, event: MessageEvent, session_key: str) -> None:
         """Route a message that arrived while ``session_key`` is busy: bypass
@@ -3554,10 +3555,15 @@ class BasePlatformAdapter(ABC):
                     return
             except Exception as e:
                 logger.error("[%s] Busy-session handler failed: %s", self.name, e, exc_info=True)
+        # Without a runner FIFO, do not merge a wake into an occupied human slot
+        # (or collapse distinct wakes into one turn). Its caller can retry admission.
+        if event.internal and session_key in self._pending_messages:
+            return
         # Photo bursts/albums: queue without interrupting; they run after the current task.
         if event.message_type == MessageType.PHOTO:
             logger.debug("[%s] Queuing photo follow-up for session %s without interrupt", self.name, session_key)
             merge_pending_message_event(self._pending_messages, session_key, event)
+            event._gateway_accepted = True
             return
         if self._is_queue_text_debounce_candidate(event):
             logger.debug("[%s] New text message while session %s is active — "
@@ -3569,6 +3575,7 @@ class BasePlatformAdapter(ABC):
                          "(no interrupt, will cascade after current turn)", self.name, session_key)
             merge_pending_message_event(self._pending_messages, session_key, event,
                                         merge_text=event.message_type == MessageType.TEXT)
+            event._gateway_accepted = True
 
     @staticmethod
     def _get_human_delay() -> float:
@@ -3645,8 +3652,13 @@ class BasePlatformAdapter(ABC):
             if not await asyncio.to_thread(ledger_enabled):
                 return None
             source = event.source
+            # ``ledger_message_id`` wins when set: a queued chain's final answers the last message
+            # of the chain, not the event that opened it (see ``MessageEvent.ledger_message_id``).
+            _ledger_id = getattr(event, "ledger_message_id", None)
+            if _ledger_id is None:
+                _ledger_id = getattr(event, "message_id", "")
             obligation_id = compute_obligation_id(
-                session_key, str(getattr(event, "message_id", "") or ""), text_content)
+                session_key, str(_ledger_id or ""), text_content)
             await asyncio.to_thread(
                 record_obligation, obligation_id=obligation_id, session_key=session_key,
                 platform=str(getattr(source.platform, "value", source.platform)),
@@ -3747,25 +3759,38 @@ class BasePlatformAdapter(ABC):
         except Exception as batch_err:
             logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
 
-    async def _send_final_text(
-        self, event: MessageEvent, session_key: str, text_content: str, metadata: Dict[str, Any],
-        is_ephemeral_response: bool, ephemeral_ttl: int, record_delivery: Callable) -> None:
-        """Send the final text on the CURRENT transport (a reconnect may have replaced
-        this adapter), ledger-bracketed; the message-id owner owns the ephemeral delete."""
+    async def send_final_ledgered(
+        self, event: MessageEvent, session_key: str, text_content: str, metadata: Dict[str, Any], *,
+        reply_to: Optional[str], is_ephemeral_response: bool = False,
+    ) -> "tuple[SendResult, BasePlatformAdapter]":
+        """The delivery-ledger bracket every final text goes through, on the CURRENT transport
+        (a reconnect may have replaced this adapter): record the obligation before the send,
+        send with retry, finalize from the result — so a refused final (flood control, a dead
+        transport) leaves a ledger row the boot sweep / runtime redelivery can act on. ``event``
+        supplies the source and the ledger identity (``ledger_message_id`` or ``message_id``).
+        Returns the result with the adapter that sent it: that adapter owns ``result.message_id``
+        (an ephemeral delete must go to the same transport)."""
         delivery_adapter = self._final_delivery_adapter(event.source)
         logger.info("[%s] Sending response (%d chars) to %s", delivery_adapter.name,
                     len(text_content), event.source.chat_id)
-        _obligation_id = await self._record_delivery_obligation(
+        obligation_id = await self._record_delivery_obligation(
             event, session_key, text_content, delivery_adapter, is_ephemeral_response)
         result = await delivery_adapter._send_with_retry(
-            chat_id=event.source.chat_id, content=text_content,
-            reply_to=_reply_anchor_for_event(event), metadata=metadata)
+            chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
+        if obligation_id is not None:
+            await self._finalize_delivery_obligation(obligation_id, result, event, delivery_adapter)
+        return result, delivery_adapter
+
+    async def _send_final_text(
+        self, event: MessageEvent, session_key: str, text_content: str, metadata: Dict[str, Any],
+        is_ephemeral_response: bool, ephemeral_ttl: int, record_delivery: Callable) -> None:
+        """Normal-lane final: the ledger bracket plus the message-id owner's ephemeral delete."""
+        result, delivery_adapter = await self.send_final_ledgered(
+            event, session_key, text_content, metadata,
+            reply_to=_reply_anchor_for_event(event), is_ephemeral_response=is_ephemeral_response)
         record_delivery(result)
-        if _obligation_id is not None:
-            await self._finalize_delivery_obligation(_obligation_id, result, event, delivery_adapter)
         if ephemeral_ttl and ephemeral_ttl > 0 and result.success and result.message_id:
-            delivery_adapter._schedule_ephemeral_delete(
-                event.source.chat_id, result.message_id, ephemeral_ttl)
+            delivery_adapter._schedule_ephemeral_delete(event.source.chat_id, result.message_id, ephemeral_ttl)
 
     async def _notify_turn_error(self, event: MessageEvent, e: BaseException) -> Optional[dict]:
         """Tell the user a turn failed rather than leaving radio silence (last resort:
