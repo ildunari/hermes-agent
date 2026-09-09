@@ -223,10 +223,6 @@ paths:
     disposition: upstream
     owner: native shutdown protocol durability regression coverage
     evidence: *active_work
-  - path: package-lock.json
-    disposition: must-carry
-    owner: monotonic local Desktop release version
-    evidence: *desktop
   - path: cron/jobs.py
     disposition: must-carry
     owner: generic proactive probe completion seam
