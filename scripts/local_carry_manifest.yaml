@@ -3,8 +3,8 @@ base_ref: origin/main
 limits:
   # Preserve current platform/profile seams plus opt-in plugin context observation.
   paths: 147
-  total_changed_lines: 7196
-  modified_upstream_lines: 2822
+  total_changed_lines: 7262
+  modified_upstream_lines: 2828
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/native_owner_controls.py

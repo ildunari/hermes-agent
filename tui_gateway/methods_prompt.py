@@ -619,6 +619,12 @@ def _submit_admitted_prompt(rid, params: dict) -> dict:
         with session["history_lock"]:
             if not session.get("running"):
                 break
+            # Observation is idle-only: steer/redirect/queue drop the request-local
+            # binding and later drain under a different RPC id.
+            if plugin_context_observation is not None:
+                return _err(
+                    rid, 4124,
+                    "plugin context observation is available only for idle inline turns")
             if internal_hosted_submit:
                 return _err(rid, 4091, "hosted room member session is busy")
             busy_transport = t or session.get("transport")
