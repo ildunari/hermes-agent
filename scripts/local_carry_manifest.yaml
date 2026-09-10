@@ -1,10 +1,10 @@
 version: 1
 base_ref: origin/main
 limits:
-  # Preserve platform suppression plus profile-scoped native model discovery.
-  paths: 141
-  total_changed_lines: 6778
-  modified_upstream_lines: 2628
+  # Preserve current platform/profile seams plus opt-in plugin context observation.
+  paths: 147
+  total_changed_lines: 7196
+  modified_upstream_lines: 2822
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/native_owner_controls.py
@@ -90,8 +90,19 @@ evidence_templates:
     runtime_caller: updater Desktop staging and activation
     interface_test: updater version monotonicity and artifact identity tests
     artifact: signed Studio and MacBook bundles with exact commit stamps
+  plugin_context_observation: &plugin_context_observation
+    registration: opt-in pre-LLM plugin context observer
+    runtime_caller: inline gateway prompt turn with exact transport attribution
+    interface_test: privacy, failure, suppression, and concurrent request isolation tests
+    artifact: focused 160-test local receipt before supported update activation
 
 paths:
+  - {path: agent/turn_context.py, disposition: must-carry, owner: sanitized plugin context observation seam, evidence: *plugin_context_observation}
+  - {path: hermes_cli/lifecycle.py, disposition: must-carry, owner: attributed plugin hook lifecycle dispatch, evidence: *plugin_context_observation}
+  - {path: hermes_cli/plugins_dispatch.py, disposition: must-carry, owner: opt-in plugin hook provenance, evidence: *plugin_context_observation}
+  - {path: hermes_cli/plugins_ledger.py, disposition: must-carry, owner: manifest plugin subject attribution, evidence: *plugin_context_observation}
+  - {path: tests/agent/test_plugin_context_observation.py, disposition: must-carry, owner: plugin context privacy and failure regressions, evidence: *plugin_context_observation}
+  - {path: tests/tui_gateway/test_plugin_context_observation.py, disposition: must-carry, owner: gateway opt-in and transport isolation regressions, evidence: *plugin_context_observation}
   - path: hermes_cli/dashboard_procs.py
     disposition: upstream
     owner: shared SSH ownership protection during named-profile startup

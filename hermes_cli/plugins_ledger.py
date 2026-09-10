@@ -34,6 +34,7 @@ class PluginRegistration:
     key: str
     release: Callable[[], None]
     plugin_key: str = ""
+    subject: Any = field(default=None, repr=False)
     # Process-global host infrastructure (e.g. dashboard-auth providers): kept out of ``_registration_order``
     # so unload-all cannot dispose it, but still disposed by a *targeted* unload and evicted on force
     # re-discovery when the plugin no longer re-registers it.
@@ -62,7 +63,7 @@ class PluginRegistration:
 class PluginLedgerMixin:
     def _track_registration(
         self, manifest: PluginManifest, kind: str, key: str, release: Callable[[], None], *,
-        persistent: bool = False,
+        persistent: bool = False, subject: Any = None,
     ) -> PluginRegistration:
         """Record one registration under its canonical plugin key. ``persistent`` ones (process-global host
         infrastructure) stay in the ownership ledger for attribution but NOT in ``_registration_order``, so a
@@ -71,7 +72,8 @@ class PluginLedgerMixin:
         See #91701.
         """
         registration = PluginRegistration(
-            kind=kind, key=key, release=release, plugin_key=manifest_key(manifest), persistent=persistent)
+            kind=kind, key=key, release=release, plugin_key=manifest_key(manifest),
+            persistent=persistent, subject=subject)
         registration._on_dispose = lambda disposed: self._forget_registrations([disposed])
         self._ownership_ledger.setdefault(registration.plugin_key, []).append(registration)
         if not persistent:

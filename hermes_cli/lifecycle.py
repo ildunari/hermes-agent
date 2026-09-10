@@ -23,10 +23,16 @@ def _plugin_hooks(hook_name: str, **kwargs: Any) -> List[Any]:
     return plugins.invoke_hook(hook_name, **kwargs)
 
 
-def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
+def invoke_hook(
+    hook_name: str, *, _with_provenance: bool = False, **kwargs: Any
+) -> List[Any]:
     """Notify first-party observers, then invoke compatibility plugin hooks."""
     _observe(hook_name, **kwargs)
-    return _plugin_hooks(hook_name, **kwargs)
+    from hermes_cli import plugins
+
+    if not _with_provenance:
+        return plugins.invoke_hook(hook_name, **kwargs)
+    return plugins.invoke_hook(hook_name, _with_provenance=True, **kwargs)
 
 
 def has_hook(hook_name: str) -> bool:

@@ -464,7 +464,10 @@ def _persist_session_row_for_submit(rid, session):
     return None
 
 
-def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_terminal_callback):
+def _run_after_agent_ready(
+    rid, sid, session, text, display_kind, hosted_terminal_callback,
+    plugin_context_observation=None,
+):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
     # The wait delivers the prompt when the still-running build completes, honors a cancel promptly, notices
@@ -494,11 +497,23 @@ def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_termina
             return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind,
-        terminal_callback=hosted_terminal_callback)
+        terminal_callback=hosted_terminal_callback,
+        plugin_context_observation=plugin_context_observation)
 
 
 _TRUNCATION_PARAMS = (
     "truncate_before_user_ordinal", "truncate_before_row_id", "truncate_before_message_id")
+
+
+def _plugin_context_observation_spec(params: dict, rid, transport):
+    """Return an ephemeral request-local observation binding for an exact opt-in."""
+    diagnostics = params.get("diagnostics")
+    if not (
+        isinstance(diagnostics, dict)
+        and diagnostics.get("plugin_context_observation") is True
+    ):
+        return None
+    return {"prompt_request_id": rid, "transport": transport}
 
 
 def _lock_in_submit_turn(
@@ -589,6 +604,12 @@ def _submit_admitted_prompt(rid, params: dict) -> dict:
         if (t := current_transport()) is not None:
             _attach_session_transport(session, t)
             _cancel_ws_orphan_reap(sid)
+    plugin_context_observation = _plugin_context_observation_spec(
+        params, rid, t or _stdio_transport)
+    if turn_isolation and plugin_context_observation is not None:
+        return _err(
+            rid, 4122,
+            "plugin context observation is unavailable for isolated compute turns")
     # Claim the turn against a possibly-running session (busy/queued reply, else fall
     # through once ``running`` is observed False).  The provider interrupt happens after
     # history_lock is released (a non-interruptible tool may hold it); if the old turn
@@ -638,7 +659,8 @@ def _submit_admitted_prompt(rid, params: dict) -> dict:
         _start_agent_build(sid, session)
     run_thread = threading.Thread(
         target=lambda: _run_after_agent_ready(
-            rid, sid, session, text, display_kind, hosted_terminal_callback),
+            rid, sid, session, text, display_kind, hosted_terminal_callback,
+            plugin_context_observation),
         daemon=True)
     # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
     session["_run_thread"] = run_thread

@@ -311,10 +311,12 @@ class PluginContext:
 
     def _track(
         self, kind: str, key: str, release: Callable[[], None], *, persistent: bool = False,
+        subject: Any = None,
     ) -> PluginRegistration:
         """Record host-owned cleanup for a successful registration (see
         :meth:`PluginManager._track_registration` for ``persistent``)."""
-        return self._manager._track_registration(self.manifest, kind, key, release, persistent=persistent)
+        return self._manager._track_registration(
+            self.manifest, kind, key, release, persistent=persistent, subject=subject)
 
     def _track_replacement(
         self, kind: str, key: str, *, slot: tuple, current: Any, previous: Any,
@@ -911,7 +913,18 @@ class PluginContext:
 
     def register_hook(self, hook_name: str, callback: Callable) -> PluginRegistration:
         """Register a lifecycle hook callback (unknown names warn but are still stored)."""
-        return self._track_callback("hook", hook_name, callback, self._manager._hooks, VALID_HOOKS)
+        if hook_name not in VALID_HOOKS:
+            logger.warning(
+                "Plugin '%s' registered unknown hook '%s' (valid: %s)",
+                self.manifest.name, hook_name, ", ".join(sorted(VALID_HOOKS)))
+        self._manager._hooks.setdefault(hook_name, []).append(callback)
+        handle = self._track(
+            "hook", hook_name,
+            lambda: self._manager._remove_callback(self._manager._hooks, hook_name, callback),
+            subject=callback,
+        )
+        logger.debug("Plugin %s registered hook: %s", self.manifest.name, hook_name)
+        return handle
 
     def register_middleware(self, kind: str, callback: Callable) -> PluginRegistration:
         """Register behavior-changing middleware (request kinds rewrite the payload, execution kinds
@@ -1686,7 +1699,9 @@ def _delivery_manager() -> PluginManager:
     return manager
 
 
-def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
+def invoke_hook(
+    hook_name: str, *, _with_provenance: bool = False, **kwargs: Any
+) -> List[Any]:
     """Invoke a lifecycle hook (lazy-discovers first); return non-``None`` callback results.
 
     Hot-path / observer hooks in ``_HOOK_TIMEOUT_BOUNDED_HOOKS`` and the policy hook ``pre_tool_call`` are
@@ -1697,7 +1712,10 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     ``discover_plugins()`` (gateway platform events, TUI slash workers, query mode, cron) still fire
     callbacks registered by user plugins (tracking #64178).
     """
-    return _delivery_manager().invoke_hook(hook_name, **kwargs)
+    manager = _delivery_manager()
+    if not _with_provenance:
+        return manager.invoke_hook(hook_name, **kwargs)
+    return manager.invoke_hook(hook_name, _with_provenance=True, **kwargs)
 
 
 def render_system_prompt_sections(session_info: Mapping[str, Any]) -> List[RenderedPluginSystemPromptSection]:

@@ -133,6 +133,14 @@ class _QueuedPluginEvent:
     generation: int
 
 
+@dataclass(frozen=True)
+class AttributedHookResult:
+    """One non-None hook result paired with its manifest-derived plugin id."""
+
+    plugin_id: str
+    value: Any
+
+
 # Hook callback timeout (non-blocking abandon). Default cap per Python hook callback; overridden by
 # ``plugins.hook_callback_timeout``. Shell hooks enforce their own subprocess timeout.
 _HOOK_CALLBACK_TIMEOUT_SECS = 30.0
@@ -163,7 +171,9 @@ class PluginDispatchMixin:
             if name in parameters and parameters[name].kind in keyword_kinds
         })
 
-    def invoke_hook(self, hook_name: str, **kwargs: Any) -> List[Any]:
+    def invoke_hook(
+        self, hook_name: str, *, _with_provenance: bool = False, **kwargs: Any
+    ) -> List[Any]:
         """Call all callbacks for *hook_name*; return their non-``None`` results.
 
         Payloads evolve additively: ``**kwargs`` callbacks get everything, narrow signatures only
@@ -178,21 +188,41 @@ class PluginDispatchMixin:
         if hook_name != "gateway_platform_event":
             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
         results: List[Any] = []
+        owners: Dict[int, List[str]] = {}
+        if _with_provenance:
+            for registration in self._registration_order:
+                if (
+                    registration.active and registration.kind == "hook"
+                    and registration.key == hook_name and registration.subject is not None
+                ):
+                    owners.setdefault(id(registration.subject), []).append(registration.plugin_key)
+        owner_offsets: Dict[int, int] = {}
         timeout = _resolve_hook_callback_timeout()
         use_timeout = _hook_uses_callback_timeout(hook_name, timeout)
         fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
         for cb in self._hooks.get(hook_name, []):
+            plugin_id = ""
+            if _with_provenance:
+                callback_id = id(cb)
+                offset = owner_offsets.get(callback_id, 0)
+                candidates = owners.get(callback_id, [])
+                if offset < len(candidates):
+                    plugin_id = candidates[offset]
+                    owner_offsets[callback_id] = offset + 1
             try:
                 if use_timeout:
                     ret = self._run_hook_callback_bounded(hook_name, cb, kwargs, timeout)
                     if ret is _HOOK_SKIPPED:
                         if fail_closed:  # policy hook: fail closed with a block directive
-                            results.append({"action": "block", "message": _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE})
+                            value = {"action": "block", "message": _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE}
+                            results.append(
+                                AttributedHookResult(plugin_id, value) if _with_provenance else value)
                         continue
                 else:
                     ret = self._invoke_hook_callback(cb, kwargs)
                 if ret is not None:
-                    results.append(ret)
+                    results.append(
+                        AttributedHookResult(plugin_id, ret) if _with_provenance else ret)
             except Exception as exc:
                 logger.warning(
                     "Hook '%s' callback %s raised: %s", hook_name, getattr(cb, "__name__", repr(cb)), exc)

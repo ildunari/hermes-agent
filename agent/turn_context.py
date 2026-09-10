@@ -8,6 +8,8 @@ returns a ``TurnContext`` with only the locals the loop reads back.
 
 from __future__ import annotations
 
+import contextvars
+import hashlib
 import logging
 import sys
 import threading
@@ -27,6 +29,39 @@ from agent.image_token_cost import bind_image_token_cost
 from agent.usage_anchor import anchored_context_tokens, restore_usage_anchor
 
 logger = logging.getLogger(__name__)
+
+_plugin_context_observer: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "hermes_plugin_context_observer", default=None)
+
+
+def bind_plugin_context_observer(observer: Any):
+    """Bind a turn-local sink for sanitized accepted plugin-context metadata."""
+    return _plugin_context_observer.set(observer)
+
+
+def reset_plugin_context_observer(token: Any) -> None:
+    _plugin_context_observer.reset(token)
+
+
+def _observe_accepted_plugin_context(
+    *, plugin_id: str, session_id: str, turn_id: str, platform: str, context: str,
+) -> None:
+    observer = _plugin_context_observer.get()
+    if observer is None or not plugin_id:
+        return
+    try:
+        encoded = context.encode("utf-8")
+        observer({
+            "plugin_id": plugin_id,
+            "hook": "pre_llm_call",
+            "platform": platform,
+            "runtime_session_id": session_id,
+            "turn_id": turn_id,
+            "context_sha256": hashlib.sha256(encoded).hexdigest(),
+            "context_length": len(encoded),
+        })
+    except Exception:
+        logger.warning("plugin context observation failed", exc_info=True)
 
 
 def _str_attr(agent: Any, name: str) -> str:
@@ -665,6 +700,7 @@ def _collect_pre_llm_call_context(
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
             "pre_llm_call",
+            _with_provenance=True,
             session_id=agent.session_id,
             task_id=effective_task_id,
             turn_id=turn_id,
@@ -687,13 +723,23 @@ def _collect_pre_llm_call_context(
             _spill_if_oversized = None  # type: ignore[assignment]
             _spill_config_cached = None
         _ctx_parts: list[str] = []
-        for r in _pre_results:
+        from hermes_cli.plugins_dispatch import AttributedHookResult
+        for attributed in _pre_results:
+            plugin_id = attributed.plugin_id if isinstance(attributed, AttributedHookResult) else ""
+            r = attributed.value if isinstance(attributed, AttributedHookResult) else attributed
             if isinstance(r, dict) and r.get("context"):
                 _piece = str(r["context"])
             elif isinstance(r, str) and r.strip():
                 _piece = r
             else:
                 continue
+            _observe_accepted_plugin_context(
+                plugin_id=plugin_id,
+                session_id=str(agent.session_id or ""),
+                turn_id=turn_id,
+                platform=str(getattr(agent, "platform", None) or ""),
+                context=_piece,
+            )
             if _spill_if_oversized is not None:
                 try:
                     _piece = _spill_if_oversized(

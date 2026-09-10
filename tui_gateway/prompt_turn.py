@@ -20,6 +20,38 @@ def _hook_failure(what: str, exc: BaseException) -> None:
     print(f"[tui_gateway] {what} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
+def _bind_plugin_context_observation(
+    sid: str, observation: dict[str, Any] | None,
+):
+    """Bind one opt-in request's sanitized hook events to its exact transport."""
+    if not isinstance(observation, dict) or observation.get("transport") is None:
+        return None
+    observation_transport = observation["transport"]
+    prompt_request_id = observation.get("prompt_request_id")
+    sequence = 0
+
+    def _observe(observed: dict[str, Any]) -> None:
+        nonlocal sequence
+        sequence += 1
+        payload = {
+            key: observed[key]
+            for key in (
+                "plugin_id", "hook", "platform", "runtime_session_id", "turn_id",
+                "context_sha256", "context_length",
+            )
+            if key in observed
+        }
+        payload.update({
+            "schema_version": 1,
+            "prompt_request_id": prompt_request_id,
+            "sequence": sequence,
+        })
+        observation_transport.write(_event_frame("plugin.context_observed", sid, payload))
+
+    from agent.turn_context import bind_plugin_context_observer
+    return bind_plugin_context_observer(_observe)
+
+
 def _is_successful_goal_turn(result: Any, status: str, raw: Any) -> bool:
     """Whether a turn produced a real response the goal judge can use."""
     return bool(
@@ -807,7 +839,8 @@ def _run_prompt_submit(
     rid, sid: str, session: dict, text: Any, *, display_kind: str | None = None,
     display_metadata: dict | None = None, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
-    terminal_callback: Callable[[dict[str, Any]], None] | None = None) -> bool:
+    terminal_callback: Callable[[dict[str, Any]], None] | None = None,
+    plugin_context_observation: dict[str, Any] | None = None) -> bool:
     admitted = _admit_prompt_turn(sid, session, text, image_paths, queued_prompt_generation)
     if admitted is None:
         return False
@@ -833,6 +866,8 @@ def _run_prompt_submit(
         # before any tool can commission a child (delegate_task captures it as authority).
         transport_token = bind_transport(session.get("transport"))
         runtime_session_token = _current_runtime_session_record.set(session)
+        plugin_context_observer_token = _bind_plugin_context_observation(
+            sid, plugin_context_observation)
         st = _TurnRun(
             session["agent"], session.pop("one_turn_model_restore", None), terminal_callback,
             receipt_committed=terminal_callback is None)
@@ -865,6 +900,9 @@ def _run_prompt_submit(
             _recover_turn_exception(sid, session, st, e)
         finally:
             _finish_turn(sid, session, st)
+            if plugin_context_observer_token is not None:
+                from agent.turn_context import reset_plugin_context_observer
+                reset_plugin_context_observer(plugin_context_observer_token)
             _current_runtime_session_record.reset(runtime_session_token)
             reset_transport(transport_token)
             # A stale interim closure must not fire during a later turn.
