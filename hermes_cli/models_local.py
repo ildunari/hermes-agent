@@ -12,13 +12,13 @@ import hashlib
 import http.client
 import json
 import logging
-import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
+from agent.secret_scope import get_secret
 from hermes_cli.urllib_security import url_origin
 
 # Log-record parity with the origin module.
@@ -111,7 +111,7 @@ def _get_ollama_base_url() -> str:
                 return model_base
         except (OSError, RuntimeError, TypeError, ValueError):
             pass
-    env_host = os.getenv("OLLAMA_HOST", "").strip()
+    env_host = get_secret("OLLAMA_HOST", "").strip()
     return _ollama_host_from_env(env_host) if env_host else "http://localhost:11434"
 
 
@@ -121,7 +121,7 @@ def _api_key_from_provider_config(entry: dict, *env_keys: str) -> str:
     if api_key:
         return api_key
     key_env = str(next((entry.get(k) for k in env_keys if entry.get(k)), "") or "").strip()
-    return os.getenv(key_env, "").strip() if key_env else ""
+    return get_secret(key_env, "").strip() if key_env else ""
 
 
 def _drop_authorization(headers: dict[str, str]) -> None:
@@ -667,8 +667,8 @@ def fetch_ollama_cloud_models(
         if cached is not None:
             return cached["models"]
 
-    api_key = api_key or os.getenv("OLLAMA_API_KEY", "")
-    base_url = base_url or os.getenv("OLLAMA_BASE_URL", "") or "https://ollama.com/v1"
+    api_key = api_key or get_secret("OLLAMA_API_KEY", "")
+    base_url = base_url or get_secret("OLLAMA_BASE_URL", "") or "https://ollama.com/v1"
     live_models = (fetch_api_models(api_key, base_url, timeout=8.0) or []) if api_key else []
     mdev_models: list[str] = []
     try:

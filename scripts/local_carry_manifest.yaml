@@ -1,10 +1,10 @@
 version: 1
 base_ref: origin/main
 limits:
-  # Restore platform suppression across status, notice, and background delivery.
-  paths: 138
-  total_changed_lines: 6612
-  modified_upstream_lines: 2564
+  # Preserve platform suppression plus profile-scoped native model discovery.
+  paths: 141
+  total_changed_lines: 6778
+  modified_upstream_lines: 2628
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/native_owner_controls.py
@@ -751,3 +751,19 @@ paths:
       runtime_caller: SSH token adoption after web server module import
       interface_test: headless post-mount token regression and auth checks
       artifact: real SSH bootstrap token rejected before fix; seven focused tests pass
+  - path: hermes_cli/models.py
+    disposition: upstream
+    owner: profile-scoped native model catalog credentials and background refresh
+    evidence: &catalog_scope
+      registration: Hermes cached provider and custom endpoint discovery
+      runtime_caller: WebUI profile-scoped model and provider catalog reads
+      interface_test: tests/hermes_cli/test_model_catalog_profile_scope.py
+      artifact: concurrent profile credential and cache isolation plus authenticated WebUI catalog refresh
+  - path: hermes_cli/models_local.py
+    disposition: upstream
+    owner: scoped local and cloud model endpoint credentials
+    evidence: *catalog_scope
+  - path: tests/hermes_cli/test_model_catalog_profile_scope.py
+    disposition: upstream
+    owner: real native catalog and background refresh isolation regressions
+    evidence: *catalog_scope

@@ -9,6 +9,7 @@ Origin module; cohesive clusters live in siblings and are re-imported here so
 from __future__ import annotations
 
 import copy
+from contextvars import copy_context
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from typing import Any, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import TypeGuard
 
+from agent.secret_scope import get_secret
 from hermes_cli import __version__ as _HERMES_VERSION
 from hermes_cli.urllib_security import open_credentialed_url
 from hermes_cli.models_catalog_static import (
@@ -669,7 +671,7 @@ def _provider_has_credentials(pid: str) -> bool:
         if pid == "custom":
             return bool((_get_custom_base_url() or "").strip())
         if pid == "openrouter":
-            return has_usable_secret(os.getenv("OPENROUTER_API_KEY", ""))
+            return has_usable_secret(get_secret("OPENROUTER_API_KEY", ""))
         status = get_auth_status(pid)
         return bool(status.get("logged_in") or status.get("configured"))
     except Exception:
@@ -1135,7 +1137,7 @@ def _openai_discovery_base_url(provider: str) -> str:
     """OpenAI endpoint for model discovery, mirroring runtime precedence so discovery probes the SAME
     endpoint inference uses: ``$OPENAI_BASE_URL`` → config ``model.base_url`` (when the configured
     provider matches) → the canonical default."""
-    env_raw = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
+    env_raw = get_secret("OPENAI_BASE_URL", "").strip().rstrip("/")
     if env_raw:
         return env_raw
     try:
@@ -1229,7 +1231,7 @@ def _anthropic_catalog(normalized: str, force_refresh: bool) -> list[str]:
 
 
 def _openai_catalog(normalized: str, force_refresh: bool) -> Optional[list[str]]:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = get_secret("OPENAI_API_KEY", "").strip()
     if not api_key:
         return None
     base = _openai_discovery_base_url(normalized)
@@ -1271,9 +1273,9 @@ def _custom_catalog(normalized: str, force_refresh: bool) -> Optional[list[str]]
     # Try common API key env vars for custom endpoints.
     api_key = (
         str(model_cfg.get("api_key", "") or "").strip()
-        or os.getenv("CUSTOM_API_KEY", "")
-        or os.getenv("OPENAI_API_KEY", "")
-        or os.getenv("OPENROUTER_API_KEY", ""))
+        or get_secret("CUSTOM_API_KEY", "")
+        or get_secret("OPENAI_API_KEY", "")
+        or get_secret("OPENROUTER_API_KEY", ""))
     api_mode = "anthropic_messages" if _base_url_looks_like_anthropic_messages(base_url) else None
     return fetch_api_models(api_key, base_url, api_mode=api_mode) or None
 
@@ -1411,14 +1413,16 @@ def _ollama_native_probe_reachable() -> bool:
 
 
 def _spawn_swr_refresh(cache_key: str, refresh_fn=None) -> None:
-    """Fire-and-forget daemon refresh of *cache_key*'s cache entry, at most one in flight per key.
+    """Fire-and-forget daemon refresh of *cache_key*'s cache entry, at most one in flight per profile/key.
     Failures are swallowed — the stale entry stays served until a later refresh succeeds.
     ``refresh_fn`` (no-args → fresh entry dict or None) lets ``custom:<base_url>`` keys from
     :func:`cached_fetch_api_models` reuse the same inflight-dedupe scaffolding."""
+    context = copy_context()
+    inflight_key = (str(_provider_models_cache_path()), cache_key)
     with _swr_refresh_lock:
-        if cache_key in _swr_refresh_inflight:
+        if inflight_key in _swr_refresh_inflight:
             return
-        _swr_refresh_inflight.add(cache_key)
+        _swr_refresh_inflight.add(inflight_key)
 
     def _default_refresh():
         live = provider_model_ids(cache_key, force_refresh=True)
@@ -1435,9 +1439,17 @@ def _spawn_swr_refresh(cache_key: str, refresh_fn=None) -> None:
             logger.debug("SWR refresh failed for %s", cache_key, exc_info=True)
         finally:
             with _swr_refresh_lock:
-                _swr_refresh_inflight.discard(cache_key)
+                _swr_refresh_inflight.discard(inflight_key)
 
-    threading.Thread(target=_refresh, daemon=True, name=f"model-cache-swr-{cache_key}").start()
+    try:
+        threading.Thread(
+            target=lambda: context.run(_refresh), daemon=True,
+            name=f"model-cache-swr-{cache_key}",
+        ).start()
+    except Exception:
+        with _swr_refresh_lock:
+            _swr_refresh_inflight.discard(inflight_key)
+        raise
 
 
 def _provider_models_cache_path() -> Path:
@@ -1459,13 +1471,13 @@ def _credential_fingerprint(provider: str) -> str:
     parts: list[str] = []
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
-        pcfg = PROVIDER_REGISTRY.get(provider)
+        pcfg = PROVIDER_REGISTRY.get("openai-api" if provider == "openai" else provider)
         if pcfg is not None:
             for ev in getattr(pcfg, "api_key_env_vars", ()) or ():
-                parts.append(f"{ev}={os.environ.get(ev, '')}")
+                parts.append(f"{ev}={get_secret(ev, '')}")
             bev = getattr(pcfg, "base_url_env_var", "") or ""
             if bev:
-                parts.append(f"{bev}={os.environ.get(bev, '')}")
+                parts.append(f"{bev}={get_secret(bev, '')}")
     except Exception:
         pass
 
@@ -1482,14 +1494,14 @@ def _credential_fingerprint(provider: str) -> str:
         key_env = provider_cfg.get("key_env") or provider_cfg.get("api_key_env") or ""
         model_cfg = _get_model_config_dict()
         parts += [
-            f"OLLAMA_HOST={os.environ.get('OLLAMA_HOST', '')}",
+            f"OLLAMA_HOST={get_secret('OLLAMA_HOST', '')}",
             "providers.ollama.base_url="
             f"{provider_cfg.get('base_url', '') or provider_cfg.get('api', '') or provider_cfg.get('url', '')}",
             f"providers.ollama.api_key={provider_cfg.get('api_key', '')}",
             f"providers.ollama.key_env={key_env}",
         ]
         if key_env:
-            parts.append(f"{key_env}={os.environ.get(str(key_env), '')}")
+            parts.append(f"{key_env}={get_secret(str(key_env), '')}")
         parts += [
             f"model.provider={model_cfg.get('provider', '')}|model.base_url={model_cfg.get('base_url', '')}",
             "providers.ollama.extra_headers="
@@ -2290,7 +2302,7 @@ _DEEPINFRA_CATALOG_NEG_TTL = 60.0  # seconds
 
 def _deepinfra_catalog_url() -> tuple[str, str]:
     """Return ``(cache_key, full_url)`` for the DeepInfra catalog endpoint."""
-    base = os.getenv("DEEPINFRA_BASE_URL", "").strip() or _DEEPINFRA_DEFAULT_BASE_URL
+    base = get_secret("DEEPINFRA_BASE_URL", "").strip() or _DEEPINFRA_DEFAULT_BASE_URL
     cache_key = base.rstrip("/")
     return cache_key, f"{cache_key}/models?{_DEEPINFRA_MODELS_QUERY}"
 
@@ -2308,7 +2320,7 @@ def _fetch_deepinfra_catalog(
             return None
 
     headers: dict[str, str] = {"User-Agent": _HERMES_USER_AGENT}
-    api_key = os.getenv("DEEPINFRA_API_KEY", "").strip()
+    api_key = get_secret("DEEPINFRA_API_KEY", "").strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:
@@ -2368,16 +2380,16 @@ def deepinfra_model_ids(tag: str, *, force_refresh: bool = False) -> list[str]:
 def deepinfra_base_url(section: Optional[dict] = None) -> str:
     """DeepInfra base URL: config-section ``base_url`` → ``DEEPINFRA_BASE_URL`` env → default; stripped."""
     candidate = section.get("base_url") if isinstance(section, dict) else None
-    value = candidate or os.getenv("DEEPINFRA_BASE_URL") or _DEEPINFRA_DEFAULT_BASE_URL
+    value = candidate or get_secret("DEEPINFRA_BASE_URL") or _DEEPINFRA_DEFAULT_BASE_URL
     return str(value).strip().rstrip("/")
 
 
 def _fetch_ai_gateway_models(timeout: float = 5.0) -> Optional[list[str]]:
     """Fetch available language models with tool-use from AI Gateway."""
-    api_key = os.getenv("AI_GATEWAY_API_KEY", "").strip()
+    api_key = get_secret("AI_GATEWAY_API_KEY", "").strip()
     if not api_key:
         return None
-    base_url = os.getenv("AI_GATEWAY_BASE_URL", "").strip()
+    base_url = get_secret("AI_GATEWAY_BASE_URL", "").strip()
     if not base_url:
         from hermes_constants import AI_GATEWAY_BASE_URL
         base_url = AI_GATEWAY_BASE_URL
