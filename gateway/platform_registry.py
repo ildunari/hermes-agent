@@ -77,6 +77,9 @@ class PlatformEntry:
     emoji: str = "🔌"  # CLI/gateway display
     allow_update_command: bool = True  # /update may be issued from this platform
     platform_hint: str = ""  # injected into the system prompt; empty = none
+    # Machine-generated statuses only; "*" also covers future status kinds.
+    # Ordinary assistant replies and requested command results are separate.
+    suppress_status_event_types: frozenset[str] = field(default_factory=frozenset)
     # ``() -> Optional[dict]`` of ``extra`` fields to seed when auto-enabled from env; runs in
     # ``_apply_env_overrides`` BEFORE adapter construction so ``gateway status`` sees it.
     env_enablement_fn: Optional[Callable[[], Optional[dict]]] = None
@@ -346,6 +349,12 @@ class PlatformRegistry:
             scope = self.current_scope_key()
             entries, _deferred = self._scope_maps(scope)
             return name in entries or name in self._entries or self._load_pending(scope, name)
+
+    def suppresses_status_event(self, platform_name: str, event_type: str) -> bool:
+        """Apply the active profile's registered platform status policy."""
+        entry = self.get(platform_name)
+        suppressed = entry.suppress_status_event_types if entry else frozenset()
+        return "*" in suppressed or event_type in suppressed
 
     def create_adapter(self, name: str, config: Any) -> Optional[Any]:
         """Create an adapter instance for *name*; None when no entry exists, deps are missing

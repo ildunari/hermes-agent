@@ -1097,6 +1097,10 @@ class TurnRunner:
         pending_lock = threading.Lock()
 
         def deliver(message: str) -> None:
+            from gateway.platform_registry import platform_registry
+            if platform_registry.suppresses_status_event(ctx.source.platform.value, "background_review"):
+                logger.debug("Background review notice suppressed for %s", ctx.source.platform.value)
+                return
             if self._status_live():
                 self._send_status_text(
                     message,

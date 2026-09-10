@@ -104,6 +104,10 @@ class GatewayNotificationsMixin:
     async def _deliver_platform_notice(self, source, content: str) -> None:
         """Deliver a setup/operational notice using platform-specific privacy rules."""
         from gateway.run import _is_slack_ignored_channel
+        from gateway.platform_registry import platform_registry
+        if platform_registry.suppresses_status_event(source.platform.value, "notice"):
+            logger.debug("Platform operational notice suppressed for %s", source.platform.value)
+            return
         adapter = self._adapter_for_source(source)
         if not adapter:
             return

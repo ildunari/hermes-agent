@@ -299,6 +299,18 @@ paths:
     disposition: must-carry
     owner: core gateway seams
     evidence: *conversation
+  - path: gateway/run_notifications.py
+    disposition: must-carry
+    owner: registered platform operational-notice suppression
+    evidence: *bluebubbles
+  - path: gateway/run_turn_runner.py
+    disposition: must-carry
+    owner: registered platform background-review suppression
+    evidence: *bluebubbles
+  - path: tests/gateway/test_platform_status_suppression.py
+    disposition: must-carry
+    owner: scoped status suppression and ordinary reply regression
+    evidence: *bluebubbles
   - path: gateway/run_adapters.py
     disposition: must-carry
     owner: off-loop profile handoff store resolution

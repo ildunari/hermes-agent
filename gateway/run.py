@@ -680,6 +680,9 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     """Filter/sanitize agent status callbacks before platform delivery.
 
     Local/CLI keep the raw diagnostic stream; messaging surfaces drop transient aux/compression noise."""
+    from gateway.platform_registry import platform_registry
+    if platform_registry.suppresses_status_event(_gateway_platform_value(platform), event_type):
+        return None
     text = str(message or "").strip()
     if not text:
         return None
