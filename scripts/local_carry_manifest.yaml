@@ -1,9 +1,10 @@
 version: 1
 base_ref: origin/main
 limits:
-  paths: 136
-  total_changed_lines: 6559
-  modified_upstream_lines: 2546
+  # Restore platform suppression across status, notice, and background delivery.
+  paths: 138
+  total_changed_lines: 6612
+  modified_upstream_lines: 2564
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/native_owner_controls.py
