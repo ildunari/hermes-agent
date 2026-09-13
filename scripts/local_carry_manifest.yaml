@@ -1,10 +1,10 @@
 version: 1
 base_ref: origin/main
 limits:
-  # Preserve platform suppression plus profile-scoped native model discovery.
-  paths: 141
-  total_changed_lines: 6778
-  modified_upstream_lines: 2628
+  # Preserve profile-scoped model discovery and agent-cache finalization.
+  paths: 144
+  total_changed_lines: 6930
+  modified_upstream_lines: 2666
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/native_owner_controls.py
@@ -767,3 +767,23 @@ paths:
     disposition: upstream
     owner: real native catalog and background refresh isolation regressions
     evidence: *catalog_scope
+  - path: gateway/run_agent_cache.py
+    disposition: upstream
+    owner: profile-correct post-turn cache coherence
+    evidence: &cache_scope
+      registration: GatewayRunner agent-cache mixin
+      runtime_caller: post-turn and queued-turn cache rebaseline
+      interface_test: tests/gateway/test_profile_cache_rebaseline.py
+      artifact: isolated two-database reproduction and live mismatched profile counts
+  - path: tests/gateway/test_profile_cache_rebaseline.py
+    disposition: upstream
+    owner: profile database and foreign-write cache guard regression
+    evidence: *cache_scope
+  - path: agent/turn_context.py
+    disposition: upstream
+    owner: measured pre-request phase timing without message content
+    evidence:
+      registration: AIAgent turn-context construction
+      runtime_caller: every normal conversation turn preflight
+      interface_test: tests/agent/test_turn_context.py
+      artifact: prompt, compaction, hooks, memory and persistence timings in profile logs

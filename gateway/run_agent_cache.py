@@ -5,6 +5,7 @@ for GatewayRunner (MRO mixin). ``gateway.run`` internals are imported lazily ins
 from __future__ import annotations
 
 import importlib
+import asyncio
 import logging
 import threading
 import time
@@ -444,10 +445,25 @@ class GatewayAgentCacheMixin:
         from gateway.run import _AGENT_PENDING_SENTINEL
         _cache_lock = getattr(self, "_agent_cache_lock", None)
         _cache = getattr(self, "_agent_cache", None)
-        if self._session_db is None or not session_id or not _cache_lock or _cache is None:
+        if not session_id or not _cache_lock or _cache is None:
             return
+        with _cache_lock:
+            snapshot = _cache.get(session_key)
+            if not (isinstance(snapshot, tuple) and len(snapshot) > 2 and snapshot[0] is not _AGENT_PENDING_SENTINEL):
+                return
+            if len(snapshot) > 3 and snapshot[3] is not None and snapshot[3] != session_id:
+                return
+        # Finalization can run outside the routed profile scope. The cached agent
+        # owns the exact DB used for its turn; the runner may now resolve root's DB.
+        agent_db = getattr(snapshot[0], "_session_db", None)
         try:
-            _sess_row = await self._session_db.get_session(session_id)
+            if agent_db is not None:
+                _sess_row = await asyncio.to_thread(agent_db.get_session, session_id)
+            else:
+                session_db = self._session_db
+                if session_db is None:
+                    return
+                _sess_row = await session_db.get_session(session_id)
             _live = _sess_row.get("message_count", 0) if _sess_row else None
         except Exception:
             return
@@ -455,6 +471,8 @@ class GatewayAgentCacheMixin:
             return
         with _cache_lock:
             cached = _cache.get(session_key)
+            if cached is not snapshot:
+                return
             # Only re-baseline a live 3-tuple entry; skip pending sentinels, legacy 2-tuples (they opt
             # out of the guard), and entries evicted/rebuilt mid-turn. A snapshot taken for a different
             # session_id (same session_key, different conversation) is a different DB row — leave it.

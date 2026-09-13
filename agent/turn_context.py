@@ -929,6 +929,7 @@ def build_turn_context(
             f"{'...' if len(_preview_text) > 60 else ''}'"
         )
 
+    preflight_started = time.monotonic()
     # System prompt is cached per session for prefix caching.
     if agent._cached_system_prompt is None:
         restore_or_build_system_prompt(agent, system_message, conversation_history)
@@ -944,6 +945,7 @@ def build_turn_context(
         logger.debug("message_agent injection skipped", exc_info=True)
 
     _ensure_session_row(agent, pending_cli_message)
+    prompt_ready = time.monotonic()
 
     compaction = run_turn_start_compaction(
         agent, messages=messages, system_message=system_message,
@@ -955,6 +957,7 @@ def build_turn_context(
     active_system_prompt = compaction.active_system_prompt
     conversation_history = compaction.conversation_history
     current_turn_user_idx = compaction.current_turn_user_idx
+    compaction_ready = time.monotonic()
 
     plugin_user_context = _collect_pre_llm_call_context(
         agent, effective_task_id=effective_task_id, turn_id=turn_id,
@@ -966,7 +969,9 @@ def build_turn_context(
     )
 
     _bind_interrupt_scope(agent, ra)
+    hooks_ready = time.monotonic()
     ext_prefetch_cache = _memory_turn_start_and_prefetch(agent, original_user_message)
+    memory_ready = time.monotonic()
 
     # Sidecar skipped for codex_app_server/MoA.
     if (
@@ -981,6 +986,14 @@ def build_turn_context(
         )
 
     _persist_turn_start(agent, messages, conversation_history, pending_cli_message)
+    logger.info(
+        "Turn preflight timing: prompt_ms=%.1f compaction_ms=%.1f hooks_ms=%.1f memory_ms=%.1f persist_ms=%.1f",
+        (prompt_ready - preflight_started) * 1000,
+        (compaction_ready - prompt_ready) * 1000,
+        (hooks_ready - compaction_ready) * 1000,
+        (memory_ready - hooks_ready) * 1000,
+        (time.monotonic() - memory_ready) * 1000,
+    )
 
     # Title the session now: the row exists and titling depends only on the user's ask,
     # so it runs concurrently with the turn. Daemon thread, no-op once titled.
