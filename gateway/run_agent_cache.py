@@ -456,9 +456,27 @@ class GatewayAgentCacheMixin:
         # Finalization can run outside the routed profile scope. The cached agent
         # owns the exact DB used for its turn; the runner may now resolve root's DB.
         agent_db = getattr(snapshot[0], "_session_db", None)
+        known_ids = [
+            row["_row_id"] for row in getattr(snapshot[0], "_db_flush_scan_prefix", ())
+            if isinstance(row, dict) and isinstance(row.get("_row_id"), int)
+        ]
+
+        def read_agent_count():
+            row = agent_db.get_session(session_id)
+            # AIAgent stamps committed row IDs into its flush snapshot. A later
+            # transcript row is not in that agent's history, even if it committed
+            # before the count read finished. Do not absorb it into the baseline.
+            # Gateway-only session_meta rows carry no conversational content.
+            if not known_ids:
+                return None
+            tail = agent_db.get_messages(session_id, after_id=max(known_ids))
+            if any(message.get("role") != "session_meta" for message in tail):
+                return None
+            return row
+
         try:
             if agent_db is not None:
-                _sess_row = await asyncio.to_thread(agent_db.get_session, session_id)
+                _sess_row = await asyncio.to_thread(read_agent_count)
             else:
                 session_db = self._session_db
                 if session_db is None:
