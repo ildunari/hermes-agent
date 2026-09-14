@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import socket
-import sys
 
 import pytest
 
 
-@pytest.mark.skipif(
-    sys.platform != "linux", reason="Abstract Unix sockets are Linux-specific"
-)
+@pytest.mark.linux_only  # abstract (NUL-prefixed) AF_UNIX names are a Linux kernel feature
 def test_notify_supports_systemd_abstract_socket(monkeypatch):
     name = "\0hermes-test-notify"
     receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
