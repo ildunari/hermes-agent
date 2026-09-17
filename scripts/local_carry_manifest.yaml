@@ -2,7 +2,7 @@ version: 1
 base_ref: origin/main
 limits:
   # Preserve profile-scoped model discovery and agent-cache finalization.
-  paths: 151
+  paths: 155
   total_changed_lines: 8406
   modified_upstream_lines: 4156
 
@@ -308,6 +308,10 @@ paths:
     disposition: must-carry
     owner: preserve queued session identity and dedicated secondary-bot routing
     evidence: *active_work
+  - path: gateway/display_config.py
+    disposition: must-carry
+    owner: profile-scoped suppression of contact-facing busy notices
+    evidence: *bluebubbles
   - path: tests/gateway/test_permitted_routes_loading.py
     disposition: must-carry
     owner: startup route permissions and fail-closed precedence regression
@@ -320,6 +324,10 @@ paths:
     disposition: must-carry
     owner: registered platform operational-notice suppression
     evidence: *bluebubbles
+  - path: gateway/run_busy.py
+    disposition: must-carry
+    owner: queue and steer busy-notice suppression without dropping input
+    evidence: *bluebubbles
   - path: gateway/run_turn_runner.py
     disposition: must-carry
     owner: registered platform background-review suppression
@@ -328,6 +336,14 @@ paths:
     disposition: must-carry
     owner: scoped status suppression and ordinary reply regression
     evidence: *bluebubbles
+  - path: tests/gateway/test_busy_session_ack.py
+    disposition: must-carry
+    owner: queued follow-up retention with silent contact-facing acknowledgements
+    evidence: *bluebubbles
+  - path: tests/gateway/test_prekey_event_routing.py
+    disposition: must-carry
+    owner: pre-key Poke and Guest conversation route regression
+    evidence: *conversation
   - path: gateway/run_adapters.py
     disposition: must-carry
     owner: off-loop profile handoff store resolution
