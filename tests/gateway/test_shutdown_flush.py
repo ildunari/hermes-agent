@@ -66,6 +66,46 @@ def test_flush_writes_message_event_to_file(tmp_path, monkeypatch):
     assert payload["data"]["session_id"] == "20260728_120000_abc"
 
 
+def test_flush_resolves_missing_event_session_id(tmp_path, monkeypatch):
+    flush_dir = _make_flush_dir(tmp_path)
+    monkeypatch.setattr("gateway.shutdown_flush._get_flush_dir", lambda: flush_dir)
+    event = MagicMock()
+    event.text = "queued message"
+    event.session_id = None
+    event.platform = "bluebubbles"
+    event.sender_id = "contact"
+    event.sender_name = None
+    event.reply_to = None
+    event.media = None
+    event.raw_event = None
+
+    count = flush_pending_to_file(
+        {"agent:poke:bluebubbles:dm:contact": event},
+        session_id_resolver=lambda key: "resolved-session" if key.startswith("agent:poke:") else None,
+    )
+
+    assert count == 1
+    payload = json.loads(next(flush_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert payload["data"]["session_id"] == "resolved-session"
+
+
+def test_flush_keeps_message_when_session_resolver_fails(tmp_path, monkeypatch):
+    flush_dir = _make_flush_dir(tmp_path)
+    monkeypatch.setattr("gateway.shutdown_flush._get_flush_dir", lambda: flush_dir)
+
+    def broken_resolver(_key):
+        raise RuntimeError("session store unavailable")
+
+    count = flush_pending_to_file(
+        {"agent:main:telegram:dm:1": "preserve me"},
+        session_id_resolver=broken_resolver,
+    )
+
+    assert count == 1
+    payload = json.loads(next(flush_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert payload["data"] == {"text": "preserve me"}
+
+
 def test_recover_inserts_via_append_message_and_deletes_file(tmp_path, monkeypatch):
     flush_dir = _make_flush_dir(tmp_path)
     monkeypatch.setattr(
@@ -215,6 +255,21 @@ def test_flush_overflow_writes_one_payload_per_event_in_arrival_order(tmp_path, 
     assert [p["data"]["text"] for p in payloads] == ["follow-up B", "follow-up C"]
     assert {p["session_key"] for p in payloads} == {"agent:main:telegram:dm:1"}
     assert all(p["reason"] == "shutdown" for p in payloads)
+
+
+def test_flush_overflow_resolves_missing_event_session_ids(tmp_path, monkeypatch):
+    flush_dir = _make_flush_dir(tmp_path)
+    monkeypatch.setattr("gateway.shutdown_flush._get_flush_dir", lambda: flush_dir)
+    event = _overflow_event("follow-up", session_id="")
+
+    count = flush_overflow_to_file(
+        {"agent:poke:bluebubbles:dm:1": [event]},
+        session_id_resolver=lambda _key: "resolved-overflow-session",
+    )
+
+    assert count == 1
+    payload = json.loads(next(flush_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert payload["data"]["session_id"] == "resolved-overflow-session"
 
 
 def test_flushed_overflow_is_replayed_by_recover_pending_to_db(tmp_path, monkeypatch):

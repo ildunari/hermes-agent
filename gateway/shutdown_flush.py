@@ -19,7 +19,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -65,12 +65,17 @@ def _write_payload(flush_dir: Path, payload: Dict[str, Any]) -> Path:
     return final_path
 
 
-def _flush_value(flush_dir: Path, kind: str, session_key: str, value: Any, **extra: Any) -> bool:
+def _flush_value(
+    flush_dir: Path, kind: str, session_key: str, value: Any, *,
+    session_id: Optional[str] = None, **extra: Any,
+) -> bool:
     """Serialise and write one pending value; return True when a payload was written."""
     try:
         serialised = _serialise_value(value)
         if serialised is None:
             return False
+        if session_id and not serialised.get("session_id"):
+            serialised["session_id"] = session_id
         _write_payload(flush_dir, {"session_key": session_key, **extra, "data": serialised})
         return True
     except Exception as exc:
@@ -78,20 +83,42 @@ def _flush_value(flush_dir: Path, kind: str, session_key: str, value: Any, **ext
         return False
 
 
-def flush_pending_to_file(pending: Dict[str, Any], *, reason: str = "shutdown") -> int:
+def _resolve_session_id(
+    resolver: Optional[Callable[[str], Optional[str]]], session_key: str,
+) -> Optional[str]:
+    if resolver is None:
+        return None
+    try:
+        value = resolver(session_key)
+    except Exception:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def flush_pending_to_file(
+    pending: Dict[str, Any], *, reason: str = "shutdown",
+    session_id_resolver: Optional[Callable[[str], Optional[str]]] = None,
+) -> int:
     """Serialise non-empty ``_pending_messages`` slots (``MessageEvent`` or str); return count."""
     if not pending:
         return 0
     flush_dir, ts, flushed = _get_flush_dir(), int(time.time()), 0
     for session_key, value in list(pending.items()):
         if value is not None:
-            flushed += _flush_value(flush_dir, "pending", session_key, value, reason=reason, ts=ts)
+            session_id = _resolve_session_id(session_id_resolver, session_key)
+            flushed += _flush_value(
+                flush_dir, "pending", session_key, value, reason=reason, ts=ts,
+                session_id=session_id,
+            )
     if flushed:
         logger.info("Flushed %d pending message(s) to %s (reason=%s)", flushed, flush_dir, reason)
     return flushed
 
 
-def flush_overflow_to_file(overflow_by_session: Dict[str, Any], *, reason: str = "shutdown") -> int:
+def flush_overflow_to_file(
+    overflow_by_session: Dict[str, Any], *, reason: str = "shutdown",
+    session_id_resolver: Optional[Callable[[str], Optional[str]]] = None,
+) -> int:
     """Serialise the FIFO overflow tails (``queued_events``) to disk; return events flushed.
 
     The adapter slot holds the queue head and ``SessionState.conversation.queued_events`` the
@@ -104,10 +131,13 @@ def flush_overflow_to_file(overflow_by_session: Dict[str, Any], *, reason: str =
     for session_key, events in list(overflow_by_session.items()):
         if not session_key or not events:
             continue
+        session_id = _resolve_session_id(session_id_resolver, session_key)
         for seq, value in enumerate(list(events)):
             if value is not None:
-                flushed += _flush_value(flush_dir, "overflow", session_key, value, reason=reason,
-                                        ts=ts, seq=seq)
+                flushed += _flush_value(
+                    flush_dir, "overflow", session_key, value, reason=reason, ts=ts, seq=seq,
+                    session_id=session_id,
+                )
     if flushed:
         logger.info("Flushed %d queued overflow message(s) to %s (reason=%s)", flushed, flush_dir,
                     reason)

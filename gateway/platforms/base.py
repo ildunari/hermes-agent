@@ -4317,7 +4317,11 @@ class BasePlatformAdapter(ABC):
                 break
         with contextlib.suppress(Exception):  # flush pending messages to disk before clearing
             from gateway.shutdown_flush import flush_pending_to_file
-            flush_pending_to_file(self._pending_messages, reason="adapter_shutdown")
+            resolver = getattr(getattr(self, "_session_store", None), "peek_session_id", None)
+            flush_pending_to_file(
+                self._pending_messages, reason="adapter_shutdown",
+                session_id_resolver=resolver if callable(resolver) else None,
+            )
         for state in self._text_debounce_store().values():
             state.cancel_timer()
         for bucket in (self._background_tasks, self._expected_cancelled_tasks, self._session_tasks,
