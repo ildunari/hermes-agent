@@ -638,6 +638,24 @@ def _valid_lockfile_payload(parsed: object, ownership_id: str) -> bool:
     return parsed["logPath"].endswith(f"/{ownership_id}/{parsed['spawnNonce']}.log")
 
 
+def _remote_lock_roots(base_dir: Path | None) -> list[Path]:
+    """Every dir the Desktop may have written ``desktop-ssh/<ownershipId>/backend.lock.json`` under.
+
+    The Desktop writes SSH locks beneath the ROOT home (``~/.hermes/desktop-ssh``), but a profile
+    backend (``hermes --profile X serve``) runs with ``HERMES_HOME=<root>/profiles/X`` — scanning only
+    the process home found no lock there and its reaper killed the sibling profile's live SSH
+    backend on every profile switch (#89811)."""
+    if base_dir is not None:
+        return [base_dir]
+    from hermes_constants import get_default_hermes_root
+    roots: list[Path] = []
+    for home in (_hermes_home_dir(), get_default_hermes_root(), Path.home() / ".hermes"):
+        root = home / _REMOTE_LOCK_SUBDIR
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
 def _lock_owned_serve_pids(base_dir: Path | None = None) -> set[int]:
     """PIDs claimed by valid SSH ownership records.
 
@@ -646,21 +664,13 @@ def _lock_owned_serve_pids(base_dir: Path | None = None) -> set[int]:
     under a custom active home. An explicit base_dir scans only that directory.
     """
     import json
-
-    if base_dir is None:
-        # This is the SSH writer's machine-scoped namespace, not the profile
-        # root (get_default_hermes_root also follows custom HERMES_HOME).
-        roots = {
-            Path.home() / ".hermes" / _REMOTE_LOCK_SUBDIR,
-            _hermes_home_dir() / _REMOTE_LOCK_SUBDIR,
-        }
-        return set().union(*(_lock_owned_serve_pids(root) for root in roots))
-    root = base_dir
     owned: set[int] = set()
-    try:
-        entries = list(root.iterdir()) if root.is_dir() else []
-    except OSError:
-        return owned
+    entries: list[Path] = []
+    for root in _remote_lock_roots(base_dir):
+        try:
+            entries.extend(root.iterdir() if root.is_dir() else [])
+        except OSError:
+            continue
     for entry in entries:
         ownership_id = entry.name
         lock_path = entry / "backend.lock.json"
