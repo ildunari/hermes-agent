@@ -574,6 +574,22 @@ class GatewayBusySessionMixin:
             logger.debug("Busy steer ack suppressed for session %s", session_key)
         return steer_ack_enabled
 
+    def _busy_ack_enabled(self, event: MessageEvent, session_key: str) -> bool:
+        """Resolve the general busy notice per profile/platform, including queue fallback."""
+        from gateway.run import _load_gateway_config, _platform_config_key
+        from gateway.display_config import resolve_configured_display_setting
+        env_value = os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED")
+        env_default = True if env_value is None else env_value.strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        enabled = bool(resolve_configured_display_setting(
+            _load_gateway_config(), _platform_config_key(event.source.platform),
+            "busy_ack_enabled", env_default,
+        ))
+        if not enabled:
+            logger.debug("Busy ack suppressed for session %s", session_key)
+        return enabled
+
     _BUSY_DEMOTED_TAIL = (
         " — your message is queued for when it finishes (use /stop to cancel everything)."
     )
@@ -729,8 +745,7 @@ class GatewayBusySessionMixin:
 
         # Disabled ack: still process input. Checked before debounce so an undelivered ack never
         # stamps the "last ack" timestamp.
-        if os.environ.get("HERMES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() != "true":
-            logger.debug("Busy ack suppressed for session %s", session_key)
+        if not self._busy_ack_enabled(event, session_key):
             return True  # input still processed, just no ack sent
 
         # Debounce (30s) before the config-heavy display lookup.

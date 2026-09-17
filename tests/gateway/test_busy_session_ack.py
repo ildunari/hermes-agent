@@ -300,6 +300,31 @@ class TestBusySessionAck:
         assert "Steered" not in content
 
     @pytest.mark.asyncio
+    async def test_general_busy_ack_setting_suppresses_queue_fallback_notice(self, monkeypatch):
+        import gateway.run as _gr
+
+        monkeypatch.delenv("HERMES_GATEWAY_BUSY_ACK_ENABLED", raising=False)
+        monkeypatch.setattr(
+            _gr,
+            "_load_gateway_config",
+            lambda: {"display": {"platforms": {"telegram": {"busy_ack_enabled": False}}}},
+        )
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "steer"
+        adapter = _make_adapter()
+        event = _make_event(text="answer this next")
+        sk = build_session_key(event.source)
+        runner.adapters[event.source.platform] = adapter
+        agent = MagicMock()
+        agent.steer = MagicMock(return_value=False)
+        runner._running_agents[sk] = agent
+
+        assert await runner._handle_active_session_busy_message(event, sk) is True
+
+        assert adapter._pending_messages.get(sk) is event
+        adapter._send_with_retry.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_steer_mode_falls_back_to_queue_when_agent_pending(self):
         """If agent is still starting (sentinel), steer mode falls back to queue."""
         runner, sentinel = _make_runner()
@@ -567,5 +592,4 @@ class TestLongRunningNotificationOwnership:
         assert runner._should_emit_long_running_notification("sess", agent, executor_task=None) is True
         setattr(runner, flag, True)
         assert runner._should_emit_long_running_notification("sess", agent, executor_task=None) is False
-
 

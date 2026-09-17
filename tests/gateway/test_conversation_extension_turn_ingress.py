@@ -80,6 +80,44 @@ async def test_observed_only_reconnect_fires_after_auth_and_never_runs_agent(
 
 
 @pytest.mark.asyncio
+async def test_extension_route_preparation_is_idempotent_before_normal_admission(
+    monkeypatch, tmp_path
+):
+    from gateway import conversation_extension_runtime as runtime
+
+    order = []
+    runner = _runner(tmp_path, order)
+    decision = SimpleNamespace(
+        admitted=True,
+        reason="owner_route",
+        runtime_profile="guest",
+        extension_id="poke",
+        principal="guest",
+        subject_id="steve",
+        context_prefix="[contact] ",
+        suppress_turn=False,
+        conversation_id="steve",
+    )
+    calls = []
+    monkeypatch.setattr(runtime, "profile_requirements_satisfied", lambda **_kw: (True, ""))
+    monkeypatch.setattr(runtime, "build_route_context", lambda *_a, **_kw: object())
+    monkeypatch.setattr(
+        runtime, "admit_and_route", lambda *_a, **_kw: calls.append("route") or decision
+    )
+
+    event = _event()
+    event.observed_only = False
+    with patch("gateway.run._load_gateway_config_for_profile", return_value={}):
+        prepared = await runner._hm_prepare_conversation_route(event)
+        prepared_again = await runner._hm_prepare_conversation_route(prepared)
+
+    assert calls == ["route"]
+    assert prepared_again.source.profile == "guest"
+    assert prepared_again.text == "[contact] reconnect evidence"
+    assert prepared_again.metadata["_conversation_extension_route"]["prepared"] is True
+
+
+@pytest.mark.asyncio
 async def test_unready_required_extension_refuses_ingress_before_auth(
     monkeypatch, tmp_path
 ):

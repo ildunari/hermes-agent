@@ -1088,6 +1088,7 @@ class GatewayAdapterLifecycleMixin:
     def _wire_adapter_handlers(
         self, adapter: BasePlatformAdapter, *, message_handler=None, fatal_error_handler=None,
         busy_session_handler=None, authorization_check=None, platform_event_handler=None,
+        event_prepare_handler=None,
         busy_text_mode: Optional[str] = None,
     ) -> None:
         """Install the runner callbacks every adapter needs (defaults = primary handlers;
@@ -1095,6 +1096,7 @@ class GatewayAdapterLifecycleMixin:
         adapter.set_message_handler(message_handler or self._primary_message_handler())
         adapter.set_fatal_error_handler(fatal_error_handler or self._handle_adapter_fatal_error)
         adapter.set_session_store(self.session_store)
+        adapter.set_event_prepare_handler(event_prepare_handler or self._primary_event_prepare_handler())
         adapter.set_busy_session_handler(busy_session_handler or self._primary_busy_session_handler())
         _set_reaction = getattr(adapter, "set_reaction_handler", None)
         if callable(_set_reaction):
@@ -1125,6 +1127,7 @@ class GatewayAdapterLifecycleMixin:
             message_handler=self._make_profile_message_handler(profile_name),
             fatal_error_handler=self._make_profile_fatal_error_handler(profile_name, platform),
             busy_session_handler=self._make_profile_busy_session_handler(profile_name),
+            event_prepare_handler=self._make_profile_event_prepare_handler(profile_name),
             authorization_check=self._make_adapter_auth_check(platform, profile_name=profile_name),
             platform_event_handler=self._make_profile_platform_event_handler(profile_name),
             busy_text_mode=(
@@ -1364,6 +1367,18 @@ class GatewayAdapterLifecycleMixin:
 
         return _handler
 
+    def _make_profile_event_prepare_handler(self, profile_name: str):
+        """Prepare extension routing before a secondary adapter derives its session key."""
+        from gateway.run import _async_profile_runtime_scope
+        profile_home = self._profile_home_or_none(profile_name)
+
+        async def _handler(event):
+            self._stamp_event_profile(event, profile_name)
+            async with self._scope_or_null(_async_profile_runtime_scope, profile_home):
+                return await self._hm_prepare_conversation_route(event)
+
+        return _handler
+
     def _make_profile_busy_session_handler(self, profile_name: str):
         """Stamp an owning adapter's profile, then resolve busy policy under the profile scope
         (auth runs against the profile's own allowlist, same as the cold-path message handler)."""
@@ -1388,6 +1403,20 @@ class GatewayAdapterLifecycleMixin:
             profile_home = self._admit_primary_source(event.source, default_home) or default_home
             async with _async_profile_runtime_scope(profile_home):
                 return await self._handle_message(event)
+
+        return _handler
+
+    def _make_default_profile_event_prepare_handler(self):
+        """Route shared primary-transport events before the adapter claims a busy lane."""
+        from gateway.run import _async_profile_runtime_scope, get_hermes_home
+        default_home = Path(get_hermes_home())
+
+        async def _handler(event):
+            profile_home = self._admit_primary_source(event.source, default_home)
+            if profile_home is None:
+                return None
+            async with _async_profile_runtime_scope(profile_home):
+                return await self._hm_prepare_conversation_route(event)
 
         return _handler
 
@@ -1443,6 +1472,11 @@ class GatewayAdapterLifecycleMixin:
         if self._multiplex_on():
             return self._make_default_profile_message_handler()
         return self._standalone_scoped(self._handle_message)
+
+    def _primary_event_prepare_handler(self):
+        if self._multiplex_on():
+            return self._make_default_profile_event_prepare_handler()
+        return self._standalone_scoped(self._hm_prepare_conversation_route)
 
     def _primary_busy_session_handler(self):
         """Return the correctly scoped busy-session handler for a primary adapter."""

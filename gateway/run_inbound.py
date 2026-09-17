@@ -136,29 +136,18 @@ class GatewayInboundMixin:
         if notifier.first_time(platform_name, source.user_id) and getattr(self, "config", None) is not None:
             await notifier.notify(self, source, hint)
 
-    async def _hm_admit_event(
-        self, event: "MessageEvent"
-    ) -> Optional[Tuple["MessageEvent", SessionSource, bool]]:
-        """Ingress gates for ``_handle_message``; None when dropped, else ``(event, source, is_internal)``
-        (the ``pre_gateway_dispatch`` hook may have rewritten ``event``)."""
-        from gateway.run import _is_slack_ignored_channel
+    async def _hm_prepare_conversation_route(self, event: "MessageEvent") -> Optional["MessageEvent"]:
+        """Apply static and conversation-extension routing before adapter session keying.
+
+        The prepared decision is carried on the in-memory event so normal admission can authorize
+        and observe it without classifying twice or prefixing the user text twice.
+        """
         source = event.source
-        # getattr(self, ...) throughout: bare test runners build GatewayRunner via object.__new__.
         _config = getattr(self, "config", None)
+        prepared = (getattr(event, "metadata", None) or {}).get("_conversation_extension_route")
+        if isinstance(prepared, dict) and prepared.get("prepared") is True:
+            return event
 
-        # 🔴 Cross-session leak guard: this per-message task was create_task()'d with a copy of the
-        # spawning context, which may carry ANOTHER message's HERMES_SESSION_* ContextVars; until
-        # _set_session_env binds ours a subprocess would read the foreign identity. Reset to _UNSET.
-        try:
-            from gateway.session_context import reset_session_vars
-            reset_session_vars()
-        except Exception:
-            logger.debug("reset_session_vars failed at handler entry", exc_info=True)
-
-        # Most adapters resolve profile routes in build_source(); internal/voice paths construct
-        # SessionSource directly, so resolve those here as the shared fail-closed ingress gate.
-        # Strict boolean marker: require the literal True so duck-typed test/internal sources with
-        # dynamic attributes are not mistaken for a rejection.
         if (
             getattr(_config, "multiplex_profiles", False)
             and not getattr(source, "profile", None)
@@ -225,7 +214,10 @@ class GatewayInboundMixin:
                     return None
                 if decision is not None:
                     source, event = self._apply_extension_route_decision_safe(source, event, decision)
+                    if event is None:
+                        return None
                     event.metadata["_conversation_extension_route"] = {
+                        "prepared": True,
                         "scope": extension_scope,
                         "context": extension_context,
                         "decision": decision,
@@ -236,6 +228,44 @@ class GatewayInboundMixin:
             # bypass required Poke/Guest routing and tool policy.
             logger.warning("Dropping inbound message: conversation-extension admission failed", exc_info=True)
             return None
+        if "_conversation_extension_route" not in (getattr(event, "metadata", None) or {}):
+            metadata = dict(getattr(event, "metadata", None) or {})
+            metadata["_conversation_extension_route"] = {
+                "prepared": True,
+                "scope": extension_scope,
+                "context": extension_context,
+                "decision": None,
+            }
+            event.metadata = metadata
+        return event
+
+    async def _hm_admit_event(
+        self, event: "MessageEvent"
+    ) -> Optional[Tuple["MessageEvent", SessionSource, bool]]:
+        """Ingress gates for ``_handle_message``; None when dropped, else ``(event, source, is_internal)``
+        (the ``pre_gateway_dispatch`` hook may have rewritten ``event``)."""
+        from gateway.run import _is_slack_ignored_channel
+        # getattr(self, ...) throughout: bare test runners build GatewayRunner via object.__new__.
+        _config = getattr(self, "config", None)
+
+        # Cross-session leak guard: this per-message task was create_task()'d with a copy of the
+        # spawning context, which may carry ANOTHER message's HERMES_SESSION_* ContextVars.
+        try:
+            from gateway.session_context import reset_session_vars
+            reset_session_vars()
+        except Exception:
+            logger.debug("reset_session_vars failed at handler entry", exc_info=True)
+
+        event = await self._hm_prepare_conversation_route(event)
+        if event is None:
+            return None
+        source = event.source
+        route_state = (getattr(event, "metadata", None) or {}).get("_conversation_extension_route") or {}
+        extension_context = route_state.get("context")
+        extension_scope = route_state.get("scope")
+        extension_runtime = None
+        if extension_context is not None:
+            from gateway import conversation_extension_runtime as extension_runtime
 
         is_internal = bool(getattr(event, "internal", False))  # e.g. background-process notifications
 

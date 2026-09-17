@@ -1866,6 +1866,12 @@ class BasePlatformAdapter(ABC):
         self._reaction_handler: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         # Runner-owned boundary for normalized events: auth/profile state never lives in an adapter.
         self._platform_event_handler: Optional[Callable[[Dict[str, Any], Any], Awaitable[None]]] = None
+        # Runner-owned admission preparation that must happen before session keying. Conversation
+        # extensions can route one shared transport into distinct profile lanes (for example owner
+        # and guest DMs); keying first would collapse those lanes into agent:main.
+        self._event_prepare_handler: Optional[
+            Callable[[MessageEvent], Awaitable[Optional[MessageEvent]]]
+        ] = None
         # Rewrites ``event.source.thread_id`` before session keying (Telegram DM topics).
         self._topic_recovery_fn: Optional[Callable[[Any], Optional[str]]] = None
         self._running, self._fatal_error_retryable = False, True
@@ -2225,6 +2231,12 @@ class BasePlatformAdapter(ABC):
         ``SessionSource``); the runner owns authorization and plugin dispatch: no callback = fail
         closed."""
         self._platform_event_handler = handler
+
+    def set_event_prepare_handler(
+        self, handler: Optional[Callable[[MessageEvent], Awaitable[Optional[MessageEvent]]]]
+    ) -> None:
+        """Install the runner-owned pre-session-key admission/routing boundary."""
+        self._event_prepare_handler = handler
 
     def set_topic_recovery_fn(self, fn: Optional[Callable[[Any], Optional[str]]]) -> None:
         """Install a thread_id-recovery hook (Telegram DM topic mode): called with ``event.source``
@@ -3714,6 +3726,11 @@ class BasePlatformAdapter(ABC):
         if (not expected_session_key and getattr(self, "_topic_recovery_fn", None) is not None
                 and event.source.platform == Platform.TELEGRAM and event.source.chat_type == "dm"):
             await asyncio.to_thread(self._apply_topic_recovery, event)
+        prepare = getattr(self, "_event_prepare_handler", None)
+        if prepare is not None:
+            event = await prepare(event)
+            if event is None:
+                return
         session_key = self._event_session_key(event)
         if expected_session_key and session_key != expected_session_key:
             logger.warning("Dropping internally routed event: expected session=%s derived=%s",
