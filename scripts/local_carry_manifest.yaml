@@ -3,8 +3,8 @@ base_ref: origin/main
 limits:
   # Preserve profile-scoped model discovery and agent-cache finalization.
   paths: 144
-  total_changed_lines: 6932
-  modified_upstream_lines: 2683
+  total_changed_lines: 8296
+  modified_upstream_lines: 4049
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/native_owner_controls.py
@@ -144,7 +144,7 @@ paths:
     disposition: upstream
     owner: native gateway maintenance admission and recovery regressions
     evidence: *active_work
-  - path: docs/owner-maintenance-control.md
+  - path: website/docs/developer-guide/owner-maintenance-control.md
     disposition: upstream
     owner: authenticated maintenance protocol and recovery contract
     evidence: *active_work
@@ -443,7 +443,7 @@ paths:
     disposition: upstream
     owner: core provider resolution tests
     evidence: *provider
-  - path: tests/test_tui_gateway_server.py
+  - path: tests/tui_gateway/test_tui_gateway_server.py
     disposition: must-carry
     owner: model-picker test isolation
     evidence: *provider
@@ -471,7 +471,7 @@ paths:
     disposition: upstream
     owner: translated context-engine plugin documentation
     evidence: *context_engine
-  - path: tests/run_agent/test_plugin_context_engine_init.py
+  - path: tests/agent/test_plugin_context_engine_init.py
     disposition: upstream
     owner: core context-engine seam tests
     evidence: *context_engine
@@ -599,13 +599,13 @@ paths:
       runtime_caller: scratch validation on Mac Studio
       interface_test: tests/skills/test_openclaw_migration.py
       artifact: continuation focused test receipts
-  - path: tests/test_guest_durability_barriers.py
+  - path: tests/hermes_state/test_guest_durability_barriers.py
     disposition: upstream
     owner: hermetic and portable validation on macOS
     evidence:
       registration: canonical isolated test runner
       runtime_caller: scratch validation on Mac Studio
-      interface_test: tests/test_guest_durability_barriers.py
+      interface_test: tests/hermes_state/test_guest_durability_barriers.py
       artifact: continuation focused test receipts
   - path: hermes_state_holders.py
     disposition: upstream
@@ -647,7 +647,7 @@ paths:
       runtime_caller: state maintenance and scratch validation
       interface_test: resumed seven fixtures and Darwin holder regression suite
       artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
-  - path: tests/state/test_state_db_holders.py
+  - path: tests/hermes_state/test_state_db_holders.py
     disposition: upstream
     owner: Darwin zero-descriptor success proof
     evidence:
@@ -671,7 +671,7 @@ paths:
       runtime_caller: state maintenance and scratch validation
       interface_test: resumed seven fixtures and Darwin holder regression suite
       artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
-  - path: tests/test_hermes_state.py
+  - path: tests/hermes_state/test_hermes_state.py
     disposition: must-carry
     owner: portable current-runtime fixture
     evidence: *ratchet
