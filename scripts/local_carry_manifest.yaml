@@ -2,8 +2,8 @@ version: 1
 base_ref: origin/main
 limits:
   # Preserve profile-scoped model discovery and agent-cache finalization.
-  paths: 148
-  total_changed_lines: 8403
+  paths: 149
+  total_changed_lines: 8402
   modified_upstream_lines: 4156
 
 required_support:
@@ -406,6 +406,10 @@ paths:
   - path: tests/gateway/test_multiplex_hot_serve.py
     disposition: must-carry
     owner: profile reconciliation runtime wiring regression
+    evidence: *conversation
+  - path: tests/gateway/test_multiplex_routing_authz.py
+    disposition: must-carry
+    owner: dedicated secondary-bot routing and profile-scoped completion regressions
     evidence: *conversation
   - path: tests/gateway/test_shutdown_flush.py
     disposition: must-carry
