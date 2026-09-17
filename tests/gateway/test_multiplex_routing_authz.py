@@ -38,6 +38,7 @@ def mux(tmp_path, monkeypatch):
     """Default home allows user 777; profile ``ops`` is a shared-bot satellite; ``team_b`` owns a bot."""
     from agent import secret_scope
     from gateway.run import GatewayRunner
+    import hermes_state
 
     home = tmp_path / "hh"
     for name in ("ops", "team_b"):
@@ -46,6 +47,10 @@ def mux(tmp_path, monkeypatch):
     (home / "profiles" / "team_b" / ".env").write_text("TELEGRAM_ALLOWED_USERS=72719239\n")
     (home / "profiles" / "ops" / ".env").write_text("")
     monkeypatch.setenv("HERMES_HOME", str(home))
+    # The global hermetic fixture may have imported and pinned hermes_state for an earlier test.
+    # Keep this fixture's default path dynamic so profile runtime scopes select their own state.db.
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", home / "state.db")
+    monkeypatch.setattr(hermes_state, "_IMPORT_DEFAULT_DB_PATH", home / "state.db")
     for key in ("TELEGRAM_ALLOWED_USERS", "GATEWAY_ALLOW_ALL_USERS", "GATEWAY_ALLOWED_USERS"):
         monkeypatch.delenv(key, raising=False)
     prev = secret_scope.is_multiplex_active()

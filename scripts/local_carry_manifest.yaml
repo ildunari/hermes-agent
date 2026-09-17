@@ -2,9 +2,9 @@ version: 1
 base_ref: origin/main
 limits:
   # Preserve profile-scoped model discovery and agent-cache finalization.
-  paths: 144
-  total_changed_lines: 8281
-  modified_upstream_lines: 4034
+  paths: 148
+  total_changed_lines: 8403
+  modified_upstream_lines: 4156
 
 required_support:
   - support/hermes-studio-ops/src/hermes_studio_ops/native_owner_controls.py
@@ -292,6 +292,10 @@ paths:
     disposition: must-carry
     owner: startup route permission YAML bridge
     evidence: *conversation
+  - path: gateway/platforms/base.py
+    disposition: must-carry
+    owner: preserve queued session identity and dedicated secondary-bot routing
+    evidence: *active_work
   - path: tests/gateway/test_permitted_routes_loading.py
     disposition: must-carry
     owner: startup route permissions and fail-closed precedence regression
@@ -324,6 +328,10 @@ paths:
     disposition: must-carry
     owner: conversation extension lifecycle teardown
     evidence: *conversation
+  - path: gateway/shutdown_flush.py
+    disposition: must-carry
+    owner: preserve queued session identity during graceful shutdown
+    evidence: *active_work
   - path: gateway/run_startup.py
     disposition: must-carry
     owner: conversation extension activation and liveness freshness
@@ -395,6 +403,14 @@ paths:
     disposition: must-carry
     owner: gateway off-loop startup hydration contract
     evidence: *conversation
+  - path: tests/gateway/test_multiplex_hot_serve.py
+    disposition: must-carry
+    owner: profile reconciliation runtime wiring regression
+    evidence: *conversation
+  - path: tests/gateway/test_shutdown_flush.py
+    disposition: must-carry
+    owner: queued session identity shutdown regressions
+    evidence: *active_work
   - path: tests/gateway/test_handoff_watcher_async_db.py
     disposition: must-carry
     owner: gateway off-loop session-store initialization contract
