@@ -2,7 +2,7 @@ version: 1
 base_ref: origin/main
 limits:
   # Preserve profile-scoped model discovery and agent-cache finalization.
-  paths: 149
+  paths: 151
   total_changed_lines: 8406
   modified_upstream_lines: 4156
 
@@ -92,6 +92,18 @@ evidence_templates:
     artifact: signed Studio and MacBook bundles with exact commit stamps
 
 paths:
+  - path: agent/secret_scope.py
+    disposition: upstream
+    owner: profile-local 1Password bootstrap scope under gateway multiplexing
+    evidence: &op_bootstrap_scope
+      registration: profile runtime secret-scope construction
+      runtime_caller: multiplexed 1Password login-vault backend initialization
+      interface_test: tests/agent/test_secret_scope.py
+      artifact: profile-local service-account token prevents interactive op fallback after hydration
+  - path: tests/agent/test_secret_scope.py
+    disposition: upstream
+    owner: multiplexed 1Password service-account bootstrap regression
+    evidence: *op_bootstrap_scope
   - path: hermes_cli/dashboard_procs.py
     disposition: upstream
     owner: shared SSH ownership protection during named-profile startup

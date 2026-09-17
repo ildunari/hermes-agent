@@ -252,13 +252,22 @@ def load_env_file(env_path: Path) -> Dict[str, str]:
 
 
 def build_profile_secret_scope(hermes_home: Path) -> Dict[str, str]:
-    """Build a profile's secret mapping from ``<home>/.env`` plus its external
-    secret sources. Global vars are NOT copied in — ``get_secret`` reads those
-    from ``os.environ`` — so the scope holds only profile secrets."""
-    secrets = load_env_file(Path(hermes_home) / ".env")
+    """Build a profile's secret mapping from its private env files plus external sources.
+
+    ``.op.env`` carries the 1Password bootstrap credential used both by the secret source and by the
+    login-vault backend later in a routed profile's lifetime.  Omitting it here made multiplexed profiles
+    hydrate successfully, then fall back to interactive Desktop authorization when the vault backend was
+    constructed.  Match :func:`load_hermes_dotenv` precedence: ``.env`` wins over ``.op.env``.
+
+    Global vars are NOT copied in — ``get_secret`` reads those from ``os.environ`` — so the scope holds
+    only profile secrets.
+    """
+    home = Path(hermes_home)
+    secrets = load_env_file(home / ".op.env")
+    secrets.update(load_env_file(home / ".env"))
     try:
         from hermes_cli.env_loader import get_secret_source_values
-        external_secrets = get_secret_source_values(Path(hermes_home))
+        external_secrets = get_secret_source_values(home)
     except Exception:
         external_secrets = {}
     secrets.update((k, v) for k, v in external_secrets.items() if not _is_global_env(k))

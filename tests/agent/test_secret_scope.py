@@ -217,6 +217,30 @@ class TestEnvFileParsing:
             "ANTHROPIC_API_KEY": "sk-profile"
         }
 
+    def test_build_profile_secret_scope_includes_op_bootstrap_with_env_precedence(self, tmp_path):
+        (tmp_path / ".op.env").write_text(
+            "OP_SERVICE_ACCOUNT_TOKEN=ops-profile\nSHARED=bootstrap\n"
+        )
+        (tmp_path / ".env").write_text("SHARED=profile\n")
+
+        assert ss.build_profile_secret_scope(tmp_path) == {
+            "OP_SERVICE_ACCOUNT_TOKEN": "ops-profile",
+            "SHARED": "profile",
+        }
+
+    def test_multiplexed_onepassword_backend_uses_scoped_service_account(self, tmp_path):
+        from agent.vault_backends.onepassword import OnePasswordLoginBackend
+
+        (tmp_path / ".op.env").write_text("OP_SERVICE_ACCOUNT_TOKEN=ops-profile\n")
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope(ss.build_profile_secret_scope(tmp_path))
+        try:
+            backend = OnePasswordLoginBackend({"service_account_token_env": "OP_SERVICE_ACCOUNT_TOKEN"})
+            assert backend.is_unlocked()
+            assert backend._service_token == "ops-profile"
+        finally:
+            ss.reset_secret_scope(token)
+
     def test_build_profile_secret_scope_includes_home_external_secrets(
         self, tmp_path, monkeypatch
     ):
