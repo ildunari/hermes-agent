@@ -192,18 +192,13 @@ def hygiene_compaction_recovered(
 
 def _hygiene_compression_timeout_message(
     *, total_exhausted: bool, elapsed: float, idle_timeout: float, progress_observed: bool) -> str:
-    """Describe the host timeout that actually ended hygiene compression."""
+    """Describe the host timeout without leaking host-only tuning into chat."""
+    lead = (
+        "⚠️ Shortening the conversation history took too long, so I skipped it and kept "
+        "everything as-is. Run /compress to try again or /new to start fresh.")
     if total_exhausted:
-        progress = " after summary output was observed" if progress_observed else ""
-        return (
-            "⚠️ Context compression reached its total ceiling after "
-            f"{elapsed:.1f}s{progress}. No messages were dropped — continuing "
-            "without compression. Run /compress to retry or /reset for a clean session.")
-    return (
-        f"⚠️ Context compression timed out after {idle_timeout:.1f}s with no "
-        "output from the summary model. No messages were dropped — continuing "
-        "without compression. Run /compress to retry, /reset for a clean "
-        "session, or check your auxiliary.compression model configuration.")
+        return lead
+    return lead + " If this keeps happening, run `hermes doctor` on the host."
 
 
 def _cached_agent_for_hygiene(gateway, session_key: str):
