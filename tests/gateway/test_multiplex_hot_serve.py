@@ -14,7 +14,7 @@ import pytest
 
 from gateway.config import GatewayConfig, Platform
 from gateway.run import GatewayRunner
-from gateway.run_profile_reconcile import profile_serve_signature
+from gateway.run_profile_reconcile import GatewayProfileReconcileMixin, profile_serve_signature
 
 
 class _Adapter:
@@ -30,6 +30,11 @@ class _Adapter:
 
     async def cancel_background_tasks(self):
         self.cancelled = True
+
+
+def test_gateway_runner_includes_profile_reconcile_mixin():
+    assert issubclass(GatewayRunner, GatewayProfileReconcileMixin)
+    assert callable(GatewayRunner._profile_reconcile_watcher)
 
 
 def _runner(tmp_path, monkeypatch):

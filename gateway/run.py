@@ -2203,6 +2203,7 @@ from gateway.run_shutdown import GatewayShutdownMixin, _exit_with_failure_verdic
 from gateway.run_busy import GatewayBusySessionMixin
 from gateway.run_config_loaders import GatewayConfigLoadersMixin
 from gateway.run_startup import GatewayStartupMixin
+from gateway.run_profile_reconcile import GatewayProfileReconcileMixin
 from gateway.run_watchers import GatewaySessionWatchersMixin
 from gateway.run_notifications import GatewayNotificationsMixin
 from gateway.run_inbound import GatewayInboundMixin
@@ -3386,8 +3387,8 @@ class GatewayRunner(
     GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin,
     GatewayVoiceMixin, GatewayAdapterLifecycleMixin, GatewayTopicThreadsMixin, GatewayTurnMixin,
     GatewayShutdownMixin, GatewayBusySessionMixin, GatewayConfigLoadersMixin, GatewayStartupMixin,
-    GatewaySessionWatchersMixin, GatewayNotificationsMixin, GatewayInboundMixin, GatewayGoalsMixin,
-    GatewayAgentCacheMixin):
+    GatewayProfileReconcileMixin, GatewaySessionWatchersMixin, GatewayNotificationsMixin,
+    GatewayInboundMixin, GatewayGoalsMixin, GatewayAgentCacheMixin):
     """Main gateway controller: manages adapter lifecycles, routes messages to/from the agent."""
 
     # Class-level defaults so partial construction in tests doesn't blow up on attribute access.
