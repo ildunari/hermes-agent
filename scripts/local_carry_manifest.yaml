@@ -3,7 +3,7 @@ base_ref: origin/main
 limits:
   # Preserve profile-scoped model discovery and agent-cache finalization.
   paths: 149
-  total_changed_lines: 8402
+  total_changed_lines: 8406
   modified_upstream_lines: 4156
 
 required_support:
