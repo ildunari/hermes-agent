@@ -463,7 +463,7 @@ def _resolve_job_reasoning_config(job: dict, cfg: dict, model: str) -> dict | No
 from cron.jobs import (
     _ensure_cron_dir, advance_next_runs, claim_dispatch, claim_job_for_fire, fire_claim_fence,
     clear_run_claim, get_due_jobs, heartbeat_fire_claim, heartbeat_run_claim, mark_job_run,
-    save_job_output, use_cron_store)
+    save_job_output, self_removal_delivery_allowed, self_removal_delivery_scope, use_cron_store)
 from cron.executions import (
     _TERMINAL_STATES, create_execution, finish_execution, get_execution,
     mark_execution_handoff_pending, mark_execution_running, recover_interrupted_executions)
@@ -2469,20 +2469,21 @@ def run_one_job(
         _running_fire_owners.setdefault(job["id"], {})[execution_token] = (
             fire_owner or None, profile_home)
     try:
-        return _run_with_fire_claim_heartbeat(
-            job,
-            lambda lost_ownership: _run_one_job_body(
+        with self_removal_delivery_scope(job["id"]):
+            return _run_with_fire_claim_heartbeat(
                 job,
-                adapters=adapters,
-                loop=loop,
-                verbose=verbose,
-                extra_prompt=extra_prompt,
-                fire_claim_lost=(
-                    _CombinedCancelEvent(lost_ownership, cancel_event)
-                    if cancel_event is not None
-                    else lost_ownership
-                ),
-                execution_token=execution_token, probe_run_snapshot=probe_run_snapshot))
+                lambda lost_ownership: _run_one_job_body(
+                    job,
+                    adapters=adapters,
+                    loop=loop,
+                    verbose=verbose,
+                    extra_prompt=extra_prompt,
+                    fire_claim_lost=(
+                        _CombinedCancelEvent(lost_ownership, cancel_event)
+                        if cancel_event is not None
+                        else lost_ownership
+                    ),
+                    execution_token=execution_token, probe_run_snapshot=probe_run_snapshot))
     finally:
         with _running_lock:
             executions = _running_fire_owners.get(job["id"])
@@ -2649,6 +2650,11 @@ def _save_compose_deliver(
     # Whitespace-only == empty: skip delivery; the guard below marks it a soft failure.
     d.should_deliver = bool(deliver_content.strip()) and not _silent_alert
     d.deliver_content = deliver_content
+    if d.should_deliver and not d.success and job.get("_model_unreachable"):
+        from cron.unreachable_retry import will_retry
+        if will_retry(job):
+            d.should_deliver = False
+            logger.info("Job '%s': suppressing failure notice - automatic re-run pending", job["id"])
     # Not a substring check: bare "SILENT"/"NO_REPLY" or a report quoting "[SILENT]" must
     # not be swallowed; bracketed-prefix / trailing-line tolerance is kept.
     if d.should_deliver and d.success and _is_cron_silence_response(deliver_content):
@@ -2716,7 +2722,9 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         from cron.jobs import update_job
         update_job(job["id"], {"last_delivery_queued": None})
         job["last_delivery_queued"] = None
-    mark_kwargs = {"delivery_error": d.delivery_error}
+    mark_kwargs: dict = {"delivery_error": d.delivery_error}
+    if not d.success and job.pop("_model_unreachable", False):
+        mark_kwargs["model_unreachable"] = True
     snapshot = d.probe_run_snapshot
     if snapshot is not None:
         mark_kwargs["probe_run_snapshot"] = snapshot
@@ -2731,7 +2739,8 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         mark_kwargs["expected_fire_owner"] = fire_owner
     if d.blocked_config:
         mark_kwargs["status"] = "blocked_config"
-    marked = mark_job_run(job["id"], d.success, d.error, **mark_kwargs)
+    marked = self_removal_delivery_allowed(job["id"]) or mark_job_run(
+        job["id"], d.success, d.error, **mark_kwargs)
     if fire_owner is not None and not marked:
         finish_execution(
             execution_id, success=False,

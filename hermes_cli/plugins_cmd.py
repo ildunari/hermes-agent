@@ -125,11 +125,16 @@ def _scan_on_install_enabled() -> bool:
     return bool(_config_value("plugins", "scan_on_install", default=True))
 
 
-def _scan_plugin_tree(plugin_dir: Path, identifier: str, *, force: bool, scan_decision_cb=None):
+def _scan_plugin_tree(plugin_dir: Path, identifier: str, *, force: bool, scan_decision_cb=None,
+                      reviewed_pin: bool = False):
     """Scan *plugin_dir* and enforce the install policy.
 
     Verdicts: safe → proceed; caution → needs confirmation (``force=True`` or a truthy
     ``scan_decision_cb(result)``); dangerous → always blocked (:class:`PluginScanBlocked`).
+    *reviewed_pin* marks a tree checked out at a curated-catalog sha: that exact tree passed
+    the same scanner at admission with a human reading the caution findings, so caution is
+    accepted without a prompt (the Desktop has none). Dangerous still blocks — a signature
+    added after review is exactly the case the backstop exists for.
     Returns the ScanResult, or None when scanning is disabled.
     """
     if not _scan_on_install_enabled():
@@ -137,6 +142,8 @@ def _scan_plugin_tree(plugin_dir: Path, identifier: str, *, force: bool, scan_de
     from tools.plugin_guard import format_scan_report, scan_plugin, should_allow_plugin_install
     result = scan_plugin(plugin_dir, source=identifier)
     allowed, reason = should_allow_plugin_install(result, force=force)
+    if allowed is None and reviewed_pin:
+        allowed, reason = True, "Caution verdict accepted: reviewed catalog pin"
 
     if allowed is None and scan_decision_cb is not None:
         try:
@@ -404,6 +411,18 @@ def _display_after_install(plugin_dir: Path, identifier: str) -> None:
     console.print()
 
 
+def _clone_failure_message(git_url: str, git_error: str) -> str:
+    """Plain-words clone failure: what to check (address, network, private repo), raw git text last.
+
+    The text reaches ``_fail`` -> Rich ``console.print``: escape the git output so ``[...]`` in it is
+    not parsed as markup."""
+    from rich.markup import escape
+    return (f"Could not download the plugin from {git_url}. Check the address (browse the catalog "
+            "with `hermes plugins search`), check your internet connection, or, if the repository "
+            "is private, sign in first with `gh auth login` (or set GITHUB_TOKEN in your .env).\n"
+            f"Details: {escape(git_error.strip())}")
+
+
 def _require_installed_plugin(name: str, plugins_dir: Path, console) -> Path:
     """The plugin path if it exists; else exit 1 (invalid name, or a listing of installed plugins)."""
     try:
@@ -411,9 +430,17 @@ def _require_installed_plugin(name: str, plugins_dir: Path, console) -> Path:
     except ValueError as e:
         _fail(console, f"[red]Error:[/red] {e}")
     if not target.exists():
-        installed = ", ".join(d.name for d in plugins_dir.iterdir() if d.is_dir()) or "(none)"
-        _fail(console, f"[red]Error:[/red] Plugin '{name}' not found in {plugins_dir}.\nInstalled plugins: {installed}")
+        _fail(console, _unknown_plugin_message(name, downloaded_only=True))
     return target
+
+
+def _unknown_plugin_message(name: str, *, downloaded_only: bool = False) -> str:
+    """``No plugin named ...`` with the exact-name rule and the two commands that resolve it."""
+    scope = (" This command only works on downloaded plugins; bundled ones can only be enabled or disabled."
+             if downloaded_only else " Bundled plugins can only be enabled or disabled.")
+    return (f"[red]No plugin named '{name}'.[/red] Run `hermes plugins list` to see the exact names "
+            f"(nested plugins use their full key, e.g. web/firecrawl).{scope} "
+            "To add one: `hermes plugins install <owner/repo>`.")
 
 
 # ── Install metadata + git plumbing ─────────────────────────────────────────────────────────
@@ -446,6 +473,19 @@ def _write_install_metadata(metadata: dict[str, dict[str, object]]) -> None:
         path, json.dumps(metadata, indent=2, sort_keys=True) + "\n", tmp_prefix=f"{path.name}.tmp-")
 
 
+def pinned_revision(name: str, metadata: Optional[dict] = None) -> Optional[str]:
+    """Full SHA a ``--ref`` install of *name* is pinned to, else ``None``."""
+    entry = (metadata if metadata is not None else _read_install_metadata()).get(name)
+    if isinstance(entry, dict) and entry.get("pinned") is True and isinstance(entry.get("revision"), str):
+        return entry["revision"]
+    return None
+
+
+def _pin_annotation(name: str, metadata: dict) -> Optional[str]:
+    sha = pinned_revision(name, metadata)
+    return f"git pinned@{sha[:8]}" if sha else None
+
+
 def _normalize_exact_revision(ref: str) -> str:
     """Lowercase a full 40-hex commit SHA; anything else is a PluginOperationError."""
     if not isinstance(ref, str) or not _EXACT_COMMIT_RE.fullmatch(ref):
@@ -463,10 +503,11 @@ def _safe_git_error(result: subprocess.CompletedProcess, source_url: str = "") -
 
 
 def _git_or_raise(
-    git_exe: str, repo: Path, *args: str, failure_prefix: str, timeout: int = 60, source_url: str = ""
+    git_exe: str, repo: Path, *args: str, failure_prefix: str, timeout: int = 60, source_url: str = "",
+    auth_url: str = "",
 ) -> subprocess.CompletedProcess:
     """Run git in *repo*; on a non-zero exit raise PluginOperationError(prefix + scrubbed error)."""
-    result = _run_plugin_git(git_exe, repo, *args, timeout=timeout)
+    result = _run_plugin_git(git_exe, repo, *args, timeout=timeout, auth_url=auth_url)
     if result.returncode != 0:
         raise PluginOperationError(failure_prefix + _safe_git_error(result, source_url))
     return result
@@ -479,14 +520,15 @@ def _git_head_revision(repo: Path, git_exe: str) -> str:
     ).stdout.strip().lower()
 
 
-def _checkout_exact_revision(repo: Path, git_exe: str, revision: str) -> None:
+def _checkout_exact_revision(repo: Path, git_exe: str, revision: str, source_url: str = "") -> None:
     """Fetch and detach at one immutable commit, then verify the resulting HEAD."""
     for verb, args, failure_prefix in (
         ("fetch", ("fetch", "--depth", "1", "origin", revision), f"Git commit '{revision}' could not be fetched:\n"),
         ("checkout", ("checkout", "--detach", revision), f"Git checkout of commit '{revision}' failed:\n"),
     ):
         try:
-            _git_or_raise(git_exe, repo, *args, failure_prefix=failure_prefix)
+            _git_or_raise(git_exe, repo, *args, failure_prefix=failure_prefix, source_url=source_url,
+                          auth_url=source_url if verb == "fetch" else "")
         except subprocess.TimeoutExpired as exc:
             raise PluginOperationError(f"Git {verb} of commit '{revision}' timed out after 60 seconds.") from exc
     actual = _git_head_revision(repo, git_exe)
@@ -548,16 +590,16 @@ def _clone_plugin_repo(tmp_clone: Path, git_url: str, revision: Optional[str]) -
         raise PluginOperationError("git is not installed or not in PATH.")
     clone_args = ["clone", "--depth", "1", *(["--no-checkout"] if revision else []), git_url, str(tmp_clone)]
     try:
-        result = _run_plugin_git(git_exe, tmp_clone.parent, *clone_args)
+        result = _run_plugin_git(git_exe, tmp_clone.parent, *clone_args, auth_url=git_url)
     except FileNotFoundError as e:
         raise PluginOperationError("git is not installed or not in PATH.") from e
     except subprocess.TimeoutExpired as e:
         raise PluginOperationError("Git clone timed out after 60 seconds.") from e
     if result.returncode != 0:
-        raise PluginOperationError(f"Git clone failed:\n{_safe_git_error(result, git_url)}")
+        raise PluginOperationError(_clone_failure_message(git_url, _safe_git_error(result, git_url)))
     _scrub_cloned_origin(tmp_clone, git_exe, git_url)
     if revision:
-        _checkout_exact_revision(tmp_clone, git_exe, revision)
+        _checkout_exact_revision(tmp_clone, git_exe, revision, source_url=git_url)
     return _git_head_revision(tmp_clone, git_exe)
 
 
@@ -574,6 +616,43 @@ def _read_manifest_for_install(plugin_dir: Path) -> dict:
     for diagnostic in diagnostics:
         logger.warning("Agent Plugin install: %s", diagnostic.message)
     return manifest
+
+
+def _probe_readable(path: Path) -> None:
+    """Raise ``OSError`` unless *path* can actually be listed (dir) or opened for reading (file)."""
+    if path.is_dir():
+        os.listdir(path)
+    else:
+        with open(path, "rb"):
+            pass
+
+
+def _ensure_tree_readable(root: Path, plugins_dir: Path) -> None:
+    """Refuse to ship a tree Hermes cannot read back. A clone can land unreadable (Windows ACL
+    inheritance -> WinError 5, a mode-000 file) and discovery would then skip the plugin forever
+    (#111804); repair ``u+rX`` where the OS supports it, otherwise fail before anything moves."""
+    paths = [root]
+    for dirpath, dirnames, filenames in os.walk(root):
+        paths.extend(Path(dirpath) / name for name in (*dirnames, *filenames))
+    for path in paths:
+        try:
+            _probe_readable(path)
+            continue
+        except OSError:
+            if os.name != "nt":  # chmod only toggles the read-only bit on Windows; ACLs need icacls
+                try:
+                    os.chmod(path, os.stat(path).st_mode | (0o500 if path.is_dir() else 0o400))
+                except OSError:
+                    pass
+        try:
+            _probe_readable(path)
+        except OSError as exc:
+            fix = (f'icacls "{plugins_dir}" /grant:r "%USERNAME%":(OI)(CI)F /T' if os.name == "nt"
+                   else f"chmod -R u+rX {plugins_dir}")
+            raise PluginOperationError(
+                f"Installed file {path.relative_to(root)} is not readable ({exc.strerror or exc}); "
+                f"nothing was installed. Fix permissions on {plugins_dir} (e.g. `{fix}`) and retry."
+            ) from exc
 
 
 def _swap_in_plugin(tmp_target: Path, target: Path, backup: Path, old_metadata: dict, new_metadata: dict) -> None:
@@ -603,8 +682,12 @@ def _install_plugin_core(
     force: bool,
     ref: Optional[str] = None,
     scan_decision_cb=None,
+    reviewed_pin: Optional[str] = None,
 ) -> tuple[Path, dict, str]:
-    """Clone a Git plugin and atomically record its source and exact revision."""
+    """Clone a Git plugin and atomically record its source and exact revision.
+
+    *reviewed_pin* is the curated-catalog sha for this install; the scan trusts the tree
+    only when the checked-out revision is exactly that sha."""
     requested_revision = _normalize_exact_revision(ref) if ref is not None else None
     try:
         git_url, subdir = _resolve_git_url(identifier)
@@ -626,6 +709,7 @@ def _install_plugin_core(
         tmp_clone = Path(tmp) / "plugin"
         installed_revision = _clone_plugin_repo(tmp_clone, git_url, requested_revision)
         tmp_target = _resolve_subdir_within(tmp_clone, subdir) if subdir else tmp_clone
+        _ensure_tree_readable(tmp_target, plugins_dir)
         manifest = _read_manifest_for_install(tmp_target)
         plugin_name = manifest.get("name") or (
             subdir.rstrip("/").rsplit("/", 1)[-1] if subdir else _repo_name_from_url(git_url))
@@ -635,7 +719,8 @@ def _install_plugin_core(
             raise PluginOperationError(str(e)) from e
         _check_manifest_version(manifest, plugin_name)
         # Scan BEFORE anything is moved into place; raises PluginScanBlocked when blocked.
-        _scan_plugin_tree(tmp_target, identifier, force=force, scan_decision_cb=scan_decision_cb)
+        _scan_plugin_tree(tmp_target, identifier, force=force, scan_decision_cb=scan_decision_cb,
+                          reviewed_pin=bool(reviewed_pin) and installed_revision == reviewed_pin)
 
         if target.exists() and not force:
             raise PluginOperationError(
@@ -986,7 +1071,7 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
     _refuse_legacy_relay(name)
     resolved = _resolve_plugin_key_and_source(name)
     if resolved is None:
-        _fail(console, f"[red]Plugin '{name}' is not installed or bundled.[/red]")
+        _fail(console, _unknown_plugin_message(name))
     key, source = resolved
     _refuse_legacy_relay(key)
 
@@ -1117,7 +1202,7 @@ def cmd_capabilities(name: Optional[str] = None) -> None:
         rows.append((key, entry[3], declared, granted, effective))
 
     if name is not None and not rows:
-        _fail(console, f"[red]Plugin '{name}' is not installed or bundled.[/red]")
+        _fail(console, _unknown_plugin_message(name))
     if not rows:
         console.print("[dim]No plugins declare or hold capabilities.[/dim]")
         return
@@ -1168,7 +1253,7 @@ def cmd_disable(name: str) -> None:
     console = _console()
     key = _resolve_plugin_key(name)
     if key is None:
-        _fail(console, f"[red]Plugin '{name}' is not installed or bundled.[/red]")
+        _fail(console, _unknown_plugin_message(name))
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
     if key not in enabled and key in disabled:
@@ -1239,9 +1324,14 @@ def _scan_level(base: Path, source: str, skip_names: set, prefix: str, depth: in
     if not base.is_dir():
         return
     for d in sorted(base.iterdir()):
-        if not d.is_dir() or (depth == 0 and skip_names and d.name in skip_names):
+        try:
+            if not d.is_dir() or (depth == 0 and skip_names and d.name in skip_names):
+                continue
+            info = _read_manifest_info(d, prefix)
+        except OSError as exc:
+            # Mirrors scan_directory: an unsearchable plugin dir (WinError 5 / mode 000) is skipped, not fatal.
+            logger.warning("Skipping unreadable plugin directory %s: %s", d, exc)
             continue
-        info = _read_manifest_info(d, prefix)
         if info is None:
             if depth == 0:
                 _scan_level(d, source, set(), f"{prefix}/{d.name}" if prefix else d.name, 1, seen)
@@ -1306,10 +1396,13 @@ def cmd_list(args: Any | None = None) -> None:
     disabled = _get_disabled_set()
     entries = _filter_plugin_entries(entries, args, enabled, disabled)
     from hermes_cli import plugins_cmd_catalog as catalog
-    # Source shows catalog provenance (``catalog:<tier>@<sha8>``); a kill-listed install is flagged.
+    # Source shows catalog provenance (``catalog:<tier>@<sha8>``) or a ``--ref`` pin
+    # (``git pinned@<sha8>``) so a team can eyeball that everyone runs the same commit.
+    pins = _read_install_metadata()
     rows = [
         (name, _plugin_status(name, enabled, disabled, key=key), str(version), description,
-         catalog.catalog_annotation(_dir) or source, catalog.removed_annotation(name, _dir))
+         catalog.catalog_annotation(_dir) or _pin_annotation(name, pins) or source,
+         catalog.removed_annotation(name, _dir))
         for name, version, description, source, _dir, key in entries
     ]
 
@@ -1679,9 +1772,11 @@ def _run_composite_fallback(plugin_keys, plugin_labels, plugin_selected, disable
 
 def dashboard_install_plugin(
     identifier: str, *, force: bool, enable: bool, catalog_name: Optional[str] = None,
+    ref: Optional[str] = None,
 ) -> dict[str, Any]:
     """Non-interactive install for the dashboard/TUI. *catalog_name* installs a curated entry at its
-    pinned SHA (identifier may be empty); every path enforces the kill list (no GUI bypass)."""
+    pinned SHA (identifier may be empty); *ref* pins a custom source to one full commit SHA (same
+    contract as ``--ref``); every path enforces the kill list (no GUI bypass)."""
     from hermes_cli import plugins_cmd_catalog as catalog
     warnings: list[str] = []
     entry = None
@@ -1706,7 +1801,8 @@ def dashboard_install_plugin(
             target, installed_manifest, installed_name = catalog.install_catalog_entry(
                 entry, force=force, allow_removed=True)
         else:
-            target, installed_manifest, installed_name = _install_plugin_core(identifier, force=force)
+            target, installed_manifest, installed_name = _install_plugin_core(
+                identifier, force=force, ref=(ref or "").strip() or None)
     except PluginScanBlocked as exc:
         fields = ("pattern_id", "severity", "category", "file", "line", "description")
         return {
@@ -1852,11 +1948,18 @@ def _clear_plugin_bytecode(target: Path) -> int:
     return removed
 
 
-def _run_plugin_git(git_exe: str, target: Path, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
-    """Run one git command inside a plugin checkout (non-interactive)."""
+def _run_plugin_git(
+    git_exe: str, target: Path, *args: str, timeout: int = 60, auth_url: str = "",
+) -> subprocess.CompletedProcess:
+    """Run one git command inside a plugin checkout (non-interactive). *auth_url* names the remote
+    a network verb talks to so a stored user credential for its host is attached (private repos)."""
+    env = noninteractive_git_env()
+    if auth_url:
+        from hermes_cli.git_credentials import with_git_auth
+        env = with_git_auth(env, auth_url)
     return subprocess.run(
         [git_exe, *args], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
-        cwd=str(target), stdin=subprocess.DEVNULL, env=noninteractive_git_env())
+        cwd=str(target), stdin=subprocess.DEVNULL, env=env)
 
 
 def _stash_ref(git_exe: str, target: Path) -> str:
@@ -1916,7 +2019,8 @@ def _git_pull_plugin_dir(target: Path) -> tuple[bool, str]:
         stash_created, err = _autostash_dirty_tree(git_exe, target)
         if err:
             return False, err
-        result = _run_plugin_git(git_exe, target, "pull", "--ff-only")
+        origin = _run_plugin_git(git_exe, target, "remote", "get-url", "origin", timeout=15)
+        result = _run_plugin_git(git_exe, target, "pull", "--ff-only", auth_url=origin.stdout.strip())
         if result.returncode != 0:
             err = _safe_git_error(result) or "git pull failed."
             if not stash_created:

@@ -1638,8 +1638,7 @@ class HygieneTurnHoldExceeded(Exception):
 def _multiplex_profile_homes(config: object) -> list[tuple[str, "Path"]]:
     """Return the authoritative profile set for one multiplex gateway config."""
     from hermes_cli.profiles import profiles_to_serve
-    return list(profiles_to_serve(
-        multiplex=True, profile_allowlist=getattr(config, "multiplex_profile_allowlist", None)))
+    return list(profiles_to_serve(multiplex=True))
 
 
 def _external_cron_ticker_owns_profile(
@@ -1893,17 +1892,19 @@ async def _discover_gateway_mcp_tools(config: object) -> None:
     carry the scope into the executor thread with ``copy_context()`` (the same shape as
     ``_run_in_executor_with_context``). See #95518.
     """
+    from tools.mcp_oauth import suppress_interactive_oauth
     from tools.mcp_tool_discovery import discover_mcp_tools
     loop = asyncio.get_running_loop()
-    if not getattr(config, "multiplex_profiles", False):
-        await loop.run_in_executor(None, discover_mcp_tools)
-        return
-    for profile_name, profile_home in _multiplex_profile_homes(config):
-        try:
-            async with _async_profile_runtime_scope(Path(profile_home)):
-                await loop.run_in_executor(None, copy_context().run, discover_mcp_tools)
-        except Exception:
-            logger.warning("MCP tool discovery failed for profile '%s'", profile_name, exc_info=True)
+    with suppress_interactive_oauth():
+        if not getattr(config, "multiplex_profiles", False):
+            await loop.run_in_executor(None, copy_context().run, discover_mcp_tools)
+            return
+        for profile_name, profile_home in _multiplex_profile_homes(config):
+            try:
+                async with _async_profile_runtime_scope(Path(profile_home)):
+                    await loop.run_in_executor(None, copy_context().run, discover_mcp_tools)
+            except Exception:
+                logger.warning("MCP tool discovery failed for profile '%s'", profile_name, exc_info=True)
 
 
 def _platform_has_bot_credential(platform: "Platform", platform_config: "PlatformConfig") -> bool:
@@ -4075,13 +4076,18 @@ class GatewayRunner(
                 return self._is_user_authorized(source)
             return self._is_user_authorized(source, allow_adapter_delegation=False)
 
-        authorization_home = getattr(source, "_authorization_profile_home", None)
-        if authorization_home is not None:
-            with _profile_runtime_scope(
-                Path(authorization_home), hydrate_secrets=False
-            ):
-                return _check()
-        return _check()
+        return self._under_authorization_profile(source, _check)
+
+    def _admit_bot_message_for_source(self, source: SessionSource) -> bool:
+        """Count bot messages under the transport profile's loop-guard configuration."""
+        return self._under_authorization_profile(source, lambda: self._admit_bot_message(source))
+
+    def _under_authorization_profile(self, source: SessionSource, check):
+        authorization_home = self._authorization_home_for_source(source)
+        if authorization_home is None:
+            return check()
+        with _profile_runtime_scope(Path(authorization_home), hydrate_secrets=False):
+            return check()
 
     def _cache_session_source(self, session_key: str, source) -> None:
         if not session_key or source is None:
@@ -5149,6 +5155,7 @@ async def _start_gateway_start_control_socket(runner):
         # failure only means consumers fall back to the process-scan/state-file layer, exactly as before
         # this feature. See #92091.
         from gateway.control_socket import GatewayControlServer
+        from gateway.run_profile_reconcile import migrate_profile_identity_verb, purge_profile_identity_verb
         # pause-for-update: the updater asks us to drain + exit (freeing venv handles) vs. a tree-kill
         # (same path as SIGUSR1). Handler runs on the socket executor thread, so marshal onto the loop.
         # pause-for-update (#92091 step 2): the updater asks this gateway to drain in-flight turns and exit
@@ -5182,10 +5189,25 @@ async def _start_gateway_start_control_socket(runner):
         from gateway.drain_control import gateway_maintenance, gateway_maintenance_control
         from gateway.control_socket import build_status_payload
         owner = gateway_maintenance(runner)
+
+        def _rescan_profiles_handler() -> dict:
+            if not getattr(runner.config, "multiplex_profiles", False):
+                return {"multiplex": False, "served_profiles": runner.served_profile_names()}
+            future = asyncio.run_coroutine_threadsafe(
+                runner.reconcile_served_profiles(reason="control-socket"), _main_loop)
+            try:
+                return {"multiplex": True, **future.result(timeout=5.0)}
+            except concurrent.futures.TimeoutError:
+                return {"multiplex": True, "pending": True,
+                        "served_profiles": runner.served_profile_names()}
+
         _control_server = GatewayControlServer(
             verb_handlers={"pause-for-update": _pause_for_update_handler,
                            "status": lambda: {**build_status_payload(),
-                                              "owner_maintenance": owner.status(runner)}},
+                                              "owner_maintenance": owner.status(runner)},
+                           "rescan-profiles": _rescan_profiles_handler,
+                           "migrate-profile-identity": migrate_profile_identity_verb(runner),
+                           "purge-profile-identity": purge_profile_identity_verb(runner)},
             body_handlers={"owner_maintenance": lambda body: gateway_maintenance_control(runner, body)})
         if not await _control_server.start():
             _control_server = None
@@ -5223,7 +5245,7 @@ def _start_gateway_start_cron_and_housekeeping(runner):
                 cron_start_kwargs["profile_adapters"] = getattr(runner, "_profile_adapters", None)
                 # runner.adapters belongs to "default"; naming it keeps the ticker from routing a secondary's
                 # cron through the default bot (even before that profile's adapter connects).
-                cron_start_kwargs["default_profile"] = "default"
+                cron_start_kwargs["default_profile"] = runner._primary_profile_name
                 # A fresh support-owned central ticker contract owns this
                 # profile. Re-evaluate every cycle so stale/absent heartbeat
                 # falls back to the gateway without a restart.
@@ -5236,8 +5258,8 @@ def _start_gateway_start_cron_and_housekeeping(runner):
 
     # Only the in-process ticker polls local due jobs, so only it gets the external-drain dispatch gate.
     if isinstance(cron_provider, InProcessCronScheduler):
-        cron_start_kwargs["can_dispatch"] = lambda: not (
-            runner._draining or runner._external_drain_active)
+        cron_start_kwargs["can_dispatch"] = lambda: _gateway_cron_can_dispatch(
+            runner, multiplex=multiplex_cron)
     cron_thread = threading.Thread(
         target=cron_provider.start, args=(cron_stop,), kwargs=cron_start_kwargs, daemon=True,
         name="cron-scheduler")

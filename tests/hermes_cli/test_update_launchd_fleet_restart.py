@@ -309,7 +309,7 @@ def _fleet(monkeypatch, tmp_path, *, current, labels, located,
     monkeypatch.setattr(
         gw,
         "_graceful_restart_via_sigusr1",
-        lambda pid, drain_timeout: (rec.drains.append(pid), (drain_results or {}).get(pid, False))[1],
+        lambda pid, drain_timeout, **_: (rec.drains.append(pid), (drain_results or {}).get(pid, False))[1],
     )
 
     def fake_kickstart(label, domain):
@@ -663,6 +663,7 @@ class TestIncompleteWarningMentionsLaunchctl:
         out = capsys.readouterr().out
         assert "Update incomplete" in out
         assert "launchctl bootstrap" in out
+        assert "systemctl" not in out
 
     def test_systemd_units_keep_systemctl_hint(self, monkeypatch, capsys):
         # This test exercises the non-macOS branch while the suite runs on the
