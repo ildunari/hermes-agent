@@ -244,6 +244,10 @@ paths:
     disposition: must-carry
     owner: generic plugin validation and delegated cron delivery seams
     evidence: *proactive_alarm
+  - path: cron/scheduler_tick.py
+    disposition: must-carry
+    owner: gateway maintenance admission around the upstream cron tick
+    evidence: *active_work
   - path: agent/agent_init.py
     disposition: must-carry
     owner: core context-engine seam
@@ -575,14 +579,6 @@ paths:
     disposition: must-carry
     owner: registry-first plugin message delivery
     evidence: *bluebubbles
-  - path: scripts/run_tests_parallel.py
-    disposition: upstream
-    owner: hermetic and portable validation on macOS
-    evidence:
-      registration: canonical isolated test runner
-      runtime_caller: scratch validation on Mac Studio
-      interface_test: scripts/run_tests_parallel.py
-      artifact: continuation focused test receipts
   - path: tests/gateway/test_multiplex_background_task_scope.py
     disposition: upstream
     owner: hermetic and portable validation on macOS
@@ -719,10 +715,6 @@ paths:
       runtime_caller: state maintenance and scratch validation
       interface_test: resumed seven fixtures and Darwin holder regression suite
       artifact: resume 475-pass and Darwin 19-pass receipts plus independent review
-  - path: tests/hermes_state/test_hermes_state.py
-    disposition: must-carry
-    owner: portable current-runtime fixture
-    evidence: *ratchet
   - path: tests/tools/test_file_tools.py
     disposition: must-carry
     owner: portable current-runtime fixture
