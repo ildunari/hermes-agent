@@ -1007,6 +1007,9 @@ def detect_provider_for_model(
     model_name: str, current_provider: str) -> Optional[tuple[str, str]]:
     """Auto-detect the best provider for a model name: static catalogs (bare provider name → its
     default; direct catalog match), then the OpenRouter catalog, then a configured ``vendor/`` prefix."""
+    from hermes_cli.models_detect import (
+        current_provider_catalog_match, current_provider_owns_vendor, provider_has_credentials)
+
     name = (model_name or "").strip()
     if not name:
         return None
@@ -2375,7 +2378,8 @@ def normalize_opencode_base_url(
     family (``opencode-go-bridge``) declared its relay path explicitly in ``providers:`` and keeps it.
     Only the path is edited, so a port, userinfo, query or fragment round-trips untouched."""
     url = str(base_url or "").strip().rstrip("/")
-    if not url or opencode_provider_family(provider_id) is None:
+    family = opencode_provider_family(provider_id)
+    if not url or family is None:
         return url
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").lower()

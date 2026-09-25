@@ -21,6 +21,7 @@ from typing import Any, Callable, NamedTuple, Optional  # noqa: F401  (Callable:
 
 # Several of these look unused here but are resolved BARE by split-module bodies rebound onto this
 # namespace (method_ctx.bind_module) — deleting one breaks a handler at call time, not import time.
+from agent.session_persistence import _runtime_model_config
 from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope  # noqa: F401
 from hermes_constants import (
     get_hermes_home, get_hermes_home_override, get_process_hermes_home, profile_name_for_home,
@@ -1576,8 +1577,6 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
 
 def _persist_live_session_runtime(session: dict | None) -> None:
     """Persist active session runtime so future resumes restore the same footer."""
-    from agent.session_persistence import _runtime_model_config
-
     live = _live_session_agent_db(session)
     if live is None:
         return

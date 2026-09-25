@@ -1342,8 +1342,6 @@ def _plugin_aliases() -> Dict[str, str]:
     try:
         from providers import list_providers as _lp
         for _pp in _lp():
-            if _pp.name not in PROVIDER_REGISTRY:
-                _register_plugin_provider(_pp)
             for _alias in _pp.aliases:
                 aliases.setdefault(_alias, _pp.name)
     except Exception:
@@ -1917,14 +1915,6 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
     keyless_status = keyless_provider_status_for_auth(provider_id, pconfig)
     if keyless_status is not None:
         return keyless_status
-    status = {
-        "configured": True, "provider": provider_id, "name": pconfig.name, "key_source": "keyless",
-        "base_url": pconfig.inference_base_url, "logged_in": True}
-    if _provider_is_keyless(provider_id):
-        # Keyless providers (opencode-free) are served anonymously: every install counts as
-        # configured.
-        return status
-
     api_key, key_source = _resolve_api_key_provider_secret(provider_id, pconfig)
     env_url = _provider_env_base_url(pconfig)
     if provider_id in {"kimi-coding", "kimi-coding-cn"}:

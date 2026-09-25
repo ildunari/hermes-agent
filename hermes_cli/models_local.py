@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
-from agent.secret_scope import get_secret_str
+from agent.secret_scope import get_secret, get_secret_str
 from hermes_cli.urllib_security import url_origin
 
 # Log-record parity with the origin module.

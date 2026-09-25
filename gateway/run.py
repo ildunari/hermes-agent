@@ -1036,6 +1036,7 @@ def _warm_turn_machinery_sync() -> int:
     inference request. Context files remain lazy because they need the active turn's agent."""
     import run_agent  # noqa: F401  # heavy import graph, cached in sys.modules
     import model_tools
+    from hermes_cli.config import load_config_readonly
 
     tool_defs = model_tools.get_tool_definitions(quiet_mode=True)
     agent_cfg = load_config_readonly().get("agent")
@@ -2614,37 +2615,6 @@ def _credential_pool_for_provider(provider: Optional[str]):
     except Exception:
         logger.debug("Failed to resolve credential pool for provider=%s", provider, exc_info=True)
         return None
-
-
-def _try_resolve_fallback_provider() -> dict | None:
-    """Attempt to resolve credentials from the fallback_model/fallback_providers config."""
-    from hermes_cli.runtime_provider import resolve_runtime_provider
-    try:
-        # Canonical loader so managed overlay / ${VAR} expansion reach the fallback chain.
-        cfg = _load_gateway_runtime_config()
-        fb_list = get_fallback_chain(cfg)
-        if not fb_list:
-            return None
-        for entry in fb_list:
-            try:
-                from hermes_cli.fallback_config import resolve_entry_api_key
-                runtime = resolve_runtime_provider(
-                    requested=entry.get("provider"), explicit_base_url=entry.get("base_url"),
-                    explicit_api_key=resolve_entry_api_key(entry))
-                # Log the config `provider`, not the runtime category (Ollama would log "openrouter").
-                logger.info(
-                    # Log the literal `provider` key from config, not the resolved runtime category — an
-                    # Ollama fallback resolves through the OpenAI-compatible path and would otherwise be
-                    # logged as "openrouter", contradicting the operator's config (#32790).
-                    "Fallback provider resolved: %s model=%s",
-                    entry.get("provider") or runtime.get("provider"), entry.get("model"))
-                return {**_runtime_agent_kwargs(runtime), "model": entry.get("model")}
-            except Exception as fb_exc:
-                logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)
-                continue
-    except Exception:
-        pass
-    return None
 
 
 def _event_media_type_at(event, index: int) -> str:
@@ -5886,6 +5856,9 @@ def _start_gateway_start_cron_and_housekeeping(runner):
             [p[0] if isinstance(p, tuple) else p for p in cron_profile_homes])
 
     # Only the in-process ticker polls local due jobs, so only it gets the external-drain dispatch gate.
+    # Same multiplex test as scheduler_for_profile_mode above: one ticker serving several homes owns
+    # them all; a single-home ticker defers to the support profile ticker when that owns the home.
+    multiplex_cron = len(cron_profile_homes) > 1
     if isinstance(cron_provider, InProcessCronScheduler):
         cron_start_kwargs["can_dispatch"] = lambda: _gateway_cron_can_dispatch(
             runner, multiplex=multiplex_cron)
