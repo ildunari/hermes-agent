@@ -1495,11 +1495,11 @@ class GatewayAdapterLifecycleMixin:
     def _make_profile_event_prepare_handler(self, profile_name: str):
         """Prepare extension routing before a secondary adapter derives its session key."""
         from gateway.run import _async_profile_runtime_scope
-        profile_home = self._profile_home_or_none(profile_name)
+        profile_home = self._routed_profile_home(profile_name)
 
         async def _handler(event):
-            self._stamp_event_profile(event, profile_name)
-            async with self._scope_or_null(_async_profile_runtime_scope, profile_home):
+            self._canonicalize(getattr(event, "source", None), transport_profile=profile_name)
+            async with self._async_scope_or_null(_async_profile_runtime_scope, profile_home):
                 return await self._hm_prepare_conversation_route(event)
 
         return _handler
